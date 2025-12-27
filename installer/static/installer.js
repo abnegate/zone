@@ -1,18 +1,101 @@
-// Voiz Web Installer - Client-side Logic
+// Voiz Web Installer - Clean, Professional JavaScript
 
-let currentStep = 1;
-const totalSteps = 7;
-const config = {};
+console.log('Voiz Installer JS loaded');
 
-// Initialize
-document.addEventListener('DOMContentLoaded', () => {
+var currentStep = 1;
+var totalSteps = 7;
+var config = {};
+
+// Function declarations (hoisted, available immediately)
+function nextStep() {
+    console.log('nextStep called');
+    if (currentStep < totalSteps) {
+        updateConfig();
+        currentStep++;
+        updateUI();
+    }
+}
+
+function previousStep() {
+    console.log('previousStep called');
+    if (currentStep > 1) {
+        currentStep--;
+        updateUI();
+    }
+}
+
+function goToStep(step) {
+    console.log('goToStep called with step:', step);
+    if (step >= 1 && step <= totalSteps) {
+        updateConfig();
+        currentStep = step;
+        updateUI();
+    }
+}
+
+function generateSecret(fieldName) {
+    console.log('generateSecret called for:', fieldName);
+    var array = new Uint8Array(32);
+    crypto.getRandomValues(array);
+    var secret = btoa(String.fromCharCode.apply(null, array));
+
+    var input = document.querySelector('input[name="' + fieldName + '"]');
+    if (input) {
+        input.value = secret;
+        updateConfig();
+    }
+}
+
+function generateAllSecrets() {
+    console.log('generateAllSecrets called');
+    generateSecret('SECURITY_LITELLM_MASTER_KEY');
+    generateSecret('SECURITY_LITELLM_SALT_KEY');
+    generateSecret('SECURITY_SEARXNG_SECRET_KEY');
+}
+
+function toggleVPNFields() {
+    var enabled = document.getElementById('enable-vpn').checked;
+    var vpnFields = document.getElementById('vpn-fields');
+
+    if (enabled) {
+        vpnFields.classList.remove('hidden');
+    } else {
+        vpnFields.classList.add('hidden');
+    }
+}
+
+function toggleVPNProtocol() {
+    var type = document.getElementById('vpn-type').value;
+    var openvpnFields = document.getElementById('openvpn-fields');
+    var wireguardFields = document.getElementById('wireguard-fields');
+
+    if (type === 'openvpn') {
+        openvpnFields.classList.remove('hidden');
+        wireguardFields.classList.add('hidden');
+    } else {
+        openvpnFields.classList.add('hidden');
+        wireguardFields.classList.remove('hidden');
+    }
+}
+
+function closeModal() {
+    document.getElementById('install-modal').classList.remove('active');
+    setTimeout(function() {
+        document.getElementById('install-complete').classList.add('hidden');
+        document.getElementById('install-error').classList.add('hidden');
+    }, 200);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOM loaded, initializing...');
     updateUI();
     loadDefaults();
+    attachEventListeners();
+    console.log('Initialization complete');
 });
 
-// Load default values from form
 function loadDefaults() {
-    const form = document.getElementById('install-form');
+    const form = document.getElementById('config-form');
     const inputs = form.querySelectorAll('input, select');
 
     inputs.forEach(input => {
@@ -26,7 +109,7 @@ function loadDefaults() {
         }
     });
 
-    // Set hidden/computed values
+    // Set computed values
     config['SECURITY_BASIC_AUTH_USERS_FILE'] = './auth/users.htpasswd';
     config['OLLAMA_HOST'] = '0.0.0.0:11434';
     config['OLLAMA_KEEP_ALIVE'] = '24h';
@@ -43,9 +126,8 @@ function loadDefaults() {
     config['ADVANCED_LITELLM_ROUTER_TIMEOUT'] = '120';
 }
 
-// Update form values in config
 function updateConfig() {
-    const form = document.getElementById('install-form');
+    const form = document.getElementById('config-form');
     const inputs = form.querySelectorAll('input, select');
 
     inputs.forEach(input => {
@@ -59,11 +141,9 @@ function updateConfig() {
         }
     });
 
-    // Update derived values
     config['WEBUI_OPENAI_API_KEY'] = config['SECURITY_LITELLM_MASTER_KEY'];
 }
 
-// Generate secure random secret
 function generateSecret(fieldName) {
     const array = new Uint8Array(32);
     crypto.getRandomValues(array);
@@ -76,14 +156,12 @@ function generateSecret(fieldName) {
     }
 }
 
-// Generate all security secrets
 function generateAllSecrets() {
     generateSecret('SECURITY_LITELLM_MASTER_KEY');
     generateSecret('SECURITY_LITELLM_SALT_KEY');
     generateSecret('SECURITY_SEARXNG_SECRET_KEY');
 }
 
-// Toggle VPN fields visibility
 function toggleVPNFields() {
     const enabled = document.getElementById('enable-vpn').checked;
     const vpnFields = document.getElementById('vpn-fields');
@@ -95,7 +173,6 @@ function toggleVPNFields() {
     }
 }
 
-// Toggle between OpenVPN and WireGuard fields
 function toggleVPNProtocol() {
     const type = document.getElementById('vpn-type').value;
     const openvpnFields = document.getElementById('openvpn-fields');
@@ -110,43 +187,43 @@ function toggleVPNProtocol() {
     }
 }
 
-// Navigation
-function nextStep() {
-    if (currentStep < totalSteps) {
-        updateConfig();
-        currentStep++;
-        updateUI();
-    }
-}
 
-function previousStep() {
-    if (currentStep > 1) {
-        currentStep--;
-        updateUI();
-    }
-}
-
-function goToStep(step) {
-    if (step >= 1 && step <= totalSteps) {
-        updateConfig();
-        currentStep = step;
-        updateUI();
-    }
-}
-
-// Update UI based on current step
 function updateUI() {
+    console.log('updateUI called, currentStep:', currentStep);
+
     // Update steps
-    document.querySelectorAll('.step').forEach(el => {
+    const allSteps = document.querySelectorAll('.step');
+    console.log('Found', allSteps.length, 'step elements');
+
+    allSteps.forEach(el => {
         el.classList.remove('active');
     });
-    document.querySelector(`.step[data-step="${currentStep}"]`).classList.add('active');
+
+    const currentStepEl = document.querySelector(`.step[data-step="${currentStep}"]`);
+    console.log('Current step element:', currentStepEl);
+
+    if (currentStepEl) {
+        currentStepEl.classList.add('active');
+    } else {
+        console.error('Could not find step element for step', currentStep);
+    }
 
     // Update progress
     const progress = (currentStep / totalSteps) * 100;
-    document.getElementById('progress-bar').style.width = progress + '%';
-    document.getElementById('current-step').textContent = currentStep;
-    document.getElementById('progress-percent').textContent = Math.round(progress);
+    const progressBar = document.getElementById('progress-bar');
+    if (progressBar) {
+        progressBar.style.width = progress + '%';
+    }
+
+    const currentStepSpan = document.getElementById('current-step');
+    if (currentStepSpan) {
+        currentStepSpan.textContent = currentStep;
+    }
+
+    const progressPercent = document.getElementById('progress-percent');
+    if (progressPercent) {
+        progressPercent.textContent = Math.round(progress);
+    }
 
     // Update pills
     document.querySelectorAll('.step-pill').forEach(pill => {
@@ -161,151 +238,133 @@ function updateUI() {
     });
 
     // Update buttons
-    document.getElementById('btn-prev').disabled = currentStep === 1;
+    const btnPrev = document.getElementById('btn-prev');
+    const btnNext = document.getElementById('btn-next');
+    const btnInstall = document.getElementById('btn-install');
+
+    if (btnPrev) btnPrev.disabled = currentStep === 1;
 
     if (currentStep === totalSteps) {
-        document.getElementById('btn-next').style.display = 'none';
-        document.getElementById('btn-install').style.display = 'block';
+        if (btnNext) btnNext.style.display = 'none';
+        if (btnInstall) btnInstall.style.display = 'block';
     } else {
-        document.getElementById('btn-next').style.display = 'block';
-        document.getElementById('btn-install').style.display = 'none';
+        if (btnNext) btnNext.style.display = 'block';
+        if (btnInstall) btnInstall.style.display = 'none';
     }
+
+    console.log('updateUI complete');
 }
 
-// Install function
-async function install() {
+function install() {
+    console.log('install called');
     updateConfig();
 
-    // Show modal
-    document.getElementById('install-modal').classList.remove('hidden');
-    document.getElementById('install-status').innerHTML = '<div class="text-gray-400">Preparing installation...</div>';
+    var modal = document.getElementById('install-modal');
+    modal.classList.add('active');
 
-    try {
-        // Send config to backend
-        const response = await fetch('/api/install', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(config)
-        });
+    document.getElementById('install-status').innerHTML =
+        '<div class="status-line">Preparing installation...</div>';
 
+    fetch('/api/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config)
+    })
+    .then(function(response) {
         if (!response.ok) {
             throw new Error('Installation failed: ' + response.statusText);
         }
+        return response.body.getReader();
+    })
+    .then(function(reader) {
+        var decoder = new TextDecoder();
+        var statusHTML = '';
 
-        // Stream progress
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let statusHTML = '';
+        function readChunk() {
+            return reader.read().then(function(result) {
+                if (result.done) return;
 
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
+                var chunk = decoder.decode(result.value);
+                var lines = chunk.split('\n');
 
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n');
+                lines.forEach(function(line) {
+                    if (line.trim()) {
+                        try {
+                            var data = JSON.parse(line);
 
-            lines.forEach(line => {
-                if (line.trim()) {
-                    try {
-                        const data = JSON.parse(line);
+                            if (data.status) {
+                                var className = data.status.includes('✓') ? 'success' : '';
+                                statusHTML += '<div class="status-line ' + className + '">' + escapeHtml(data.status) + '</div>';
+                                document.getElementById('install-status').innerHTML = statusHTML;
+                            }
 
-                        if (data.status) {
-                            statusHTML += `<div class="text-gray-400">${escapeHtml(data.status)}</div>`;
-                            document.getElementById('install-status').innerHTML = statusHTML;
-                        }
+                            if (data.progress) {
+                                document.getElementById('install-progress').style.width = data.progress + '%';
+                            }
 
-                        if (data.progress) {
-                            document.getElementById('install-progress').style.width = data.progress + '%';
-                        }
+                            if (data.complete) {
+                                setTimeout(function() {
+                                    document.getElementById('install-complete').classList.remove('hidden');
+                                }, 300);
+                            }
 
-                        if (data.complete) {
-                            document.getElementById('install-status').innerHTML = statusHTML;
-                            document.getElementById('install-complete').classList.remove('hidden');
-                            document.getElementById('final-host').textContent = config['DOMAIN_WEBUI_HOST'];
-
-                            if (document.getElementById('enable-vpn')?.checked) {
-                                document.getElementById('vpn-step').classList.remove('hidden');
+                            if (data.error) {
+                                throw new Error(data.error);
+                            }
+                        } catch (e) {
+                            if (line.trim() && !line.includes('{')) {
+                                statusHTML += '<div class="status-line">' + escapeHtml(line) + '</div>';
+                                document.getElementById('install-status').innerHTML = statusHTML;
                             }
                         }
-
-                        if (data.error) {
-                            throw new Error(data.error);
-                        }
-                    } catch (e) {
-                        // Not JSON, just append as status
-                        if (line.trim()) {
-                            statusHTML += `<div class="text-gray-400">${escapeHtml(line)}</div>`;
-                            document.getElementById('install-status').innerHTML = statusHTML;
-                        }
                     }
-                }
-            });
+                });
 
-            // Auto-scroll to bottom
-            const statusDiv = document.getElementById('install-status');
-            statusDiv.scrollTop = statusDiv.scrollHeight;
+                var statusDiv = document.getElementById('install-status');
+                statusDiv.scrollTop = statusDiv.scrollHeight;
+
+                return readChunk();
+            });
         }
 
-    } catch (error) {
+        return readChunk();
+    })
+    .catch(function(error) {
         console.error('Installation error:', error);
         document.getElementById('install-error').classList.remove('hidden');
         document.getElementById('error-message').textContent = error.message;
-    }
+    });
 }
 
-// Close modal
 function closeModal() {
-    document.getElementById('install-modal').classList.add('hidden');
-    document.getElementById('install-complete').classList.add('hidden');
-    document.getElementById('install-error').classList.add('hidden');
+    document.getElementById('install-modal').classList.remove('active');
+    setTimeout(() => {
+        document.getElementById('install-complete').classList.add('hidden');
+        document.getElementById('install-error').classList.add('hidden');
+    }, 200);
 }
 
-// Utility: Escape HTML
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
 }
 
-// Add CSS for step pills
-const style = document.createElement('style');
-style.textContent = `
-    .step-pill {
-        padding: 0.5rem 1rem;
-        border-radius: 0.375rem;
-        font-size: 0.875rem;
-        font-weight: 500;
-        background-color: #374151;
-        color: #9CA3AF;
-        border: 2px solid transparent;
-        transition: all 0.2s;
-        cursor: pointer;
-    }
-    .step-pill:hover {
-        background-color: #4B5563;
-    }
-    .step-pill.active {
-        background-color: #2563EB;
-        color: white;
-        border-color: #3B82F6;
-    }
-    .step-pill.completed {
-        background-color: #059669;
-        color: white;
-    }
-    #install-status {
-        max-height: 400px;
-        overflow-y: auto;
-    }
-`;
-document.head.appendChild(style);
-
-// Add click handlers to step pills
-document.querySelectorAll('.step-pill').forEach(pill => {
-    pill.addEventListener('click', () => {
-        const step = parseInt(pill.dataset.step);
-        goToStep(step);
+function attachEventListeners() {
+    // Step pill click handlers
+    document.querySelectorAll('.step-pill').forEach(pill => {
+        pill.addEventListener('click', () => {
+            const step = parseInt(pill.dataset.step);
+            goToStep(step);
+        });
     });
-});
+
+    // Keyboard navigation
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' && currentStep < totalSteps) {
+            nextStep();
+        } else if (e.key === 'ArrowLeft' && currentStep > 1) {
+            previousStep();
+        }
+    });
+}

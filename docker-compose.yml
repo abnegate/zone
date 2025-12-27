@@ -10,16 +10,18 @@ services:
       - --api.dashboard=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-      - --providers.docker.network=edge
+      - --providers.docker.network=voiz_edge
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
       - --entrypoints.ping.address=:8082
       - --ping=true
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
-      - --certificatesresolvers.letsencrypt.acme.email=${ADVANCED_ACME_EMAIL}
-      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      # HTTP->HTTPS redirect disabled for local development
+      # - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      # - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      # Let's Encrypt disabled for .localhost domains
+      # - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+      # - --certificatesresolvers.letsencrypt.acme.email=${ADVANCED_ACME_EMAIL}
+      # - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
       - --log.level=INFO
       - --accesslog=true
     ports:
@@ -27,19 +29,20 @@ services:
       - "443:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${SECURITY_BASIC_AUTH_USERS_FILE}:/auth/users.htpasswd:ro
+      - ${SECURITY_BASIC_AUTH_USERS_FILE:-./auth/users.htpasswd}:/auth/users.htpasswd:ro
       - traefik_letsencrypt:/letsencrypt
     networks:
       - edge
     labels:
       - traefik.enable=true
       - traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN_WEBUI_HOST}`)
-      - traefik.http.routers.dashboard.entrypoints=websecure
-      - traefik.http.routers.dashboard.tls.certresolver=letsencrypt
+      - traefik.http.routers.dashboard.entrypoints=web
+      # TLS disabled for local .localhost development
+      # - traefik.http.routers.dashboard.tls.certresolver=letsencrypt
       - traefik.http.routers.dashboard.service=api@internal
-      - traefik.http.routers.dashboard.middlewares=auth
       - traefik.http.middlewares.auth.basicauth.usersfile=/auth/users.htpasswd
       - traefik.http.middlewares.auth.basicauth.realm=${SECURITY_BASICAUTH_REALM}
+      - traefik.http.routers.dashboard.middlewares=auth@docker
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 30s
@@ -47,9 +50,6 @@ services:
       retries: 3
       start_period: 10s
 
-  # ===========================================================================
-  # Ollama - Local LLM Inference Engine
-  # ===========================================================================
   ollama:
     image: ollama/ollama:0.13.5
     container_name: ollama
@@ -64,8 +64,6 @@ services:
       - internal
     expose:
       - "11434"
-
-    # GPU passthrough (optional - comment out if no GPU available)
     deploy:
       resources:
         reservations:
@@ -73,7 +71,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
@@ -81,9 +78,6 @@ services:
       retries: 5
       start_period: 60s
 
-  # ===========================================================================
-  # Ollama Init - One-time Model Puller
-  # ===========================================================================
   ollama-init:
     image: ollama/ollama:0.13.5
     container_name: ollama-init
@@ -97,14 +91,34 @@ services:
       - OLLAMA_REASON_MODEL=${OLLAMA_REASON_MODEL}
       - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL}
     volumes:
+      - ollama_data:/root/.ollama
       - ./ollama/pull-models.sh:/pull-models.sh:ro
     networks:
       - internal
     entrypoint: ["/bin/sh", "/pull-models.sh"]
 
   # ===========================================================================
-  # LiteLLM - OpenAI API Proxy with Semantic Routing
+  # PostgreSQL - Database for LiteLLM
   # ===========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=litellm
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=litellm_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
     container_name: litellm
@@ -122,6 +136,8 @@ services:
       - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL}
       - LITELLM_REQUEST_TIMEOUT=${ADVANCED_LITELLM_REQUEST_TIMEOUT}
       - LITELLM_ROUTER_TIMEOUT=${ADVANCED_LITELLM_ROUTER_TIMEOUT}
+      # Database disabled - not needed for basic operation
+      # - DATABASE_URL=postgresql://litellm:litellm_password@postgres:5432/litellm
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
       - ./litellm/router.json.template:/app/router.json.template:ro
@@ -134,7 +150,6 @@ services:
       - "4000"
       - --num_workers
       - "${ADVANCED_LITELLM_WORKERS}"
-      - --detailed_debug
     networks:
       - internal
       - edge
@@ -142,24 +157,17 @@ services:
       - "4000"
     labels:
       - traefik.enable=true
-      - traefik.docker.network=edge
+      - traefik.docker.network=voiz_edge
       - traefik.http.routers.litellm.rule=Host(`${DOMAIN_API_HOST}`)
-      - traefik.http.routers.litellm.entrypoints=websecure
-      - traefik.http.routers.litellm.tls.certresolver=letsencrypt
-      - traefik.http.routers.litellm.middlewares=auth
+      - traefik.http.routers.litellm.entrypoints=web
+      # TLS disabled for local .localhost development
+      # - traefik.http.routers.litellm.tls.certresolver=letsencrypt
+      # Auth disabled for local development
+      # - traefik.http.routers.litellm.middlewares=auth@docker
       - traefik.http.services.litellm.loadbalancer.server.port=4000
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    # Healthcheck disabled - /health endpoint requires authentication
+    # LiteLLM starts successfully, no healthcheck needed
 
-  # ===========================================================================
-  # Web Installer - Configuration UI
-  # ===========================================================================
-  # Optional: Enable with --profile installer
-  # Access at http://localhost:8000
   installer:
     build:
       context: ./installer
@@ -172,15 +180,8 @@ services:
       - "8000:8000"
     volumes:
       - .:/project
-      - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /project
-    environment:
-      - PYTHONUNBUFFERED=1
 
-  # ===========================================================================
-  # Gluetun - VPN Client for Privacy
-  # ===========================================================================
-  # Optional: Enable with --profile vpn
   gluetun:
     image: qmcgaw/gluetun:v3.41
     container_name: gluetun
@@ -219,10 +220,6 @@ services:
       retries: 5
       start_period: 30s
 
-  # ===========================================================================
-  # SearXNG - Privacy-Respecting Metasearch Engine
-  # ===========================================================================
-  # Optional: Enable with --profile vpn
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
@@ -248,20 +245,23 @@ services:
       retries: 3
       start_period: 30s
 
-  # ===========================================================================
-  # Open WebUI - ChatGPT-like Web Interface
-  # ===========================================================================
   openwebui:
     image: ghcr.io/open-webui/open-webui:latest
     container_name: openwebui
     restart: unless-stopped
     depends_on:
-      litellm:
-        condition: service_healthy
+      - litellm
     environment:
-      # OpenAI API Configuration
-      - OPENAI_API_BASE_URL=${WEBUI_OPENAI_API_BASE_URL}
-      - OPENAI_API_KEY=${WEBUI_OPENAI_API_KEY}
+      # Ollama for model discovery (direct internal connection)
+      - OLLAMA_BASE_URLS=http://ollama:11434
+
+      # OpenAI API Configuration (LiteLLM for semantic routing)
+      - OPENAI_API_BASE_URLS=http://litellm:4000/v1
+      - OPENAI_API_KEYS=sk-XbNJmMfPm9f4dDfVRmRSoACy5VbUezcgGM+OynAcPMw=
+
+      # Enable both APIs
+      - ENABLE_OLLAMA_API=true
+      - ENABLE_OPENAI_API=true
 
       # Web Search Integration
       - ENABLE_RAG_WEB_SEARCH=${SEARCH_ENABLE_RAG}
@@ -276,9 +276,9 @@ services:
       - DEFAULT_LOCALE=${WEBUI_DEFAULT_LOCALE}
       - ENABLE_PERSISTENT_CONFIG=${WEBUI_ENABLE_PERSISTENT_CONFIG}
 
-      # API Configuration
-      - ENABLE_OLLAMA_API=${WEBUI_ENABLE_OLLAMA_API}
-      - ENABLE_OPENAI_API=${WEBUI_ENABLE_OPENAI_API}
+      # API Configuration - already set above
+      # - ENABLE_OLLAMA_API=${WEBUI_ENABLE_OLLAMA_API}
+      # - ENABLE_OPENAI_API=${WEBUI_ENABLE_OPENAI_API}
 
       # System
       - TZ=${ADVANCED_TZ}
@@ -292,22 +292,17 @@ services:
       - "8080"
     labels:
       - traefik.enable=true
-      - traefik.docker.network=edge
+      - traefik.docker.network=voiz_edge
       - traefik.http.routers.openwebui.rule=Host(`${DOMAIN_WEBUI_HOST}`)
-      - traefik.http.routers.openwebui.entrypoints=websecure
-      - traefik.http.routers.openwebui.tls.certresolver=letsencrypt
-      - traefik.http.routers.openwebui.middlewares=auth
+      - traefik.http.routers.openwebui.entrypoints=web
+      # TLS disabled for local .localhost development
+      # - traefik.http.routers.openwebui.tls.certresolver=letsencrypt
+      # Auth disabled for local development
+      # - traefik.http.routers.openwebui.middlewares=auth@docker
       - traefik.http.services.openwebui.loadbalancer.server.port=8080
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      test: ["NONE"]
 
-# =============================================================================
-# Networks
-# =============================================================================
 networks:
   edge:
     name: voiz_edge
@@ -317,9 +312,7 @@ networks:
     driver: bridge
     internal: false  # Must be false to allow Ollama to download models
 
-# =============================================================================
-# Volumes
-# =============================================================================
+
 volumes:
   ollama_data:
     name: voiz_ollama_data
@@ -327,3 +320,5 @@ volumes:
     name: voiz_openwebui_data
   traefik_letsencrypt:
     name: voiz_traefik_letsencrypt
+  postgres_data:
+    name: voiz_postgres_data

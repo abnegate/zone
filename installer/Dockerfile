@@ -1,21 +1,24 @@
-FROM python:3.12-slim
+FROM ghcr.io/gleam-lang/gleam:v1.14.0-erlang AS builder
+WORKDIR /build
 
-# Install htpasswd utility
+COPY gleam.toml .
+COPY src src
+
+RUN gleam deps download
+RUN gleam build
+
+FROM ghcr.io/gleam-lang/gleam:v1.14.0-erlang
+
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends apache2-utils docker.io && \
-    apt-get clean && \
+    apt-get install -y --no-install-recommends apache2-utils && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /build
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=builder /build /build
+COPY static static
+COPY templates templates
+COPY start.sh /build/start.sh
+RUN chmod +x /build/start.sh
 
-# Copy application
-COPY app.py .
-COPY templates/ templates/
-COPY static/ static/
-
-# Run with gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "120", "--access-logfile", "-", "app:app"]
+CMD ["/build/start.sh"]

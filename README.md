@@ -70,6 +70,8 @@ Choose your preferred installation method:
 
 #### 🌐 Option 1: Web Installer (Recommended for First-Time Users)
 
+Beautiful web-based wizard built with **Gleam** (type-safe functional language on the BEAM).
+
 1. **Clone and start installer**
 
    ```bash
@@ -81,11 +83,11 @@ Choose your preferred installation method:
 2. **Configure via web interface**
 
    - Open browser to `http://localhost:8000`
-   - Step through configuration wizard
-   - Generate secure secrets with one click
+   - Step through 7-step configuration wizard
+   - Generate secure secrets with one click (cryptographically secure)
    - Choose models based on your hardware
-   - Optional: Configure VPN for private search
-   - Click "Install Now"
+   - Optional: Configure VPN (OpenVPN or WireGuard)
+   - Click "Install Now" and watch live progress
 
 3. **Start the stack**
 
@@ -94,6 +96,8 @@ Choose your preferred installation method:
    # or
    make up-vpn      # With VPN-protected search
    ```
+
+**Tech Stack**: Gleam + Wisp + Mist (backend) | Vanilla HTML + JS + Tailwind (frontend)
 
 #### ⚡ Option 2: Quick Start (Zero Configuration)
 
