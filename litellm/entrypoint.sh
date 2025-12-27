@@ -15,4 +15,5 @@ fi
 
 # Execute the original litellm command
 echo "[litellm-entrypoint] Starting LiteLLM proxy..."
-exec "$@"
+echo "[litellm-entrypoint] Command: $@"
+exec litellm "$@"

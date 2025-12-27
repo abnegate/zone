@@ -1,23 +1,9 @@
-# LiteLLM Proxy Configuration with Auto Routing
-# Documentation: https://docs.litellm.ai/docs/proxy/auto_routing
+# LiteLLM Proxy Configuration
+# Documentation: https://docs.litellm.ai/docs/
 
 model_list:
   # ===========================================================================
-  # Auto Router - Automatically routes based on query complexity
-  # This is the model you should use in Open WebUI for automatic routing
-  # ===========================================================================
-  - model_name: auto
-    litellm_params:
-      model: auto_router/complexity_router
-      auto_router_config_path: /tmp/router.json
-      auto_router_default_model: fast
-      auto_router_embedding_model: embed
-    model_info:
-      id: auto
-      mode: chat
-
-  # ===========================================================================
-  # Fast Model - For simple queries
+  # Fast Model - For simple queries (default)
   # ===========================================================================
   - model_name: fast
     litellm_params:
@@ -77,8 +63,18 @@ general_settings:
   # Master key for API authentication
   master_key: ${SECURITY_LITELLM_MASTER_KEY}
 
-  # Default model when not specified (use auto for intelligent routing)
-  default_model: auto
+  # Allow master key to be used directly (no virtual keys required)
+  disable_spend_logs: true
+
+  # Don't require database lookup for master key
+  master_key_hash_auth: true
+
+  # Default model when not specified
+  default_model: fast
+
+  # Don't persist models to database - models defined in config.yaml
+  store_model_in_db: false
+  use_azure_key_vault: false
 
   # Logging
   litellm_settings:

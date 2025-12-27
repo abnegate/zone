@@ -65,7 +65,7 @@ wait_for_ollama() {
 
     local retries=0
     while [ $retries -lt $MAX_RETRIES ]; do
-        if wget -qO- "${OLLAMA_HOST}/api/tags" >/dev/null 2>&1; then
+        if ollama list >/dev/null 2>&1; then
             log_info "Ollama API is ready!"
             return 0
         fi
@@ -149,5 +149,4 @@ main() {
     fi
 }
 
-# Run main function
 main
