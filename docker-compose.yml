@@ -1,198 +1,404 @@
 services:
+  # ===========================================================================
+  # Traefik - Reverse Proxy & TLS Termination
+  # ===========================================================================
   traefik:
     image: traefik:v3.6
     container_name: traefik
     restart: unless-stopped
+
     command:
+      # API & Dashboard
       - --api.dashboard=true
+
+      # Docker Provider
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=edge
 
       # Entrypoints
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
 
-      # If you're handling certs elsewhere, you can keep TLS termination external.
-      # If you DO want Traefik to terminate TLS later, add a resolver here.
-      - --certificatesresolvers.le.acme.tlschallenge=true
-      - --certificatesresolvers.le.acme.email=you@domain.com
-      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      # TLS Configuration
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+
+      # Let's Encrypt ACME (automatic TLS certificates)
+      - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
 
       # Logging
       - --log.level=INFO
+      - --accesslog=true
+
     ports:
       - "80:80"
       - "443:443"
+
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Basic auth users file
       - ${BASIC_AUTH_USERS_FILE}:/auth/users.htpasswd:ro
+      - traefik_letsencrypt:/letsencrypt
+
     networks:
       - edge
 
     labels:
       - traefik.enable=true
 
-      # Optional dashboard exposure (protect it)
-      - traefik.http.routers.traefik.rule=Host(`traefik.${WEBUI_HOST}`)
-      - traefik.http.routers.traefik.entrypoints=websecure
-      - traefik.http.routers.traefik.service=api@internal
-      - traefik.http.routers.traefik.middlewares=auth@docker
+      # Dashboard (protected by basic auth)
+      - traefik.http.routers.dashboard.rule=Host(`traefik.${WEBUI_HOST}`)
+      - traefik.http.routers.dashboard.entrypoints=websecure
+      - traefik.http.routers.dashboard.tls.certresolver=letsencrypt
+      - traefik.http.routers.dashboard.service=api@internal
+      - traefik.http.routers.dashboard.middlewares=auth
 
+      # Basic Auth Middleware
       - traefik.http.middlewares.auth.basicauth.usersfile=/auth/users.htpasswd
+      - traefik.http.middlewares.auth.basicauth.realm=${BASICAUTH_REALM}
 
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # ===========================================================================
+  # Ollama - Local LLM Inference Engine
+  # ===========================================================================
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.13.5
     container_name: ollama
     restart: unless-stopped
-    # GPU on Windows+WSL2 works via Docker Desktop GPU support.
-    # If your setup supports nvidia runtime in WSL2:
+
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST}
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_MAX_LOADED_MODELS=3
+
+    volumes:
+      - ollama_data:/root/.ollama
+
+    networks:
+      - internal
+
+    expose:
+      - "11434"
+
+    # GPU passthrough for Docker Desktop (Windows/Mac) and Linux with nvidia-container-toolkit
     deploy:
       resources:
         reservations:
           devices:
-            - capabilities: [gpu]
-    environment:
-      # Helps some setups that need explicit host binding:
-      - OLLAMA_HOST=0.0.0.0:11434
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - internal
-    expose:
-      - "11434"
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
-  # One-shot model puller that persists into the shared ollama_data volume
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ===========================================================================
+  # Ollama Init - One-time Model Puller
+  # ===========================================================================
   ollama-init:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.13.5
     container_name: ollama-init
-    depends_on:
-      - ollama
     restart: "no"
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+
     environment:
+      - OLLAMA_HOST=http://ollama:11434
       - OLLAMA_FAST_MODEL=${OLLAMA_FAST_MODEL}
       - OLLAMA_REASON_MODEL=${OLLAMA_REASON_MODEL}
       - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL}
+
     volumes:
-      - ollama_data:/root/.ollama
       - ./ollama/pull-models.sh:/pull-models.sh:ro
+
     networks:
       - internal
+
     entrypoint: ["/bin/sh", "/pull-models.sh"]
 
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+
+  # ===========================================================================
+  # LiteLLM - OpenAI API Proxy with Semantic Routing
+  # ===========================================================================
   litellm:
-    image: ghcr.io/berriai/litellm:latest
+    image: ghcr.io/berriai/litellm:main-stable
     container_name: litellm
     restart: unless-stopped
+
     depends_on:
-      - ollama
-      - ollama-init
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+
     environment:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
       - OLLAMA_FAST_MODEL=${OLLAMA_FAST_MODEL}
       - OLLAMA_REASON_MODEL=${OLLAMA_REASON_MODEL}
       - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL}
+
+      # Performance tuning
+      - LITELLM_REQUEST_TIMEOUT=${LITELLM_REQUEST_TIMEOUT}
+      - LITELLM_ROUTER_TIMEOUT=${LITELLM_ROUTER_TIMEOUT}
+
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
-    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+      - ./litellm/router.json:/app/router.json:ro
+
+    command:
+      - --config
+      - /app/config.yaml
+      - --port
+      - "4000"
+      - --num_workers
+      - "${LITELLM_WORKERS}"
+      - --detailed_debug
+
     networks:
       - internal
       - edge
+
     expose:
       - "4000"
 
     labels:
       - traefik.enable=true
-      - traefik.http.routers.api.rule=Host(`${API_HOST}`)
-      - traefik.http.routers.api.entrypoints=websecure
-      # If you terminate TLS elsewhere, you can still keep websecure and forward 443->443.
-      - traefik.http.routers.api.middlewares=auth@docker
-      - traefik.http.services.api.loadbalancer.server.port=4000
+      - traefik.docker.network=edge
 
-  openwebui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: openwebui
-    restart: unless-stopped
-    depends_on:
-      - litellm
-      - gluetun
-    environment:
-      # Open WebUI env config reference  [oai_citation:2‡docs.openwebui.com](https://docs.openwebui.com/getting-started/env-configuration/?utm_source=chatgpt.com)
-      - OPENAI_API_BASE_URL=${OPENAI_BASE_URL}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # API Router
+      - traefik.http.routers.litellm.rule=Host(`${API_HOST}`)
+      - traefik.http.routers.litellm.entrypoints=websecure
+      - traefik.http.routers.litellm.tls.certresolver=letsencrypt
+      - traefik.http.routers.litellm.middlewares=auth
+      - traefik.http.services.litellm.loadbalancer.server.port=4000
 
-      # Web search via SearXNG (through VPN tunnel)
-      - WEB_SEARCH_ENGINE=searxng
-      - SEARXNG_QUERY_URL=${SEARXNG_BASE_URL}/search?q=<query>&format=json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
-      # Optional: reduce surprises if you want it “static-ish”
-      - DEFAULT_LOCALE=en
-      - ENABLE_SIGNUP=false
-      # Note: Open WebUI still has its own first-user bootstrap; after that, UI config is optional.
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
 
-    volumes:
-      - openwebui_data:/app/backend/data
-    networks:
-      - internal
-      - edge
-    expose:
-      - "8080"
-
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.webui.rule=Host(`${WEBUI_HOST}`)
-      - traefik.http.routers.webui.entrypoints=websecure
-      - traefik.http.routers.webui.middlewares=auth@docker
-      - traefik.http.services.webui.loadbalancer.server.port=8080
-
-  # VPN tunnel
+  # ===========================================================================
+  # Gluetun - VPN Client for Privacy
+  # ===========================================================================
   gluetun:
-    image: qmcgaw/gluetun:latest
+    image: qmcgaw/gluetun:v3.41
     container_name: gluetun
     restart: unless-stopped
+
     cap_add:
       - NET_ADMIN
+
     environment:
       - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
       - VPN_TYPE=${VPN_TYPE}
       - OPENVPN_USER=${OPENVPN_USER}
       - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
-      # Optional pinning:
-      # - SERVER_COUNTRIES=${SERVER_COUNTRIES}
-      # - SERVER_CITIES=${SERVER_CITIES}
+      - TZ=${TZ}
+
+      # Performance and reliability
+      - FIREWALL_OUTBOUND_SUBNETS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      - HEALTH_VPN_DURATION_INITIAL=30s
+      - UPDATER_PERIOD=24h
+
     networks:
       - internal
-    # We do NOT publish to host; only internal containers should reach searxng via gluetun:8080
+
     expose:
-      - "8080"
+      - "8080"  # SearXNG port
+      - "8000"  # Gluetun control server
+
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8000/v1/openvpn/status"]
-      interval: 30s
-      timeout: 5s
-      retries: 10
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
-  # SearXNG runs "inside" the gluetun network namespace → all outbound goes via VPN
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # ===========================================================================
+  # SearXNG - Privacy-Respecting Metasearch Engine
+  # ===========================================================================
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
     restart: unless-stopped
+
+    # Share network namespace with gluetun (all traffic goes through VPN)
     network_mode: "service:gluetun"
+
     depends_on:
-      - gluetun
+      gluetun:
+        condition: service_healthy
+
     environment:
-      - BASE_URL=http://gluetun:8080/
-      - INSTANCE_NAME=LocalSearXNG
+      - SEARXNG_SECRET=${SEARXNG_SECRET_KEY}
+      - SEARXNG_BASE_URL=http://localhost:8080
+      - INSTANCE_NAME=Voiz Search
+      - TZ=${TZ}
+
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
 
-networks:
-  edge:
-    name: edge
-  internal:
-    name: internal
-    internal: true
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
 
+  # ===========================================================================
+  # Open WebUI - ChatGPT-like Web Interface
+  # ===========================================================================
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: openwebui
+    restart: unless-stopped
+
+    depends_on:
+      litellm:
+        condition: service_healthy
+      gluetun:
+        condition: service_healthy
+
+    environment:
+      # OpenAI API Configuration
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+
+      # Web Search Integration
+      - ENABLE_RAG_WEB_SEARCH=${ENABLE_RAG_WEB_SEARCH}
+      - RAG_WEB_SEARCH_ENGINE=${RAG_WEB_SEARCH_ENGINE}
+      - RAG_WEB_SEARCH_RESULT_COUNT=${RAG_WEB_SEARCH_RESULT_COUNT}
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=${RAG_WEB_SEARCH_CONCURRENT_REQUESTS}
+      - SEARXNG_QUERY_URL=${SEARXNG_QUERY_URL}
+
+      # Authentication & Security
+      - WEBUI_AUTH=${WEBUI_AUTH}
+      - ENABLE_SIGNUP=${ENABLE_SIGNUP}
+
+      # General Settings
+      - DEFAULT_LOCALE=${DEFAULT_LOCALE}
+      - ENABLE_PERSISTENT_CONFIG=${ENABLE_PERSISTENT_CONFIG}
+      - TZ=${TZ}
+
+      # Performance
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_OPENAI_API=true
+
+    volumes:
+      - openwebui_data:/app/backend/data
+
+    networks:
+      - internal
+      - edge
+
+    expose:
+      - "8080"
+
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=edge
+
+      # Web UI Router
+      - traefik.http.routers.openwebui.rule=Host(`${WEBUI_HOST}`)
+      - traefik.http.routers.openwebui.entrypoints=websecure
+      - traefik.http.routers.openwebui.tls.certresolver=letsencrypt
+      - traefik.http.routers.openwebui.middlewares=auth
+      - traefik.http.services.openwebui.loadbalancer.server.port=8080
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  # External-facing network (internet access, Traefik routing)
+  edge:
+    name: voiz_edge
+    driver: bridge
+
+  # Internal network (service-to-service communication only)
+  internal:
+    name: voiz_internal
+    driver: bridge
+    internal: false  # Allow outbound for model downloads
+
+# =============================================================================
+# Volumes
+# =============================================================================
 volumes:
+  # Ollama model storage (can be very large: 10-100GB+)
   ollama_data:
+    name: voiz_ollama_data
+
+  # Open WebUI data (conversations, user settings, uploads)
   openwebui_data:
+    name: voiz_openwebui_data
+
+  # Traefik Let's Encrypt certificates
+  traefik_letsencrypt:
+    name: voiz_traefik_letsencrypt

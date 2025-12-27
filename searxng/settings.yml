@@ -1,15 +1,73 @@
+# SearXNG Configuration
+# Documentation: https://docs.searxng.org/admin/settings/
+
 use_default_settings: true
 
 server:
   port: 8080
-  bind_address: 0.0.0.0
-  secret_key: "Fh8oIopdm3Pz7yX3Jhfctqgyo92c"
+  bind_address: "0.0.0.0"
+
+  # Secret key for session encryption (provided via environment variable)
+  # DO NOT hardcode this value - it's injected from SEARXNG_SECRET env var
+  secret_key: "${SEARXNG_SECRET}"
+
+  # Rate limiting
   limiter: true
 
+  # Image proxy for privacy
+  image_proxy: true
+
 ui:
+  # Use content hashing for static assets
   static_use_hash: true
 
+  # Default theme
+  default_theme: simple
+
+  # Infinite scroll
+  infinite_scroll: true
+
+  # Query in title
+  query_in_title: true
+
 search:
+  # Supported output formats
   formats:
     - html
     - json
+
+  # Safe search filter (0=off, 1=moderate, 2=strict)
+  safe_search: 0
+
+  # Autocomplete
+  autocomplete: "google"
+
+  # Default language
+  default_lang: "en"
+
+# Privacy enhancements
+outgoing:
+  # Request timeout (seconds)
+  request_timeout: 10.0
+
+  # Max request timeout (seconds)
+  max_request_timeout: 15.0
+
+  # Proxies (not needed - we're using Gluetun VPN)
+  proxies: {}
+
+  # Use HTTP/2
+  enable_http2: true
+
+# Optional: Disable specific engines or categories
+# engines:
+#   - name: google
+#     disabled: false
+#   - name: bing
+#     disabled: false
+
+# Optional: Enable specific plugins
+# plugins:
+#   - name: "Hash plugin"
+#   - name: "Self Information"
+#   - name: "Tracker URL remover"
