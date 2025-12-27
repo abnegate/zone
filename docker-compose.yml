@@ -6,74 +6,46 @@ services:
     image: traefik:v3.6
     container_name: traefik
     restart: unless-stopped
-
     command:
-      # API & Dashboard
       - --api.dashboard=true
-
-      # Docker Provider
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=edge
-
-      # Entrypoints
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
-
-      # TLS Configuration
+      - --entrypoints.ping.address=:8082
+      - --ping=true
       - --entrypoints.web.http.redirections.entrypoint.to=websecure
       - --entrypoints.web.http.redirections.entrypoint.scheme=https
-
-      # Let's Encrypt ACME (automatic TLS certificates)
       - --certificatesresolvers.letsencrypt.acme.tlschallenge=true
-      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.email=${ADVANCED_ACME_EMAIL}
       - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
-
-      # Logging
       - --log.level=INFO
       - --accesslog=true
-
     ports:
       - "80:80"
       - "443:443"
-
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${BASIC_AUTH_USERS_FILE}:/auth/users.htpasswd:ro
+      - ${SECURITY_BASIC_AUTH_USERS_FILE}:/auth/users.htpasswd:ro
       - traefik_letsencrypt:/letsencrypt
-
     networks:
       - edge
-
     labels:
       - traefik.enable=true
-
-      # Dashboard (protected by basic auth)
-      - traefik.http.routers.dashboard.rule=Host(`traefik.${WEBUI_HOST}`)
+      - traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN_WEBUI_HOST}`)
       - traefik.http.routers.dashboard.entrypoints=websecure
       - traefik.http.routers.dashboard.tls.certresolver=letsencrypt
       - traefik.http.routers.dashboard.service=api@internal
       - traefik.http.routers.dashboard.middlewares=auth
-
-      # Basic Auth Middleware
       - traefik.http.middlewares.auth.basicauth.usersfile=/auth/users.htpasswd
-      - traefik.http.middlewares.auth.basicauth.realm=${BASICAUTH_REALM}
-
+      - traefik.http.middlewares.auth.basicauth.realm=${SECURITY_BASICAUTH_REALM}
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 128M
 
   # ===========================================================================
   # Ollama - Local LLM Inference Engine
@@ -82,22 +54,18 @@ services:
     image: ollama/ollama:0.13.5
     container_name: ollama
     restart: unless-stopped
-
     environment:
       - OLLAMA_HOST=${OLLAMA_HOST}
-      - OLLAMA_KEEP_ALIVE=24h
-      - OLLAMA_MAX_LOADED_MODELS=3
-
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS}
     volumes:
       - ollama_data:/root/.ollama
-
     networks:
       - internal
-
     expose:
       - "11434"
 
-    # GPU passthrough for Docker Desktop (Windows/Mac) and Linux with nvidia-container-toolkit
+    # GPU passthrough (optional - comment out if no GPU available)
     deploy:
       resources:
         reservations:
@@ -120,30 +88,19 @@ services:
     image: ollama/ollama:0.13.5
     container_name: ollama-init
     restart: "no"
-
     depends_on:
       ollama:
         condition: service_healthy
-
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - OLLAMA_FAST_MODEL=${OLLAMA_FAST_MODEL}
       - OLLAMA_REASON_MODEL=${OLLAMA_REASON_MODEL}
       - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL}
-
     volumes:
       - ./ollama/pull-models.sh:/pull-models.sh:ro
-
     networks:
       - internal
-
     entrypoint: ["/bin/sh", "/pull-models.sh"]
-
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
 
   # ===========================================================================
   # LiteLLM - OpenAI API Proxy with Semantic Routing
@@ -152,55 +109,45 @@ services:
     image: ghcr.io/berriai/litellm:main-stable
     container_name: litellm
     restart: unless-stopped
-
     depends_on:
       ollama:
         condition: service_healthy
       ollama-init:
         condition: service_completed_successfully
-
     environment:
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+      - LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
+      - LITELLM_SALT_KEY=${SECURITY_LITELLM_SALT_KEY}
       - OLLAMA_FAST_MODEL=${OLLAMA_FAST_MODEL}
       - OLLAMA_REASON_MODEL=${OLLAMA_REASON_MODEL}
       - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL}
-
-      # Performance tuning
-      - LITELLM_REQUEST_TIMEOUT=${LITELLM_REQUEST_TIMEOUT}
-      - LITELLM_ROUTER_TIMEOUT=${LITELLM_ROUTER_TIMEOUT}
-
+      - LITELLM_REQUEST_TIMEOUT=${ADVANCED_LITELLM_REQUEST_TIMEOUT}
+      - LITELLM_ROUTER_TIMEOUT=${ADVANCED_LITELLM_ROUTER_TIMEOUT}
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
-      - ./litellm/router.json:/app/router.json:ro
-
+      - ./litellm/router.json.template:/app/router.json.template:ro
+      - ./litellm/entrypoint.sh:/app/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/app/entrypoint.sh"]
     command:
       - --config
       - /app/config.yaml
       - --port
       - "4000"
       - --num_workers
-      - "${LITELLM_WORKERS}"
+      - "${ADVANCED_LITELLM_WORKERS}"
       - --detailed_debug
-
     networks:
       - internal
       - edge
-
     expose:
       - "4000"
-
     labels:
       - traefik.enable=true
       - traefik.docker.network=edge
-
-      # API Router
-      - traefik.http.routers.litellm.rule=Host(`${API_HOST}`)
+      - traefik.http.routers.litellm.rule=Host(`${DOMAIN_API_HOST}`)
       - traefik.http.routers.litellm.entrypoints=websecure
       - traefik.http.routers.litellm.tls.certresolver=letsencrypt
       - traefik.http.routers.litellm.middlewares=auth
       - traefik.http.services.litellm.loadbalancer.server.port=4000
-
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
       interval: 30s
@@ -208,45 +155,63 @@ services:
       retries: 3
       start_period: 30s
 
-    deploy:
-      resources:
-        limits:
-          cpus: '4.0'
-          memory: 4G
-        reservations:
-          cpus: '1.0'
-          memory: 1G
+  # ===========================================================================
+  # Web Installer - Configuration UI
+  # ===========================================================================
+  # Optional: Enable with --profile installer
+  # Access at http://localhost:8000
+  installer:
+    build:
+      context: ./installer
+      dockerfile: Dockerfile
+    container_name: voiz-installer
+    restart: "no"
+    profiles:
+      - installer
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/project
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /project
+    environment:
+      - PYTHONUNBUFFERED=1
 
   # ===========================================================================
   # Gluetun - VPN Client for Privacy
   # ===========================================================================
+  # Optional: Enable with --profile vpn
   gluetun:
     image: qmcgaw/gluetun:v3.41
     container_name: gluetun
     restart: unless-stopped
-
+    profiles:
+      - vpn
     cap_add:
       - NET_ADMIN
-
     environment:
       - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
       - VPN_TYPE=${VPN_TYPE}
-      - OPENVPN_USER=${OPENVPN_USER}
-      - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
-      - TZ=${TZ}
 
-      # Performance and reliability
+      # OpenVPN credentials (used if VPN_TYPE=openvpn)
+      - OPENVPN_USER=${VPN_OPENVPN_USER}
+      - OPENVPN_PASSWORD=${VPN_OPENVPN_PASSWORD}
+
+      # WireGuard credentials (used if VPN_TYPE=wireguard)
+      - WIREGUARD_PRIVATE_KEY=${VPN_WIREGUARD_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${VPN_WIREGUARD_ADDRESSES}
+      - WIREGUARD_PRESHARED_KEY=${VPN_WIREGUARD_PRESHARED_KEY}
+
+      # System settings
+      - TZ=${ADVANCED_TZ}
       - FIREWALL_OUTBOUND_SUBNETS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
       - HEALTH_VPN_DURATION_INITIAL=30s
       - UPDATER_PERIOD=24h
-
     networks:
       - internal
-
     expose:
-      - "8080"  # SearXNG port
-      - "8000"  # Gluetun control server
-
+      - "8080"
+      - "8000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8000/v1/openvpn/status"]
       interval: 60s
@@ -254,47 +219,34 @@ services:
       retries: 5
       start_period: 30s
 
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 128M
-
   # ===========================================================================
   # SearXNG - Privacy-Respecting Metasearch Engine
   # ===========================================================================
+  # Optional: Enable with --profile vpn
   searxng:
     image: searxng/searxng:latest
     container_name: searxng
     restart: unless-stopped
-
-    # Share network namespace with gluetun (all traffic goes through VPN)
+    profiles:
+      - vpn
     network_mode: "service:gluetun"
-
     depends_on:
       gluetun:
         condition: service_healthy
-
     environment:
-      - SEARXNG_SECRET=${SEARXNG_SECRET_KEY}
-      - SEARXNG_BASE_URL=http://localhost:8080
-      - INSTANCE_NAME=Voiz Search
-      - TZ=${TZ}
-
+      - SEARXNG_SERVER__SECRET_KEY=${SECURITY_SEARXNG_SECRET_KEY}
+      - SEARXNG_SERVER__BASE_URL=${SEARCH_SEARXNG_SERVER_BASE_URL}
+      - SEARXNG_SERVER__INSTANCE_NAME=${SEARCH_SEARXNG_INSTANCE_NAME}
+      - SEARXNG_GENERAL__INSTANCE_NAME=${SEARCH_SEARXNG_INSTANCE_NAME}
+      - TZ=${ADVANCED_TZ}
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
-
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 1G
-        reservations:
-          cpus: '0.5'
-          memory: 256M
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ===========================================================================
   # Open WebUI - ChatGPT-like Web Interface
@@ -303,59 +255,49 @@ services:
     image: ghcr.io/open-webui/open-webui:latest
     container_name: openwebui
     restart: unless-stopped
-
     depends_on:
       litellm:
         condition: service_healthy
-      gluetun:
-        condition: service_healthy
-
     environment:
       # OpenAI API Configuration
-      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE_URL=${WEBUI_OPENAI_API_BASE_URL}
+      - OPENAI_API_KEY=${WEBUI_OPENAI_API_KEY}
 
       # Web Search Integration
-      - ENABLE_RAG_WEB_SEARCH=${ENABLE_RAG_WEB_SEARCH}
-      - RAG_WEB_SEARCH_ENGINE=${RAG_WEB_SEARCH_ENGINE}
-      - RAG_WEB_SEARCH_RESULT_COUNT=${RAG_WEB_SEARCH_RESULT_COUNT}
-      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=${RAG_WEB_SEARCH_CONCURRENT_REQUESTS}
-      - SEARXNG_QUERY_URL=${SEARXNG_QUERY_URL}
+      - ENABLE_RAG_WEB_SEARCH=${SEARCH_ENABLE_RAG}
+      - RAG_WEB_SEARCH_ENGINE=${SEARCH_ENGINE}
+      - RAG_WEB_SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT}
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=${SEARCH_CONCURRENT_REQUESTS}
+      - SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL}
 
-      # Authentication & Security
+      # Authentication & Settings
       - WEBUI_AUTH=${WEBUI_AUTH}
-      - ENABLE_SIGNUP=${ENABLE_SIGNUP}
+      - ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}
+      - DEFAULT_LOCALE=${WEBUI_DEFAULT_LOCALE}
+      - ENABLE_PERSISTENT_CONFIG=${WEBUI_ENABLE_PERSISTENT_CONFIG}
 
-      # General Settings
-      - DEFAULT_LOCALE=${DEFAULT_LOCALE}
-      - ENABLE_PERSISTENT_CONFIG=${ENABLE_PERSISTENT_CONFIG}
-      - TZ=${TZ}
+      # API Configuration
+      - ENABLE_OLLAMA_API=${WEBUI_ENABLE_OLLAMA_API}
+      - ENABLE_OPENAI_API=${WEBUI_ENABLE_OPENAI_API}
 
-      # Performance
-      - ENABLE_OLLAMA_API=false
-      - ENABLE_OPENAI_API=true
+      # System
+      - TZ=${ADVANCED_TZ}
 
     volumes:
       - openwebui_data:/app/backend/data
-
     networks:
       - internal
       - edge
-
     expose:
       - "8080"
-
     labels:
       - traefik.enable=true
       - traefik.docker.network=edge
-
-      # Web UI Router
-      - traefik.http.routers.openwebui.rule=Host(`${WEBUI_HOST}`)
+      - traefik.http.routers.openwebui.rule=Host(`${DOMAIN_WEBUI_HOST}`)
       - traefik.http.routers.openwebui.entrypoints=websecure
       - traefik.http.routers.openwebui.tls.certresolver=letsencrypt
       - traefik.http.routers.openwebui.middlewares=auth
       - traefik.http.services.openwebui.loadbalancer.server.port=8080
-
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -363,42 +305,25 @@ services:
       retries: 3
       start_period: 60s
 
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
-
 # =============================================================================
 # Networks
 # =============================================================================
 networks:
-  # External-facing network (internet access, Traefik routing)
   edge:
     name: voiz_edge
     driver: bridge
-
-  # Internal network (service-to-service communication only)
   internal:
     name: voiz_internal
     driver: bridge
-    internal: false  # Allow outbound for model downloads
+    internal: false  # Must be false to allow Ollama to download models
 
 # =============================================================================
 # Volumes
 # =============================================================================
 volumes:
-  # Ollama model storage (can be very large: 10-100GB+)
   ollama_data:
     name: voiz_ollama_data
-
-  # Open WebUI data (conversations, user settings, uploads)
   openwebui_data:
     name: voiz_openwebui_data
-
-  # Traefik Let's Encrypt certificates
   traefik_letsencrypt:
     name: voiz_traefik_letsencrypt

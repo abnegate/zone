@@ -1,0 +1,357 @@
+# Voiz Configuration Reference
+
+Complete documentation of all configuration options available in `.env`
+
+## 📝 Configuration Philosophy
+
+**Voiz requires ZERO configuration to start!**
+
+All variables have working defaults. The system will run immediately after:
+```bash
+cp .env.example .env
+mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
+make up
+```
+
+For production, regenerate secrets for security.
+
+---
+
+## 🌐 Domain Configuration (2 variables)
+
+### `WEBUI_HOST`
+- **Default**: `webui.localhost`
+- **Description**: Hostname for the Open WebUI interface
+- **Example**: `ai.yourdomain.com`
+- **Usage**: Configure DNS A record or add to /etc/hosts
+
+### `API_HOST`
+- **Default**: `api.localhost`
+- **Description**: Hostname for the LiteLLM API endpoint
+- **Example**: `api.yourdomain.com`
+- **Usage**: Configure DNS A record or add to /etc/hosts
+
+---
+
+## 🔐 Security & Authentication (5 variables)
+
+### `BASICAUTH_REALM`
+- **Default**: `"Voiz AI Stack"`
+- **Description**: Realm name displayed in browser authentication prompt
+- **Example**: `"My Private AI"`
+- **Note**: Quotes required if contains spaces
+
+### `BASIC_AUTH_USERS_FILE`
+- **Default**: `./auth/users.htpasswd`
+- **Description**: Path to Apache htpasswd file for basic authentication
+- **Generate**: `htpasswd -cB auth/users.htpasswd username`
+
+### `LITELLM_MASTER_KEY`
+- **Default**: `dev-insecure-key-change-for-production`
+- **Description**: Master API key for authenticating to LiteLLM
+- **Security**: **Insecure default** - change for production!
+- **Generate**: `openssl rand -base64 32`
+- **Usage**: Used by Open WebUI to authenticate to LiteLLM
+
+### `LITELLM_SALT_KEY`
+- **Default**: `dev-insecure-salt-change-for-production`
+- **Description**: Salt key used for internal hashing
+- **Security**: Optional but recommended for production
+- **Generate**: `openssl rand -base64 32`
+
+### `SEARXNG_SECRET_KEY`
+- **Default**: `dev-insecure-key-change-for-production`
+- **Description**: Secret key for session encryption in SearXNG
+- **Security**: **Insecure default** - change for production!
+- **Generate**: `openssl rand -base64 32`
+- **Usage**: Required if using VPN profile (web search)
+
+---
+
+## 🤖 Ollama Model Configuration (4 variables)
+
+### `OLLAMA_FAST_MODEL`
+- **Default**: `llama3.1:8b`
+- **Description**: Fast model for simple queries and general chat
+- **RAM**: ~4-8GB
+- **Use for**: Summaries, rewrites, simple questions, translations
+- **Options**:
+  - `llama3.2:3b` (smaller, faster)
+  - `llama3.1:8b` (balanced)
+  - `qwen2.5:7b` (alternative)
+  - `mistral:7b` (alternative)
+
+### `OLLAMA_REASON_MODEL`
+- **Default**: `deepseek-r1:14b`
+- **Description**: Reasoning model for complex analysis and deep thinking
+- **RAM**: ~8-16GB
+- **Use for**: Debugging, system design, proofs, complex math
+- **Options**:
+  - `deepseek-r1:7b` (smaller, faster reasoning)
+  - `deepseek-r1:14b` (balanced)
+  - `deepseek-r1:32b` (highest quality reasoning)
+  - `llama3.1:70b` (alternative large model)
+
+### `OLLAMA_EMBED_MODEL`
+- **Default**: `nomic-embed-text`
+- **Description**: Embedding model for semantic routing and search
+- **RAM**: ~1-2GB
+- **Critical**: Used by auto router to analyze query complexity
+- **Options**:
+  - `nomic-embed-text` (recommended, fast)
+  - `mxbai-embed-large` (higher quality, slower)
+- **Note**: If changed, restart needed to regenerate router.json
+
+### `OLLAMA_HOST`
+- **Default**: `0.0.0.0:11434`
+- **Description**: Internal binding address for Ollama server
+- **Usage**: Usually don't change (internal networking)
+
+---
+
+## 💬 Open WebUI Configuration (8 variables)
+
+### `WEBUI_AUTH`
+- **Default**: `false`
+- **Description**: Enable Open WebUI's built-in user authentication
+- **Note**: We use Traefik basic auth instead by default
+- **Set to `true`**: If you want per-user accounts in the UI
+
+### `OPENAI_API_BASE_URL`
+- **Default**: `http://litellm:4000/v1`
+- **Description**: Internal URL for LiteLLM API endpoint
+- **Usage**: Don't change unless customizing architecture
+
+### `OPENAI_API_KEY`
+- **Default**: *auto-set from LITELLM_MASTER_KEY*
+- **Description**: API key for OpenAI-compatible requests
+- **Usage**: Automatically configured by setup script
+
+### `ENABLE_PERSISTENT_CONFIG`
+- **Default**: `false`
+- **Description**: Store config in database vs environment variables
+- **Recommendation**: Keep `false` for infrastructure-as-code approach
+
+### `ENABLE_SIGNUP`
+- **Default**: `false`
+- **Description**: Allow new users to create accounts
+- **Set to `true`**: For multi-user installations
+
+### `DEFAULT_LOCALE`
+- **Default**: `en-US`
+- **Description**: Default language for the interface
+- **Options**: `en-US`, `es-ES`, `fr-FR`, `de-DE`, etc.
+
+### `ENABLE_OLLAMA_API`
+- **Default**: `false`
+- **Description**: Enable direct Ollama API access in UI
+- **Usage**: Keep `false` since we use LiteLLM proxy
+
+### `ENABLE_OPENAI_API`
+- **Default**: `true`
+- **Description**: Enable OpenAI-compatible API in UI
+- **Usage**: Must be `true` for LiteLLM integration
+
+---
+
+## 🔍 Web Search Configuration (8 variables)
+
+### `ENABLE_RAG_WEB_SEARCH`
+- **Default**: `true`
+- **Description**: Enable web search in RAG (Retrieval Augmented Generation)
+- **Note**: Only works when VPN profile is enabled
+
+### `RAG_WEB_SEARCH_ENGINE`
+- **Default**: `searxng`
+- **Description**: Search engine to use for web search
+- **Options**: `searxng` (only supported option)
+
+### `RAG_WEB_SEARCH_RESULT_COUNT`
+- **Default**: `5`
+- **Description**: Number of search results to fetch per query
+- **Range**: 1-20 (higher = more context, slower)
+
+### `RAG_WEB_SEARCH_CONCURRENT_REQUESTS`
+- **Default**: `8`
+- **Description**: Maximum concurrent search requests
+- **Range**: 1-16 (higher = faster parallel searches, more load)
+
+### `SEARXNG_QUERY_URL`
+- **Default**: `"http://gluetun:8080/search?q=<query>&format=json"`
+- **Description**: SearXNG API endpoint URL
+- **Note**: Quotes required for `<query>` placeholder
+- **Usage**: Routes through Gluetun VPN container
+
+### `SEARXNG_BASE_URL`
+- **Default**: `"http://gluetun:8080"`
+- **Description**: SearXNG base URL (through VPN)
+- **Usage**: Internal routing through Gluetun
+
+### `SEARXNG_SERVER_BASE_URL`
+- **Default**: `http://localhost:8080`
+- **Description**: SearXNG's own base URL configuration
+- **Usage**: SearXNG internal setting
+
+### `SEARXNG_INSTANCE_NAME`
+- **Default**: `Voiz Search`
+- **Description**: Display name for SearXNG instance
+- **Example**: `My Private Search`
+
+---
+
+## 🔒 VPN Configuration - Optional (6 variables)
+
+**VPN is completely optional!** Only needed if you want private web search.
+
+### `VPN_SERVICE_PROVIDER`
+- **Default**: `surfshark`
+- **Description**: VPN provider name
+- **Options**: `surfshark`, `nordvpn`, `expressvpn`, `protonvpn`, `mullvad`, etc.
+- **See**: https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers
+
+### `VPN_TYPE`
+- **Default**: `openvpn`
+- **Description**: VPN protocol to use
+- **Options**: `openvpn`, `wireguard`
+- **Note**: Check if your provider supports both
+
+### `OPENVPN_USER`
+- **Default**: *empty*
+- **Description**: VPN account username
+- **Surfshark**: Use your service credentials (not login email)
+- **Required**: Only if using `--profile vpn`
+
+### `OPENVPN_PASSWORD`
+- **Default**: *empty*
+- **Description**: VPN account password
+- **Required**: Only if using `--profile vpn`
+
+### `SERVER_COUNTRIES`
+- **Default**: *commented out*
+- **Description**: Pin VPN to specific countries (comma-separated)
+- **Example**: `United States,Canada`
+- **Usage**: Uncomment to use
+
+### `SERVER_CITIES`
+- **Default**: *commented out*
+- **Description**: Pin VPN to specific cities (comma-separated)
+- **Example**: `New York,Los Angeles`
+- **Usage**: Uncomment to use
+
+---
+
+## ⚙️ Advanced Configuration (5 variables)
+
+### `LITELLM_WORKERS`
+- **Default**: `4`
+- **Description**: Number of LiteLLM worker processes
+- **Range**: 1-8 recommended (1-2 per CPU core)
+- **Higher**: Better concurrency, more RAM usage
+- **Lower**: Less RAM, potential queuing
+
+### `LITELLM_REQUEST_TIMEOUT`
+- **Default**: `600` (10 minutes)
+- **Description**: Maximum time for a single request (seconds)
+- **Increase**: For very slow models or long responses
+- **Decrease**: To fail fast on issues
+
+### `LITELLM_ROUTER_TIMEOUT`
+- **Default**: `120` (2 minutes)
+- **Description**: Router decision timeout (seconds)
+- **Usage**: How long to wait for routing decision
+
+### `TZ`
+- **Default**: `UTC`
+- **Description**: Timezone for all containers
+- **Example**: `America/New_York`, `Europe/London`, `Asia/Tokyo`
+- **List**: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+
+### `ACME_EMAIL`
+- **Default**: `admin@example.com`
+- **Description**: Email for Let's Encrypt certificate notifications
+- **Required**: For automatic HTTPS certificates
+- **Usage**: Must be real email for certificate renewal notices
+
+---
+
+## 🎯 Configuration by Priority
+
+### Tier 1: Zero Config (Default)
+Just `cp .env.example .env` and it works!
+- All 35 variables have defaults
+- Insecure keys for dev (warnings shown)
+
+### Tier 2: Basic Security (2 variables)
+Regenerate secrets for production:
+- `LITELLM_MASTER_KEY` - `openssl rand -base64 32`
+- `SEARXNG_SECRET_KEY` - `openssl rand -base64 32`
+
+### Tier 3: Production (4 more variables)
+- `WEBUI_HOST` - Your domain
+- `API_HOST` - Your API domain
+- `ACME_EMAIL` - Your email
+- `TZ` - Your timezone
+
+### Tier 4: Optional Features
+- VPN credentials - For private search
+- Model changes - For performance tuning
+- Worker count - For scaling
+
+---
+
+## 📊 Summary Table
+
+| Category | Variables | Required | Have Defaults |
+|----------|-----------|----------|---------------|
+| Domain | 2 | No | ✅ Yes |
+| Security | 5 | No* | ✅ Yes (insecure) |
+| Ollama Models | 4 | No | ✅ Yes |
+| Open WebUI | 8 | No | ✅ Yes |
+| Web Search | 8 | No | ✅ Yes |
+| VPN (optional) | 6 | No | ✅ Yes (empty OK) |
+| Advanced | 5 | No | ✅ Yes |
+| **TOTAL** | **35** | **0** | **✅ All** |
+
+*Security variables have insecure defaults. Change for production.
+
+---
+
+## 🚀 Instant Start Guide
+
+### Absolute Minimum (3 commands, 30 seconds)
+```bash
+cp .env.example .env
+mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
+make up
+```
+
+### Production Ready (1 command, 2 minutes)
+```bash
+./scripts/setup.sh
+```
+
+### With VPN Search (1 extra step)
+```bash
+nano .env  # Add OPENVPN_USER and OPENVPN_PASSWORD
+make up-vpn
+```
+
+---
+
+## 🔍 Variable Search Index
+
+Need to find a specific config? Quick lookup:
+
+- **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE, WEBUI_AUTH
+- **Domains**: WEBUI_HOST, API_HOST
+- **Email**: ACME_EMAIL
+- **Models**: OLLAMA_FAST_MODEL, OLLAMA_REASON_MODEL, OLLAMA_EMBED_MODEL
+- **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
+- **Search**: ENABLE_RAG_WEB_SEARCH, RAG_WEB_SEARCH_*, SEARXNG_*
+- **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
+- **Timezone**: TZ
+- **VPN**: VPN_*, OPENVPN_*
+
+---
+
+**Total: 35 configuration options, 0 required, all optional with working defaults**

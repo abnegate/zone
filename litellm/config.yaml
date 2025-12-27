@@ -9,7 +9,7 @@ model_list:
   - model_name: auto
     litellm_params:
       model: auto_router/complexity_router
-      auto_router_config_path: /app/router.json
+      auto_router_config_path: /tmp/router.json
       auto_router_default_model: fast
       auto_router_embedding_model: embed
     model_info:
@@ -75,7 +75,7 @@ router_settings:
 # =============================================================================
 general_settings:
   # Master key for API authentication
-  master_key: ${LITELLM_MASTER_KEY}
+  master_key: ${SECURITY_LITELLM_MASTER_KEY}
 
   # Default model when not specified (use auto for intelligent routing)
   default_model: auto
