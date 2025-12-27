@@ -1,0 +1,198 @@
+services:
+  traefik:
+    image: traefik:v3.6
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+
+      # Entrypoints
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+
+      # If you're handling certs elsewhere, you can keep TLS termination external.
+      # If you DO want Traefik to terminate TLS later, add a resolver here.
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      - --certificatesresolvers.le.acme.email=you@domain.com
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+
+      # Logging
+      - --log.level=INFO
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Basic auth users file
+      - ${BASIC_AUTH_USERS_FILE}:/auth/users.htpasswd:ro
+    networks:
+      - edge
+
+    labels:
+      - traefik.enable=true
+
+      # Optional dashboard exposure (protect it)
+      - traefik.http.routers.traefik.rule=Host(`traefik.${WEBUI_HOST}`)
+      - traefik.http.routers.traefik.entrypoints=websecure
+      - traefik.http.routers.traefik.service=api@internal
+      - traefik.http.routers.traefik.middlewares=auth@docker
+
+      - traefik.http.middlewares.auth.basicauth.usersfile=/auth/users.htpasswd
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    # GPU on Windows+WSL2 works via Docker Desktop GPU support.
+    # If your setup supports nvidia runtime in WSL2:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    environment:
+      # Helps some setups that need explicit host binding:
+      - OLLAMA_HOST=0.0.0.0:11434
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - internal
+    expose:
+      - "11434"
+
+  # One-shot model puller that persists into the shared ollama_data volume
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: ollama-init
+    depends_on:
+      - ollama
+    restart: "no"
+    environment:
+      - OLLAMA_FAST_MODEL=${OLLAMA_FAST_MODEL}
+      - OLLAMA_REASON_MODEL=${OLLAMA_REASON_MODEL}
+      - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL}
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./ollama/pull-models.sh:/pull-models.sh:ro
+    networks:
+      - internal
+    entrypoint: ["/bin/sh", "/pull-models.sh"]
+
+  litellm:
+    image: ghcr.io/berriai/litellm:latest
+    container_name: litellm
+    restart: unless-stopped
+    depends_on:
+      - ollama
+      - ollama-init
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_SALT_KEY=${LITELLM_SALT_KEY}
+      - OLLAMA_FAST_MODEL=${OLLAMA_FAST_MODEL}
+      - OLLAMA_REASON_MODEL=${OLLAMA_REASON_MODEL}
+      - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL}
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    networks:
+      - internal
+      - edge
+    expose:
+      - "4000"
+
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.api.rule=Host(`${API_HOST}`)
+      - traefik.http.routers.api.entrypoints=websecure
+      # If you terminate TLS elsewhere, you can still keep websecure and forward 443->443.
+      - traefik.http.routers.api.middlewares=auth@docker
+      - traefik.http.services.api.loadbalancer.server.port=4000
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    restart: unless-stopped
+    depends_on:
+      - litellm
+      - gluetun
+    environment:
+      # Open WebUI env config reference  [oai_citation:2‡docs.openwebui.com](https://docs.openwebui.com/getting-started/env-configuration/?utm_source=chatgpt.com)
+      - OPENAI_API_BASE_URL=${OPENAI_BASE_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+
+      # Web search via SearXNG (through VPN tunnel)
+      - WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=${SEARXNG_BASE_URL}/search?q=<query>&format=json
+
+      # Optional: reduce surprises if you want it “static-ish”
+      - DEFAULT_LOCALE=en
+      - ENABLE_SIGNUP=false
+      # Note: Open WebUI still has its own first-user bootstrap; after that, UI config is optional.
+
+    volumes:
+      - openwebui_data:/app/backend/data
+    networks:
+      - internal
+      - edge
+    expose:
+      - "8080"
+
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.webui.rule=Host(`${WEBUI_HOST}`)
+      - traefik.http.routers.webui.entrypoints=websecure
+      - traefik.http.routers.webui.middlewares=auth@docker
+      - traefik.http.services.webui.loadbalancer.server.port=8080
+
+  # VPN tunnel
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
+      - VPN_TYPE=${VPN_TYPE}
+      - OPENVPN_USER=${OPENVPN_USER}
+      - OPENVPN_PASSWORD=${OPENVPN_PASSWORD}
+      # Optional pinning:
+      # - SERVER_COUNTRIES=${SERVER_COUNTRIES}
+      # - SERVER_CITIES=${SERVER_CITIES}
+    networks:
+      - internal
+    # We do NOT publish to host; only internal containers should reach searxng via gluetun:8080
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/v1/openvpn/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+
+  # SearXNG runs "inside" the gluetun network namespace → all outbound goes via VPN
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      - gluetun
+    environment:
+      - BASE_URL=http://gluetun:8080/
+      - INSTANCE_NAME=LocalSearXNG
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+
+networks:
+  edge:
+    name: edge
+  internal:
+    name: internal
+    internal: true
+
+volumes:
+  ollama_data:
+  openwebui_data:

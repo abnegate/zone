@@ -1,0 +1,23 @@
+{
+  "encoder_type": "openai",
+  "encoder_name": "local-embed",
+  "routes": [
+    {
+      "name": "reasoning",
+      "utterances": [
+        "prove that",
+        "derive the formula",
+        "solve this step by step",
+        "analyze complexity",
+        "debug this code deeply",
+        "find the root cause",
+        "design an architecture with tradeoffs",
+        "multi-step reasoning",
+        "hard math problem"
+      ],
+      "description": "complex reasoning + deep analysis",
+      "score_threshold": 0.45,
+      "metadata": {}
+    }
+  ]
+}
