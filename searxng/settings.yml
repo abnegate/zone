@@ -7,9 +7,9 @@ server:
   port: 8080
   bind_address: "0.0.0.0"
 
-  # Secret key for session encryption (provided via environment variable)
-  # DO NOT hardcode this value - it's injected from SEARXNG_SECRET env var
-  secret_key: "${SEARXNG_SECRET}"
+  # Secret key for session encryption
+  # Provided via SEARXNG_SECRET_KEY environment variable
+  # SearXNG automatically reads this from the environment
 
   # Rate limiting
   limiter: true

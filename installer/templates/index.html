@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voiz AI Stack - Web Installer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .step { display: none; }
+        .step.active { display: block; }
+        .field-error { display: none; }
+        .field-error.active { display: block; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-bold mb-2 text-blue-400">Voiz AI Stack</h1>
+            <p class="text-gray-400">Web-Based Configuration Installer</p>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="mb-8">
+            <div class="flex justify-between items-center mb-2">
+                <span class="text-sm text-gray-400">Step <span id="current-step">1</span> of 7</span>
+                <span class="text-sm text-gray-400"><span id="progress-percent">14</span>% Complete</span>
+            </div>
+            <div class="w-full bg-gray-700 rounded-full h-2">
+                <div id="progress-bar" class="bg-blue-500 h-2 rounded-full transition-all duration-300" style="width: 14%"></div>
+            </div>
+        </div>
+
+        <!-- Steps Navigation Pills -->
+        <div class="flex flex-wrap gap-2 mb-8 justify-center">
+            <button class="step-pill active" data-step="1">Domain</button>
+            <button class="step-pill" data-step="2">Security</button>
+            <button class="step-pill" data-step="3">Models</button>
+            <button class="step-pill" data-step="4">Web UI</button>
+            <button class="step-pill" data-step="5">Search</button>
+            <button class="step-pill" data-step="6">VPN</button>
+            <button class="step-pill" data-step="7">Advanced</button>
+        </div>
+
+        <!-- Installation Form -->
+        <div class="bg-gray-800 rounded-lg shadow-xl p-8">
+            <form id="install-form">
+
+                <!-- STEP 1: Domain Configuration -->
+                <div class="step active" data-step="1">
+                    <h2 class="text-2xl font-bold mb-4 text-blue-400">Domain Configuration</h2>
+                    <p class="text-gray-400 mb-6">Configure the hostnames for your services</p>
+
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Web UI Hostname</label>
+                            <input type="text" name="DOMAIN_WEBUI_HOST" value="webui.localhost"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500"
+                                   placeholder="webui.localhost">
+                            <p class="text-xs text-gray-500 mt-1">Hostname for the chat interface</p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">API Hostname</label>
+                            <input type="text" name="DOMAIN_API_HOST" value="api.localhost"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500"
+                                   placeholder="api.localhost">
+                            <p class="text-xs text-gray-500 mt-1">Hostname for the LiteLLM API</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STEP 2: Security Configuration -->
+                <div class="step" data-step="2">
+                    <h2 class="text-2xl font-bold mb-4 text-blue-400">Security & Authentication</h2>
+                    <p class="text-gray-400 mb-6">Configure authentication and generate secure secrets</p>
+
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Basic Auth Realm</label>
+                            <input type="text" name="SECURITY_BASICAUTH_REALM" value="Voiz AI Stack"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                            <p class="text-xs text-gray-500 mt-1">Name displayed in browser auth prompt</p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">LiteLLM Master API Key</label>
+                            <div class="flex gap-2">
+                                <input type="text" name="SECURITY_LITELLM_MASTER_KEY" value="dev-insecure-key-change-for-production"
+                                       class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500 font-mono text-sm">
+                                <button type="button" onclick="generateSecret('SECURITY_LITELLM_MASTER_KEY')"
+                                        class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">Generate</button>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Master API key for authentication</p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">LiteLLM Salt Key (Optional)</label>
+                            <div class="flex gap-2">
+                                <input type="text" name="SECURITY_LITELLM_SALT_KEY" value="dev-insecure-salt-change-for-production"
+                                       class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500 font-mono text-sm">
+                                <button type="button" onclick="generateSecret('SECURITY_LITELLM_SALT_KEY')"
+                                        class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">Generate</button>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Salt for internal hashing</p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">SearXNG Secret Key</label>
+                            <div class="flex gap-2">
+                                <input type="text" name="SECURITY_SEARXNG_SECRET_KEY" value="dev-insecure-key-change-for-production"
+                                       class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500 font-mono text-sm">
+                                <button type="button" onclick="generateSecret('SECURITY_SEARXNG_SECRET_KEY')"
+                                        class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">Generate</button>
+                            </div>
+                            <p class="text-xs text-gray-500 mt-1">Session encryption for search</p>
+                        </div>
+
+                        <div class="mt-4">
+                            <button type="button" onclick="generateAllSecrets()"
+                                    class="w-full bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-medium">
+                                Generate All Secrets
+                            </button>
+                        </div>
+
+                        <div class="bg-yellow-900/30 border border-yellow-600 rounded p-4 mt-4">
+                            <p class="text-sm text-yellow-400">
+                                <strong>Security Note:</strong> Default secrets are INSECURE. Use the generate buttons for production deployments.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STEP 3: Ollama Models -->
+                <div class="step" data-step="3">
+                    <h2 class="text-2xl font-bold mb-4 text-blue-400">Model Configuration</h2>
+                    <p class="text-gray-400 mb-6">Choose which models to download from Ollama</p>
+
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Fast Model (4-8GB RAM)</label>
+                            <select name="OLLAMA_FAST_MODEL"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                <option value="llama3.2:3b">llama3.2:3b (3GB - Very Fast)</option>
+                                <option value="llama3.1:8b" selected>llama3.1:8b (4.7GB - Balanced)</option>
+                                <option value="qwen2.5:7b">qwen2.5:7b (4.4GB - Fast)</option>
+                                <option value="mistral:7b">mistral:7b (4.1GB - Fast)</option>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-1">Used for simple queries, summaries, quick answers</p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Reasoning Model (8-32GB RAM)</label>
+                            <select name="OLLAMA_REASON_MODEL"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                <option value="deepseek-r1:7b">deepseek-r1:7b (4.9GB - Faster)</option>
+                                <option value="deepseek-r1:14b">deepseek-r1:14b (8.9GB - Balanced)</option>
+                                <option value="deepseek-r1:32b" selected>deepseek-r1:32b (20GB - Best)</option>
+                                <option value="llama3.1:70b">llama3.1:70b (40GB - Huge)</option>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-1">Used for complex analysis, debugging, system design</p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Embedding Model (1-2GB RAM)</label>
+                            <select name="OLLAMA_EMBED_MODEL"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                <option value="nomic-embed-text" selected>nomic-embed-text (274MB - Fast)</option>
+                                <option value="mxbai-embed-large">mxbai-embed-large (669MB - Better)</option>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-1">Used for semantic routing and search</p>
+                        </div>
+
+                        <div class="bg-blue-900/30 border border-blue-600 rounded p-4 mt-4">
+                            <p class="text-sm text-blue-400">
+                                <strong>Disk Space:</strong> Models will be downloaded on first start. Total size varies by selection (typically 10-50GB).
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STEP 4: Web UI Settings -->
+                <div class="step" data-step="4">
+                    <h2 class="text-2xl font-bold mb-4 text-blue-400">Web UI Settings</h2>
+                    <p class="text-gray-400 mb-6">Configure the Open WebUI interface</p>
+
+                    <div class="space-y-4">
+                        <div class="flex items-center gap-3 p-4 bg-gray-700 rounded">
+                            <input type="checkbox" id="WEBUI_AUTH" name="WEBUI_AUTH"
+                                   class="w-5 h-5 text-blue-600 bg-gray-600 border-gray-500 rounded focus:ring-blue-500">
+                            <label for="WEBUI_AUTH" class="text-sm">Enable Open WebUI's built-in authentication</label>
+                        </div>
+                        <p class="text-xs text-gray-500 -mt-2 ml-8">By default, we use Traefik basic auth. Enable this for per-user accounts.</p>
+
+                        <div class="flex items-center gap-3 p-4 bg-gray-700 rounded">
+                            <input type="checkbox" id="WEBUI_ENABLE_SIGNUP" name="WEBUI_ENABLE_SIGNUP"
+                                   class="w-5 h-5 text-blue-600 bg-gray-600 border-gray-500 rounded focus:ring-blue-500">
+                            <label for="WEBUI_ENABLE_SIGNUP" class="text-sm">Allow user signups</label>
+                        </div>
+                        <p class="text-xs text-gray-500 -mt-2 ml-8">Enable for multi-user installations</p>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Default Language</label>
+                            <select name="WEBUI_DEFAULT_LOCALE"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                <option value="en-US" selected>English (US)</option>
+                                <option value="en-GB">English (UK)</option>
+                                <option value="es-ES">Spanish</option>
+                                <option value="fr-FR">French</option>
+                                <option value="de-DE">German</option>
+                                <option value="it-IT">Italian</option>
+                                <option value="pt-BR">Portuguese (Brazil)</option>
+                                <option value="ja-JP">Japanese</option>
+                                <option value="zh-CN">Chinese (Simplified)</option>
+                                <option value="ko-KR">Korean</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STEP 5: Search Configuration -->
+                <div class="step" data-step="5">
+                    <h2 class="text-2xl font-bold mb-4 text-blue-400">Web Search Configuration</h2>
+                    <p class="text-gray-400 mb-6">Configure SearXNG integration (requires VPN)</p>
+
+                    <div class="space-y-4">
+                        <div class="flex items-center gap-3 p-4 bg-gray-700 rounded">
+                            <input type="checkbox" id="SEARCH_ENABLE_RAG" name="SEARCH_ENABLE_RAG" checked
+                                   class="w-5 h-5 text-blue-600 bg-gray-600 border-gray-500 rounded focus:ring-blue-500">
+                            <label for="SEARCH_ENABLE_RAG" class="text-sm">Enable web search in RAG pipeline</label>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Search Results Per Query</label>
+                            <input type="number" name="SEARCH_RESULT_COUNT" value="5" min="1" max="20"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Concurrent Search Requests</label>
+                            <input type="number" name="SEARCH_CONCURRENT_REQUESTS" value="8" min="1" max="32"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Search Instance Name</label>
+                            <input type="text" name="SEARCH_SEARXNG_INSTANCE_NAME" value="Voiz Search"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                        </div>
+
+                        <div class="bg-yellow-900/30 border border-yellow-600 rounded p-4 mt-4">
+                            <p class="text-sm text-yellow-400">
+                                <strong>Note:</strong> Web search only works when VPN is configured in the next step.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STEP 6: VPN Configuration -->
+                <div class="step" data-step="6">
+                    <h2 class="text-2xl font-bold mb-4 text-blue-400">VPN Configuration (Optional)</h2>
+                    <p class="text-gray-400 mb-6">Configure VPN for private web search - completely optional!</p>
+
+                    <div class="space-y-4">
+                        <div class="flex items-center gap-3 p-4 bg-gray-700 rounded">
+                            <input type="checkbox" id="enable-vpn" onchange="toggleVPNFields()"
+                                   class="w-5 h-5 text-blue-600 bg-gray-600 border-gray-500 rounded focus:ring-blue-500">
+                            <label for="enable-vpn" class="text-sm font-medium">Enable VPN-protected search</label>
+                        </div>
+
+                        <div id="vpn-fields" class="hidden space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-2">VPN Provider</label>
+                                <select name="VPN_SERVICE_PROVIDER"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                    <option value="surfshark" selected>Surfshark</option>
+                                    <option value="nordvpn">NordVPN</option>
+                                    <option value="expressvpn">ExpressVPN</option>
+                                    <option value="protonvpn">ProtonVPN</option>
+                                    <option value="mullvad">Mullvad</option>
+                                    <option value="private internet access">Private Internet Access</option>
+                                    <option value="vyprvpn">VyprVPN</option>
+                                    <option value="windscribe">Windscribe</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium mb-2">VPN Protocol</label>
+                                <select name="VPN_TYPE" id="vpn-type" onchange="toggleVPNProtocol()"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                    <option value="openvpn" selected>OpenVPN (widely supported)</option>
+                                    <option value="wireguard">WireGuard (faster, modern)</option>
+                                </select>
+                            </div>
+
+                            <!-- OpenVPN Fields -->
+                            <div id="openvpn-fields" class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-2">OpenVPN Username</label>
+                                    <input type="text" name="VPN_OPENVPN_USER"
+                                           class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                    <p class="text-xs text-gray-500 mt-1">Your VPN service credentials</p>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium mb-2">OpenVPN Password</label>
+                                    <input type="password" name="VPN_OPENVPN_PASSWORD"
+                                           class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                </div>
+                            </div>
+
+                            <!-- WireGuard Fields -->
+                            <div id="wireguard-fields" class="hidden space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-2">WireGuard Private Key</label>
+                                    <input type="text" name="VPN_WIREGUARD_PRIVATE_KEY"
+                                           class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500 font-mono text-sm">
+                                    <p class="text-xs text-gray-500 mt-1">Get from your VPN provider's WireGuard config</p>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium mb-2">WireGuard Addresses</label>
+                                    <input type="text" name="VPN_WIREGUARD_ADDRESSES" placeholder="10.x.x.x/32"
+                                           class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500 font-mono text-sm">
+                                    <p class="text-xs text-gray-500 mt-1">IP address from WireGuard config</p>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium mb-2">WireGuard Preshared Key (Optional)</label>
+                                    <input type="text" name="VPN_WIREGUARD_PRESHARED_KEY"
+                                           class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500 font-mono text-sm">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- STEP 7: Advanced Settings -->
+                <div class="step" data-step="7">
+                    <h2 class="text-2xl font-bold mb-4 text-blue-400">Advanced Configuration</h2>
+                    <p class="text-gray-400 mb-6">Performance tuning and system settings</p>
+
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">LiteLLM Workers</label>
+                            <input type="number" name="ADVANCED_LITELLM_WORKERS" value="4" min="1" max="16"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                            <p class="text-xs text-gray-500 mt-1">Number of worker processes (1-2 per CPU core recommended)</p>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Request Timeout (seconds)</label>
+                            <input type="number" name="ADVANCED_LITELLM_REQUEST_TIMEOUT" value="600" min="60" max="1800"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Timezone</label>
+                            <select name="ADVANCED_TZ"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                                <option value="UTC" selected>UTC</option>
+                                <option value="America/New_York">America/New_York (EST/EDT)</option>
+                                <option value="America/Chicago">America/Chicago (CST/CDT)</option>
+                                <option value="America/Denver">America/Denver (MST/MDT)</option>
+                                <option value="America/Los_Angeles">America/Los_Angeles (PST/PDT)</option>
+                                <option value="Europe/London">Europe/London</option>
+                                <option value="Europe/Paris">Europe/Paris</option>
+                                <option value="Europe/Berlin">Europe/Berlin</option>
+                                <option value="Asia/Tokyo">Asia/Tokyo</option>
+                                <option value="Asia/Shanghai">Asia/Shanghai</option>
+                                <option value="Australia/Sydney">Australia/Sydney</option>
+                                <option value="Pacific/Auckland">Pacific/Auckland</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium mb-2">ACME Email (for Let's Encrypt)</label>
+                            <input type="email" name="ADVANCED_ACME_EMAIL" value="admin@example.com"
+                                   class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-blue-500">
+                            <p class="text-xs text-gray-500 mt-1">Email for TLS certificate notifications</p>
+                        </div>
+                    </div>
+                </div>
+
+            </form>
+
+            <!-- Navigation Buttons -->
+            <div class="flex justify-between mt-8 pt-6 border-t border-gray-700">
+                <button id="btn-prev" onclick="previousStep()"
+                        class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+                    Previous
+                </button>
+                <button id="btn-next" onclick="nextStep()"
+                        class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded font-medium">
+                    Next
+                </button>
+                <button id="btn-install" onclick="install()" style="display:none;"
+                        class="bg-green-600 hover:bg-green-700 px-8 py-2 rounded font-medium">
+                    Install Now
+                </button>
+            </div>
+        </div>
+
+        <!-- Installation Progress Modal -->
+        <div id="install-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+            <div class="bg-gray-800 rounded-lg p-8 max-w-2xl w-full mx-4">
+                <h3 class="text-2xl font-bold mb-4 text-blue-400">Installing Voiz AI Stack</h3>
+                <div id="install-status" class="space-y-2 mb-4 font-mono text-sm">
+                    <div class="text-gray-400">Starting installation...</div>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-2 mb-4">
+                    <div id="install-progress" class="bg-blue-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+                <div id="install-complete" class="hidden">
+                    <div class="bg-green-900/30 border border-green-600 rounded p-4 mb-4">
+                        <p class="text-green-400 font-medium">Installation Complete!</p>
+                    </div>
+                    <div class="space-y-2 text-sm">
+                        <p>Next steps:</p>
+                        <ol class="list-decimal list-inside space-y-1 text-gray-400">
+                            <li>Start the stack: <code class="bg-gray-700 px-2 py-1 rounded">make up</code></li>
+                            <li id="vpn-step" class="hidden">Or with VPN: <code class="bg-gray-700 px-2 py-1 rounded">make up-vpn</code></li>
+                            <li>Access: <code class="bg-gray-700 px-2 py-1 rounded">https://<span id="final-host">webui.localhost</span></code></li>
+                        </ol>
+                    </div>
+                    <button onclick="closeModal()" class="mt-4 w-full bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                        Close
+                    </button>
+                </div>
+                <div id="install-error" class="hidden">
+                    <div class="bg-red-900/30 border border-red-600 rounded p-4 mb-4">
+                        <p class="text-red-400 font-medium">Installation Failed</p>
+                        <p class="text-sm text-gray-400 mt-2" id="error-message"></p>
+                    </div>
+                    <button onclick="closeModal()" class="w-full bg-gray-600 hover:bg-gray-700 px-4 py-2 rounded">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/installer.js"></script>
+</body>
+</html>

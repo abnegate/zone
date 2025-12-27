@@ -109,18 +109,21 @@ setup_env_file() {
     local litellm_salt=$(generate_secret)
     local searxng_secret=$(generate_secret)
 
-    # Use sed to replace empty values
-    sed -i.bak "s|^LITELLM_MASTER_KEY=.*|LITELLM_MASTER_KEY=${litellm_key}|" "${ENV_FILE}"
-    sed -i.bak "s|^LITELLM_SALT_KEY=.*|LITELLM_SALT_KEY=${litellm_salt}|" "${ENV_FILE}"
-    sed -i.bak "s|^SEARXNG_SECRET_KEY=.*|SEARXNG_SECRET_KEY=${searxng_secret}|" "${ENV_FILE}"
+    # Use sed to replace empty values with new prefixed names
+    sed -i.bak "s|^SECURITY_LITELLM_MASTER_KEY=.*|SECURITY_LITELLM_MASTER_KEY=${litellm_key}|" "${ENV_FILE}"
+    sed -i.bak "s|^SECURITY_LITELLM_SALT_KEY=.*|SECURITY_LITELLM_SALT_KEY=${litellm_salt}|" "${ENV_FILE}"
+    sed -i.bak "s|^SECURITY_SEARXNG_SECRET_KEY=.*|SECURITY_SEARXNG_SECRET_KEY=${searxng_secret}|" "${ENV_FILE}"
+
+    # Fix WEBUI_OPENAI_API_KEY to use actual value
+    sed -i.bak "s|^WEBUI_OPENAI_API_KEY=.*|WEBUI_OPENAI_API_KEY=${litellm_key}|" "${ENV_FILE}"
 
     rm -f "${ENV_FILE}.bak"
 
     log_info "✓ Secrets generated and inserted into .env"
     log_warn "Review ${ENV_FILE} and update:"
-    log_warn "  - Domain names (WEBUI_HOST, API_HOST, etc.)"
-    log_warn "  - VPN credentials (OPENVPN_USER, OPENVPN_PASSWORD)"
-    log_warn "  - ACME email (ACME_EMAIL)"
+    log_warn "  - Domain names (DOMAIN_WEBUI_HOST, DOMAIN_API_HOST)"
+    log_warn "  - VPN credentials (VPN_OPENVPN_USER, VPN_OPENVPN_PASSWORD)"
+    log_warn "  - ACME email (ADVANCED_ACME_EMAIL)"
     log_warn "  - Model choices (OLLAMA_*_MODEL)"
 }
 
@@ -204,23 +207,30 @@ validate_config() {
 
     local errors=0
 
-    # Check for placeholder values
-    if [[ "${LITELLM_MASTER_KEY:-}" == "" ]] || [[ "${LITELLM_MASTER_KEY:-}" == *"CHANGE_ME"* ]]; then
-        log_error "LITELLM_MASTER_KEY not set"
-        errors=$((errors + 1))
+    # Check for insecure default values
+    if [[ "${SECURITY_LITELLM_MASTER_KEY:-}" == *"dev-insecure"* ]]; then
+        log_warn "SECURITY_LITELLM_MASTER_KEY is using default insecure value (OK for dev, change for production)"
     fi
 
-    if [[ "${SEARXNG_SECRET_KEY:-}" == "" ]] || [[ "${SEARXNG_SECRET_KEY:-}" == *"CHANGE_ME"* ]]; then
-        log_error "SEARXNG_SECRET_KEY not set"
-        errors=$((errors + 1))
+    if [[ "${SECURITY_SEARXNG_SECRET_KEY:-}" == *"dev-insecure"* ]]; then
+        log_warn "SECURITY_SEARXNG_SECRET_KEY is using default insecure value (OK for dev, change for production)"
     fi
 
-    if [[ "${OPENVPN_USER:-}" == "" ]] || [[ "${OPENVPN_USER:-}" == "YOUR_"* ]]; then
-        log_warn "OPENVPN_USER not set (VPN will not work)"
-    fi
-
-    if [[ "${OPENVPN_PASSWORD:-}" == "" ]] || [[ "${OPENVPN_PASSWORD:-}" == "YOUR_"* ]]; then
-        log_warn "OPENVPN_PASSWORD not set (VPN will not work)"
+    # Check VPN credentials based on VPN_TYPE
+    if [[ "${VPN_TYPE:-openvpn}" == "openvpn" ]]; then
+        if [[ "${VPN_OPENVPN_USER:-}" == "" ]]; then
+            log_warn "VPN_OPENVPN_USER not set (OpenVPN will not work)"
+        fi
+        if [[ "${VPN_OPENVPN_PASSWORD:-}" == "" ]]; then
+            log_warn "VPN_OPENVPN_PASSWORD not set (OpenVPN will not work)"
+        fi
+    elif [[ "${VPN_TYPE:-}" == "wireguard" ]]; then
+        if [[ "${VPN_WIREGUARD_PRIVATE_KEY:-}" == "" ]]; then
+            log_warn "VPN_WIREGUARD_PRIVATE_KEY not set (WireGuard will not work)"
+        fi
+        if [[ "${VPN_WIREGUARD_ADDRESSES:-}" == "" ]]; then
+            log_warn "VPN_WIREGUARD_ADDRESSES not set (WireGuard will not work)"
+        fi
     fi
 
     if [ $errors -gt 0 ]; then

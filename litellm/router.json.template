@@ -1,6 +1,6 @@
 {
   "encoder_type": "ollama",
-  "encoder_name": "nomic-embed-text",
+  "encoder_name": "{{OLLAMA_EMBED_MODEL}}",
   "routes": [
     {
       "name": "reason",

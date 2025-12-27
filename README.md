@@ -7,7 +7,7 @@ A production-ready, privacy-focused AI stack featuring local LLM inference, sema
 - **Local LLM Inference**: Run powerful language models locally with Ollama
 - **Intelligent Routing**: Automatic model selection based on query complexity (LiteLLM)
 - **ChatGPT-like Interface**: Modern web UI with conversation history (Open WebUI)
-- **Private Web Search**: VPN-protected metasearch engine (SearXNG + Gluetun)
+- **Private Web Search** (optional): VPN-protected metasearch engine (SearXNG + Gluetun)
 - **Reverse Proxy**: Automatic HTTPS with Let's Encrypt (Traefik)
 - **Security First**: Basic authentication, secrets management, no telemetry
 
@@ -46,56 +46,80 @@ A production-ready, privacy-focused AI stack featuring local LLM inference, sema
 
 ## Quick Start
 
+**ZERO configuration required!** Just copy `.env.example` to `.env`, create basic auth, and start:
+
+```bash
+cp .env.example .env
+mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
+make up
+```
+
+Access at `https://webui.localhost` (add to /etc/hosts if needed)
+
 ### Prerequisites
 
 - **Docker** (20.10+) and **Docker Compose** (v2.0+)
 - **8GB+ RAM** (16GB+ recommended for larger models)
 - **50GB+ free disk space** (models can be large)
 - **NVIDIA GPU** (optional, for faster inference)
-- **VPN subscription** (Surfshark, NordVPN, etc.) - optional but recommended
+- **VPN subscription** (optional, only needed for private web search)
 
 ### Installation
 
-1. **Clone the repository**
+Choose your preferred installation method:
+
+#### 🌐 Option 1: Web Installer (Recommended for First-Time Users)
+
+1. **Clone and start installer**
 
    ```bash
    git clone <repository-url>
    cd voiz
+   make install
    ```
 
-2. **Run setup script**
+2. **Configure via web interface**
+
+   - Open browser to `http://localhost:8000`
+   - Step through configuration wizard
+   - Generate secure secrets with one click
+   - Choose models based on your hardware
+   - Optional: Configure VPN for private search
+   - Click "Install Now"
+
+3. **Start the stack**
 
    ```bash
-   chmod +x scripts/setup.sh
-   ./scripts/setup.sh
-   ```
-
-   Or manually:
-
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   mkdir -p auth
-   htpasswd -cB auth/users.htpasswd yourusername
-   ```
-
-3. **Configure your environment**
-
-   Edit `.env` and update:
-   - Domain names (`WEBUI_HOST`, `API_HOST`)
-   - VPN credentials (`OPENVPN_USER`, `OPENVPN_PASSWORD`)
-   - ACME email for Let's Encrypt (`ACME_EMAIL`)
-   - Model preferences (see [Model Selection](#model-selection))
-
-4. **Start the stack**
-
-   ```bash
-   make up
+   make up          # Without VPN
    # or
-   docker compose up -d
+   make up-vpn      # With VPN-protected search
    ```
 
-5. **Monitor initial setup**
+#### ⚡ Option 2: Quick Start (Zero Configuration)
+
+```bash
+cp .env.example .env
+mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
+make up
+```
+
+That's it! Uses insecure defaults (fine for development).
+
+#### 💻 Option 3: CLI Setup Script
+
+```bash
+./scripts/setup.sh
+```
+
+Interactive command-line wizard for those who prefer the terminal.
+
+---
+
+### Post-Installation
+
+After using any installation method above:
+
+1. **Monitor initial setup** (models downloading)
 
    ```bash
    make logs-follow
@@ -120,6 +144,14 @@ Configure models in `.env` based on your hardware:
 | 32GB RAM | `llama3.1:70b` | `deepseek-r1:32b` | `mxbai-embed-large` |
 
 Browse more models at [Ollama Library](https://ollama.com/library).
+
+### VPN Configuration (Optional)
+
+**VPN is completely optional**. The system works perfectly without it - you'll just have direct (non-VPN) web search or no search at all.
+
+To enable VPN-protected search:
+1. Add VPN credentials to `.env`
+2. Start with VPN profile: `docker compose --profile vpn up -d`
 
 ### VPN Providers
 

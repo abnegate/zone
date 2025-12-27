@@ -16,7 +16,18 @@ DOCKER_COMPOSE := $(shell which docker-compose 2>/dev/null || echo "docker compo
 
 ##@ Setup & Configuration
 
-setup: ## Run interactive setup script
+install: ## Start web-based installer (recommended for first-time setup)
+	@echo "$(BLUE)Starting web installer...$(NC)"
+	@echo "$(GREEN)Building installer container...$(NC)"
+	@$(DOCKER_COMPOSE) --profile installer build installer
+	@$(DOCKER_COMPOSE) --profile installer up installer
+	@echo ""
+	@echo "$(GREEN)Web installer started!$(NC)"
+	@echo "$(BLUE)Open your browser to: http://localhost:8000$(NC)"
+	@echo ""
+	@echo "Press Ctrl+C when done to stop the installer"
+
+setup: ## Run interactive CLI setup script
 	@echo "$(BLUE)Running setup script...$(NC)"
 	@./scripts/setup.sh
 
@@ -33,14 +44,27 @@ add-user: ## Add additional basic auth user
 
 validate: ## Validate configuration
 	@echo "$(BLUE)Validating configuration...$(NC)"
-	@./scripts/setup.sh 5
+	@if [ -f .env ] && [ -f auth/users.htpasswd ]; then \
+		echo "$(GREEN)✓ .env file exists$(NC)"; \
+		echo "$(GREEN)✓ auth file exists$(NC)"; \
+		$(DOCKER_COMPOSE) config --quiet && echo "$(GREEN)✓ Docker Compose config is valid$(NC)" || echo "$(RED)✗ Docker Compose config is invalid$(NC)"; \
+	else \
+		echo "$(RED)✗ Missing .env or auth/users.htpasswd. Run 'make setup' first.$(NC)"; \
+		exit 1; \
+	fi
 
 ##@ Docker Operations
 
-up: ## Start all services
+up: ## Start all services (without VPN)
 	@echo "$(GREEN)Starting services...$(NC)"
 	$(DOCKER_COMPOSE) up -d
 	@echo "$(GREEN)Services started! Check status with: make ps$(NC)"
+	@echo "$(YELLOW)Note: VPN not enabled. For VPN-protected search, use: make up-vpn$(NC)"
+
+up-vpn: ## Start all services with VPN-protected search
+	@echo "$(GREEN)Starting services with VPN...$(NC)"
+	$(DOCKER_COMPOSE) --profile vpn up -d
+	@echo "$(GREEN)Services started with VPN! Check status with: make ps$(NC)"
 
 down: ## Stop all services
 	@echo "$(YELLOW)Stopping services...$(NC)"
