@@ -1,0 +1,42 @@
+# Environment variables (contains secrets!)
+.env
+.env.local
+.env.*.local
+
+# Docker Compose overrides (may contain local config)
+docker-compose.override.yml
+
+# Docker volumes and data
+ollama_data/
+openwebui_data/
+
+# Basic auth credentials
+auth/
+*.htpasswd
+
+# Traefik
+traefik/acme.json
+traefik/logs/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+tmp/
+temp/

@@ -1,23 +1,61 @@
 {
-  "encoder_type": "openai",
-  "encoder_name": "local-embed",
+  "encoder_type": "ollama",
+  "encoder_name": "nomic-embed-text",
   "routes": [
     {
-      "name": "reasoning",
+      "name": "reason",
       "utterances": [
-        "prove that",
-        "derive the formula",
-        "solve this step by step",
-        "analyze complexity",
-        "debug this code deeply",
-        "find the root cause",
-        "design an architecture with tradeoffs",
-        "multi-step reasoning",
-        "hard math problem"
+        "prove that this algorithm is correct",
+        "derive the mathematical formula step by step",
+        "solve this complex problem with detailed reasoning",
+        "analyze the computational complexity of this code",
+        "explain why this architectural design is flawed",
+        "debug this critical system failure",
+        "design a scalable distributed system",
+        "write a comprehensive migration plan with risk analysis",
+        "compare multiple approaches with detailed tradeoffs",
+        "perform a thorough security audit",
+        "create a formal proof",
+        "analyze edge cases and failure modes",
+        "optimize this algorithm for performance",
+        "reverse engineer this complex system",
+        "explain the theoretical foundations",
+        "conduct a detailed code review",
+        "analyze the time and space complexity",
+        "design a cryptographic protocol",
+        "perform static analysis on this code",
+        "trace through this algorithm step by step"
       ],
-      "description": "complex reasoning + deep analysis",
-      "score_threshold": 0.45,
-      "metadata": {}
+      "description": "Complex reasoning and deep analysis queries",
+      "score_threshold": 0.65,
+      "metadata": {
+        "model_type": "reasoning"
+      }
+    },
+    {
+      "name": "fast",
+      "utterances": [
+        "rewrite this paragraph",
+        "summarize this article",
+        "draft a quick reply",
+        "explain this concept simply",
+        "translate this text",
+        "format this code",
+        "give me a quick answer",
+        "simple question about basic facts",
+        "write a brief email",
+        "create a simple list",
+        "fix this typo",
+        "basic explanation needed",
+        "quick summary please",
+        "convert this to markdown",
+        "what is the definition of"
+      ],
+      "description": "Simple, fast queries for general tasks",
+      "score_threshold": 0.50,
+      "metadata": {
+        "model_type": "fast"
+      }
     }
   ]
 }
