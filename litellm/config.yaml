@@ -1,0 +1,67 @@
+# LiteLLM Proxy config
+# Routing + fallbacks docs:
+# - Auto routing  [oai_citation:5‡docs.litellm.ai](https://docs.litellm.ai/docs/proxy/auto_routing?utm_source=chatgpt.com)
+# - Fallbacks  [oai_citation:6‡docs.litellm.ai](https://docs.litellm.ai/docs/proxy/reliability?utm_source=chatgpt.com)
+
+model_list:
+  # --- Fast ---
+  - model_name: fast
+    litellm_params:
+      model: ollama/${OLLAMA_FAST_MODEL}
+      api_base: http://ollama:11434
+      timeout: 30
+
+  # --- Reasoning ---
+  - model_name: reason
+    litellm_params:
+      model: ollama/${OLLAMA_REASON_MODEL}
+      api_base: http://ollama:11434
+      timeout: 120
+
+  # --- Embeddings for semantic routing ---
+  - model_name: embed
+    litellm_params:
+      model: ollama/${OLLAMA_EMBED_MODEL}
+      api_base: http://ollama:11434
+      timeout: 30
+
+router_settings:
+  # If the chosen model fails after retries, fall back.
+  num_retries: 1
+  fallbacks:
+    fast: ["reason"]
+
+  # Auto routing uses embeddings to pick the best target.
+  # We define an "auto router" which chooses between fast/reason.
+  # The actual matching is based on semantic similarity to these utterances.
+  auto_routing:
+    enabled: true
+    embedding_model: embed
+    # The "routes" define which model to pick for which cluster of prompts.
+    routes:
+      - name: complex_reasoning
+        model: reason
+        utterances:
+          - "prove"
+          - "derive"
+          - "solve step by step"
+          - "analyze this algorithm"
+          - "explain why this is wrong"
+          - "debug this crash"
+          - "design a system"
+          - "write a careful migration plan"
+          - "compare tradeoffs with constraints"
+
+      - name: default_fast
+        model: fast
+        utterances:
+          - "rewrite this"
+          - "summarize"
+          - "draft a reply"
+          - "basic explanation"
+          - "simple question"
+          - "quick answer"
+
+# Optional: restrict routes / add auth policies, etc.
+general_settings:
+  master_key: ${LITELLM_MASTER_KEY}
