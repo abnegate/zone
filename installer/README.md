@@ -89,7 +89,7 @@ Handles installation request
 installer/
 ├── gleam.toml              # Gleam project configuration
 ├── src/
-│   └── voiz_installer.gleam  # Main application
+│   └── installer.gleam  # Main application
 ├── templates/
 │   └── index.html          # Wizard UI
 ├── static/

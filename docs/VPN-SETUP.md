@@ -76,7 +76,6 @@ VPN_SERVICE_PROVIDER=mullvad
 VPN_TYPE=wireguard
 VPN_WIREGUARD_PRIVATE_KEY=your_private_key
 VPN_WIREGUARD_ADDRESSES=10.x.x.x/32
-VPN_WIREGUARD_PRESHARED_KEY=your_preshared_key  # optional
 ```
 
 ### OpenVPN vs WireGuard

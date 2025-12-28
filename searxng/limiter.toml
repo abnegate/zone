@@ -1,0 +1,11 @@
+# Limiter configuration (limiter is disabled in settings.yml)
+
+[botdetection]
+# No trusted proxies - all requests are direct
+trusted_proxies = []
+
+[botdetection.ip_limit]
+link_token = false
+
+[botdetection.ip_lists]
+block_ip = []

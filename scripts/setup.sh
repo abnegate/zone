@@ -26,19 +26,19 @@ readonly BLUE='\033[0;34m'
 readonly NC='\033[0m'
 
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    printf '%b[INFO]%b %s\n' "${GREEN}" "${NC}" "$1"
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    printf '%b[WARN]%b %s\n' "${YELLOW}" "${NC}" "$1"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
+    printf '%b[ERROR]%b %s\n' "${RED}" "${NC}" "$1" >&2
 }
 
 log_step() {
-    echo -e "\n${BLUE}▶${NC} $1\n"
+    printf '\n%b▶%b %s\n\n' "${BLUE}" "${NC}" "$1"
 }
 
 # Check if command exists
@@ -61,7 +61,7 @@ check_prerequisites() {
         missing+=("docker")
     fi
 
-    if ! command_exists docker-compose || ! command_exists docker compose; then
+    if ! command_exists docker-compose && ! command_exists docker compose; then
         missing+=("docker-compose")
     fi
 
@@ -108,14 +108,42 @@ setup_env_file() {
     local litellm_key=$(generate_secret)
     local litellm_salt=$(generate_secret)
     local searxng_secret=$(generate_secret)
+    local postgres_password=$(generate_secret)
 
     # Use sed to replace empty values with new prefixed names
-    sed -i.bak "s|^SECURITY_LITELLM_MASTER_KEY=.*|SECURITY_LITELLM_MASTER_KEY=${litellm_key}|" "${ENV_FILE}"
-    sed -i.bak "s|^SECURITY_LITELLM_SALT_KEY=.*|SECURITY_LITELLM_SALT_KEY=${litellm_salt}|" "${ENV_FILE}"
-    sed -i.bak "s|^SECURITY_SEARXNG_SECRET_KEY=.*|SECURITY_SEARXNG_SECRET_KEY=${searxng_secret}|" "${ENV_FILE}"
+    if ! sed -i.bak "s|^SECURITY_LITELLM_MASTER_KEY=.*|SECURITY_LITELLM_MASTER_KEY=${litellm_key}|" "${ENV_FILE}"; then
+        log_error "Failed to update SECURITY_LITELLM_MASTER_KEY"
+        exit 1
+    fi
+    if ! sed -i.bak "s|^SECURITY_LITELLM_SALT_KEY=.*|SECURITY_LITELLM_SALT_KEY=${litellm_salt}|" "${ENV_FILE}"; then
+        log_error "Failed to update SECURITY_LITELLM_SALT_KEY"
+        exit 1
+    fi
+    if ! sed -i.bak "s|^SECURITY_SEARXNG_SECRET_KEY=.*|SECURITY_SEARXNG_SECRET_KEY=${searxng_secret}|" "${ENV_FILE}"; then
+        log_error "Failed to update SECURITY_SEARXNG_SECRET_KEY"
+        exit 1
+    fi
+    if ! sed -i.bak "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${postgres_password}|" "${ENV_FILE}"; then
+        log_error "Failed to update POSTGRES_PASSWORD"
+        exit 1
+    fi
 
     # Fix WEBUI_OPENAI_API_KEY to use actual value
-    sed -i.bak "s|^WEBUI_OPENAI_API_KEY=.*|WEBUI_OPENAI_API_KEY=${litellm_key}|" "${ENV_FILE}"
+    if ! sed -i.bak "s|^WEBUI_OPENAI_API_KEY=.*|WEBUI_OPENAI_API_KEY=${litellm_key}|" "${ENV_FILE}"; then
+        log_error "Failed to update WEBUI_OPENAI_API_KEY"
+        exit 1
+    fi
+
+    # Set WEBUI_CORS_ALLOW_ORIGIN based on DOMAIN_HOST_WEBUI
+    local domain_host
+    domain_host=$(grep "^DOMAIN_HOST_WEBUI=" "${ENV_FILE}" | cut -d'=' -f2)
+    if [ -n "${domain_host}" ]; then
+        if ! sed -i.bak "s|^WEBUI_CORS_ALLOW_ORIGIN=.*|WEBUI_CORS_ALLOW_ORIGIN=http://${domain_host}|" "${ENV_FILE}"; then
+            log_error "Failed to update WEBUI_CORS_ALLOW_ORIGIN"
+            exit 1
+        fi
+        log_info "Set WEBUI_CORS_ALLOW_ORIGIN to http://${domain_host}"
+    fi
 
     rm -f "${ENV_FILE}.bak"
 
@@ -140,10 +168,25 @@ setup_basic_auth() {
         fi
     fi
 
-    mkdir -p "${AUTH_DIR}"
+    if ! mkdir -p "${AUTH_DIR}" 2>/dev/null; then
+        log_error "Failed to create auth directory at ${AUTH_DIR}"
+        log_error "Please check permissions and try again"
+        exit 1
+    fi
 
     echo -e "${BLUE}Enter username for basic auth:${NC}"
     read -r username
+
+    # Validate username (alphanumeric, dash, underscore only)
+    if [[ ! "$username" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        log_error "Invalid username. Use only alphanumeric characters, dash, and underscore"
+        exit 1
+    fi
+
+    if [ -z "$username" ]; then
+        log_error "Username cannot be empty"
+        exit 1
+    fi
 
     if ! command_exists htpasswd; then
         log_error "htpasswd not found. Cannot create auth file."
@@ -171,6 +214,17 @@ add_auth_user() {
     echo -e "${BLUE}Enter username to add:${NC}"
     read -r username
 
+    # Validate username (alphanumeric, dash, underscore only)
+    if [[ ! "$username" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        log_error "Invalid username. Use only alphanumeric characters, dash, and underscore"
+        exit 1
+    fi
+
+    if [ -z "$username" ]; then
+        log_error "Username cannot be empty"
+        exit 1
+    fi
+
     # Append without -c flag
     htpasswd -B "${AUTH_FILE}" "${username}"
 
@@ -194,15 +248,33 @@ validate_config() {
     # Source .env file safely (export vars without executing)
     set -a
     # Use grep to filter out comments and empty lines, then source
-    while IFS='=' read -r key value; do
+    while IFS= read -r line; do
         # Skip comments and empty lines
-        [[ "$key" =~ ^#.*$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$line" ]] && continue
+
+        # Extract key (before first =)
+        key="${line%%=*}"
+        # Trim whitespace from key (safely without command substitution)
+        key="${key#"${key%%[![:space:]]*}"}"  # Remove leading whitespace
+        key="${key%"${key##*[![:space:]]}"}"  # Remove trailing whitespace
+
+        # Skip if no valid key
         [[ -z "$key" ]] && continue
-        # Remove quotes from value
-        value="${value%\"}"
-        value="${value#\"}"
-        export "$key=$value"
-    done < <(grep -v '^#' "${ENV_FILE}" | grep -v '^$')
+
+        # Extract value (everything after first =)
+        value="${line#*=}"
+
+        # Remove quotes from value (both single and double)
+        if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        fi
+
+        # Only export valid variable names (alphanumeric and underscore)
+        if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+            export "$key=$value"
+        fi
+    done < <(grep -v '^\s*#' "${ENV_FILE}" | grep -v '^\s*$')
     set +a
 
     local errors=0

@@ -18,15 +18,15 @@ readonly YELLOW='\033[1;33m'
 readonly NC='\033[0m' # No Color
 
 log_info() {
-    echo "${GREEN}[ollama-init]${NC} $1"
+    printf '%s[ollama-init]%s %s\n' "${GREEN}" "${NC}" "$1"
 }
 
 log_warn() {
-    echo "${YELLOW}[ollama-init]${NC} $1"
+    printf '%s[ollama-init]%s %s\n' "${YELLOW}" "${NC}" "$1"
 }
 
 log_error() {
-    echo "${RED}[ollama-init ERROR]${NC} $1" >&2
+    printf '%s[ollama-init ERROR]%s %s\n' "${RED}" "${NC}" "$1" >&2
 }
 
 # Validate environment variables
@@ -72,7 +72,7 @@ wait_for_ollama() {
 
         retries=$((retries + 1))
         log_warn "Ollama not ready yet (attempt $retries/$MAX_RETRIES)..."
-        sleep $RETRY_INTERVAL
+        sleep "${RETRY_INTERVAL}"
     done
 
     log_error "Ollama API failed to become ready after $MAX_RETRIES attempts"
@@ -83,7 +83,8 @@ wait_for_ollama() {
 model_exists() {
     local model_name="$1"
 
-    if ollama list | grep -q "^${model_name}[[:space:]]"; then
+    # Use grep -F for fixed string matching (no regex interpretation)
+    if ollama list | grep -qF "${model_name}"; then
         return 0  # Model exists
     else
         return 1  # Model doesn't exist
@@ -128,7 +129,7 @@ main() {
     log_info "  Fast Model:      ${OLLAMA_MODEL_FAST}"
     log_info "  Reasoning Model: ${OLLAMA_MODEL_REASON}"
     log_info "  Embedding Model: ${OLLAMA_MODEL_EMBED}"
-    echo ""
+    printf '\n'
 
     # Pull models
     local failed=0
@@ -137,7 +138,7 @@ main() {
     pull_model "${OLLAMA_MODEL_REASON}" "REASONING" || failed=1
     pull_model "${OLLAMA_MODEL_EMBED}" "EMBEDDING" || failed=1
 
-    echo ""
+    printf '\n'
 
     if [ $failed -eq 0 ]; then
         log_info "===== Model initialization complete! ====="

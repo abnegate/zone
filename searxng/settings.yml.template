@@ -1,18 +1,19 @@
 # SearXNG Configuration
 # Documentation: https://docs.searxng.org/admin/settings/
 
-use_default_settings: true
+use_default_settings:
+  engines:
+    remove:
+      - ahmia
+      - torch
 
 server:
   port: 8080
   bind_address: "0.0.0.0"
+  secret_key: "{{SEARXNG_SECRET_KEY}}"
 
-  # Secret key for session encryption
-  # Provided via SEARXNG_SECRET_KEY environment variable
-  # SearXNG automatically reads this from the environment
-
-  # Rate limiting
-  limiter: true
+  # Rate limiting (disabled - requires Valkey/Redis)
+  limiter: false
 
   # Image proxy for privacy
   image_proxy: true
@@ -58,13 +59,6 @@ outgoing:
 
   # Use HTTP/2
   enable_http2: true
-
-# Optional: Disable specific engines or categories
-# engines:
-#   - name: google
-#     disabled: false
-#   - name: bing
-#     disabled: false
 
 # Optional: Enable specific plugins
 # plugins:
