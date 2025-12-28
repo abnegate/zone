@@ -17,23 +17,18 @@ For production, regenerate secrets for security.
 
 ---
 
-## 🌐 Domain Configuration (2 variables)
+## 🌐 Domain Configuration
 
-### `WEBUI_HOST`
+### `DOMAIN_HOST_WEBUI`
 - **Default**: `webui.localhost`
 - **Description**: Hostname for the Open WebUI interface
 - **Example**: `ai.yourdomain.com`
 - **Usage**: Configure DNS A record or add to /etc/hosts
-
-### `API_HOST`
-- **Default**: `api.localhost`
-- **Description**: Hostname for the LiteLLM API endpoint
-- **Example**: `api.yourdomain.com`
-- **Usage**: Configure DNS A record or add to /etc/hosts
+- **Note**: LiteLLM API is internal-only, accessed via OpenWebUI
 
 ---
 
-## 🔐 Security & Authentication (5 variables)
+## 🔐 Security & Authentication
 
 ### `BASICAUTH_REALM`
 - **Default**: `"Voiz AI Stack"`
@@ -68,7 +63,7 @@ For production, regenerate secrets for security.
 
 ---
 
-## 🤖 Ollama Model Configuration (4 variables)
+## 🤖 Ollama Model Configuration
 
 ### `OLLAMA_MODEL_FAST`
 - **Default**: `llama3.1:8b`
@@ -109,7 +104,7 @@ For production, regenerate secrets for security.
 
 ---
 
-## 💬 Open WebUI Configuration (8 variables)
+## 💬 Open WebUI Configuration
 
 ### `WEBUI_AUTH`
 - **Default**: `false`
@@ -154,7 +149,7 @@ For production, regenerate secrets for security.
 
 ---
 
-## 🔍 Web Search Configuration (8 variables)
+## 🔍 Web Search Configuration
 
 ### `ENABLE_RAG_WEB_SEARCH`
 - **Default**: `true`
@@ -199,7 +194,7 @@ For production, regenerate secrets for security.
 
 ---
 
-## 🔒 VPN Configuration - Optional (6 variables)
+## 🔒 VPN Configuration - Optional
 
 **VPN is completely optional!** Only needed if you want private web search.
 
@@ -240,7 +235,53 @@ For production, regenerate secrets for security.
 
 ---
 
-## ⚙️ Advanced Configuration (5 variables)
+## 🐳 Docker Image Versions
+
+### `DOCKER_VERSION_TRAEFIK`
+- **Default**: `v3.6`
+- **Description**: Traefik reverse proxy version
+- **Example**: `v3.6`, `v3.5`, `latest`
+- **Note**: Pin to specific versions for production stability
+
+### `DOCKER_VERSION_OLLAMA`
+- **Default**: `0.13.5`
+- **Description**: Ollama AI model runtime version
+- **Example**: `0.13.5`, `0.13.0`, `latest`
+- **Note**: Used by both ollama and ollama-init services
+
+### `DOCKER_VERSION_POSTGRES`
+- **Default**: `16-alpine`
+- **Description**: PostgreSQL database version for LiteLLM
+- **Example**: `16-alpine`, `15-alpine`, `14-alpine`
+- **Note**: Alpine variant for smaller image size
+
+### `DOCKER_VERSION_LITELLM`
+- **Default**: `main-stable`
+- **Description**: LiteLLM proxy version
+- **Example**: `main-stable`, `main-latest`, specific commit SHA
+- **Note**: `main-stable` recommended for production
+
+### `DOCKER_VERSION_GLUETUN`
+- **Default**: `v3.41`
+- **Description**: Gluetun VPN client version
+- **Example**: `v3.41`, `v3.40`, `latest`
+- **Note**: Only used when VPN profile is enabled
+
+### `DOCKER_VERSION_SEARXNG`
+- **Default**: `latest`
+- **Description**: SearXNG metasearch engine version
+- **Example**: `latest`, specific tag
+- **Note**: Only used when VPN profile is enabled
+
+### `DOCKER_VERSION_OPENWEBUI`
+- **Default**: `latest`
+- **Description**: Open WebUI chat interface version
+- **Example**: `latest`, `main`, specific tag
+- **Note**: Update regularly for latest features
+
+---
+
+## ⚙️ Advanced Configuration
 
 ### `LITELLM_WORKERS`
 - **Default**: `4`
@@ -278,39 +319,39 @@ For production, regenerate secrets for security.
 
 ### Tier 1: Zero Config (Default)
 Just `cp .env.example .env` and it works!
-- All 35 variables have defaults
+- All variables have defaults
 - Insecure keys for dev (warnings shown)
 
-### Tier 2: Basic Security (2 variables)
+### Tier 2: Basic Security
 Regenerate secrets for production:
 - `LITELLM_MASTER_KEY` - `openssl rand -base64 32`
 - `SEARXNG_SECRET_KEY` - `openssl rand -base64 32`
 
-### Tier 3: Production (4 more variables)
-- `WEBUI_HOST` - Your domain
-- `API_HOST` - Your API domain
+### Tier 3: Production
+- `DOMAIN_HOST_WEBUI` - Your domain
 - `ACME_EMAIL` - Your email
 - `TZ` - Your timezone
 
 ### Tier 4: Optional Features
 - VPN credentials - For private search
 - Model changes - For performance tuning
+- Docker versions - For version pinning
 - Worker count - For scaling
 
 ---
 
 ## 📊 Summary Table
 
-| Category | Variables | Required | Have Defaults |
-|----------|-----------|----------|---------------|
-| Domain | 2 | No | ✅ Yes |
-| Security | 5 | No* | ✅ Yes (insecure) |
-| Ollama Models | 4 | No | ✅ Yes |
-| Open WebUI | 8 | No | ✅ Yes |
-| Web Search | 8 | No | ✅ Yes |
-| VPN (optional) | 6 | No | ✅ Yes (empty OK) |
-| Advanced | 5 | No | ✅ Yes |
-| **TOTAL** | **35** | **0** | **✅ All** |
+| Category | Required | Have Defaults |
+|----------|----------|---------------|
+| Domain | No | ✅ Yes |
+| Security | No* | ✅ Yes (insecure) |
+| Ollama Models | No | ✅ Yes |
+| Open WebUI | No | ✅ Yes |
+| Web Search | No | ✅ Yes |
+| VPN (optional) | No | ✅ Yes (empty OK) |
+| Docker Versions | No | ✅ Yes |
+| Advanced | No | ✅ Yes |
 
 *Security variables have insecure defaults. Change for production.
 
@@ -343,7 +384,8 @@ make up-vpn
 Need to find a specific config? Quick lookup:
 
 - **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE, WEBUI_AUTH
-- **Domains**: HOST_WEBUI, HOST_API
+- **Docker Versions**: DOCKER_VERSION_TRAEFIK, DOCKER_VERSION_OLLAMA, DOCKER_VERSION_POSTGRES, DOCKER_VERSION_LITELLM, DOCKER_VERSION_GLUETUN, DOCKER_VERSION_SEARXNG, DOCKER_VERSION_OPENWEBUI
+- **Domains**: DOMAIN_HOST_WEBUI
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
@@ -354,4 +396,4 @@ Need to find a specific config? Quick lookup:
 
 ---
 
-**Total: 35 configuration options, 0 required, all optional with working defaults**
+**All configuration options are optional with working defaults**

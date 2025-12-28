@@ -70,6 +70,7 @@ Handles installation request
 {
   "DOMAIN_HOST_WEBUI": "webui.localhost",
   "SECURITY_LITELLM_MASTER_KEY": "...",
+  "OLLAMA_MODEL_FAST": "llama3.1:8b",
   ...
 }
 ```
