@@ -6,9 +6,9 @@ model_list:
   # Auto Model - Semantic routing (automatically chooses fast or reason)
   # Note: This creates a virtual model that routes based on query
   # ===========================================================================
-  - model_name: auto
+  - model_name: "{{OLLAMA_MODEL_FAST}} [auto]"
     litellm_params:
-      model: ollama/${OLLAMA_MODEL_FAST}
+      model: ollama/{{OLLAMA_MODEL_FAST}}
       api_base: http://ollama:11434
       # Router will override this based on semantic matching
     model_info:
@@ -18,9 +18,9 @@ model_list:
   # ===========================================================================
   # Fast Model - For simple queries
   # ===========================================================================
-  - model_name: fast
+  - model_name: "{{OLLAMA_MODEL_FAST}} [fast]"
     litellm_params:
-      model: ollama/${OLLAMA_MODEL_FAST}
+      model: ollama/{{OLLAMA_MODEL_FAST}}
       api_base: http://ollama:11434
       timeout: 60
     model_info:
@@ -30,9 +30,9 @@ model_list:
   # ===========================================================================
   # Reasoning Model - For complex analysis
   # ===========================================================================
-  - model_name: reason
+  - model_name: "{{OLLAMA_MODEL_REASON}} [reason]"
     litellm_params:
-      model: ollama/${OLLAMA_MODEL_REASON}
+      model: ollama/{{OLLAMA_MODEL_REASON}}
       api_base: http://ollama:11434
       timeout: 180
     model_info:
@@ -42,9 +42,9 @@ model_list:
   # ===========================================================================
   # Embedding Model - For semantic search and routing
   # ===========================================================================
-  - model_name: embed
+  - model_name: "{{OLLAMA_MODEL_EMBED}} [embed]"
     litellm_params:
-      model: ollama/${OLLAMA_MODEL_EMBED}
+      model: ollama/{{OLLAMA_MODEL_EMBED}}
       api_base: http://ollama:11434
       timeout: 30
     model_info:
@@ -69,7 +69,7 @@ router_settings:
 
   # Automatic fallbacks for reliability
   fallbacks:
-    - fast: [reason]
+    - "{{OLLAMA_MODEL_FAST}} [fast]": ["{{OLLAMA_MODEL_REASON}} [reason]"]
 
 # =============================================================================
 # General Settings
@@ -79,7 +79,11 @@ general_settings:
   master_key: ${SECURITY_LITELLM_MASTER_KEY}
 
   # Default model when not specified
-  default_model: fast
+  default_model: "{{OLLAMA_MODEL_FAST}} [fast]"
+
+  # Log prompts
+  store_model_in_db: true
+  store_prompts_in_spend_logs: true
 
   # Logging
   litellm_settings:

@@ -1,4 +1,4 @@
-name = "voiz_installer"
+name = "installer"
 version = "1.0.0"
 
 target = "erlang"
