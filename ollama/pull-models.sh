@@ -38,18 +38,18 @@ validate_env() {
         missing=1
     fi
 
-    if [ -z "${OLLAMA_FAST_MODEL}" ]; then
-        log_error "OLLAMA_FAST_MODEL is not set"
+    if [ -z "${OLLAMA_MODEL_FAST}" ]; then
+        log_error "OLLAMA_MODEL_FAST is not set"
         missing=1
     fi
 
-    if [ -z "${OLLAMA_REASON_MODEL}" ]; then
-        log_error "OLLAMA_REASON_MODEL is not set"
+    if [ -z "${OLLAMA_MODEL_REASON}" ]; then
+        log_error "OLLAMA_MODEL_REASON is not set"
         missing=1
     fi
 
-    if [ -z "${OLLAMA_EMBED_MODEL}" ]; then
-        log_error "OLLAMA_EMBED_MODEL is not set"
+    if [ -z "${OLLAMA_MODEL_EMBED}" ]; then
+        log_error "OLLAMA_MODEL_EMBED is not set"
         missing=1
     fi
 
@@ -125,17 +125,17 @@ main() {
 
     # Display model configuration
     log_info "Model Configuration:"
-    log_info "  Fast Model:      ${OLLAMA_FAST_MODEL}"
-    log_info "  Reasoning Model: ${OLLAMA_REASON_MODEL}"
-    log_info "  Embedding Model: ${OLLAMA_EMBED_MODEL}"
+    log_info "  Fast Model:      ${OLLAMA_MODEL_FAST}"
+    log_info "  Reasoning Model: ${OLLAMA_MODEL_REASON}"
+    log_info "  Embedding Model: ${OLLAMA_MODEL_EMBED}"
     echo ""
 
     # Pull models
     local failed=0
 
-    pull_model "${OLLAMA_FAST_MODEL}" "FAST" || failed=1
-    pull_model "${OLLAMA_REASON_MODEL}" "REASONING" || failed=1
-    pull_model "${OLLAMA_EMBED_MODEL}" "EMBEDDING" || failed=1
+    pull_model "${OLLAMA_MODEL_FAST}" "FAST" || failed=1
+    pull_model "${OLLAMA_MODEL_REASON}" "REASONING" || failed=1
+    pull_model "${OLLAMA_MODEL_EMBED}" "EMBEDDING" || failed=1
 
     echo ""
 

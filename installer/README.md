@@ -68,7 +68,7 @@ Handles installation request
 **Request Body:**
 ```json
 {
-  "DOMAIN_WEBUI_HOST": "webui.localhost",
+  "DOMAIN_HOST_WEBUI": "webui.localhost",
   "SECURITY_LITELLM_MASTER_KEY": "...",
   ...
 }

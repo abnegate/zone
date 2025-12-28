@@ -327,8 +327,8 @@ docker compose logs gluetun
 
 ```bash
 # Use smaller models
-OLLAMA_FAST_MODEL=llama3.2:3b
-OLLAMA_REASON_MODEL=deepseek-r1:7b
+OLLAMA_MODEL_FAST=llama3.2:3b
+OLLAMA_MODEL_REASON=deepseek-r1:7b
 
 # Or reduce concurrent requests
 LITELLM_WORKERS=2
@@ -489,7 +489,7 @@ make shell-ollama
 Edit `.env`:
 
 ```env
-OLLAMA_FAST_MODEL=your-custom-model:tag
+OLLAMA_MODEL_FAST=your-custom-model:tag
 ```
 
 Restart:

@@ -3,11 +3,24 @@
 
 model_list:
   # ===========================================================================
-  # Fast Model - For simple queries (default)
+  # Auto Model - Semantic routing (automatically chooses fast or reason)
+  # Note: This creates a virtual model that routes based on query
+  # ===========================================================================
+  - model_name: auto
+    litellm_params:
+      model: ollama/${OLLAMA_MODEL_FAST}
+      api_base: http://ollama:11434
+      # Router will override this based on semantic matching
+    model_info:
+      id: auto
+      mode: router
+
+  # ===========================================================================
+  # Fast Model - For simple queries
   # ===========================================================================
   - model_name: fast
     litellm_params:
-      model: ollama/${OLLAMA_FAST_MODEL}
+      model: ollama/${OLLAMA_MODEL_FAST}
       api_base: http://ollama:11434
       timeout: 60
     model_info:
@@ -19,7 +32,7 @@ model_list:
   # ===========================================================================
   - model_name: reason
     litellm_params:
-      model: ollama/${OLLAMA_REASON_MODEL}
+      model: ollama/${OLLAMA_MODEL_REASON}
       api_base: http://ollama:11434
       timeout: 180
     model_info:
@@ -31,7 +44,7 @@ model_list:
   # ===========================================================================
   - model_name: embed
     litellm_params:
-      model: ollama/${OLLAMA_EMBED_MODEL}
+      model: ollama/${OLLAMA_MODEL_EMBED}
       api_base: http://ollama:11434
       timeout: 30
     model_info:
@@ -42,19 +55,21 @@ model_list:
 # Router Configuration
 # =============================================================================
 router_settings:
+  # Enable semantic routing based on router.json
+  routing_strategy: semantic-similarity
+
+  # Router config file path
+  router_config_path: /tmp/router.json
+
   # Retry failed requests
   num_retries: 2
 
   # Timeout for requests (seconds)
   timeout: 180
 
-  # Routing strategy for non-auto models
-  routing_strategy: usage-based-routing
-
   # Automatic fallbacks for reliability
   fallbacks:
     - fast: [reason]
-    - auto: [reason]
 
 # =============================================================================
 # General Settings
@@ -63,20 +78,13 @@ general_settings:
   # Master key for API authentication
   master_key: ${SECURITY_LITELLM_MASTER_KEY}
 
-  # Allow master key to be used directly (no virtual keys required)
-  disable_spend_logs: true
-
-  # Don't require database lookup for master key
-  master_key_hash_auth: true
-
   # Default model when not specified
   default_model: fast
 
-  # Don't persist models to database - models defined in config.yaml
-  store_model_in_db: false
-  use_azure_key_vault: false
-
   # Logging
   litellm_settings:
-    drop_params: true
-    set_verbose: false
+    drop_params: false
+    set_verbose: true
+
+    # Add routing info to response headers
+    return_response_headers: true
