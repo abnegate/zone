@@ -142,19 +142,6 @@ services:
       - --add_function_to_prompt
     networks:
       - internal
-      - edge
-    # No ports exposed - accessible only via Traefik
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=voiz_edge
-      - traefik.http.routers.litellm.rule=Host(`${DOMAIN_HOST_API}`)
-      - traefik.http.routers.litellm.entrypoints=web
-      # TLS disabled for local .localhost development
-      # - traefik.http.routers.litellm.tls.certresolver=letsencrypt
-      # Basic auth disabled - API protected by LiteLLM key
-      - traefik.http.services.litellm.loadbalancer.server.port=4000
-    # Healthcheck disabled - /health endpoint requires authentication
-    # LiteLLM starts successfully, no healthcheck needed
 
   installer:
     build:
@@ -241,7 +228,7 @@ services:
     environment:
       # LiteLLM for semantic routing
       - OPENAI_API_BASE_URLS=http://litellm:4000/v1
-      - OPENAI_API_KEYS=sk-XbNJmMfPm9f4dDfVRmRSoACy5VbUezcgGM+OynAcPMw=
+      - OPENAI_API_KEYS=${SECURITY_LITELLM_MASTER_KEY}
 
       # Use OpenAI API (LiteLLM) exclusively
       - ENABLE_OLLAMA_API=false

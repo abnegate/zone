@@ -66,9 +66,8 @@ Be respectful, professional, and constructive in all interactions. We aim to mai
    Edit `.env` with local development values:
 
    ```env
-   WEBUI_HOST=webui.localhost
-   API_HOST=api.localhost
-   LITELLM_WORKERS=2  # Lower for dev
+   DOMAIN_HOST_WEBUI=webui.localhost
+   ADVANCED_LITELLM_WORKERS=2  # Lower for dev
    ```
 
 3. **Generate test credentials**
