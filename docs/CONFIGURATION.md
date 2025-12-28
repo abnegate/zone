@@ -70,7 +70,7 @@ For production, regenerate secrets for security.
 
 ## 🤖 Ollama Model Configuration (4 variables)
 
-### `OLLAMA_FAST_MODEL`
+### `OLLAMA_MODEL_FAST`
 - **Default**: `llama3.1:8b`
 - **Description**: Fast model for simple queries and general chat
 - **RAM**: ~4-8GB
@@ -81,7 +81,7 @@ For production, regenerate secrets for security.
   - `qwen2.5:7b` (alternative)
   - `mistral:7b` (alternative)
 
-### `OLLAMA_REASON_MODEL`
+### `OLLAMA_MODEL_REASON`
 - **Default**: `deepseek-r1:14b`
 - **Description**: Reasoning model for complex analysis and deep thinking
 - **RAM**: ~8-16GB
@@ -92,7 +92,7 @@ For production, regenerate secrets for security.
   - `deepseek-r1:32b` (highest quality reasoning)
   - `llama3.1:70b` (alternative large model)
 
-### `OLLAMA_EMBED_MODEL`
+### `OLLAMA_MODEL_EMBED`
 - **Default**: `nomic-embed-text`
 - **Description**: Embedding model for semantic routing and search
 - **RAM**: ~1-2GB
@@ -343,9 +343,9 @@ make up-vpn
 Need to find a specific config? Quick lookup:
 
 - **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE, WEBUI_AUTH
-- **Domains**: WEBUI_HOST, API_HOST
+- **Domains**: HOST_WEBUI, HOST_API
 - **Email**: ACME_EMAIL
-- **Models**: OLLAMA_FAST_MODEL, OLLAMA_REASON_MODEL, OLLAMA_EMBED_MODEL
+- **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: ENABLE_RAG_WEB_SEARCH, RAG_WEB_SEARCH_*, SEARXNG_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY

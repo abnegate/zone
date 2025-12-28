@@ -5,8 +5,8 @@ set -e
 # Write to /tmp since /app is read-only
 if [ -f /app/router.json.template ]; then
     echo "[litellm-entrypoint] Generating router.json from template..."
-    sed "s|{{OLLAMA_EMBED_MODEL}}|${OLLAMA_EMBED_MODEL}|g" /app/router.json.template > /tmp/router.json
-    echo "[litellm-entrypoint] ✓ router.json generated with embedding model: ${OLLAMA_EMBED_MODEL}"
+    sed "s|{{OLLAMA_EMBED_MODEL}}|${OLLAMA_MODEL_EMBED}|g" /app/router.json.template > /tmp/router.json
+    echo "[litellm-entrypoint] ✓ router.json generated with embedding model: ${OLLAMA_MODEL_EMBED}"
     echo "[litellm-entrypoint] ✓ router.json location: /tmp/router.json"
 else
     echo "[litellm-entrypoint] Warning: router.json.template not found"

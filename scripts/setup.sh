@@ -121,10 +121,10 @@ setup_env_file() {
 
     log_info "✓ Secrets generated and inserted into .env"
     log_warn "Review ${ENV_FILE} and update:"
-    log_warn "  - Domain names (DOMAIN_WEBUI_HOST, DOMAIN_API_HOST)"
+    log_warn "  - Domain names (DOMAIN_HOST_WEBUI, DOMAIN_HOST_API)"
     log_warn "  - VPN credentials (VPN_OPENVPN_USER, VPN_OPENVPN_PASSWORD)"
     log_warn "  - ACME email (ADVANCED_ACME_EMAIL)"
-    log_warn "  - Model choices (OLLAMA_*_MODEL)"
+    log_warn "  - Model choices (OLLAMA_MODEL_*)"
 }
 
 # Setup basic auth
