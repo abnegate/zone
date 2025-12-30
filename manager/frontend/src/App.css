@@ -1,0 +1,14 @@
+/* =============================================================================
+   Main App Styles
+   Import modular CSS files for better organization
+   ============================================================================= */
+
+@import './styles/variables.css';
+@import './styles/base.css';
+@import './styles/buttons.css';
+@import './styles/forms.css';
+@import './styles/cards.css';
+@import './styles/models.css';
+@import './styles/progress.css';
+@import './styles/modals.css';
+@import './styles/utilities.css';

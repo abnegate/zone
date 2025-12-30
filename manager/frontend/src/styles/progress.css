@@ -1,0 +1,79 @@
+/* =============================================================================
+   Progress Section
+   ============================================================================= */
+
+.progress-section {
+  margin-top: var(--spacing-lg);
+  padding-top: var(--spacing-lg);
+  border-top: 1px solid var(--color-border);
+}
+
+.progress-header {
+  margin-bottom: var(--spacing-md);
+  font-weight: 500;
+  color: var(--color-text-muted);
+}
+
+.steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm);
+  background: var(--color-bg-input);
+  border-radius: var(--radius-sm);
+  font-size: 0.9rem;
+}
+
+.step-icon {
+  flex-shrink: 0;
+  width: 1.25rem;
+  text-align: center;
+  font-weight: bold;
+}
+
+.step-success .step-icon {
+  color: var(--color-success);
+}
+
+.step-error .step-icon {
+  color: var(--color-error);
+}
+
+.step-name {
+  flex-shrink: 0;
+  font-weight: 500;
+  min-width: 5rem;
+}
+
+.step-message {
+  color: var(--color-text-muted);
+}
+
+/* =============================================================================
+   Result Message
+   ============================================================================= */
+
+.result-message {
+  margin-top: var(--spacing-md);
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+  font-weight: 500;
+}
+
+.result-success {
+  color: var(--color-success);
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.result-error {
+  color: var(--color-error);
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}

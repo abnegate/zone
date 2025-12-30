@@ -1,0 +1,75 @@
+name: Frontend Lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'manager/frontend/src/**'
+      - 'manager/frontend/biome.json'
+      - 'manager/frontend/package.json'
+      - '.github/workflows/frontend-lint.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'manager/frontend/src/**'
+      - 'manager/frontend/biome.json'
+      - 'manager/frontend/package.json'
+      - '.github/workflows/frontend-lint.yml'
+
+jobs:
+  biome:
+    name: Biome Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: manager/frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Biome
+        uses: biomejs/setup-biome@v2
+        with:
+          version: latest
+
+      - name: Run Biome lint
+        run: biome lint src
+
+  biome-format:
+    name: Biome Format Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: manager/frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Biome
+        uses: biomejs/setup-biome@v2
+        with:
+          version: latest
+
+      - name: Check formatting
+        run: biome format --check src
+
+  biome-imports:
+    name: Import Organization
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: manager/frontend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Biome
+        uses: biomejs/setup-biome@v2
+        with:
+          version: latest
+
+      - name: Check import organization
+        run: biome check --linter-enabled=false --formatter-enabled=false src

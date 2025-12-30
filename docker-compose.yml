@@ -72,6 +72,7 @@ services:
       - ollama_data:/root/.ollama
     networks:
       - internal
+      - edge  # Needs internet access to pull models
     deploy:
       resources:
         reservations:
@@ -106,7 +107,7 @@ services:
     entrypoint: ["/bin/sh", "/pull-models.sh"]
 
   postgres:
-    image: postgres:${DOCKER_VERSION_POSTGRES:-16-alpine}
+    image: pgvector/pgvector:${DOCKER_VERSION_POSTGRES:-pg16}
     container_name: postgres
     restart: unless-stopped
     environment:
@@ -222,6 +223,7 @@ services:
       - UPDATER_PERIOD=24h
     networks:
       - internal
+      - edge
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
       interval: 60s
@@ -320,11 +322,20 @@ services:
         condition: service_healthy
       litellm:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - LITELLM_HOST=http://litellm:4000
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_MANAGER_API_KEY=${SECURITY_MANAGER_API_KEY}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - manager_repos:/tmp/repos
+      - manager_artifacts:/app/artifacts
     networks:
       - internal
       - edge
@@ -378,3 +389,7 @@ volumes:
     name: voiz_traefik_letsencrypt
   postgres_data:
     name: voiz_postgres_data
+  manager_repos:
+    name: voiz_manager_repos
+  manager_artifacts:
+    name: voiz_manager_artifacts

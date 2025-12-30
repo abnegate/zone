@@ -1,0 +1,53 @@
+/* =============================================================================
+   Utility Classes
+   ============================================================================= */
+
+.loading-placeholder,
+.empty-placeholder,
+.error-placeholder {
+  padding: var(--spacing-lg);
+  text-align: center;
+  color: var(--color-text-muted);
+}
+
+.error-placeholder {
+  color: var(--color-error);
+}
+
+/* =============================================================================
+   Responsive
+   ============================================================================= */
+
+@media (max-width: 640px) {
+  .input-group {
+    flex-direction: column;
+  }
+
+  .search-container {
+    flex-direction: column;
+  }
+
+  .source-tabs {
+    flex-wrap: wrap;
+  }
+
+  .browse-item {
+    flex-direction: column;
+  }
+
+  .browse-item .btn {
+    width: 100%;
+  }
+
+  .modal-content {
+    margin: var(--spacing-md);
+  }
+
+  .modal-actions {
+    flex-direction: column-reverse;
+  }
+
+  .modal-actions .btn {
+    width: 100%;
+  }
+}

@@ -43,7 +43,7 @@ if [ -n "${POSTGRES_PASSWORD}" ]; then
 
     # Check if password contains special URL characters that need encoding
     case "${POSTGRES_PASSWORD}" in
-        *@* | *:* | */* | *%* | *?* | *#* | *\&* | *=*)
+        *@* | *:* | */* | *%* | *?* | *#* | *\&* | *=* | *+*)
             echo "[litellm-entrypoint] Encoding DATABASE_URL password for special characters..."
             ENCODED_PASSWORD=$(url_encode "${POSTGRES_PASSWORD}")
             export DATABASE_URL="postgresql://${POSTGRES_USER_VAL}:${ENCODED_PASSWORD}@postgres:5432/${POSTGRES_DB_VAL}"
