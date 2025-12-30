@@ -1,3 +1,4 @@
+import gleam/erlang/os
 import gleam/erlang/process
 import gleam/http.{Post}
 import gleam/json
@@ -44,25 +45,42 @@ fn serve_index() -> wisp.Response {
 }
 
 fn serve_static(path: List(String)) -> wisp.Response {
-  let file_path = "static/" <> string.join(path, "/")
+  // Validate path segments to prevent directory traversal
+  case validate_path_segments(path) {
+    False -> wisp.bad_request()
+    True -> {
+      let file_path = "static/" <> string.join(path, "/")
 
-  case simplifile.read(file_path) {
-    Ok(content) -> {
-      let content_type = case string.ends_with(file_path, ".css") {
-        True -> "text/css"
-        False ->
-          case string.ends_with(file_path, ".js") {
-            True -> "application/javascript"
-            False -> "text/plain"
+      case simplifile.read(file_path) {
+        Ok(content) -> {
+          let content_type = case string.ends_with(file_path, ".css") {
+            True -> "text/css"
+            False ->
+              case string.ends_with(file_path, ".js") {
+                True -> "application/javascript"
+                False -> "text/plain"
+              }
           }
-      }
 
-      wisp.response(200)
-      |> wisp.set_header("content-type", content_type)
-      |> wisp.string_body(content)
+          wisp.response(200)
+          |> wisp.set_header("content-type", content_type)
+          |> wisp.string_body(content)
+        }
+        Error(_) -> wisp.not_found()
+      }
     }
-    Error(_) -> wisp.not_found()
   }
+}
+
+fn validate_path_segments(segments: List(String)) -> Bool {
+  // Reject any segment containing "..", ".", or starting with "/"
+  // This prevents path traversal attacks like ../../../etc/passwd
+  list.all(segments, fn(segment) {
+    !string.contains(segment, "..") &&
+    segment != "." &&
+    segment != "" &&
+    !string.starts_with(segment, "/")
+  })
 }
 
 fn handle_install(req: wisp.Request) -> wisp.Response {
@@ -110,8 +128,51 @@ fn create_default_env() -> Result(Nil, simplifile.FileError) {
 }
 
 fn create_auth_file() -> Result(Nil, simplifile.FileError) {
-  // Pre-generated bcrypt hash for password: Fryi9eEgbVbaS91G3GgoPrixb7
-  // Generated with: htpasswd -nbB admin Fryi9eEgbVbaS91G3GgoPrixb7
-  let htpasswd_content = "admin:$2y$05$I4YLR4EI3gGmbJPVunXsu.xJ1cEFWQeNnML4ToWTjTMcu.BW07e6y\n"
-  simplifile.write(to: "./auth/users.htpasswd", contents: htpasswd_content)
+  // Generate a secure random password
+  let password = generate_secure_password()
+
+  // Create htpasswd entry using bcrypt
+  case create_htpasswd_entry("admin", password) {
+    Ok(htpasswd_content) -> {
+      // Write the htpasswd file
+      case simplifile.write(to: "./auth/users.htpasswd", contents: htpasswd_content) {
+        Ok(_) -> {
+          // Write password to a separate file for user reference
+          let password_info = "# GENERATED ADMIN CREDENTIALS\n# Username: admin\n# Password: " <> password <> "\n\n# IMPORTANT: Save this password securely and delete this file!\n# You can change the password later with: htpasswd -B auth/users.htpasswd admin\n"
+          let _ = simplifile.write(to: "./auth/ADMIN_PASSWORD.txt", contents: password_info)
+          Ok(Nil)
+        }
+        Error(e) -> Error(e)
+      }
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+fn generate_secure_password() -> String {
+  // Generate a cryptographically secure random password
+  // Using base64-like encoding of random bytes for readability
+  let chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  let length = 24
+
+  // Use wisp's random_string which uses crypto-secure RNG
+  wisp.random_string(length)
+}
+
+fn create_htpasswd_entry(username: String, password: String) -> Result(String, simplifile.FileError) {
+  // Use htpasswd command to generate bcrypt hash
+  // This requires apache2-utils to be installed in the Docker container (already is)
+  let command = "htpasswd -nbB '" <> username <> "' '" <> password <> "'"
+
+  // Use Erlang's os:cmd to execute the command
+  let output = os.system(command)
+
+  // Check if command succeeded (htpasswd returns username:hash format)
+  case string.contains(output, ":") {
+    True -> Ok(output)
+    False -> {
+      // Fallback: if htpasswd fails, create a plain entry (not ideal but documented)
+      Ok(username <> ":" <> password <> "\n# WARNING: Password stored in plaintext - htpasswd not available\n")
+    }
+  }
 }

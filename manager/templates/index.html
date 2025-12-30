@@ -7,6 +7,32 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="login-overlay" hidden>
+        <div class="login-modal">
+            <h2>Manager Authentication</h2>
+            <p class="help-text">Enter your API key to access the manager.</p>
+            <form id="login-form" class="login-form">
+                <input
+                    type="password"
+                    id="api-key-input"
+                    name="api_key"
+                    placeholder="API Key"
+                    autocomplete="off"
+                    required
+                >
+                <div id="login-error" class="login-error" hidden></div>
+                <button type="submit" id="login-btn" class="btn btn-primary">
+                    <span class="btn-text">Login</span>
+                    <span class="btn-loading" hidden>
+                        <span class="spinner"></span>
+                        Authenticating...
+                    </span>
+                </button>
+            </form>
+        </div>
+    </div>
+
     <div class="container">
         <header class="header">
             <h1>Manager</h1>

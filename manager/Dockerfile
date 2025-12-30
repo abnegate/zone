@@ -14,11 +14,21 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
+# Create non-root user for security
+# Note: Gleam/Erlang applications don't require root privileges
+RUN groupadd -r appuser && useradd -r -g appuser -s /bin/false appuser
+
 WORKDIR /app
 
 COPY --from=builder /build /app
 COPY static static
 COPY templates templates
+
+# Change ownership to non-root user
+RUN chown -R appuser:appuser /app
+
+# Run as non-root user
+USER appuser
 
 EXPOSE 8000
 
