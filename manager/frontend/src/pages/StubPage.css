@@ -1,0 +1,75 @@
+.stub-page {
+  max-width: 700px;
+}
+
+.stub-content {
+  text-align: center;
+  padding: var(--spacing-xl);
+}
+
+.stub-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+  margin: 0 auto var(--spacing-lg);
+  background: rgba(59, 130, 246, 0.1);
+  border-radius: 50%;
+}
+
+.stub-icon svg {
+  width: 40px;
+  height: 40px;
+  color: var(--color-primary);
+}
+
+.stub-content h2 {
+  margin: 0 0 var(--spacing-md) 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.stub-description {
+  margin: 0 0 var(--spacing-xl) 0;
+  color: var(--color-text-muted);
+  font-size: 1rem;
+  line-height: 1.6;
+  max-width: 500px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.stub-features {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  max-width: 300px;
+  margin: 0 auto;
+}
+
+.stub-feature {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--color-bg-input);
+  border-radius: var(--radius-md);
+  text-align: left;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.stub-feature-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: var(--color-primary);
+  color: white;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}

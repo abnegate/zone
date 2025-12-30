@@ -1,3 +1,13 @@
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ .
+RUN npm run build
+
 FROM ghcr.io/gleam-lang/gleam:v1.14.0-erlang AS builder
 
 WORKDIR /build
@@ -21,7 +31,7 @@ RUN groupadd -r appuser && useradd -r -g appuser -s /bin/false appuser
 WORKDIR /app
 
 COPY --from=builder /build /app
-COPY static static
+COPY --from=frontend-builder /frontend/build /app/static
 COPY templates templates
 
 # Change ownership to non-root user

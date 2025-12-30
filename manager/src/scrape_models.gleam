@@ -91,13 +91,17 @@ pub fn get_all_models() -> List(OllamaModel) {
   header <> model_lines <> "\n" <> footer
 }
 
-fn escape_string(s: String) -> String {
+/// Escape special characters in strings for Gleam source code
+/// @internal
+pub fn escape_string(s: String) -> String {
   s
   |> string.replace("\\", "\\\\")
   |> string.replace("\"", "\\\"")
 }
 
-fn format_number(n: Int) -> String {
+/// Format number with underscores for readability
+/// @internal
+pub fn format_number(n: Int) -> String {
   let s = int.to_string(n)
   format_with_underscores(s, "")
 }
@@ -125,7 +129,9 @@ fn has_any(text: String, keywords: List(String)) -> Bool {
   list.any(keywords, fn(kw) { string.contains(text, kw) })
 }
 
-fn categorize(name: String, desc: String) -> List(String) {
+/// Categorize a model based on its name and description
+/// @internal
+pub fn categorize(name: String, desc: String) -> List(String) {
   let combined = string.lowercase(name <> " " <> desc)
   let tags = []
 
