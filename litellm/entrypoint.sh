@@ -15,8 +15,8 @@ url_encode() {
     local encoded=""
     local pos c o
 
-    for pos in $(seq 0 $((strlen - 1))); do
-        c=$(printf '%s' "$string" | cut -c$((pos + 1)))
+    for pos in $(seq 0 "$((strlen - 1))"); do
+        c=$(printf '%s' "$string" | cut -c"$((pos + 1))")
         case "$c" in
             [-_.~a-zA-Z0-9])
                 o="${c}"

@@ -109,6 +109,7 @@ setup_env_file() {
     local litellm_salt=$(generate_secret)
     local searxng_secret=$(generate_secret)
     local postgres_password=$(generate_secret)
+    local manager_api_key=$(generate_secret)
 
     # Use sed to replace empty values with new prefixed names
     if ! sed -i.bak "s|^SECURITY_LITELLM_MASTER_KEY=.*|SECURITY_LITELLM_MASTER_KEY=${litellm_key}|" "${ENV_FILE}"; then
@@ -125,6 +126,10 @@ setup_env_file() {
     fi
     if ! sed -i.bak "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${postgres_password}|" "${ENV_FILE}"; then
         log_error "Failed to update POSTGRES_PASSWORD"
+        exit 1
+    fi
+    if ! sed -i.bak "s|^SECURITY_MANAGER_API_KEY=.*|SECURITY_MANAGER_API_KEY=${manager_api_key}|" "${ENV_FILE}"; then
+        log_error "Failed to update SECURITY_MANAGER_API_KEY"
         exit 1
     fi
 
@@ -148,6 +153,10 @@ setup_env_file() {
     rm -f "${ENV_FILE}.bak"
 
     log_info "✓ Secrets generated and inserted into .env"
+    log_info ""
+    log_info "Manager API Key (save this for login):"
+    log_info "  ${BLUE}${manager_api_key}${NC}"
+    log_info ""
     log_warn "Review ${ENV_FILE} and update:"
     log_warn "  - Domain name (DOMAIN_HOST_WEBUI)"
     log_warn "  - VPN credentials (VPN_OPENVPN_USER, VPN_OPENVPN_PASSWORD)"
@@ -338,6 +347,9 @@ print_next_steps() {
     echo -e ""
     echo -e "  6. Access the web UI:"
     echo -e "     ${BLUE}https://webui.localhost${NC}"
+    echo -e ""
+    echo -e "  7. Access the manager (use SECURITY_MANAGER_API_KEY to login):"
+    echo -e "     ${BLUE}https://manager.webui.localhost${NC}"
     echo -e ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}\n"
 }

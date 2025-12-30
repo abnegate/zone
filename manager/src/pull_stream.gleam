@@ -1,5 +1,4 @@
 //// Streaming model pull using httpp library
-//// Pure Gleam - no FFI required
 
 import gleam/bytes_tree
 import gleam/dynamic/decode

@@ -48,16 +48,17 @@ general_settings:
   # Default model when not specified
   default_model: "{{OLLAMA_MODEL_FAST}}"
 
-  # Log prompts
+  # Privacy-first configuration: Do NOT log prompts or completions
+  # This prevents sensitive user data from being stored in the database
   store_model_in_db: true
-  store_prompts_in_spend_logs: true
+  store_prompts_in_spend_logs: false
 
 # =============================================================================
 # LiteLLM Settings
 # =============================================================================
 litellm_settings:
   drop_params: false
-  set_verbose: true
+  set_verbose: false
 
   # Add routing info to response headers
   return_response_headers: true

@@ -8,7 +8,8 @@ import gleam/http/response
 import gleam/httpc
 import gleam/json
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{None, Some}
+import gleam/result
 import gleam/string
 import gleam/uri
 import httpp/jsonl.{Closed, Line}
@@ -38,9 +39,55 @@ fn handle_mist_request(
   secret: String,
 ) -> response.Response(ResponseData) {
   case request.path_segments(req) {
-    ["ws", "pull"] -> handle_websocket_upgrade(req)
+    ["ws", "pull"] -> handle_websocket_upgrade_with_auth(req)
     _ -> wisp_mist.handler(handle_request, secret)(req)
   }
+}
+
+fn handle_websocket_upgrade_with_auth(
+  req: HttpRequest(Connection),
+) -> response.Response(ResponseData) {
+  let expected_key = get_manager_api_key()
+
+  case expected_key {
+    "" -> {
+      // No API key configured - reject
+      response.new(401)
+      |> response.set_body(mist.Bytes(<<"Unauthorized: API key not configured":utf8>>))
+    }
+    key -> {
+      // Parse query string to get api_key parameter
+      let query_params = case req.query {
+        Some(query) -> parse_query_params(query)
+        None -> []
+      }
+
+      let provided_key = case list.find(query_params, fn(pair) { pair.0 == "api_key" }) {
+        Ok(pair) -> pair.1
+        Error(_) -> ""
+      }
+
+      case provided_key == key {
+        True -> handle_websocket_upgrade(req)
+        False -> {
+          response.new(401)
+          |> response.set_body(mist.Bytes(<<"Unauthorized: Invalid API key":utf8>>))
+        }
+      }
+    }
+  }
+}
+
+fn parse_query_params(query: String) -> List(#(String, String)) {
+  query
+  |> string.split("&")
+  |> list.filter(fn(p) { p != "" })
+  |> list.filter_map(fn(param) {
+    case string.split_once(param, "=") {
+      Ok(#(key, value)) ->  Ok(#(key, uri.percent_decode(value) |> result.unwrap(value)))
+      Error(_) -> Ok(#(param, ""))
+    }
+  })
 }
 
 type WsState {
@@ -203,19 +250,86 @@ fn receive_pull_events(
 // =============================================================================
 
 pub fn handle_request(req: Request) -> Response {
+  // SECURITY MODEL for Manager API:
+  // - Primary protection: API key authentication (Bearer token or X-API-Key header)
+  // - Secondary protection: Network isolation (accessible only via voiz_edge network)
+  // - Tertiary protection: Path traversal validation on static file serving
+  //
+  // All API endpoints require valid API key authentication.
+  // The index page injects the API key for frontend use.
+  // Static files (CSS/JS) are served without auth.
+
   use <- wisp.log_request(req)
   use <- wisp.rescue_crashes
   use req <- wisp.handle_head(req)
 
   case wisp.path_segments(req) {
+    // Index page - no auth (frontend handles login UI)
     [] -> serve_index()
+    // Static files - no auth (CSS/JS are public)
     ["static", ..rest] -> serve_static(rest)
-    ["api", "models"] -> handle_models(req)
-    ["api", "models", model_name] -> handle_model_by_name(req, model_name)
-    ["api", "browse"] -> handle_browse(req)
-    ["api", "model-card", ..rest] -> handle_model_card(req, rest)
+    // API endpoints - all require API key auth
+    ["api", ..rest] -> {
+      case validate_api_key(req) {
+        True -> route_api(req, rest)
+        False -> unauthorized_response()
+      }
+    }
     _ -> wisp.not_found()
   }
+}
+
+fn route_api(req: Request, path: List(String)) -> Response {
+  case path {
+    ["models"] -> handle_models(req)
+    ["models", model_name] -> handle_model_by_name(req, model_name)
+    ["browse"] -> handle_browse(req)
+    ["model-card", ..rest] -> handle_model_card(req, rest)
+    _ -> wisp.not_found()
+  }
+}
+
+fn validate_api_key(req: Request) -> Bool {
+  let expected_key = get_manager_api_key()
+
+  // If no API key is configured, reject all requests
+  case expected_key {
+    "" -> False
+    key -> {
+      // Check Authorization: Bearer <key> header
+      let bearer_valid = case wisp.get_header(req, "authorization") {
+        Some(auth) -> {
+          case string.starts_with(auth, "Bearer ") {
+            True -> string.drop_start(auth, 7) == key
+            False -> False
+          }
+        }
+        None -> False
+      }
+
+      // Check X-API-Key header as fallback
+      let api_key_valid = case wisp.get_header(req, "x-api-key") {
+        Some(provided_key) -> provided_key == key
+        None -> False
+      }
+
+      bearer_valid || api_key_valid
+    }
+  }
+}
+
+fn unauthorized_response() -> Response {
+  let error_json =
+    json.object([
+      #("success", json.bool(False)),
+      #("error", json.string("Unauthorized: Invalid or missing API key")),
+    ])
+    |> json.to_string
+
+  wisp.response(401)
+  |> wisp.set_header("content-type", "application/json")
+  |> wisp.set_header("www-authenticate", "Bearer")
+  |> wisp.string_body(error_json)
 }
 
 // =============================================================================
@@ -233,18 +347,35 @@ fn serve_index() -> Response {
 }
 
 fn serve_static(path: List(String)) -> Response {
-  let file_path = "static/" <> string.join(path, "/")
+  // Validate path segments to prevent directory traversal attacks
+  case validate_path_segments(path) {
+    False -> wisp.bad_request()
+    True -> {
+      let file_path = "static/" <> string.join(path, "/")
 
-  case simplifile.read(file_path) {
-    Ok(content) -> {
-      let content_type = get_content_type(file_path)
+      case simplifile.read(file_path) {
+        Ok(content) -> {
+          let content_type = get_content_type(file_path)
 
-      wisp.response(200)
-      |> wisp.set_header("content-type", content_type)
-      |> wisp.string_body(content)
+          wisp.response(200)
+          |> wisp.set_header("content-type", content_type)
+          |> wisp.string_body(content)
+        }
+        Error(_) -> wisp.not_found()
+      }
     }
-    Error(_) -> wisp.not_found()
   }
+}
+
+fn validate_path_segments(segments: List(String)) -> Bool {
+  // Reject any segment containing "..", ".", or starting with "/"
+  // This prevents path traversal attacks like ../../../etc/passwd
+  list.all(segments, fn(segment) {
+    !string.contains(segment, "..") &&
+    segment != "." &&
+    segment != "" &&
+    !string.starts_with(segment, "/")
+  })
 }
 
 fn get_content_type(path: String) -> String {
@@ -282,6 +413,10 @@ fn get_litellm_host() -> String {
 
 fn get_litellm_key() -> String {
   get_env("SECURITY_LITELLM_MASTER_KEY", "")
+}
+
+fn get_manager_api_key() -> String {
+  get_env("SECURITY_MANAGER_API_KEY", "")
 }
 
 // =============================================================================

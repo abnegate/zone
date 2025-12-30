@@ -1,6 +1,118 @@
 // Manager Frontend Application
 
+// =============================================================================
+// Authentication
+// =============================================================================
+
+const API_KEY_STORAGE_KEY = 'manager_api_key';
+
+function getApiKey() {
+    return localStorage.getItem(API_KEY_STORAGE_KEY) || '';
+}
+
+function setApiKey(key) {
+    localStorage.setItem(API_KEY_STORAGE_KEY, key);
+}
+
+function clearApiKey() {
+    localStorage.removeItem(API_KEY_STORAGE_KEY);
+}
+
+function getAuthHeaders() {
+    const apiKey = getApiKey();
+    return apiKey ? { 'Authorization': 'Bearer ' + apiKey } : {};
+}
+
+async function checkAuth() {
+    const apiKey = getApiKey();
+    if (!apiKey) {
+        showLoginOverlay();
+        return false;
+    }
+
+    // Verify the API key by making a test request
+    try {
+        const response = await fetch('/api/models', {
+            headers: getAuthHeaders()
+        });
+
+        if (response.status === 401) {
+            clearApiKey();
+            showLoginOverlay();
+            return false;
+        }
+
+        hideLoginOverlay();
+        return true;
+    } catch (error) {
+        showLoginOverlay();
+        return false;
+    }
+}
+
+function showLoginOverlay() {
+    document.getElementById('login-overlay').hidden = false;
+}
+
+function hideLoginOverlay() {
+    document.getElementById('login-overlay').hidden = true;
+}
+
+async function handleLogin(event) {
+    event.preventDefault();
+
+    const apiKeyInput = document.getElementById('api-key-input');
+    const loginBtn = document.getElementById('login-btn');
+    const loginError = document.getElementById('login-error');
+    const btnText = loginBtn.querySelector('.btn-text');
+    const btnLoading = loginBtn.querySelector('.btn-loading');
+
+    const apiKey = apiKeyInput.value.trim();
+    if (!apiKey) {
+        loginError.textContent = 'Please enter an API key';
+        loginError.hidden = false;
+        return;
+    }
+
+    // Show loading state
+    loginBtn.disabled = true;
+    btnText.hidden = true;
+    btnLoading.hidden = false;
+    loginError.hidden = true;
+
+    // Test the API key
+    try {
+        const response = await fetch('/api/models', {
+            headers: { 'Authorization': 'Bearer ' + apiKey }
+        });
+
+        if (response.status === 401) {
+            loginError.textContent = 'Invalid API key';
+            loginError.hidden = false;
+        } else if (response.ok) {
+            // Success - store the key and proceed
+            setApiKey(apiKey);
+            hideLoginOverlay();
+            loadModels();
+            loadBrowseResults();
+        } else {
+            loginError.textContent = 'Authentication failed';
+            loginError.hidden = false;
+        }
+    } catch (error) {
+        loginError.textContent = 'Connection error: ' + error.message;
+        loginError.hidden = false;
+    } finally {
+        loginBtn.disabled = false;
+        btnText.hidden = false;
+        btnLoading.hidden = true;
+    }
+}
+
+// =============================================================================
 // State
+// =============================================================================
+
 let currentSource = 'ollama';
 let modelToDelete = null;
 let downloadTimer = null;
@@ -17,11 +129,28 @@ let selectedModel = null;
 let modelCardCache = {};
 let modelCardExpanded = false;
 
-document.addEventListener('DOMContentLoaded', function() {
-    loadModels();
-    loadBrowseResults();
-    setupEventListeners();
+document.addEventListener('DOMContentLoaded', async function() {
+    setupLoginListener();
+
+    // Check authentication before loading
+    const isAuthenticated = await checkAuth();
+    if (isAuthenticated) {
+        loadModels();
+        loadBrowseResults();
+        setupEventListeners();
+    } else {
+        // Setup event listeners even when not authenticated
+        // so they're ready after login
+        setupEventListeners();
+    }
 });
+
+function setupLoginListener() {
+    const loginForm = document.getElementById('login-form');
+    if (loginForm) {
+        loginForm.addEventListener('submit', handleLogin);
+    }
+}
 
 // =============================================================================
 // Event Listeners
@@ -146,9 +275,10 @@ function startStreamingDownload(modelName, modelInput) {
     // Start timer update
     downloadTimer = setInterval(updateDownloadTime, 1000);
 
-    // Determine WebSocket URL (ws:// or wss://)
+    // Determine WebSocket URL (ws:// or wss://) with API key auth
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = protocol + '//' + window.location.host + '/ws/pull';
+    const apiKey = getApiKey();
+    const wsUrl = protocol + '//' + window.location.host + '/ws/pull?api_key=' + encodeURIComponent(apiKey);
 
     // Close any existing connection
     if (websocket) {
@@ -168,7 +298,8 @@ function startStreamingDownload(modelName, modelInput) {
     };
 
     websocket.onerror = function(error) {
-        handleDownloadError('WebSocket error', currentModelInput);
+        // Check if this might be an auth error
+        handleDownloadError('WebSocket connection failed - please check your API key', currentModelInput);
     };
 
     websocket.onclose = function(event) {
@@ -325,7 +456,17 @@ async function loadModels() {
     modelsList.innerHTML = '<div class="loading-placeholder">Loading models...</div>';
 
     try {
-        const response = await fetch('/api/models');
+        const response = await fetch('/api/models', {
+            headers: getAuthHeaders()
+        });
+
+        // Handle auth errors
+        if (response.status === 401) {
+            clearApiKey();
+            showLoginOverlay();
+            return;
+        }
+
         const data = await response.json();
 
         if (data.error) {
@@ -403,7 +544,15 @@ async function confirmDelete() {
     try {
         const response = await fetch('/api/models/' + encodeURIComponent(modelName), {
             method: 'DELETE',
+            headers: getAuthHeaders()
         });
+
+        // Handle auth errors
+        if (response.status === 401) {
+            clearApiKey();
+            showLoginOverlay();
+            return;
+        }
 
         const data = await response.json();
 
@@ -464,7 +613,17 @@ async function loadBrowseResults() {
             offset: browseOffset.toString(),
         });
 
-        const response = await fetch('/api/browse?' + params);
+        const response = await fetch('/api/browse?' + params, {
+            headers: getAuthHeaders()
+        });
+
+        // Handle auth errors
+        if (response.status === 401) {
+            clearApiKey();
+            showLoginOverlay();
+            return;
+        }
+
         const data = await response.json();
 
         if (data.error) {
@@ -514,11 +673,21 @@ async function loadMoreBrowseResults() {
             offset: browseOffset.toString(),
         });
 
-        const response = await fetch('/api/browse?' + params);
-        const data = await response.json();
+        const response = await fetch('/api/browse?' + params, {
+            headers: getAuthHeaders()
+        });
 
         // Remove loading indicator
         loadingEl.remove();
+
+        // Handle auth errors
+        if (response.status === 401) {
+            clearApiKey();
+            showLoginOverlay();
+            return;
+        }
+
+        const data = await response.json();
 
         if (data.error) {
             browseHasMore = false;
@@ -820,7 +989,17 @@ async function fetchModelCard(modelId) {
     textEl.innerHTML = '';
 
     try {
-        const response = await fetch('/api/model-card/' + encodeURIComponent(modelId));
+        const response = await fetch('/api/model-card/' + encodeURIComponent(modelId), {
+            headers: getAuthHeaders()
+        });
+
+        // Handle auth errors
+        if (response.status === 401) {
+            clearApiKey();
+            showLoginOverlay();
+            return;
+        }
+
         const data = await response.json();
 
         if (data.success && data.content) {
@@ -841,42 +1020,36 @@ function parseMarkdown(markdown) {
     // Remove YAML front matter (between --- markers)
     markdown = markdown.replace(/^---[\s\S]*?---\n*/m, '');
 
-    // Remove script tags for security
-    markdown = markdown.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+    // First pass: escape all HTML to prevent XSS
+    markdown = escapeHtml(markdown);
 
-    // Remove style tags
-    markdown = markdown.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '');
-
-    // Remove SVG tags (they often break layout)
-    markdown = markdown.replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, '');
-
-    // Remove event handlers from HTML
-    markdown = markdown.replace(/\s+on\w+\s*=\s*["'][^"']*["']/gi, '');
-
-    // Basic markdown to HTML conversion (don't escape HTML - allow it through)
+    // Basic markdown to HTML conversion
     let html = markdown
         // Code blocks (before other processing)
         .replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-            // Escape HTML inside code blocks
-            const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            return '<pre><code>' + escaped + '</code></pre>';
+            return '<pre><code>' + code + '</code></pre>';
         })
         // Inline code
         .replace(/`([^`]+)`/g, (_, code) => {
-            const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            return '<code>' + escaped + '</code>';
+            return '<code>' + code + '</code>';
         })
-        // Headers
-        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-        .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+        // Headers (escape content to prevent nested HTML)
+        .replace(/^### (.+)$/gm, (_, content) => '<h3>' + content + '</h3>')
+        .replace(/^## (.+)$/gm, (_, content) => '<h2>' + content + '</h2>')
+        .replace(/^# (.+)$/gm, (_, content) => '<h1>' + content + '</h1>')
         // Bold and italic
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         .replace(/\*(.+?)\*/g, '<em>$1</em>')
-        // Links
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-        // Images (convert to links to avoid loading issues)
-        .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">[Image: $1]</a>')
+        // Links - sanitize URLs to prevent javascript: and data: URIs
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+            const sanitizedUrl = sanitizeUrl(url);
+            return '<a href="' + sanitizedUrl + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+        })
+        // Images - convert to safe links
+        .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+            const sanitizedUrl = sanitizeUrl(url);
+            return '<a href="' + sanitizedUrl + '" target="_blank" rel="noopener noreferrer">[Image: ' + (alt || 'view') + ']</a>';
+        })
         // Unordered lists
         .replace(/^\s*[-*]\s+(.+)$/gm, '<li>$1</li>')
         // Paragraphs (split by double newlines)
@@ -897,6 +1070,31 @@ function parseMarkdown(markdown) {
         .join('\n');
 
     return html;
+}
+
+function sanitizeUrl(url) {
+    // Remove leading/trailing whitespace
+    url = url.trim();
+
+    // Block dangerous protocols
+    const lowerUrl = url.toLowerCase();
+    if (lowerUrl.startsWith('javascript:') ||
+        lowerUrl.startsWith('data:') ||
+        lowerUrl.startsWith('vbscript:') ||
+        lowerUrl.startsWith('file:')) {
+        return '#';
+    }
+
+    // Only allow http, https, and relative URLs
+    if (!lowerUrl.startsWith('http://') &&
+        !lowerUrl.startsWith('https://') &&
+        !lowerUrl.startsWith('/') &&
+        !lowerUrl.startsWith('#')) {
+        // Assume relative URL if no protocol
+        return url;
+    }
+
+    return url;
 }
 
 // =============================================================================

@@ -9,15 +9,25 @@ TEMPLATE_FILE="/searxng/settings.yml.template"
 if [ -f "${TEMPLATE_FILE}" ]; then
     echo "[searxng-entrypoint] Generating settings.yml from template..."
 
-    # Validate secret key is set and not default
+    # Validate secret key is set and not a known insecure default
     if [ -z "${SEARXNG_SECRET_KEY}" ]; then
         echo "[searxng-entrypoint] ERROR: SEARXNG_SECRET_KEY is not set"
         exit 1
     fi
 
-    if [ "${SEARXNG_SECRET_KEY}" = "ultrasecretkey" ]; then
-        echo "[searxng-entrypoint] ERROR: SEARXNG_SECRET_KEY must be changed from default"
-        exit 1
+    # Check against common insecure values
+    case "${SEARXNG_SECRET_KEY}" in
+        "ultrasecretkey"|"secret"|"password"|"dev-insecure-key-change-for-production"|"changeme"|"insecure")
+            echo "[searxng-entrypoint] ERROR: SEARXNG_SECRET_KEY is set to a known insecure default"
+            echo "[searxng-entrypoint] Generate a secure key with: openssl rand -base64 32"
+            exit 1
+            ;;
+    esac
+
+    # Warn if key is too short (less than 16 characters)
+    if [ "${#SEARXNG_SECRET_KEY}" -lt 16 ]; then
+        echo "[searxng-entrypoint] WARNING: SEARXNG_SECRET_KEY is too short (< 16 chars)"
+        echo "[searxng-entrypoint] Continuing, but consider using: openssl rand -base64 32"
     fi
 
     # Escape special characters for sed

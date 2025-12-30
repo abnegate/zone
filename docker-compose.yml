@@ -35,14 +35,22 @@ services:
       - traefik.docker.network=voiz_edge
       - traefik.http.middlewares.auth.basicauth.usersfile=/auth/users.htpasswd
       - traefik.http.middlewares.auth.basicauth.realm=${SECURITY_BASICAUTH_REALM}
+      # Security headers middleware
+      - traefik.http.middlewares.security-headers.headers.frameDeny=true
+      - traefik.http.middlewares.security-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.security-headers.headers.browserXssFilter=true
+      - traefik.http.middlewares.security-headers.headers.referrerPolicy=strict-origin-when-cross-origin
+      - traefik.http.middlewares.security-headers.headers.permissionsPolicy=geolocation=(), microphone=(), camera=()
+      - traefik.http.middlewares.security-headers.headers.customResponseHeaders.X-Robots-Tag=noindex,nofollow,nosnippet,noarchive
+      - traefik.http.middlewares.security-headers.headers.customResponseHeaders.Server=
       - traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.dashboard.entrypoints=web
       - traefik.http.routers.dashboard.service=api@internal
-      - traefik.http.routers.dashboard.middlewares=auth
+      - traefik.http.routers.dashboard.middlewares=auth,security-headers
       - traefik.http.routers.dashboard-secure.rule=Host(`traefik.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.dashboard-secure.entrypoints=websecure
       - traefik.http.routers.dashboard-secure.service=api@internal
-      - traefik.http.routers.dashboard-secure.middlewares=auth
+      - traefik.http.routers.dashboard-secure.middlewares=auth,security-headers
       - traefik.http.routers.dashboard-secure.tls=true
       - traefik.http.routers.dashboard-secure.tls.certresolver=letsencrypt
     healthcheck:
@@ -102,15 +110,15 @@ services:
     container_name: postgres
     restart: unless-stopped
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-litellm}
-      - POSTGRES_USER=${POSTGRES_USER:-litellm}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-litellm_password}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-litellm}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -137,9 +145,9 @@ services:
       - OLLAMA_MODEL_EMBED=${OLLAMA_MODEL_EMBED}
       - LITELLM_REQUEST_TIMEOUT=${ADVANCED_LITELLM_REQUEST_TIMEOUT}
       - LITELLM_ROUTER_TIMEOUT=${ADVANCED_LITELLM_ROUTER_TIMEOUT}
-      - POSTGRES_USER=${POSTGRES_USER:-litellm}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-litellm_password}
-      - POSTGRES_DB=${POSTGRES_DB:-litellm}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
     volumes:
       - ./litellm/config.yaml.template:/app/config.yaml.template:ro
       - ./litellm/router.json.template:/app/router.json.template:ro
@@ -161,9 +169,11 @@ services:
       - traefik.http.routers.litellm.rule=Host(`litellm.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.litellm.entrypoints=web
       - traefik.http.routers.litellm.service=litellm
+      - traefik.http.routers.litellm.middlewares=security-headers
       - traefik.http.routers.litellm-secure.rule=Host(`litellm.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.litellm-secure.entrypoints=websecure
       - traefik.http.routers.litellm-secure.service=litellm
+      - traefik.http.routers.litellm-secure.middlewares=security-headers
       - traefik.http.routers.litellm-secure.tls=true
       - traefik.http.routers.litellm-secure.tls.certresolver=letsencrypt
     healthcheck:
@@ -184,7 +194,10 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - .:/project
+      # Minimal required access - only needs to write .env and auth/
+      - ./.env.example:/project/.env.example:ro
+      - ./.env:/project/.env
+      - ./auth:/project/auth
     working_dir: /project
 
   gluetun:
@@ -282,9 +295,11 @@ services:
       - traefik.http.routers.openwebui.rule=Host(`${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.openwebui.entrypoints=web
       - traefik.http.routers.openwebui.service=openwebui
+      - traefik.http.routers.openwebui.middlewares=security-headers
       - traefik.http.routers.openwebui-secure.rule=Host(`${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.openwebui-secure.entrypoints=websecure
       - traefik.http.routers.openwebui-secure.service=openwebui
+      - traefik.http.routers.openwebui-secure.middlewares=security-headers
       - traefik.http.routers.openwebui-secure.tls=true
       - traefik.http.routers.openwebui-secure.tls.certresolver=letsencrypt
     healthcheck:
@@ -309,6 +324,7 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - LITELLM_HOST=http://litellm:4000
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
+      - SECURITY_MANAGER_API_KEY=${SECURITY_MANAGER_API_KEY}
     networks:
       - internal
       - edge
@@ -319,11 +335,11 @@ services:
       - traefik.http.routers.manager.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.manager.entrypoints=web
       - traefik.http.routers.manager.service=manager
-      - traefik.http.routers.manager.middlewares=auth
+      - traefik.http.routers.manager.middlewares=security-headers
       - traefik.http.routers.manager-secure.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.manager-secure.entrypoints=websecure
       - traefik.http.routers.manager-secure.service=manager
-      - traefik.http.routers.manager-secure.middlewares=auth
+      - traefik.http.routers.manager-secure.middlewares=security-headers
       - traefik.http.routers.manager-secure.tls=true
       - traefik.http.routers.manager-secure.tls.certresolver=letsencrypt
     healthcheck:
@@ -346,7 +362,7 @@ networks:
   internal:
     name: voiz_internal
     driver: bridge
-    internal: false
+    internal: true
     driver_opts:
       com.docker.network.bridge.name: voiz_internal
     ipam:
