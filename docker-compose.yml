@@ -256,7 +256,8 @@ services:
       - OPENAI_API_KEYS=${SECURITY_LITELLM_MASTER_KEY}
       - ENABLE_OLLAMA_API=false
       - ENABLE_OPENAI_API=true
-      - ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH}
+      - TASK_MODEL_EXTERNAL=${WEBUI_TASK_MODEL_EXTERNAL}
+      - ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
       - WEB_SEARCH_ENGINE=${SEARCH_ENGINE}
       - WEB_SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT}
       - WEB_SEARCH_CONCURRENT_REQUESTS=${SEARCH_CONCURRENT_REQUESTS}
@@ -292,6 +293,45 @@ services:
       timeout: 10s
       retries: 3
       start_period: 120s
+
+  manager:
+    build:
+      context: ./manager
+      dockerfile: Dockerfile
+    container_name: manager
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - LITELLM_HOST=http://litellm:4000
+      - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
+    networks:
+      - internal
+      - edge
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=voiz_edge
+      - traefik.http.services.manager.loadbalancer.server.port=8000
+      - traefik.http.routers.manager.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.manager.entrypoints=web
+      - traefik.http.routers.manager.service=manager
+      - traefik.http.routers.manager.middlewares=auth
+      - traefik.http.routers.manager-secure.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.manager-secure.entrypoints=websecure
+      - traefik.http.routers.manager-secure.service=manager
+      - traefik.http.routers.manager-secure.middlewares=auth
+      - traefik.http.routers.manager-secure.tls=true
+      - traefik.http.routers.manager-secure.tls.certresolver=letsencrypt
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 networks:
   edge:

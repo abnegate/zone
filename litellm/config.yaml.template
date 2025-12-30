@@ -3,92 +3,61 @@
 
 model_list:
   # ===========================================================================
-  # Auto Model - Semantic routing (automatically chooses fast or reason)
-  # Note: This creates a virtual model that routes based on query
+  # Fast Model - For simple queries (default)
   # ===========================================================================
-  - model_name: "{{OLLAMA_MODEL_FAST}} [auto]"
-    litellm_params:
-      model: ollama/{{OLLAMA_MODEL_FAST}}
-      api_base: http://ollama:11434
-      # Router will override this based on semantic matching
-    model_info:
-      id: auto
-      mode: router
-
-  # ===========================================================================
-  # Fast Model - For simple queries
-  # ===========================================================================
-  - model_name: "{{OLLAMA_MODEL_FAST}} [fast]"
+  - model_name: "{{OLLAMA_MODEL_FAST}}"
     litellm_params:
       model: ollama/{{OLLAMA_MODEL_FAST}}
       api_base: http://ollama:11434
       timeout: 60
-    model_info:
-      id: fast
-      mode: chat
 
   # ===========================================================================
   # Reasoning Model - For complex analysis
   # ===========================================================================
-  - model_name: "{{OLLAMA_MODEL_REASON}} [reason]"
+  - model_name: "{{OLLAMA_MODEL_REASON}}"
     litellm_params:
       model: ollama/{{OLLAMA_MODEL_REASON}}
       api_base: http://ollama:11434
       timeout: 180
-    model_info:
-      id: reason
-      mode: chat
 
   # ===========================================================================
-  # Embedding Model - For semantic search and routing
+  # Embedding Model - For RAG and semantic search
   # ===========================================================================
-  - model_name: "{{OLLAMA_MODEL_EMBED}} [embed]"
+  - model_name: "{{OLLAMA_MODEL_EMBED}}"
     litellm_params:
       model: ollama/{{OLLAMA_MODEL_EMBED}}
       api_base: http://ollama:11434
       timeout: 30
-    model_info:
-      id: embed
-      mode: embedding
 
 # =============================================================================
 # Router Configuration
 # =============================================================================
 router_settings:
-  # Enable semantic routing based on router.json
-  routing_strategy: semantic-similarity
-
-  # Router config file path
-  router_config_path: /tmp/router.json
-
-  # Retry failed requests
   num_retries: 2
-
-  # Timeout for requests (seconds)
   timeout: 180
-
-  # Automatic fallbacks for reliability
   fallbacks:
-    - "{{OLLAMA_MODEL_FAST}} [fast]": ["{{OLLAMA_MODEL_REASON}} [reason]"]
+    - "{{OLLAMA_MODEL_FAST}}": ["{{OLLAMA_MODEL_REASON}}"]
 
 # =============================================================================
 # General Settings
 # =============================================================================
 general_settings:
-  # Master key for API authentication
-  master_key: ${SECURITY_LITELLM_MASTER_KEY}
+  # Master key for API authentication (set via LITELLM_MASTER_KEY env var)
+  master_key: os.environ/LITELLM_MASTER_KEY
 
   # Default model when not specified
-  default_model: "{{OLLAMA_MODEL_FAST}} [fast]"
+  default_model: "{{OLLAMA_MODEL_FAST}}"
 
   # Log prompts
   store_model_in_db: true
   store_prompts_in_spend_logs: true
 
-  # Logging
-  litellm_settings:
-    drop_params: false
-    set_verbose: true
+# =============================================================================
+# LiteLLM Settings
+# =============================================================================
+litellm_settings:
+  drop_params: false
+  set_verbose: true
 
-    # Add routing info to response headers
-    return_response_headers: true
+  # Add routing info to response headers
+  return_response_headers: true
