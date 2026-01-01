@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voiz Setup</title>
+    <title>Zone Setup</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
     <div class="container">
         <header class="header">
-            <h1>Voiz Configuration</h1>
+            <h1>Zone Configuration</h1>
             <p>Set up your self-hosted AI stack</p>
         </header>
 
@@ -56,7 +56,7 @@
                     <div class="form-field">
                         <label for="auth-realm">Authentication Realm</label>
                         <input type="text" id="auth-realm" name="SECURITY_BASICAUTH_REALM"
-                               value="Voiz AI Stack">
+                               value="Zone AI Stack">
                     </div>
 
                     <div class="form-field">
@@ -200,7 +200,7 @@
                     <div class="form-field">
                         <label for="search-name">Search Instance Name</label>
                         <input type="text" id="search-name" name="SEARCH_SEARXNG_INSTANCE_NAME"
-                               value="Voiz Search">
+                               value="Zone Search">
                     </div>
 
                     <div class="info-box info">
@@ -272,6 +272,51 @@
                     <h2>Advanced Settings</h2>
                     <p>Performance tuning and system configuration</p>
 
+                    <h3 style="margin-top: var(--space-lg); margin-bottom: var(--space-md); font-size: 1rem; color: var(--text-secondary);">Monitoring</h3>
+
+                    <div class="form-field">
+                        <div class="checkbox-wrapper">
+                            <input type="checkbox" id="enable-monitoring" name="MONITORING_ENABLED" onchange="toggleMonitoringFields()">
+                            <label for="enable-monitoring">Enable Prometheus + Grafana monitoring</label>
+                        </div>
+                        <p class="help-text" style="margin-left: 2.25rem;">Adds metrics collection and dashboards</p>
+                    </div>
+
+                    <div id="monitoring-fields" class="hidden">
+                        <div class="form-field">
+                            <label for="grafana-user">Grafana Admin Username</label>
+                            <input type="text" id="grafana-user" name="MONITORING_GRAFANA_ADMIN_USER"
+                                   value="admin">
+                        </div>
+
+                        <div class="form-field">
+                            <label for="grafana-password">Grafana Admin Password</label>
+                            <div class="flex gap-md">
+                                <input type="text" id="grafana-password" name="MONITORING_GRAFANA_ADMIN_PASSWORD"
+                                       value="" class="font-mono" placeholder="Leave empty to auto-generate">
+                                <button type="button" onclick="generateSecret('MONITORING_GRAFANA_ADMIN_PASSWORD')"
+                                        class="btn btn-generate">Generate</button>
+                            </div>
+                        </div>
+
+                        <div class="form-field">
+                            <label for="retention-time">Metrics Retention</label>
+                            <select id="retention-time" name="MONITORING_RETENTION_TIME">
+                                <option value="7d">7 days</option>
+                                <option value="15d" selected>15 days</option>
+                                <option value="30d">30 days</option>
+                                <option value="90d">90 days</option>
+                            </select>
+                            <p class="help-text">How long to keep metrics data</p>
+                        </div>
+
+                        <div class="info-box info">
+                            Start with: <code style="background: var(--bg-base); padding: 0.25rem 0.5rem; border-radius: 0.25rem;">docker compose --profile monitoring up</code>
+                        </div>
+                    </div>
+
+                    <h3 style="margin-top: var(--space-lg); margin-bottom: var(--space-md); font-size: 1rem; color: var(--text-secondary);">Performance</h3>
+
                     <div class="form-field">
                         <label for="workers">Worker Count</label>
                         <input type="number" id="workers" name="ADVANCED_LITELLM_WORKERS"
@@ -326,7 +371,7 @@
     <!-- Installation Modal -->
     <div id="install-modal" class="modal">
         <div class="modal-content">
-            <h3>Installing Voiz</h3>
+            <h3>Installing Zone</h3>
             <div id="install-status" class="status-log">
                 <div class="status-line">Preparing installation...</div>
             </div>

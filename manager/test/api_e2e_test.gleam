@@ -20,6 +20,7 @@ import gleeunit/should
 
 // Test configuration - these can be overridden via environment variables
 const test_host = "http://localhost:8000"
+
 const test_api_key = "test-key"
 
 // =============================================================================
@@ -43,7 +44,8 @@ fn make_api_request(
         False -> req
       }
       let req = case with_auth {
-        True -> request.set_header(req, "authorization", "Bearer " <> test_api_key)
+        True ->
+          request.set_header(req, "authorization", "Bearer " <> test_api_key)
         False -> req
       }
 
@@ -77,14 +79,16 @@ fn server_available() -> Bool {
 
 pub fn api_requires_auth_models_test() {
   case server_available() {
-    False -> Nil  // Skip if server not running
+    False -> Nil
+    // Skip if server not running
     True -> {
       case get_api("/api/models", False) {
         Ok(#(status, body)) -> {
           status |> should.equal(401)
           body |> string.contains("Unauthorized") |> should.be_true()
         }
-        Error(_) -> Nil  // Server not configured correctly
+        Error(_) -> Nil
+        // Server not configured correctly
       }
     }
   }
@@ -152,7 +156,8 @@ pub fn api_rejects_invalid_key_test() {
 
       case request.to(url) {
         Ok(req) -> {
-          let req = request.set_header(req, "authorization", "Bearer invalid-key")
+          let req =
+            request.set_header(req, "authorization", "Bearer invalid-key")
 
           case httpc.send(req) {
             Ok(response) -> {
@@ -391,18 +396,22 @@ pub fn browse_returns_json_test() {
 
       case request.to(url) {
         Ok(req) -> {
-          let req = request.set_header(req, "authorization", "Bearer " <> test_api_key)
+          let req =
+            request.set_header(req, "authorization", "Bearer " <> test_api_key)
 
           case httpc.send(req) {
             Ok(response) -> {
               // Check content-type header
-              let content_type = list.find(response.headers, fn(h) {
-                string.lowercase(h.0) == "content-type"
-              })
+              let content_type =
+                list.find(response.headers, fn(h) {
+                  string.lowercase(h.0) == "content-type"
+                })
 
               case content_type {
                 Ok(#(_, value)) -> {
-                  value |> string.contains("application/json") |> should.be_true()
+                  value
+                  |> string.contains("application/json")
+                  |> should.be_true()
                 }
                 Error(_) -> should.fail()
               }
@@ -480,12 +489,623 @@ pub fn browse_ollama_model_structure_test() {
                   downloads |> fn(d) { d > 0 } |> should.be_true()
                   list.length(tags) |> fn(l) { l > 0 } |> should.be_true()
                 }
-                Error(_) -> Nil  // No models returned
+                Error(_) -> Nil
+                // No models returned
               }
             }
             Error(_) -> should.fail()
           }
         }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+// =============================================================================
+// Chats API tests
+// =============================================================================
+
+fn post_api(
+  path: String,
+  body: String,
+  with_auth: Bool,
+) -> Result(#(Int, String), String) {
+  make_api_request(http.Post, path, body, with_auth)
+}
+
+fn patch_api(
+  path: String,
+  body: String,
+  with_auth: Bool,
+) -> Result(#(Int, String), String) {
+  make_api_request(http.Patch, path, body, with_auth)
+}
+
+fn delete_api(path: String, with_auth: Bool) -> Result(#(Int, String), String) {
+  make_api_request(http.Delete, path, "", with_auth)
+}
+
+pub fn chats_requires_auth_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/chats", False) {
+        Ok(#(status, _)) -> status |> should.equal(401)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_list_empty_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/chats", True) {
+        Ok(#(status, body)) -> {
+          status |> should.equal(200)
+          let decoder = {
+            use success <- decode.field("success", decode.bool)
+            use chats <- decode.field("chats", decode.list(decode.dynamic))
+            decode.success(#(success, chats))
+          }
+          case json.parse(body, decoder) {
+            Ok(#(success, _)) -> success |> should.be_true()
+            Error(_) -> should.fail()
+          }
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_create_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body =
+        json.object([
+          #("model_name", json.string("test-model")),
+        ])
+        |> json.to_string
+
+      case post_api("/api/chats", body, True) {
+        Ok(#(status, response_body)) -> {
+          status |> should.equal(201)
+          let decoder = {
+            use success <- decode.field("success", decode.bool)
+            decode.success(success)
+          }
+          case json.parse(response_body, decoder) {
+            Ok(success) -> success |> should.be_true()
+            Error(_) -> should.fail()
+          }
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_create_with_first_message_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body =
+        json.object([
+          #("model_name", json.string("test-model")),
+          #("first_message", json.string("Hello, world!")),
+        ])
+        |> json.to_string
+
+      case post_api("/api/chats", body, True) {
+        Ok(#(status, response_body)) -> {
+          status |> should.equal(201)
+          // Verify the chat was created with the title from first message
+          response_body |> string.contains("Hello, world!") |> should.be_true()
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_create_invalid_body_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case post_api("/api/chats", "invalid json", True) {
+        Ok(#(status, _)) -> status |> should.equal(400)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_create_missing_model_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body = json.object([]) |> json.to_string
+      case post_api("/api/chats", body, True) {
+        Ok(#(status, _)) -> status |> should.equal(400)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_get_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/chats/nonexistent-id-12345", True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_filter_by_archived_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/chats?archived=false", True) {
+        Ok(#(status, body)) -> {
+          status |> should.equal(200)
+          body |> string.contains("success") |> should.be_true()
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_archive_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case post_api("/api/chats/nonexistent-id/archive", "", True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_unarchive_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case post_api("/api/chats/nonexistent-id/unarchive", "", True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_delete_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case delete_api("/api/chats/nonexistent-id-12345", True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_messages_list_nonexistent_chat_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/chats/nonexistent-id/messages", True) {
+        Ok(#(status, body)) -> {
+          // Returns empty list for nonexistent chat (or 200 with empty)
+          status |> should.equal(200)
+          body |> string.contains("messages") |> should.be_true()
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_send_message_invalid_body_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case post_api("/api/chats/some-chat/messages", "invalid", True) {
+        Ok(#(status, _)) -> status |> should.equal(400)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_update_title_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body =
+        json.object([#("title", json.string("New Title"))]) |> json.to_string
+      case patch_api("/api/chats/nonexistent-id", body, True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_method_not_allowed_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      // PUT is not allowed on /api/chats
+      let url = test_host <> "/api/chats"
+      case request.to(url) {
+        Ok(req) -> {
+          let req = request.set_method(req, http.Put)
+          let req =
+            request.set_header(req, "authorization", "Bearer " <> test_api_key)
+          case httpc.send(req) {
+            Ok(response) -> response.status |> should.equal(405)
+            Error(_) -> Nil
+          }
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn chats_response_structure_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      // Create a chat first
+      let create_body =
+        json.object([
+          #("model_name", json.string("structure-test-model")),
+        ])
+        |> json.to_string
+
+      case post_api("/api/chats", create_body, True) {
+        Ok(#(201, response_body)) -> {
+          // Verify response contains all expected fields
+          let decoder = {
+            use success <- decode.field("success", decode.bool)
+            use chat <- decode.field("chat", {
+              use id <- decode.field("id", decode.string)
+              use title <- decode.field("title", decode.string)
+              use model_name <- decode.field("model_name", decode.string)
+              use archived <- decode.field("archived", decode.bool)
+              use created_at <- decode.field("created_at", decode.string)
+              use updated_at <- decode.field("updated_at", decode.string)
+              decode.success(#(
+                id,
+                title,
+                model_name,
+                archived,
+                created_at,
+                updated_at,
+              ))
+            })
+            decode.success(#(success, chat))
+          }
+
+          case json.parse(response_body, decoder) {
+            Ok(#(success, #(id, title, model_name, archived, _, _))) -> {
+              success |> should.be_true()
+              string.length(id) |> fn(l) { l > 0 } |> should.be_true()
+              title |> should.equal("New Chat")
+              model_name |> should.equal("structure-test-model")
+              archived |> should.be_false()
+            }
+            Error(_) -> should.fail()
+          }
+        }
+        Ok(_) -> should.fail()
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+// =============================================================================
+// Projects API tests
+// =============================================================================
+
+pub fn projects_requires_auth_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/projects", False) {
+        Ok(#(status, _)) -> status |> should.equal(401)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_list_empty_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/projects", True) {
+        Ok(#(status, body)) -> {
+          status |> should.equal(200)
+          let decoder = {
+            use success <- decode.field("success", decode.bool)
+            use projects <- decode.field(
+              "projects",
+              decode.list(decode.dynamic),
+            )
+            decode.success(#(success, projects))
+          }
+          case json.parse(body, decoder) {
+            Ok(#(success, _)) -> success |> should.be_true()
+            Error(_) -> should.fail()
+          }
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_create_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body =
+        json.object([
+          #("name", json.string("Test Project")),
+          #("description", json.string("A test project")),
+        ])
+        |> json.to_string
+
+      case post_api("/api/projects", body, True) {
+        Ok(#(status, response_body)) -> {
+          status |> should.equal(201)
+          response_body |> string.contains("Test Project") |> should.be_true()
+          response_body |> string.contains("success") |> should.be_true()
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_create_with_status_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body =
+        json.object([
+          #("name", json.string("On Hold Project")),
+          #("status", json.string("on_hold")),
+        ])
+        |> json.to_string
+
+      case post_api("/api/projects", body, True) {
+        Ok(#(status, response_body)) -> {
+          status |> should.equal(201)
+          response_body |> string.contains("on_hold") |> should.be_true()
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_create_with_github_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body =
+        json.object([
+          #("name", json.string("GitHub Project")),
+          #("github_repo_url", json.string("https://github.com/test/repo")),
+        ])
+        |> json.to_string
+
+      case post_api("/api/projects", body, True) {
+        Ok(#(status, response_body)) -> {
+          status |> should.equal(201)
+          response_body |> string.contains("github.com") |> should.be_true()
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_create_invalid_body_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case post_api("/api/projects", "invalid json", True) {
+        Ok(#(status, _)) -> status |> should.equal(400)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_create_missing_name_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body =
+        json.object([#("description", json.string("No name"))])
+        |> json.to_string
+      case post_api("/api/projects", body, True) {
+        Ok(#(status, _)) -> status |> should.equal(400)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_get_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/projects/nonexistent-id-12345", True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_filter_by_status_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case get_api("/api/projects?status=active", True) {
+        Ok(#(status, body)) -> {
+          status |> should.equal(200)
+          body |> string.contains("success") |> should.be_true()
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_update_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let body =
+        json.object([#("name", json.string("Updated"))]) |> json.to_string
+      case patch_api("/api/projects/nonexistent-id", body, True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_delete_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case delete_api("/api/projects/nonexistent-id-12345", True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_link_github_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      let url = test_host <> "/api/projects/nonexistent-id/github"
+      let body =
+        json.object([#("repo_url", json.string("https://github.com/test/repo"))])
+        |> json.to_string
+      case request.to(url) {
+        Ok(req) -> {
+          let req = request.set_method(req, http.Put)
+          let req = request.set_body(req, body)
+          let req = request.set_header(req, "content-type", "application/json")
+          let req =
+            request.set_header(req, "authorization", "Bearer " <> test_api_key)
+          case httpc.send(req) {
+            Ok(response) -> response.status |> should.equal(404)
+            Error(_) -> Nil
+          }
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_unlink_github_nonexistent_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      case delete_api("/api/projects/nonexistent-id/github", True) {
+        Ok(#(status, _)) -> status |> should.equal(404)
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_method_not_allowed_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      // PUT is not allowed on /api/projects collection
+      let url = test_host <> "/api/projects"
+      case request.to(url) {
+        Ok(req) -> {
+          let req = request.set_method(req, http.Put)
+          let req =
+            request.set_header(req, "authorization", "Bearer " <> test_api_key)
+          case httpc.send(req) {
+            Ok(response) -> response.status |> should.equal(405)
+            Error(_) -> Nil
+          }
+        }
+        Error(_) -> Nil
+      }
+    }
+  }
+}
+
+pub fn projects_response_structure_test() {
+  case server_available() {
+    False -> Nil
+    True -> {
+      // Create a project first
+      let create_body =
+        json.object([
+          #("name", json.string("Structure Test")),
+          #("description", json.string("Testing structure")),
+          #("status", json.string("active")),
+        ])
+        |> json.to_string
+
+      case post_api("/api/projects", create_body, True) {
+        Ok(#(201, response_body)) -> {
+          // Verify response contains all expected fields
+          let decoder = {
+            use success <- decode.field("success", decode.bool)
+            use project <- decode.field("project", {
+              use id <- decode.field("id", decode.string)
+              use name <- decode.field("name", decode.string)
+              use status <- decode.field("status", decode.string)
+              use created_at <- decode.field("created_at", decode.string)
+              use updated_at <- decode.field("updated_at", decode.string)
+              decode.success(#(id, name, status, created_at, updated_at))
+            })
+            decode.success(#(success, project))
+          }
+
+          case json.parse(response_body, decoder) {
+            Ok(#(success, #(id, name, status, _, _))) -> {
+              success |> should.be_true()
+              string.length(id) |> fn(l) { l > 0 } |> should.be_true()
+              name |> should.equal("Structure Test")
+              status |> should.equal("active")
+            }
+            Error(_) -> should.fail()
+          }
+        }
+        Ok(_) -> should.fail()
         Error(_) -> Nil
       }
     }

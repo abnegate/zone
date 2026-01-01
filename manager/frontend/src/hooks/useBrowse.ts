@@ -1,15 +1,15 @@
 import { useCallback, useRef, useState } from 'react';
 import { client } from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import type { BrowseModel, HuggingFaceModel, ModelSource } from '../types';
+import type { BrowseModel, ModelSource } from '../types';
 
 const LIMIT = 20;
 
 export function useBrowse() {
-  const { apiKey } = useAuth();
+  const { isAuthenticated } = useAuth();
   const [source, setSource] = useState<ModelSource>('ollama');
   const [query, setQuery] = useState('');
-  const [models, setModels] = useState<(BrowseModel | HuggingFaceModel)[]>([]);
+  const [models, setModels] = useState<BrowseModel[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -18,14 +18,13 @@ export function useBrowse() {
 
   const search = useCallback(
     async (searchQuery: string = query, searchSource: ModelSource = source) => {
-      if (!apiKey) return;
+      if (!isAuthenticated) return;
 
       setLoading(true);
       setError(null);
       offsetRef.current = 0;
 
       try {
-        client.setApiKey(apiKey);
         const response = await client.browseModels(searchSource, searchQuery, 0, LIMIT);
         setModels(response.models);
         setHasMore(response.has_more);
@@ -37,16 +36,15 @@ export function useBrowse() {
         setLoading(false);
       }
     },
-    [apiKey, query, source]
+    [isAuthenticated, query, source]
   );
 
   const loadMore = useCallback(async () => {
-    if (!apiKey || loadingMore || !hasMore) return;
+    if (!isAuthenticated || loadingMore || !hasMore) return;
 
     setLoadingMore(true);
 
     try {
-      client.setApiKey(apiKey);
       const response = await client.browseModels(source, query, offsetRef.current, LIMIT);
       setModels((prev) => [...prev, ...response.models]);
       setHasMore(response.has_more);
@@ -56,7 +54,7 @@ export function useBrowse() {
     } finally {
       setLoadingMore(false);
     }
-  }, [apiKey, source, query, loadingMore, hasMore]);
+  }, [isAuthenticated, source, query, loadingMore, hasMore]);
 
   const changeSource = useCallback(
     (newSource: ModelSource) => {

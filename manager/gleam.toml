@@ -15,6 +15,9 @@ mist = "~> 5.0"
 simplifile = "~> 2.3"
 httpp = "~> 1.1"
 gleam_crypto = "~> 1.5"
+pog = "~> 4.1"
+birl = "~> 1.7"
+valkyrie = "~> 4.1"
 
 [dev-dependencies]
 gleeunit = "~> 1.3"

@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import type { PullProgress, Step } from '../types';
 
 export function usePull() {
-  const { apiKey } = useAuth();
+  const { isAuthenticated } = useAuth();
   const [pulling, setPulling] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [steps, setSteps] = useState<Step[]>([]);
@@ -14,7 +14,7 @@ export function usePull() {
   const pull = useCallback(
     (modelName: string): Promise<boolean> => {
       return new Promise((resolve) => {
-        if (!apiKey || !modelName.trim()) {
+        if (!isAuthenticated || !modelName.trim()) {
           resolve(false);
           return;
         }
@@ -24,20 +24,29 @@ export function usePull() {
         setSteps([]);
         setResult(null);
 
-        client.setApiKey(apiKey);
         const ws = client.createPullWebSocket(modelName.trim());
         wsRef.current = ws;
 
+        let authenticated = false;
+
         ws.onopen = () => {
-          const msg = JSON.stringify({ model: modelName.trim() });
-          console.log('[usePull] WebSocket opened, sending:', msg);
-          ws.send(msg);
+          // Send authentication token first
+          const authMsg = JSON.stringify({ token: client['accessToken'] || '' });
+          ws.send(authMsg);
         };
 
         ws.onmessage = (event) => {
-          console.log('[usePull] Received:', event.data);
           try {
             const data: PullProgress = JSON.parse(event.data);
+
+            // Handle authentication response
+            if (data.type === 'authenticated') {
+              authenticated = true;
+              // Now send the pull request
+              const msg = JSON.stringify({ model: modelName.trim() });
+              ws.send(msg);
+              return;
+            }
 
             switch (data.type) {
               case 'progress':
@@ -95,8 +104,7 @@ export function usePull() {
           }
         };
 
-        ws.onerror = (err) => {
-          console.log('[usePull] WebSocket error:', err);
+        ws.onerror = () => {
           setPulling(false);
           setResult({
             success: false,
@@ -105,15 +113,14 @@ export function usePull() {
           resolve(false);
         };
 
-        ws.onclose = (event) => {
-          console.log('[usePull] WebSocket closed:', event.code, event.reason);
+        ws.onclose = () => {
           if (pulling) {
             setPulling(false);
           }
         };
       });
     },
-    [apiKey, pulling]
+    [isAuthenticated, pulling]
   );
 
   const reset = useCallback(() => {

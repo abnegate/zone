@@ -1,5 +1,11 @@
+/// Model Controller
+/// Handles /api/models routes for browsing and managing models
+///
+/// To add a new model source:
+/// 1. Create a module in sources/ with browse() and get_info() functions
+/// 2. Export a handler() function returning a ModelSourceHandler
+/// 3. Add it to get_source_handler() below
 import config
-import gleam/dynamic/decode
 import gleam/http
 import gleam/int
 import gleam/json
@@ -7,32 +13,57 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import gleam/uri
-import ollama_models
 import services/http_client
+import sources/huggingface
+import sources/modelscope
+import sources/ollama_library
+import sources/source.{type ModelSourceHandler}
 import wisp.{type Request, type Response}
+
+// =============================================================================
+// Source Registry - the ONLY place where sources are dispatched
+// =============================================================================
+
+/// Get a handler for a source by ID
+/// This is the ONLY place where source types are dispatched
+fn get_source_handler(source_id: String) -> Option(ModelSourceHandler) {
+  case source_id {
+    "ollama" -> Some(ollama_library.handler())
+    "huggingface" -> Some(huggingface.handler())
+    "modelscope" -> Some(modelscope.handler())
+    _ -> None
+  }
+}
+
+/// List of all available source IDs for browsing
+pub const available_sources = ["ollama", "huggingface", "modelscope"]
+
+// =============================================================================
+// Route Handlers
+// =============================================================================
 
 /// Handle /api/models routes
 pub fn handle_models(req: Request) -> Response {
   case req.method {
     http.Get -> {
       let query = wisp.get_query(req)
-      let source = get_query_param(query, "source", "installed")
+      let source_name = get_query_param(query, "source", "installed")
 
-      case source {
+      case source_name {
         "installed" -> list_installed_models()
-        "ollama" -> {
-          let search = get_query_param(query, "q", "")
-          let limit = get_query_param(query, "limit", "20")
-          let offset = get_query_param(query, "offset", "0")
-          browse_ollama_library(search, limit, offset)
+        source_id -> {
+          case get_source_handler(source_id) {
+            Some(handler) -> {
+              let search = get_query_param(query, "q", "")
+              let limit =
+                parse_int_param(get_query_param(query, "limit", "20"), 20)
+              let offset =
+                parse_int_param(get_query_param(query, "offset", "0"), 0)
+              browse_source(handler.browse(search, limit, offset))
+            }
+            None -> json_error_response(400, "Unknown source: " <> source_id)
+          }
         }
-        "huggingface" -> {
-          let search = get_query_param(query, "q", "")
-          let limit = get_query_param(query, "limit", "20")
-          let offset = get_query_param(query, "offset", "0")
-          browse_huggingface(search, limit, offset)
-        }
-        _ -> json_error_response(400, "Unknown source: " <> source)
       }
     }
     _ -> wisp.method_not_allowed([http.Get])
@@ -40,11 +71,32 @@ pub fn handle_models(req: Request) -> Response {
 }
 
 /// Handle /api/models/:name routes
+/// Model name may include source prefix: huggingface/author/model, modelscope/author/model
+/// or just author/model (defaults to huggingface)
 pub fn handle_model_by_name(req: Request, model_name: String) -> Response {
   case req.method {
-    http.Get -> fetch_huggingface_model_info(model_name)
+    http.Get -> {
+      // Parse source prefix from model name
+      let #(source_id, actual_name) = parse_model_source(model_name)
+      case get_source_handler(source_id) {
+        Some(handler) -> get_model_info(handler.get_info(actual_name))
+        None -> json_error_response(400, "Unknown source: " <> source_id)
+      }
+    }
     http.Delete -> delete_model(model_name)
     _ -> wisp.method_not_allowed([http.Get, http.Delete])
+  }
+}
+
+/// Parse source prefix from model name
+/// Returns (source_id, actual_model_name)
+fn parse_model_source(model_name: String) -> #(String, String) {
+  case model_name {
+    "modelscope/" <> rest -> #("modelscope", rest)
+    "huggingface/" <> rest -> #("huggingface", rest)
+    "ollama/" <> rest -> #("ollama", rest)
+    // Default to huggingface when no source prefix specified
+    _ -> #("huggingface", model_name)
   }
 }
 
@@ -65,6 +117,39 @@ fn list_installed_models() -> Response {
     Error(err) -> {
       json_error_response(500, err)
     }
+  }
+}
+
+// =============================================================================
+// Source Browse/Info Handlers
+// =============================================================================
+
+fn browse_source(result: Result(source.BrowseResult, String)) -> Response {
+  case result {
+    Ok(browse_result) -> {
+      wisp.response(200)
+      |> wisp.set_header("content-type", "application/json")
+      |> wisp.string_body(source.browse_result_to_json(browse_result))
+    }
+    Error(err) -> json_error_response(500, err)
+  }
+}
+
+fn get_model_info(result: Result(source.ModelInfo, String)) -> Response {
+  case result {
+    Ok(info) -> {
+      wisp.response(200)
+      |> wisp.set_header("content-type", "application/json")
+      |> wisp.string_body(source.model_info_to_json(info))
+    }
+    Error(err) -> json_error_response(404, err)
+  }
+}
+
+fn parse_int_param(value: String, default: Int) -> Int {
+  case int.parse(value) {
+    Ok(n) -> n
+    Error(_) -> default
   }
 }
 
@@ -91,22 +176,23 @@ fn delete_model(model_name: String) -> Response {
   let ollama_result = delete_from_ollama(ollama_host, decoded_name)
 
   // Step 2: Delete from LiteLLM (best effort)
-  let litellm_result = delete_from_litellm(litellm_host, litellm_key, decoded_name)
+  let litellm_result =
+    delete_from_litellm(litellm_host, litellm_key, decoded_name)
 
   let response_json =
     json.object([
       #("success", json.bool(ollama_result.success)),
       #("message", json.string(ollama_result.message)),
-      #("steps", json.array(
-        [ollama_result, litellm_result],
-        fn(step) {
+      #(
+        "steps",
+        json.array([ollama_result, litellm_result], fn(step) {
           json.object([
             #("step", json.string(step.step)),
             #("success", json.bool(step.success)),
             #("message", json.string(step.message)),
           ])
-        },
-      )),
+        }),
+      ),
     ])
     |> json.to_string
 
@@ -128,7 +214,8 @@ fn delete_from_ollama(ollama_host: String, model_name: String) -> StepResult {
 
   case http_client.delete(url, payload, []) {
     Ok(_) -> StepResult("ollama", True, "Deleted from Ollama")
-    Error(err) -> StepResult("ollama", False, "Failed to delete from Ollama: " <> err)
+    Error(err) ->
+      StepResult("ollama", False, "Failed to delete from Ollama: " <> err)
   }
 }
 
@@ -152,211 +239,10 @@ fn delete_from_litellm(
 
       case http_client.post(url, payload, headers) {
         Ok(_) -> StepResult("litellm", True, "Deleted from LiteLLM")
-        Error(_) -> StepResult("litellm", False, "Model may not exist in LiteLLM")
+        Error(_) ->
+          StepResult("litellm", False, "Model may not exist in LiteLLM")
       }
     }
-  }
-}
-
-// =============================================================================
-// Browse Ollama Library
-// =============================================================================
-
-fn browse_ollama_library(search: String, limit_str: String, offset_str: String) -> Response {
-  // Get all models from the ollama_models module
-  let models = ollama_models.get_all_models()
-
-  let filtered = case search {
-    "" -> models
-    q -> list.filter(models, fn(m: ollama_models.OllamaModel) {
-      string.contains(string.lowercase(m.name), string.lowercase(q)) ||
-      string.contains(string.lowercase(m.description), string.lowercase(q)) ||
-      list.any(m.tags, fn(tag) { string.contains(string.lowercase(tag), string.lowercase(q)) })
-    })
-  }
-
-  // Parse limit and offset with defaults
-  let limit = case int.parse(limit_str) {
-    Ok(n) -> n
-    Error(_) -> 20
-  }
-  let offset = case int.parse(offset_str) {
-    Ok(n) -> n
-    Error(_) -> 0
-  }
-
-  // Apply pagination
-  let total = list.length(filtered)
-  let paginated = filtered
-    |> list.drop(offset)
-    |> list.take(limit)
-  let has_more = offset + limit < total
-
-  let models_json =
-    json.object([
-      #("source", json.string("ollama")),
-      #("models", json.array(paginated, fn(m) {
-        json.object([
-          #("id", json.string(m.name)),
-          #("name", json.string(m.name)),
-          #("description", json.string(m.description)),
-          #("downloads", json.int(m.pulls)),
-          #("tags", json.array(m.tags, json.string)),
-        ])
-      })),
-      #("total", json.int(total)),
-      #("has_more", json.bool(has_more)),
-    ])
-    |> json.to_string
-
-  wisp.response(200)
-  |> wisp.set_header("content-type", "application/json")
-  |> wisp.string_body(models_json)
-}
-
-// =============================================================================
-// Browse HuggingFace
-// =============================================================================
-
-fn browse_huggingface(search: String, limit: String, offset: String) -> Response {
-  // HuggingFace API for GGUF models (Ollama-compatible)
-  let base_url = "https://huggingface.co/api/models"
-  let query_params = case search {
-    "" -> "?filter=gguf&sort=downloads&direction=-1&limit=" <> limit <> "&skip=" <> offset
-    q -> "?search=" <> uri_encode(q) <> "&filter=gguf&sort=downloads&direction=-1&limit=" <> limit <> "&skip=" <> offset
-  }
-  let url = base_url <> query_params
-
-  let limit_int = case int.parse(limit) {
-    Ok(n) -> n
-    Error(_) -> 20
-  }
-
-  case http_client.get(url, []) {
-    Ok(body) -> {
-      // Transform HuggingFace response to our format
-      let transformed = transform_huggingface_response(body, limit_int)
-
-      wisp.response(200)
-      |> wisp.set_header("content-type", "application/json")
-      |> wisp.string_body(transformed)
-    }
-    Error(err) -> {
-      json_error_response(500, "Failed to fetch from HuggingFace: " <> err)
-    }
-  }
-}
-
-fn transform_huggingface_response(body: String, limit: Int) -> String {
-  // Parse the HuggingFace response and transform to our format
-  let decoder = decode.list({
-    use id <- decode.field("modelId", decode.string)
-    use downloads <- decode.optional_field("downloads", 0, decode.int)
-    use tags <- decode.optional_field("tags", [], decode.list(decode.string))
-    use pipeline_tag <- decode.optional_field("pipeline_tag", "", decode.string)
-    use author <- decode.optional_field("author", "", decode.string)
-    use likes <- decode.optional_field("likes", 0, decode.int)
-    use last_modified <- decode.optional_field("lastModified", "", decode.string)
-    decode.success(#(id, downloads, tags, pipeline_tag, author, likes, last_modified))
-  })
-
-  case json.parse(body, decoder) {
-    Ok(models) -> {
-      // If we got exactly the limit, assume there are more results
-      let has_more = list.length(models) >= limit
-
-      let transformed =
-        json.object([
-          #("source", json.string("huggingface")),
-          #("models", json.array(models, fn(m) {
-            let #(id, downloads, tags, pipeline, author, likes, last_modified) = m
-
-            json.object([
-              #("id", json.string(id)),
-              #("name", json.string(id)),
-              #("description", json.string(case pipeline {
-                "" -> "HuggingFace GGUF model"
-                p -> "HuggingFace GGUF model - " <> p
-              })),
-              #("downloads", json.int(downloads)),
-              #("tags", json.array(tags, json.string)),
-              #("install_name", json.string("hf.co/" <> id)),
-              #("author", json.string(author)),
-              #("likes", json.int(likes)),
-              #("last_modified", json.string(last_modified)),
-              #("url", json.string("https://huggingface.co/" <> id)),
-              #("pipeline_tag", json.string(pipeline)),
-            ])
-          })),
-          #("has_more", json.bool(has_more)),
-        ])
-      json.to_string(transformed)
-    }
-    Error(_) -> {
-      // Return empty result on parse error
-      json.object([
-        #("source", json.string("huggingface")),
-        #("models", json.array([], fn(_: String) { json.null() })),
-        #("has_more", json.bool(False)),
-        #("error", json.string("Failed to parse HuggingFace response")),
-      ])
-      |> json.to_string
-    }
-  }
-}
-
-// =============================================================================
-// HuggingFace Model Info
-// =============================================================================
-
-fn fetch_huggingface_model_info(model_id: String) -> Response {
-  // Fetch model info from HuggingFace API (includes gguf size)
-  let api_url = "https://huggingface.co/api/models/" <> model_id
-  let readme_url = "https://huggingface.co/" <> model_id <> "/raw/main/README.md"
-
-  // Get model info for size
-  let gguf_size = case http_client.get(api_url, []) {
-    Ok(api_body) -> parse_gguf_size(api_body)
-    Error(_) -> None
-  }
-
-  // Get README content
-  let content = case http_client.get(readme_url, []) {
-    Ok(readme) -> Some(readme)
-    Error(_) -> None
-  }
-
-  let response_json =
-    json.object([
-      #("success", json.bool(True)),
-      #("content", case content {
-        Some(c) -> json.string(c)
-        None -> json.null()
-      }),
-      #("gguf_size", case gguf_size {
-        Some(size) -> json.int(size)
-        None -> json.null()
-      }),
-    ])
-    |> json.to_string
-
-  wisp.response(200)
-  |> wisp.set_header("content-type", "application/json")
-  |> wisp.string_body(response_json)
-}
-
-fn parse_gguf_size(body: String) -> Option(Int) {
-  let decoder = {
-    use gguf <- decode.optional_field("gguf", None, {
-      use total <- decode.field("total", decode.int)
-      decode.success(total)
-    } |> decode.map(Some))
-    decode.success(gguf)
-  }
-
-  case json.parse(body, decoder) {
-    Ok(Some(size)) -> Some(size)
-    _ -> None
   }
 }
 
@@ -377,15 +263,21 @@ pub fn register_model_in_litellm(
       let payload =
         json.object([
           #("model_name", json.string(model_name)),
-          #("litellm_params", json.object([
-            #("model", json.string("ollama/" <> model_name)),
-            #("api_base", json.string(ollama_host)),
-            #("timeout", json.int(120)),
-          ])),
-          #("model_info", json.object([
-            #("id", json.string(model_name)),
-            #("mode", json.string("chat")),
-          ])),
+          #(
+            "litellm_params",
+            json.object([
+              #("model", json.string("ollama/" <> model_name)),
+              #("api_base", json.string(ollama_host)),
+              #("timeout", json.int(120)),
+            ]),
+          ),
+          #(
+            "model_info",
+            json.object([
+              #("id", json.string(model_name)),
+              #("mode", json.string("chat")),
+            ]),
+          ),
         ])
         |> json.to_string
 
@@ -397,10 +289,8 @@ pub fn register_model_in_litellm(
       case http_client.post(url, payload, headers) {
         Ok(body) -> {
           case string.contains(body, "\"error\"") {
-            True ->
-              StepResult("register", False, "LiteLLM error: " <> body)
-            False ->
-              StepResult("register", True, "Model registered in LiteLLM")
+            True -> StepResult("register", False, "LiteLLM error: " <> body)
+            False -> StepResult("register", True, "Model registered in LiteLLM")
           }
         }
         Error(err) ->
@@ -436,8 +326,4 @@ fn json_error_response(status: Int, message: String) -> Response {
   wisp.response(status)
   |> wisp.set_header("content-type", "application/json")
   |> wisp.string_body(error_json)
-}
-
-fn uri_encode(s: String) -> String {
-  uri.percent_encode(s)
 }

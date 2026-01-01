@@ -1,3 +1,12 @@
+# Build React frontend
+FROM node:20-slim AS frontend-builder
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# Build Gleam backend
 FROM ghcr.io/gleam-lang/gleam:v1.14.0-erlang AS builder
 WORKDIR /build
 COPY gleam.toml .
@@ -5,6 +14,7 @@ COPY src src
 RUN gleam deps download
 RUN gleam build
 
+# Runtime
 FROM ghcr.io/gleam-lang/gleam:v1.14.0-erlang AS runtime
 
 RUN apt-get update && \
@@ -16,6 +26,9 @@ RUN groupadd -r appuser && useradd -r -g appuser -s /bin/false appuser
 WORKDIR /build
 
 COPY --from=builder /build /build
+COPY --from=frontend-builder /frontend/build /build/frontend/build
+
+# Keep legacy static/templates for fallback during development
 COPY static static
 COPY templates templates
 

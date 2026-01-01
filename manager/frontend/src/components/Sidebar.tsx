@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
+import ContextSwitcher from './ContextSwitcher';
 import './Sidebar.css';
+
+const COLLAPSED_KEY = 'manager_sidebar_collapsed';
 
 const navItems = [
   {
@@ -20,6 +24,11 @@ const navItems = [
     icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4',
   },
   {
+    path: '/sources',
+    label: 'Sources',
+    icon: 'M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z',
+  },
+  {
     path: '/',
     label: 'Models',
     icon: 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4',
@@ -29,11 +38,32 @@ const navItems = [
     label: 'Wiki',
     icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253',
   },
+  {
+    path: '/settings',
+    label: 'Settings',
+    icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z',
+  },
 ];
 
 export default function Sidebar() {
   const { logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === 'true');
+
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem(COLLAPSED_KEY, String(next));
+      document.documentElement.setAttribute('data-sidebar-collapsed', String(next));
+      return next;
+    });
+  };
+
+  // Set initial collapsed state on mount
+  if (typeof document !== 'undefined') {
+    document.documentElement.setAttribute('data-sidebar-collapsed', String(collapsed));
+  }
 
   return (
     <>
@@ -54,10 +84,38 @@ export default function Sidebar() {
         </svg>
       </button>
 
-      <aside className={`sidebar ${mobileOpen ? 'open' : ''}`}>
+      <aside className={`sidebar ${mobileOpen ? 'open' : ''} ${collapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <h1 className="logo">Zone</h1>
+          {!collapsed && <h1 className="logo">Zone</h1>}
+          <button
+            className="theme-toggle"
+            onClick={toggleTheme}
+            type="button"
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              {theme === 'dark' ? (
+                <path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+              ) : (
+                <path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+              )}
+            </svg>
+          </button>
         </div>
+
+        {!collapsed && (
+          <div className="sidebar-context">
+            <ContextSwitcher />
+          </div>
+        )}
 
         <nav className="sidebar-nav">
           {navItems.map((item) => (
@@ -66,6 +124,7 @@ export default function Sidebar() {
               to={item.path}
               className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
               onClick={() => setMobileOpen(false)}
+              title={collapsed ? item.label : undefined}
             >
               <svg
                 viewBox="0 0 24 24"
@@ -78,13 +137,40 @@ export default function Sidebar() {
               >
                 <path d={item.icon} />
               </svg>
-              <span>{item.label}</span>
+              {!collapsed && <span>{item.label}</span>}
             </NavLink>
           ))}
         </nav>
 
         <div className="sidebar-footer">
-          <button className="logout-btn" onClick={logout} type="button">
+          <button
+            className="collapse-btn"
+            onClick={toggleCollapsed}
+            type="button"
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              {collapsed ? (
+                <path d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+              ) : (
+                <path d="M11 19l-7-7 7-7M19 19l-7-7 7-7" />
+              )}
+            </svg>
+          </button>
+          <button
+            className="logout-btn"
+            onClick={logout}
+            type="button"
+            title={collapsed ? 'Logout' : undefined}
+          >
             <svg
               viewBox="0 0 24 24"
               fill="none"
@@ -96,7 +182,7 @@ export default function Sidebar() {
             >
               <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" />
             </svg>
-            <span>Logout</span>
+            {!collapsed && <span>Logout</span>}
           </button>
         </div>
       </aside>

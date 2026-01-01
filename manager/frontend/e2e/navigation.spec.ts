@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 test.describe('Navigation', () => {
   test.beforeEach(async ({ page }) => {
     // Mock API responses
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -11,7 +11,7 @@ test.describe('Navigation', () => {
       });
     });
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',

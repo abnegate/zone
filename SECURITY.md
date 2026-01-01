@@ -1,4 +1,4 @@
-# Security Considerations for Voiz AI Stack
+# Security Considerations for Zone AI Stack
 
 ## Docker Socket Access (Traefik)
 
@@ -95,7 +95,7 @@ openssl rand -base64 32
 ## Network Isolation
 
 ### Internal Network
-The `voiz_internal` network is designed to isolate:
+The `zone_internal` network is designed to isolate:
 - Ollama (LLM backend)
 - PostgreSQL database
 - LiteLLM proxy
@@ -111,7 +111,7 @@ networks:
 **Note**: The current configuration has `internal: false` to support certain deployment scenarios. Review your threat model and adjust accordingly.
 
 ### Edge Network
-The `voiz_edge` network connects:
+The `zone_edge` network connects:
 - Traefik (reverse proxy)
 - Open WebUI (user interface)
 - LiteLLM (API gateway)

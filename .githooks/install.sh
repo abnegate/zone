@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install git hooks for the voiz repository
+# Install git hooks for the zone repository
 
 set -e
 

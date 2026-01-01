@@ -158,7 +158,7 @@ CREATE INDEX idx_wiki_chunks_embedding ON wiki_chunks
 ### 1.3 Database Migrations Strategy
 
 **Approach:** Use Gleam's SQL file loading + manual migration tracking
-- Create `/home/jakeb/code/voiz/manager/migrations/` directory
+- Create `/home/jakeb/code/zone/manager/migrations/` directory
 - Number migrations: `001_initial_schema.sql`, `002_add_wiki.sql`, etc.
 - Track applied migrations in `schema_migrations` table
 - Run migrations on container startup
@@ -302,7 +302,7 @@ pub fn start() -> Result(pgo.Connection, String) {
   let config = pgo.Config(
     ..pgo.default_config(),
     host: "postgres",
-    database: "voiz_manager",
+    database: "zone_manager",
     user: get_env("POSTGRES_USER"),
     password: get_env("POSTGRES_PASSWORD"),
     pool_size: 10,
@@ -758,13 +758,13 @@ services:
     image: pgvector/pgvector:${DOCKER_VERSION_POSTGRES:-pg16}
     # ... existing config
     environment:
-      - POSTGRES_DB=voiz_manager  # Change from generic DB
+      - POSTGRES_DB=zone_manager  # Change from generic DB
 
   manager:
     # ... existing config
     environment:
       - POSTGRES_HOST=postgres
-      - POSTGRES_DB=voiz_manager
+      - POSTGRES_DB=zone_manager
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY}  # For GitHub integration
@@ -774,9 +774,9 @@ services:
 
 volumes:
   manager_repos:
-    name: voiz_manager_repos
+    name: zone_manager_repos
   manager_artifacts:
-    name: voiz_manager_artifacts
+    name: zone_manager_artifacts
 ```
 
 ### 5.2 Required Gleam Dependencies

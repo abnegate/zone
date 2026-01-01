@@ -1,11 +1,12 @@
 import { type FormEvent, useEffect, useState } from 'react';
+import DOMPurify from 'dompurify';
 import { client } from '../api/client';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useAuth } from '../context/AuthContext';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
-import type { BrowseModel, HuggingFaceModel, InstalledModel } from '../types';
+import type { BrowseModel, InstalledModel } from '../types';
 import './ModelsPage.css';
 
 function formatBytes(bytes: number): string {
@@ -30,7 +31,7 @@ function formatNumber(num: number): string {
 type Tab = 'installed' | 'browse';
 
 export default function ModelsPage() {
-  const { apiKey } = useAuth();
+  const { isAuthenticated } = useAuth();
   const { models, loading: modelsLoading, error: modelsError, refresh, deleteModel } = useModels();
   const browse = useBrowse();
   const pull = usePull();
@@ -39,9 +40,7 @@ export default function ModelsPage() {
   const [modelInput, setModelInput] = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [detailsModel, setDetailsModel] = useState<
-    InstalledModel | BrowseModel | HuggingFaceModel | null
-  >(null);
+  const [detailsModel, setDetailsModel] = useState<InstalledModel | BrowseModel | null>(null);
   const [modelCard, setModelCard] = useState<string | null>(null);
   const [modelCardLoading, setModelCardLoading] = useState(false);
   const [modelCardExpanded, setModelCardExpanded] = useState(false);
@@ -76,8 +75,8 @@ export default function ModelsPage() {
     }
   };
 
-  const handleInstall = async (model: BrowseModel | HuggingFaceModel) => {
-    const name = 'install_name' in model ? model.install_name : model.name;
+  const handleInstall = async (model: BrowseModel) => {
+    const name = model.install_name ?? model.name;
     setModelInput(name);
     setDetailsModel(null);
     const success = await pull.pull(name);
@@ -87,18 +86,22 @@ export default function ModelsPage() {
     }
   };
 
-  const handleShowDetails = async (model: InstalledModel | BrowseModel | HuggingFaceModel) => {
+  const handleShowDetails = async (model: InstalledModel | BrowseModel) => {
     setDetailsModel(model);
     setModelCard(null);
     setModelCardExpanded(false);
     setModelSize(null);
 
-    // Load model info for HuggingFace models
-    if ('author' in model && browse.source === 'huggingface') {
+    // Load model info for remote sources (HuggingFace, ModelScope)
+    if (
+      !isInstalledModel(model) &&
+      (browse.source === 'huggingface' || browse.source === 'modelscope')
+    ) {
       setModelCardLoading(true);
       try {
-        client.setApiKey(apiKey);
-        const info = await client.getModelInfo(model.id);
+        // Prefix with source for proper routing
+        const modelId = browse.source === 'modelscope' ? `modelscope/${model.id}` : model.id;
+        const info = await client.getModelInfo(modelId);
         setModelCard(info.content);
         setModelSize(info.gguf_size);
       } catch {
@@ -115,20 +118,12 @@ export default function ModelsPage() {
     browse.search();
   };
 
-  const isHuggingFaceModel = (
-    model: InstalledModel | BrowseModel | HuggingFaceModel
-  ): model is HuggingFaceModel => {
-    return 'author' in model;
-  };
-
-  const isInstalledModel = (
-    model: InstalledModel | BrowseModel | HuggingFaceModel
-  ): model is InstalledModel => {
+  const isInstalledModel = (model: InstalledModel | BrowseModel): model is InstalledModel => {
     return 'size' in model && 'modified_at' in model;
   };
 
   return (
-    <div className="models-page">
+    <div className="page models-page">
       <header className="page-header">
         <h1>Models</h1>
         <p className="subtitle">Manage your Ollama models</p>
@@ -343,6 +338,22 @@ export default function ModelsPage() {
               </svg>
               HuggingFace
             </button>
+            <button
+              className={`source-tab ${browse.source === 'modelscope' ? 'active' : ''}`}
+              onClick={() => browse.changeSource('modelscope')}
+              type="button"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                width="16"
+                height="16"
+                aria-hidden="true"
+              >
+                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+              </svg>
+              ModelScope
+            </button>
           </div>
 
           <form className="search-container" onSubmit={handleSearch}>
@@ -489,21 +500,16 @@ export default function ModelsPage() {
                   </button>
                 </div>
               </>
-            ) : isHuggingFaceModel(detailsModel) ? (
+            ) : (
               <>
                 <p className="details-description">{detailsModel.description}</p>
 
-                <div className="details-author">
-                  <span className="details-label">Author</span>
-                  <a
-                    href={`https://huggingface.co/${detailsModel.author}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="details-author-link"
-                  >
-                    {detailsModel.author}
-                  </a>
-                </div>
+                {detailsModel.author && (
+                  <div className="details-author">
+                    <span className="details-label">Author</span>
+                    <span className="details-author-link">{detailsModel.author}</span>
+                  </div>
+                )}
 
                 <div className="details-stats">
                   <div className="details-stat">
@@ -512,10 +518,12 @@ export default function ModelsPage() {
                     </span>
                     <span className="details-stat-label">Downloads</span>
                   </div>
-                  <div className="details-stat">
-                    <span className="details-stat-value">{formatNumber(detailsModel.likes)}</span>
-                    <span className="details-stat-label">Likes</span>
-                  </div>
+                  {detailsModel.likes != null && (
+                    <div className="details-stat">
+                      <span className="details-stat-value">{formatNumber(detailsModel.likes)}</span>
+                      <span className="details-stat-label">Likes</span>
+                    </div>
+                  )}
                   {modelSize && (
                     <div className="details-stat">
                       <span className="details-stat-value">{formatBytes(modelSize)}</span>
@@ -534,10 +542,12 @@ export default function ModelsPage() {
                   </div>
                 )}
 
-                <div className="details-install">
-                  <span className="details-label">Install command</span>
-                  <code>{detailsModel.install_name}</code>
-                </div>
+                {detailsModel.install_name && (
+                  <div className="details-install">
+                    <span className="details-label">Install command</span>
+                    <code>{detailsModel.install_name}</code>
+                  </div>
+                )}
 
                 {modelCard !== null && (
                   <div className="details-card">
@@ -565,7 +575,7 @@ export default function ModelsPage() {
                     {modelCardExpanded && (
                       <div
                         className="details-card-content details-card-text"
-                        dangerouslySetInnerHTML={{ __html: modelCard }}
+                        dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(modelCard) }}
                       />
                     )}
                   </div>
@@ -577,53 +587,22 @@ export default function ModelsPage() {
                   </div>
                 )}
 
-                <div className="details-link">
-                  <a href={detailsModel.url} target="_blank" rel="noopener noreferrer">
-                    View on HuggingFace
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
-                    </svg>
-                  </a>
-                </div>
-
-                <div className="modal-actions">
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => handleInstall(detailsModel)}
-                    type="button"
-                  >
-                    Install Model
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <p className="details-description">{detailsModel.description}</p>
-
-                <div className="details-stats">
-                  <div className="details-stat">
-                    <span className="details-stat-value">
-                      {formatNumber(detailsModel.downloads)}
-                    </span>
-                    <span className="details-stat-label">Downloads</span>
-                  </div>
-                </div>
-
-                {detailsModel.tags.length > 0 && (
-                  <div className="details-tags">
-                    {detailsModel.tags.map((tag) => (
-                      <span key={tag} className="tag">
-                        {tag}
-                      </span>
-                    ))}
+                {detailsModel.url && (
+                  <div className="details-link">
+                    <a href={detailsModel.url} target="_blank" rel="noopener noreferrer">
+                      View on {browse.source === 'modelscope' ? 'ModelScope' : 'HuggingFace'}
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        width="14"
+                        height="14"
+                        aria-hidden="true"
+                      >
+                        <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
+                      </svg>
+                    </a>
                   </div>
                 )}
 

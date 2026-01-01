@@ -58,7 +58,8 @@ pub fn get_all_models() -> List(OllamaModel) {
   [
 "
 
-  let footer = "  ]
+  let footer =
+    "  ]
 }
 "
 
@@ -148,7 +149,8 @@ pub fn categorize(name: String, desc: String) -> List(String) {
 
   let tags = case
     has_any(combined, [
-      "70b", "72b", "90b", "100b", "104b", "110b", "120b", "123b", "405b", "671b",
+      "70b", "72b", "90b", "100b", "104b", "110b", "120b", "123b", "405b",
+      "671b",
     ])
   {
     True -> ["large", ..tags]
@@ -158,8 +160,8 @@ pub fn categorize(name: String, desc: String) -> List(String) {
   // Category tags
   let tags = case
     has_any(combined, [
-      "code", "coder", "coding", "starcoder", "codellama", "devstral", "sqlcoder",
-      "codegeex",
+      "code", "coder", "coding", "starcoder", "codellama", "devstral",
+      "sqlcoder", "codegeex",
     ])
   {
     True -> ["code", ..tags]
@@ -255,16 +257,37 @@ pub fn categorize(name: String, desc: String) -> List(String) {
 }
 
 fn m(name: String, desc: String, pulls: Int) -> Model {
-  Model(name: name, description: desc, pulls: pulls, tags: categorize(name, desc))
+  Model(
+    name: name,
+    description: desc,
+    pulls: pulls,
+    tags: categorize(name, desc),
+  )
 }
 
 fn get_model_database() -> List(Model) {
   [
     // Llama family
-    m("llama3.3", "Meta's 70B state-of-the-art model with 405B-equivalent performance", 8_000_000),
-    m("llama3.2", "Meta's compact models (1B, 3B) for efficient performance", 15_000_000),
-    m("llama3.2-vision", "Llama 3.2 Vision - Instruction-tuned image reasoning", 2_000_000),
-    m("llama3.1", "Meta's Llama 3.1 available in 8B, 70B, 405B sizes", 20_000_000),
+    m(
+      "llama3.3",
+      "Meta's 70B state-of-the-art model with 405B-equivalent performance",
+      8_000_000,
+    ),
+    m(
+      "llama3.2",
+      "Meta's compact models (1B, 3B) for efficient performance",
+      15_000_000,
+    ),
+    m(
+      "llama3.2-vision",
+      "Llama 3.2 Vision - Instruction-tuned image reasoning",
+      2_000_000,
+    ),
+    m(
+      "llama3.1",
+      "Meta's Llama 3.1 available in 8B, 70B, 405B sizes",
+      20_000_000,
+    ),
     m("llama3", "Meta Llama 3 - Most capable openly available LLM", 10_000_000),
     m("llama2", "Meta Llama 2 foundation models (7B-70B)", 8_000_000),
     m("llama2-uncensored", "Llama 2 uncensored by George Sung", 3_000_000),
@@ -274,16 +297,40 @@ fn get_model_database() -> List(Model) {
     m("llama-pro", "Llama Pro - Expanded with programming and math", 500_000),
 
     // DeepSeek family
-    m("deepseek-r1", "DeepSeek R1 - Open reasoning model near O3/Gemini 2.5 Pro", 5_000_000),
+    m(
+      "deepseek-r1",
+      "DeepSeek R1 - Open reasoning model near O3/Gemini 2.5 Pro",
+      5_000_000,
+    ),
     m("deepseek-v3", "DeepSeek V3 - Strong MoE with 671B parameters", 2_000_000),
-    m("deepseek-v3.1", "DeepSeek V3.1 - Hybrid thinking/non-thinking modes", 1_500_000),
-    m("deepseek-v3.2", "DeepSeek V3.2 - Harmonized efficiency with reasoning", 500_000),
+    m(
+      "deepseek-v3.1",
+      "DeepSeek V3.1 - Hybrid thinking/non-thinking modes",
+      1_500_000,
+    ),
+    m(
+      "deepseek-v3.2",
+      "DeepSeek V3.2 - Harmonized efficiency with reasoning",
+      500_000,
+    ),
     m("deepseek-v2", "DeepSeek V2 - Economical MoE language model", 1_500_000),
-    m("deepseek-v2.5", "DeepSeek V2.5 - Combined general and coding abilities", 1_000_000),
+    m(
+      "deepseek-v2.5",
+      "DeepSeek V2.5 - Combined general and coding abilities",
+      1_000_000,
+    ),
     m("deepseek-coder", "DeepSeek Coder - Trained on 2T code tokens", 3_000_000),
-    m("deepseek-coder-v2", "DeepSeek Coder V2 - MoE comparable to GPT4-Turbo", 1_500_000),
+    m(
+      "deepseek-coder-v2",
+      "DeepSeek Coder V2 - MoE comparable to GPT4-Turbo",
+      1_500_000,
+    ),
     m("deepseek-llm", "DeepSeek LLM - Bilingual language model", 1_000_000),
-    m("deepseek-ocr", "DeepSeek OCR - Vision-language for token-efficient OCR", 300_000),
+    m(
+      "deepseek-ocr",
+      "DeepSeek OCR - Vision-language for token-efficient OCR",
+      300_000,
+    ),
     m("deepcoder", "DeepCoder - Fine-tuned coder at O3-mini level", 600_000),
     m("deepscaler", "DeepScaler - Exceeds o1-preview performance", 400_000),
 
@@ -291,7 +338,11 @@ fn get_model_database() -> List(Model) {
     m("qwen3", "Qwen 3 - Latest generation dense and MoE models", 4_000_000),
     m("qwen3-coder", "Qwen 3 Coder - Agentic and coding tasks", 500_000),
     m("qwen3-vl", "Qwen 3 VL - Most powerful Qwen vision-language", 400_000),
-    m("qwen3-embedding", "Qwen 3 Embedding - Comprehensive text embeddings", 300_000),
+    m(
+      "qwen3-embedding",
+      "Qwen 3 Embedding - Comprehensive text embeddings",
+      300_000,
+    ),
     m("qwen2.5", "Qwen 2.5 - 18T tokens, 128K context models", 6_000_000),
     m("qwen2.5-coder", "Qwen 2.5 Coder - Code specialist models", 4_000_000),
     m("qwen2.5vl", "Qwen 2.5 VL - Flagship vision-language model", 1_200_000),
@@ -315,7 +366,11 @@ fn get_model_database() -> List(Model) {
     m("phi4", "Microsoft Phi-4 14B - State-of-the-art open model", 4_000_000),
     m("phi4-mini", "Phi-4 Mini - Multilingual and function calling", 2_000_000),
     m("phi4-reasoning", "Phi-4 Reasoning - Rivaling larger models", 500_000),
-    m("phi4-mini-reasoning", "Phi-4 Mini Reasoning - Lightweight reasoning", 400_000),
+    m(
+      "phi4-mini-reasoning",
+      "Phi-4 Mini Reasoning - Lightweight reasoning",
+      400_000,
+    ),
     m("phi3", "Microsoft Phi-3 - Lightweight state-of-the-art", 6_000_000),
     m("phi3.5", "Phi-3.5 - Overtaking larger model performance", 2_500_000),
     m("phi", "Phi-2 - Outstanding reasoning capabilities", 5_000_000),
@@ -324,9 +379,21 @@ fn get_model_database() -> List(Model) {
     m("mistral", "Mistral 7B v0.3 - Excellent reasoning", 12_000_000),
     m("mistral-nemo", "Mistral Nemo 12B - 128k context by NVIDIA", 4_000_000),
     m("mistral-small", "Mistral Small - Benchmark-setting small LLM", 2_500_000),
-    m("mistral-small3.1", "Mistral Small 3.1 - Vision and 128k context", 1_500_000),
-    m("mistral-small3.2", "Mistral Small 3.2 - Improved function calling", 1_000_000),
-    m("mistral-large", "Mistral Large - Flagship 123B with 128k context", 1_000_000),
+    m(
+      "mistral-small3.1",
+      "Mistral Small 3.1 - Vision and 128k context",
+      1_500_000,
+    ),
+    m(
+      "mistral-small3.2",
+      "Mistral Small 3.2 - Improved function calling",
+      1_000_000,
+    ),
+    m(
+      "mistral-large",
+      "Mistral Large - Flagship 123B with 128k context",
+      1_000_000,
+    ),
     m("mistral-large-3", "Mistral Large 3 - Multimodal MoE", 500_000),
     m("mixtral", "Mixtral MoE - Open-weight mixture of experts", 5_000_000),
     m("mistral-openorca", "Mistral OpenOrca - Fine-tuned on OpenOrca", 800_000),
@@ -342,7 +409,11 @@ fn get_model_database() -> List(Model) {
     m("codellama", "Code Llama - Generates and discusses code", 6_000_000),
     m("starcoder", "StarCoder - 80+ programming languages", 2_500_000),
     m("starcoder2", "StarCoder2 - Next-gen transparent code LLM", 2_000_000),
-    m("wizardcoder", "WizardCoder - State-of-the-art code generation", 1_000_000),
+    m(
+      "wizardcoder",
+      "WizardCoder - State-of-the-art code generation",
+      1_000_000,
+    ),
     m("phind-codellama", "Phind CodeLlama - Code generation", 1_200_000),
     m("sqlcoder", "SQLCoder - SQL generation specialist", 1_000_000),
     m("duckdb-nsql", "DuckDB NSQL - Text-to-SQL model", 500_000),
@@ -362,19 +433,43 @@ fn get_model_database() -> List(Model) {
     m("bakllava", "BakLLaVA - Mistral with LLaVA architecture", 1_200_000),
     m("moondream", "Moondream - Small vision for edge devices", 1_500_000),
     m("minicpm-v", "MiniCPM-V - Vision-language understanding", 1_000_000),
-    m("granite3.2-vision", "Granite 3.2 Vision - Document understanding", 400_000),
+    m(
+      "granite3.2-vision",
+      "Granite 3.2 Vision - Document understanding",
+      400_000,
+    ),
 
     // Embedding models
-    m("nomic-embed-text", "Nomic Embed Text - High-performing embeddings", 8_000_000),
+    m(
+      "nomic-embed-text",
+      "Nomic Embed Text - High-performing embeddings",
+      8_000_000,
+    ),
     m("nomic-embed-text-v2-moe", "Nomic Embed V2 MoE - Multilingual", 500_000),
-    m("mxbai-embed-large", "MixedBread Embed Large - State-of-the-art", 4_000_000),
+    m(
+      "mxbai-embed-large",
+      "MixedBread Embed Large - State-of-the-art",
+      4_000_000,
+    ),
     m("bge-m3", "BGE M3 - Multi-functionality embeddings", 2_000_000),
     m("bge-large", "BGE Large - Text to vector mapping", 1_500_000),
     m("all-minilm", "All-MiniLM - Fast sentence embeddings", 3_000_000),
-    m("snowflake-arctic-embed", "Snowflake Arctic Embed - Performance optimized", 1_500_000),
-    m("snowflake-arctic-embed2", "Snowflake Arctic Embed 2 - Frontier multilingual", 500_000),
+    m(
+      "snowflake-arctic-embed",
+      "Snowflake Arctic Embed - Performance optimized",
+      1_500_000,
+    ),
+    m(
+      "snowflake-arctic-embed2",
+      "Snowflake Arctic Embed 2 - Frontier multilingual",
+      500_000,
+    ),
     m("granite-embedding", "Granite Embedding - IBM biencoder", 600_000),
-    m("paraphrase-multilingual", "Paraphrase Multilingual - Clustering and search", 800_000),
+    m(
+      "paraphrase-multilingual",
+      "Paraphrase Multilingual - Clustering and search",
+      800_000,
+    ),
 
     // Dolphin family (uncensored)
     m("dolphin3", "Dolphin 3 - Next-gen instruct-tuned model", 2_000_000),
@@ -389,7 +484,11 @@ fn get_model_database() -> List(Model) {
     m("hermes3", "Hermes 3 - Nous Research flagship", 2_000_000),
     m("nous-hermes", "Nous Hermes - General models", 2_000_000),
     m("nous-hermes2", "Nous Hermes 2 - Scientific and coding", 1_500_000),
-    m("nous-hermes2-mixtral", "Nous Hermes 2 Mixtral - Trained over Mixtral", 1_000_000),
+    m(
+      "nous-hermes2-mixtral",
+      "Nous Hermes 2 Mixtral - Trained over Mixtral",
+      1_000_000,
+    ),
     m("openhermes", "OpenHermes - Fine-tuned on Mistral", 2_000_000),
 
     // Granite family (IBM)
@@ -424,10 +523,18 @@ fn get_model_database() -> List(Model) {
     m("glm4", "GLM-4 - Strong multi-lingual model", 1_200_000),
     m("glm-4.6", "GLM-4.6 - Advanced agentic and reasoning", 500_000),
     m("glm-4.7", "GLM-4.7 - Improved coding capability", 300_000),
-    m("command-r", "Cohere Command-R - Conversational and long context", 1_500_000),
+    m(
+      "command-r",
+      "Cohere Command-R - Conversational and long context",
+      1_500_000,
+    ),
     m("command-r-plus", "Cohere Command-R Plus - Enterprise use cases", 800_000),
     m("command-r7b", "Cohere Command-R 7B - Efficient quality", 1_000_000),
-    m("command-r7b-arabic", "Cohere Command-R 7B Arabic - Arabic language", 500_000),
+    m(
+      "command-r7b-arabic",
+      "Cohere Command-R 7B Arabic - Arabic language",
+      500_000,
+    ),
     m("command-a", "Cohere Command-A - Enterprise optimized", 400_000),
     m("aya", "Aya - 23 languages by Cohere", 800_000),
     m("aya-expanse", "Aya Expanse - 23 languages trained", 700_000),
@@ -465,9 +572,17 @@ fn get_model_database() -> List(Model) {
     m("meditron", "Meditron - Medical domain Llama 2", 500_000),
     m("medllama2", "MedLlama2 - Medical questions", 400_000),
     m("llama3-chatqa", "Llama 3 ChatQA - Conversational QA and RAG", 600_000),
-    m("llama3-groq-tool-use", "Llama 3 Groq Tool Use - Open-source tools", 500_000),
+    m(
+      "llama3-groq-tool-use",
+      "Llama 3 Groq Tool Use - Open-source tools",
+      500_000,
+    ),
     m("llama3-gradient", "Llama 3 Gradient - 1M+ token context", 500_000),
-    m("firefunction-v2", "FireFunction V2 - Function calling on Llama 3", 300_000),
+    m(
+      "firefunction-v2",
+      "FireFunction V2 - Function calling on Llama 3",
+      300_000,
+    ),
     m("nexusraven", "NexusRaven - Function calling tasks", 400_000),
     m("samantha-mistral", "Samantha Mistral - Companion trained", 700_000),
     m("yarn-llama2", "YARN Llama 2 - 128k context", 500_000),
@@ -484,7 +599,11 @@ fn get_model_database() -> List(Model) {
     m("minimax-m2", "MiniMax M2 - Coding workflows", 300_000),
     m("minimax-m2.1", "MiniMax M2.1 - Multilingual code engineering", 100_000),
     m("ministral-3", "Ministral 3 - Edge deployment", 300_000),
-    m("gemini-3-pro-preview", "Gemini 3 Pro Preview - Google reasoning", 200_000),
+    m(
+      "gemini-3-pro-preview",
+      "Gemini 3 Pro Preview - Google reasoning",
+      200_000,
+    ),
     m("gemini-3-flash-preview", "Gemini 3 Flash Preview - High-speed", 200_000),
     m("kimi-k2", "Kimi K2 - State-of-the-art MoE", 300_000),
     m("kimi-k2-thinking", "Kimi K2 Thinking - Moonshot thinking model", 200_000),

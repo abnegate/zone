@@ -78,7 +78,8 @@ pub fn source_type_from_string_empty_test() {
 // =============================================================================
 
 pub fn decode_ingest_content_request_test() {
-  let json_str = "{\"title\": \"Test Entry\", \"content\": \"Some content here\"}"
+  let json_str =
+    "{\"title\": \"Test Entry\", \"content\": \"Some content here\"}"
 
   wiki.decode_ingest_content_request(json_str)
   |> should.be_ok()

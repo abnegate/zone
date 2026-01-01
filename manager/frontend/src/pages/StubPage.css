@@ -1,5 +1,7 @@
 .stub-page {
-  max-width: 700px;
+  /* Narrower max-width for stub/placeholder pages */
+  max-width: 800px;
+  margin: 0 auto;
 }
 
 .stub-content {

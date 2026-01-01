@@ -1,6 +1,6 @@
-# Voiz Web Installer
+# Zone Web Installer
 
-A web-based configuration wizard for the Voiz AI Stack.
+A web-based configuration wizard for the Zone AI Stack.
 
 ## Technology Stack
 
@@ -45,8 +45,8 @@ gleam run
 
 ### Build Docker Image
 ```bash
-docker build -t voiz-installer .
-docker run -p 8000:8000 -v $PWD/..:/project voiz-installer
+docker build -t zone-installer .
+docker run -p 8000:8000 -v $PWD/..:/project zone-installer
 ```
 
 ### Using with Make

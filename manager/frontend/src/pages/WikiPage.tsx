@@ -2,7 +2,7 @@ import './StubPage.css';
 
 export default function WikiPage() {
   return (
-    <div className="stub-page">
+    <div className="page stub-page">
       <header className="page-header">
         <h1>Wiki</h1>
         <p className="subtitle">Knowledge base for your AI models</p>

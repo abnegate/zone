@@ -1,4 +1,4 @@
-# Voiz - Self-Hosted AI Stack
+# Zone - Self-Hosted AI Stack
 
 A production-ready, privacy-focused AI stack featuring local LLM inference, semantic routing, and web search capabilities—all behind a secure VPN.
 
@@ -76,7 +76,7 @@ Beautiful web-based wizard built with **Gleam** (type-safe functional language o
 
    ```bash
    git clone <repository-url>
-   cd voiz
+   cd zone
    make install
    ```
 
@@ -368,7 +368,7 @@ make backup
 
 # Manual backup of specific volume
 docker run --rm \
-  -v voiz_ollama_data:/data \
+  -v zone_ollama_data:/data \
   -v $(pwd)/backups:/backup \
   alpine tar czf /backup/ollama.tar.gz -C /data .
 ```
@@ -377,11 +377,11 @@ docker run --rm \
 
 ```bash
 # Restore from backup
-make restore BACKUP=backups/voiz_backup_20250101_120000.tar.gz
+make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz
 
 # Or manually
 docker run --rm \
-  -v voiz_ollama_data:/data \
+  -v zone_ollama_data:/data \
   -v $(pwd)/backups:/backup \
   alpine tar xzf /backup/ollama.tar.gz -C /data
 ```

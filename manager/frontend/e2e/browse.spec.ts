@@ -12,7 +12,7 @@ const generateMockModels = (count: number, startId = 0) => {
 
 test.describe('Browse Models - Virtual Scrolling', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -20,7 +20,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
       });
     });
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -38,7 +38,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const manyModels = generateMockModels(100);
 
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -59,7 +59,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     let page2 = generateMockModels(20, 20);
 
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const offset = parseInt(url.searchParams.get('offset') || '0');
 
@@ -90,7 +90,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const models = generateMockModels(20);
 
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', async (route) => {
+    await page.route('**/api/browse*', async (route) => {
       const url = new URL(route.request().url());
       const offset = parseInt(url.searchParams.get('offset') || '0');
 
@@ -119,7 +119,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const filteredModels = [allModels[0]];
 
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const query = url.searchParams.get('q');
 
@@ -167,7 +167,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     ];
 
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -207,7 +207,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const models = generateMockModels(20);
 
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const offset = parseInt(url.searchParams.get('offset') || '0');
 
@@ -234,7 +234,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const models = generateMockModels(5);
 
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -256,7 +256,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const models = generateMockModels(3);
 
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -276,9 +276,9 @@ test.describe('Browse Models - Virtual Scrolling', () => {
   });
 });
 
-test.describe('Browse Models - HuggingFace Specific', () => {
+test.describe('Browse Models - Source Tab Switching', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -286,7 +286,69 @@ test.describe('Browse Models - HuggingFace Specific', () => {
       });
     });
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ models: [], has_more: false }),
+      });
+    });
+
+    await page.goto('/');
+    await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
+    await page.reload();
+    await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+  });
+
+  test('all three source tabs are visible', async ({ page }) => {
+    await expect(page.locator('.source-tab:has-text("Ollama")')).toBeVisible();
+    await expect(page.locator('.source-tab:has-text("HuggingFace")')).toBeVisible();
+    await expect(page.locator('.source-tab:has-text("ModelScope")')).toBeVisible();
+  });
+
+  test('clicking source tabs sends correct source parameter', async ({ page }) => {
+    const requests: string[] = [];
+
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+      if (source) requests.push(source);
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ source, models: [], has_more: false }),
+      });
+    });
+
+    // Click HuggingFace tab
+    await page.click('.source-tab:has-text("HuggingFace")');
+    await page.waitForTimeout(100);
+
+    // Click ModelScope tab
+    await page.click('.source-tab:has-text("ModelScope")');
+    await page.waitForTimeout(100);
+
+    // Click Ollama tab
+    await page.click('.source-tab:has-text("Ollama")');
+    await page.waitForTimeout(100);
+
+    expect(requests).toContain('huggingface');
+    expect(requests).toContain('modelscope');
+    expect(requests).toContain('ollama');
+  });
+});
+
+test.describe('Browse Models - HuggingFace Specific', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/models', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ models: [] }),
+      });
+    });
+
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -313,7 +375,7 @@ test.describe('Browse Models - HuggingFace Specific', () => {
       url: 'https://huggingface.co/TheBloke/Model-GGUF',
     };
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -352,7 +414,7 @@ test.describe('Browse Models - HuggingFace Specific', () => {
       url: 'https://huggingface.co/TheBloke/Model-GGUF',
     };
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -393,7 +455,7 @@ test.describe('Browse Models - HuggingFace Specific', () => {
       url: 'https://huggingface.co/TheBloke/Model-GGUF',
     };
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -416,5 +478,299 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     await page.locator('.browse-item').first().click();
 
     await expect(page.locator('.details-install code')).toHaveText('hf.co/TheBloke/Model-GGUF');
+  });
+});
+
+test.describe('Browse Models - ModelScope Specific', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route('**/api/models', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ models: [] }),
+      });
+    });
+
+    await page.route('**/api/browse*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ models: [], has_more: false }),
+      });
+    });
+
+    await page.goto('/');
+    await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
+    await page.reload();
+    await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+  });
+
+  test('displays ModelScope model with author', async ({ page }) => {
+    const msModel = {
+      id: 'Qwen/Qwen2.5-7B-GGUF',
+      name: 'Qwen2.5-7B-GGUF',
+      description: 'A Qwen GGUF model',
+      downloads: 100000,
+      likes: 500,
+      tags: ['gguf', 'qwen'],
+      author: 'Qwen',
+      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
+      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
+    };
+
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+
+      if (source === 'modelscope') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source: 'modelscope', models: [msModel], has_more: false, total: 1 }),
+        });
+      } else {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: [], has_more: false }),
+        });
+      }
+    });
+
+    // Switch to ModelScope tab
+    await page.click('.source-tab:has-text("ModelScope")');
+
+    await expect(page.locator('.browse-item')).toHaveCount(1);
+    await expect(page.locator('.browse-name')).toHaveText('Qwen2.5-7B-GGUF');
+  });
+
+  test('ModelScope details modal shows author', async ({ page }) => {
+    const msModel = {
+      id: 'Qwen/Qwen2.5-7B-GGUF',
+      name: 'Qwen2.5-7B-GGUF',
+      description: 'A Qwen GGUF model',
+      downloads: 100000,
+      likes: 500,
+      tags: ['gguf', 'qwen'],
+      author: 'Qwen',
+      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
+      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
+    };
+
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+
+      if (source === 'modelscope') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source: 'modelscope', models: [msModel], has_more: false, total: 1 }),
+        });
+      } else {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: [], has_more: false }),
+        });
+      }
+    });
+
+    // Mock the model info endpoint
+    await page.route('**/api/models/modelscope/**', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          content: '# Qwen2.5 Model\n\nA great model.',
+          gguf_size: 5000000000,
+        }),
+      });
+    });
+
+    // Switch to ModelScope tab and click model
+    await page.click('.source-tab:has-text("ModelScope")');
+    await page.locator('.browse-item').first().click();
+
+    await expect(page.locator('.modal-details')).toBeVisible();
+    await expect(page.locator('.details-author-link')).toHaveText('Qwen');
+  });
+
+  test('ModelScope details shows install command with modelscope prefix', async ({ page }) => {
+    const msModel = {
+      id: 'Qwen/Qwen2.5-7B-GGUF',
+      name: 'Qwen2.5-7B-GGUF',
+      description: 'A Qwen GGUF model',
+      downloads: 100000,
+      likes: 500,
+      tags: ['gguf'],
+      author: 'Qwen',
+      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
+      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
+    };
+
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+
+      if (source === 'modelscope') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source: 'modelscope', models: [msModel], has_more: false, total: 1 }),
+        });
+      } else {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: [], has_more: false }),
+        });
+      }
+    });
+
+    await page.route('**/api/models/modelscope/**', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, content: null, gguf_size: null }),
+      });
+    });
+
+    await page.click('.source-tab:has-text("ModelScope")');
+    await page.locator('.browse-item').first().click();
+
+    await expect(page.locator('.details-install code')).toHaveText('modelscope/Qwen/Qwen2.5-7B-GGUF');
+  });
+
+  test('ModelScope details shows View on ModelScope link', async ({ page }) => {
+    const msModel = {
+      id: 'Qwen/Qwen2.5-7B-GGUF',
+      name: 'Qwen2.5-7B-GGUF',
+      description: 'A Qwen GGUF model',
+      downloads: 100000,
+      likes: 500,
+      tags: ['gguf'],
+      author: 'Qwen',
+      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
+      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
+    };
+
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+
+      if (source === 'modelscope') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source: 'modelscope', models: [msModel], has_more: false, total: 1 }),
+        });
+      } else {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: [], has_more: false }),
+        });
+      }
+    });
+
+    await page.route('**/api/models/modelscope/**', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, content: null, gguf_size: null }),
+      });
+    });
+
+    await page.click('.source-tab:has-text("ModelScope")');
+    await page.locator('.browse-item').first().click();
+
+    await expect(page.locator('.details-link a')).toContainText('View on ModelScope');
+    await expect(page.locator('.details-link a')).toHaveAttribute('href', 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF');
+  });
+
+  test('ModelScope shows total count from response', async ({ page }) => {
+    const msModels = Array.from({ length: 5 }, (_, i) => ({
+      id: `Author/Model-${i}`,
+      name: `Model-${i}`,
+      description: 'A model',
+      downloads: 1000 * (5 - i),
+      likes: 100,
+      tags: ['gguf'],
+      author: 'Author',
+      install_name: `modelscope/Author/Model-${i}`,
+      url: `https://modelscope.cn/Author/Model-${i}`,
+    }));
+
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+
+      if (source === 'modelscope') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            source: 'modelscope',
+            models: msModels,
+            has_more: true,
+            total: 500, // Total available models
+          }),
+        });
+      } else {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: [], has_more: false }),
+        });
+      }
+    });
+
+    await page.click('.source-tab:has-text("ModelScope")');
+
+    // Should show the models
+    await expect(page.locator('.browse-item')).toHaveCount(5);
+  });
+
+  test('ModelScope install button uses modelscope install name', async ({ page }) => {
+    const msModel = {
+      id: 'Qwen/Qwen2.5-7B-GGUF',
+      name: 'Qwen2.5-7B-GGUF',
+      description: 'A Qwen GGUF model',
+      downloads: 100000,
+      likes: 500,
+      tags: ['gguf'],
+      author: 'Qwen',
+      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
+      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
+    };
+
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+
+      if (source === 'modelscope') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source: 'modelscope', models: [msModel], has_more: false, total: 1 }),
+        });
+      } else {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: [], has_more: false }),
+        });
+      }
+    });
+
+    await page.click('.source-tab:has-text("ModelScope")');
+
+    // Click install button
+    await page.locator('.browse-item').first().locator('.btn-primary').click();
+
+    // Model input should have the modelscope install name
+    await expect(page.locator('.model-form input')).toHaveValue('modelscope/Qwen/Qwen2.5-7B-GGUF');
   });
 });

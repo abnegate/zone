@@ -18,13 +18,18 @@ services:
       - --api.dashboard=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
-      - --providers.docker.network=voiz_edge
+      - --providers.docker.network=zone_edge
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
       - --entrypoints.ping.address=:8082
       - --ping=true
       - --log.level=INFO
       - --accesslog=true
+      - --metrics.prometheus=true
+      - --metrics.prometheus.addEntryPointsLabels=true
+      - --metrics.prometheus.addServicesLabels=true
+      - --metrics.prometheus.addRoutersLabels=true
+      - --entrypoints.metrics.address=:8080
     ports:
       - "80:80"
       - "443:443"
@@ -32,7 +37,7 @@ services:
       - edge
     labels:
       - traefik.enable=true
-      - traefik.docker.network=voiz_edge
+      - traefik.docker.network=zone_edge
       - traefik.http.middlewares.auth.basicauth.usersfile=/auth/users.htpasswd
       - traefik.http.middlewares.auth.basicauth.realm=${SECURITY_BASICAUTH_REALM}
       # Security headers middleware
@@ -125,6 +130,42 @@ services:
       retries: 5
       start_period: 10s
 
+  valkey:
+    image: valkey/valkey:${DOCKER_VERSION_VALKEY:-8.1-alpine}
+    container_name: valkey
+    restart: unless-stopped
+    command: valkey-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - valkey_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:${DOCKER_VERSION_POSTGRES_EXPORTER:-v0.16.0}
+    container_name: postgres-exporter
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9187/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   litellm:
     image: ghcr.io/berriai/litellm:${DOCKER_VERSION_LITELLM:-main-v1.59.13}
     container_name: litellm
@@ -165,7 +206,7 @@ services:
       - edge
     labels:
       - traefik.enable=true
-      - traefik.docker.network=voiz_edge
+      - traefik.docker.network=zone_edge
       - traefik.http.services.litellm.loadbalancer.server.port=4000
       - traefik.http.routers.litellm.rule=Host(`litellm.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.litellm.entrypoints=web
@@ -188,14 +229,13 @@ services:
     build:
       context: ./installer
       dockerfile: Dockerfile
-    container_name: voiz-installer
+    container_name: zone-installer
     restart: "no"
     profiles:
       - installer
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      # Minimal required access - only needs to write .env and auth/
       - ./.env.example:/project/.env.example:ro
       - ./.env:/project/.env
       - ./auth:/project/auth
@@ -283,7 +323,7 @@ services:
       - DEFAULT_LOCALE=${WEBUI_DEFAULT_LOCALE}
       - ENABLE_PERSISTENT_CONFIG=${WEBUI_ENABLE_PERSISTENT_CONFIG}
       - CORS_ALLOW_ORIGIN=${WEBUI_CORS_ALLOW_ORIGIN}
-      - USER_AGENT=${WEBUI_USER_AGENT:-voiz/1.0}
+      - USER_AGENT=${WEBUI_USER_AGENT:-zone/1.0}
       - TZ=${ADVANCED_TZ}
     volumes:
       - openwebui_data:/app/backend/data
@@ -292,7 +332,7 @@ services:
       - edge
     labels:
       - traefik.enable=true
-      - traefik.docker.network=voiz_edge
+      - traefik.docker.network=zone_edge
       - traefik.http.services.openwebui.loadbalancer.server.port=8080
       - traefik.http.routers.openwebui.rule=Host(`${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.openwebui.entrypoints=web
@@ -324,6 +364,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      valkey:
+        condition: service_healthy
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - LITELLM_HOST=http://litellm:4000
@@ -333,6 +375,8 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - VALKEY_HOST=valkey
+      - VALKEY_PORT=6379
     volumes:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts
@@ -341,20 +385,135 @@ services:
       - edge
     labels:
       - traefik.enable=true
-      - traefik.docker.network=voiz_edge
+      - traefik.docker.network=zone_edge
       - traefik.http.services.manager.loadbalancer.server.port=8000
-      - traefik.http.routers.manager.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.manager.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
       - traefik.http.routers.manager.entrypoints=web
       - traefik.http.routers.manager.service=manager
       - traefik.http.routers.manager.middlewares=security-headers
-      - traefik.http.routers.manager-secure.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.manager-secure.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
       - traefik.http.routers.manager-secure.entrypoints=websecure
       - traefik.http.routers.manager-secure.service=manager
       - traefik.http.routers.manager-secure.middlewares=security-headers
       - traefik.http.routers.manager-secure.tls=true
       - traefik.http.routers.manager-secure.tls.certresolver=letsencrypt
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  console:
+    build:
+      context: ./manager/frontend
+      dockerfile: Dockerfile
+    container_name: console
+    restart: unless-stopped
+    depends_on:
+      manager:
+        condition: service_healthy
+    networks:
+      - edge
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=zone_edge
+      - traefik.http.services.console.loadbalancer.server.port=3000
+      # Route all other requests to frontend (lower priority than backend routes)
+      - traefik.http.routers.console.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.console.entrypoints=web
+      - traefik.http.routers.console.service=console
+      - traefik.http.routers.console.middlewares=security-headers
+      - traefik.http.routers.console.priority=1
+      - traefik.http.routers.console-secure.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.console-secure.entrypoints=websecure
+      - traefik.http.routers.console-secure.service=console
+      - traefik.http.routers.console-secure.middlewares=security-headers
+      - traefik.http.routers.console-secure.tls=true
+      - traefik.http.routers.console-secure.tls.certresolver=letsencrypt
+      - traefik.http.routers.console-secure.priority=1
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:${DOCKER_VERSION_PROMETHEUS:-v3.4.0}
+    container_name: prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${MONITORING_RETENTION_TIME:-15d}
+      - --web.enable-lifecycle
+    networks:
+      - internal
+      - edge
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=zone_edge
+      - traefik.http.services.prometheus.loadbalancer.server.port=9090
+      - traefik.http.routers.prometheus.rule=Host(`prometheus.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.prometheus.entrypoints=web
+      - traefik.http.routers.prometheus.service=prometheus
+      - traefik.http.routers.prometheus.middlewares=auth,security-headers
+      - traefik.http.routers.prometheus-secure.rule=Host(`prometheus.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.prometheus-secure.entrypoints=websecure
+      - traefik.http.routers.prometheus-secure.service=prometheus
+      - traefik.http.routers.prometheus-secure.middlewares=auth,security-headers
+      - traefik.http.routers.prometheus-secure.tls=true
+      - traefik.http.routers.prometheus-secure.tls.certresolver=letsencrypt
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:${DOCKER_VERSION_GRAFANA:-11.6.0}
+    container_name: grafana
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      - GF_SECURITY_ADMIN_USER=${MONITORING_GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${MONITORING_GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://grafana.${DOMAIN_HOST_WEBUI}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - internal
+      - edge
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=zone_edge
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
+      - traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.grafana.entrypoints=web
+      - traefik.http.routers.grafana.service=grafana
+      - traefik.http.routers.grafana.middlewares=security-headers
+      - traefik.http.routers.grafana-secure.rule=Host(`grafana.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.grafana-secure.entrypoints=websecure
+      - traefik.http.routers.grafana-secure.service=grafana
+      - traefik.http.routers.grafana-secure.middlewares=security-headers
+      - traefik.http.routers.grafana-secure.tls=true
+      - traefik.http.routers.grafana-secure.tls.certresolver=letsencrypt
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -362,34 +521,40 @@ services:
 
 networks:
   edge:
-    name: voiz_edge
+    name: zone_edge
     driver: bridge
     driver_opts:
-      com.docker.network.bridge.name: voiz_dmz
+      com.docker.network.bridge.name: zone_dmz
     ipam:
       config:
         - subnet: 172.20.0.0/24
 
   internal:
-    name: voiz_internal
+    name: zone_internal
     driver: bridge
     internal: true
     driver_opts:
-      com.docker.network.bridge.name: voiz_internal
+      com.docker.network.bridge.name: zone_internal
     ipam:
       config:
         - subnet: 172.19.0.0/24
 
 volumes:
   ollama_data:
-    name: voiz_ollama_data
+    name: zone_ollama_data
   openwebui_data:
-    name: voiz_openwebui_data
+    name: zone_openwebui_data
   traefik_letsencrypt:
-    name: voiz_traefik_letsencrypt
+    name: zone_traefik_letsencrypt
   postgres_data:
-    name: voiz_postgres_data
+    name: zone_postgres_data
+  valkey_data:
+    name: zone_valkey_data
   manager_repos:
-    name: voiz_manager_repos
+    name: zone_manager_repos
   manager_artifacts:
-    name: voiz_manager_artifacts
+    name: zone_manager_artifacts
+  prometheus_data:
+    name: zone_prometheus_data
+  grafana_data:
+    name: zone_grafana_data

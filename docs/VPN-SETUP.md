@@ -2,7 +2,7 @@
 
 ## VPN is Optional
 
-The Voiz AI stack works perfectly **without VPN**. You only need VPN if you want:
+The Zone AI stack works perfectly **without VPN**. You only need VPN if you want:
 - Private, anonymous web search
 - IP masking for search queries
 - Enhanced privacy when using web search features

@@ -9,11 +9,25 @@
   display: flex;
   flex-direction: column;
   z-index: 100;
+  transition: width var(--transition-normal);
+}
+
+.sidebar.collapsed {
+  width: 64px;
 }
 
 .sidebar-header {
   padding: var(--spacing-lg);
   border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+}
+
+.sidebar.collapsed .sidebar-header {
+  justify-content: center;
+  padding: var(--spacing-md);
 }
 
 .logo {
@@ -21,6 +35,11 @@
   font-size: 1.25rem;
   font-weight: 600;
   color: var(--color-text);
+}
+
+.sidebar-context {
+  padding: var(--spacing-md);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .sidebar-nav {
@@ -40,6 +59,13 @@
   text-decoration: none;
   border-radius: var(--radius-md);
   transition: all var(--transition-fast);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar.collapsed .nav-item {
+  justify-content: center;
+  padding: var(--spacing-sm);
 }
 
 .nav-item:hover {
@@ -61,6 +87,54 @@
 .sidebar-footer {
   padding: var(--spacing-md);
   border-top: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.collapse-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: var(--spacing-sm);
+  color: var(--color-text-dim);
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.collapse-btn:hover {
+  color: var(--color-text-muted);
+  background: var(--color-bg-input);
+}
+
+.collapse-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.theme-toggle {
+  padding: var(--spacing-sm);
+  color: var(--color-text-muted);
+  background: none;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.theme-toggle:hover {
+  color: var(--color-text);
+  background: var(--color-bg-input);
+}
+
+.theme-toggle svg {
+  width: 18px;
+  height: 18px;
+  display: block;
 }
 
 .logout-btn {
@@ -76,6 +150,13 @@
   cursor: pointer;
   font-size: 0.875rem;
   transition: all var(--transition-fast);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar.collapsed .logout-btn {
+  justify-content: center;
+  padding: var(--spacing-sm);
 }
 
 .logout-btn:hover {
@@ -86,6 +167,7 @@
 .logout-btn svg {
   width: 20px;
   height: 20px;
+  flex-shrink: 0;
 }
 
 .mobile-menu-btn {

@@ -1,11 +1,15 @@
 services:
   manager:
     ports:
-      - "127.0.0.1:8001:8000"
+      - "127.0.0.1:8000:8000"
 
-  frontend-dev:
+  valkey:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  console:
     image: node:20-alpine
-    container_name: frontend-dev
+    container_name: console
     restart: unless-stopped
     working_dir: /app
     volumes:
@@ -15,11 +19,11 @@ services:
       - WATCHPACK_POLLING=true
       - CHOKIDAR_USEPOLLING=true
       - WDS_SOCKET_PORT=0
-      - REACT_APP_API_URL=http://localhost:8001
+      - REACT_APP_API_URL=http://localhost:8000
     command: sh -c "npm install && npm start"
     ports:
       - "3000:3000"
 
 volumes:
   frontend_node_modules:
-    name: voiz_frontend_node_modules
+    name: zone_frontend_node_modules
