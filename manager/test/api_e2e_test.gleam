@@ -2,7 +2,7 @@
 ////
 //// These tests verify the API endpoints work correctly.
 //// To run full E2E tests, start the server first:
-////   SECURITY_MANAGER_API_KEY=test-key gleam run
+////   gleam run
 //// Then run the tests:
 ////   gleam test
 ////
@@ -15,13 +15,131 @@ import gleam/http/request
 import gleam/httpc
 import gleam/json
 import gleam/list
+import gleam/option.{None, Some}
 import gleam/string
 import gleeunit/should
 
-// Test configuration - these can be overridden via environment variables
+// Test configuration
 const test_host = "http://localhost:8000"
 
-const test_api_key = "test-key"
+const test_email = "test@example.com"
+
+const test_password = "testpassword123"
+
+// Persistent storage for JWT token
+@external(erlang, "persistent_term", "get")
+fn persistent_term_get(key: a, default: b) -> b
+
+@external(erlang, "persistent_term", "put")
+fn persistent_term_put(key: a, value: b) -> Nil
+
+// =============================================================================
+// JWT Authentication helpers
+// =============================================================================
+
+/// Get or create a JWT token for testing
+fn get_test_token() -> Result(String, String) {
+  let key = "e2e_test_jwt_token"
+  case persistent_term_get(key, None) {
+    Some(token) -> Ok(token)
+    None -> {
+      // Try to login first, if that fails, register then login
+      case login_user(test_email, test_password) {
+        Ok(token) -> {
+          let _ = persistent_term_put(key, Some(token))
+          Ok(token)
+        }
+        Error(_) -> {
+          // Register the user
+          case register_user(test_email, test_password) {
+            Ok(_) -> {
+              // Now login
+              case login_user(test_email, test_password) {
+                Ok(token) -> {
+                  let _ = persistent_term_put(key, Some(token))
+                  Ok(token)
+                }
+                Error(e) -> Error(e)
+              }
+            }
+            Error(e) -> Error(e)
+          }
+        }
+      }
+    }
+  }
+}
+
+fn register_user(email: String, password: String) -> Result(Nil, String) {
+  let url = test_host <> "/api/auth/register"
+  let body =
+    json.object([
+      #("email", json.string(email)),
+      #("password", json.string(password)),
+    ])
+    |> json.to_string
+
+  case request.to(url) {
+    Ok(req) -> {
+      let req = request.set_method(req, http.Post)
+      let req = request.set_body(req, body)
+      let req = request.set_header(req, "content-type", "application/json")
+
+      case httpc.send(req) {
+        Ok(response) -> {
+          case response.status {
+            201 -> Ok(Nil)
+            200 -> Ok(Nil)
+            409 -> Ok(Nil)
+            // Already exists
+            _ -> Error("Registration failed: " <> response.body)
+          }
+        }
+        Error(_) -> Error("HTTP request failed")
+      }
+    }
+    Error(_) -> Error("Invalid URL")
+  }
+}
+
+fn login_user(email: String, password: String) -> Result(String, String) {
+  let url = test_host <> "/api/auth/login"
+  let body =
+    json.object([
+      #("email", json.string(email)),
+      #("password", json.string(password)),
+    ])
+    |> json.to_string
+
+  case request.to(url) {
+    Ok(req) -> {
+      let req = request.set_method(req, http.Post)
+      let req = request.set_body(req, body)
+      let req = request.set_header(req, "content-type", "application/json")
+
+      case httpc.send(req) {
+        Ok(response) -> {
+          case response.status {
+            200 -> {
+              // Extract access_token from response
+              let decoder = {
+                use token <- decode.field("access_token", decode.string)
+                decode.success(token)
+              }
+              case json.parse(response.body, decoder) {
+                Ok(token) -> Ok(token)
+                Error(_) -> Error("Failed to parse token from response")
+              }
+            }
+            _ -> Error("Login failed: " <> response.body)
+          }
+        }
+        Error(_) -> Error("HTTP request failed")
+      }
+    }
+    Error(_) -> Error("Invalid URL")
+  }
+}
 
 // =============================================================================
 // Helper functions
@@ -44,8 +162,13 @@ fn make_api_request(
         False -> req
       }
       let req = case with_auth {
-        True ->
-          request.set_header(req, "authorization", "Bearer " <> test_api_key)
+        True -> {
+          case get_test_token() {
+            Ok(token) ->
+              request.set_header(req, "authorization", "Bearer " <> token)
+            Error(_) -> req
+          }
+        }
         False -> req
       }
 
@@ -124,31 +247,7 @@ pub fn api_accepts_bearer_token_test() {
   }
 }
 
-pub fn api_accepts_x_api_key_header_test() {
-  case server_available() {
-    False -> Nil
-    True -> {
-      let url = test_host <> "/api/browse?source=ollama"
-
-      case request.to(url) {
-        Ok(req) -> {
-          let req = request.set_header(req, "x-api-key", test_api_key)
-
-          case httpc.send(req) {
-            Ok(response) -> {
-              // Should not be 401
-              { response.status != 401 } |> should.be_true()
-            }
-            Error(_) -> Nil
-          }
-        }
-        Error(_) -> Nil
-      }
-    }
-  }
-}
-
-pub fn api_rejects_invalid_key_test() {
+pub fn api_rejects_invalid_token_test() {
   case server_available() {
     False -> Nil
     True -> {
@@ -396,24 +495,29 @@ pub fn browse_returns_json_test() {
 
       case request.to(url) {
         Ok(req) -> {
-          let req =
-            request.set_header(req, "authorization", "Bearer " <> test_api_key)
+          case get_test_token() {
+            Ok(token) -> {
+              let req =
+                request.set_header(req, "authorization", "Bearer " <> token)
 
-          case httpc.send(req) {
-            Ok(response) -> {
-              // Check content-type header
-              let content_type =
-                list.find(response.headers, fn(h) {
-                  string.lowercase(h.0) == "content-type"
-                })
+              case httpc.send(req) {
+                Ok(response) -> {
+                  // Check content-type header
+                  let content_type =
+                    list.find(response.headers, fn(h) {
+                      string.lowercase(h.0) == "content-type"
+                    })
 
-              case content_type {
-                Ok(#(_, value)) -> {
-                  value
-                  |> string.contains("application/json")
-                  |> should.be_true()
+                  case content_type {
+                    Ok(#(_, value)) -> {
+                      value
+                      |> string.contains("application/json")
+                      |> should.be_true()
+                    }
+                    Error(_) -> should.fail()
+                  }
                 }
-                Error(_) -> should.fail()
+                Error(_) -> Nil
               }
             }
             Error(_) -> Nil
@@ -751,10 +855,15 @@ pub fn chats_method_not_allowed_test() {
       case request.to(url) {
         Ok(req) -> {
           let req = request.set_method(req, http.Put)
-          let req =
-            request.set_header(req, "authorization", "Bearer " <> test_api_key)
-          case httpc.send(req) {
-            Ok(response) -> response.status |> should.equal(405)
+          case get_test_token() {
+            Ok(token) -> {
+              let req =
+                request.set_header(req, "authorization", "Bearer " <> token)
+              case httpc.send(req) {
+                Ok(response) -> response.status |> should.equal(405)
+                Error(_) -> Nil
+              }
+            }
             Error(_) -> Nil
           }
         }
@@ -1019,10 +1128,15 @@ pub fn projects_link_github_nonexistent_test() {
           let req = request.set_method(req, http.Put)
           let req = request.set_body(req, body)
           let req = request.set_header(req, "content-type", "application/json")
-          let req =
-            request.set_header(req, "authorization", "Bearer " <> test_api_key)
-          case httpc.send(req) {
-            Ok(response) -> response.status |> should.equal(404)
+          case get_test_token() {
+            Ok(token) -> {
+              let req =
+                request.set_header(req, "authorization", "Bearer " <> token)
+              case httpc.send(req) {
+                Ok(response) -> response.status |> should.equal(404)
+                Error(_) -> Nil
+              }
+            }
             Error(_) -> Nil
           }
         }
@@ -1053,10 +1167,15 @@ pub fn projects_method_not_allowed_test() {
       case request.to(url) {
         Ok(req) -> {
           let req = request.set_method(req, http.Put)
-          let req =
-            request.set_header(req, "authorization", "Bearer " <> test_api_key)
-          case httpc.send(req) {
-            Ok(response) -> response.status |> should.equal(405)
+          case get_test_token() {
+            Ok(token) -> {
+              let req =
+                request.set_header(req, "authorization", "Bearer " <> token)
+              case httpc.send(req) {
+                Ok(response) -> response.status |> should.equal(405)
+                Error(_) -> Nil
+              }
+            }
             Error(_) -> Nil
           }
         }

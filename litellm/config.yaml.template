@@ -62,3 +62,7 @@ litellm_settings:
 
   # Add routing info to response headers
   return_response_headers: true
+
+  # Enable Prometheus metrics
+  success_callback: ["prometheus"]
+  failure_callback: ["prometheus"]

@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 // Allow running specific browser via environment variable (for CI matrix)
 const browserProject = process.env.BROWSER;
+const collectCoverage = process.env.COLLECT_COVERAGE === 'true';
 
 const allProjects = [
   {
@@ -23,19 +24,61 @@ const projects = browserProject
   ? allProjects.filter((p) => p.name === browserProject)
   : allProjects;
 
+// Configure reporters based on coverage mode
+const defaultReporters: Parameters<typeof defineConfig>[0]['reporter'] = process.env.CI
+  ? [['list'], ['html', { open: 'never' }]]
+  : [['html']];
+
+const coverageReporter: Parameters<typeof defineConfig>[0]['reporter'] = [
+  ['list'],
+  [
+    'monocart-reporter',
+    {
+      name: 'Playwright E2E Coverage Report',
+      outputFile: './coverage-e2e/report.html',
+      coverage: {
+        entryFilter: (entry: { url: string }) => {
+          // Only collect coverage for our app's source files
+          return (
+            entry.url.includes('localhost:3000') &&
+            entry.url.includes('/static/js/') &&
+            !entry.url.includes('node_modules')
+          );
+        },
+        sourceFilter: (sourcePath: string) => {
+          // Only include src files, exclude tests and config
+          return (
+            sourcePath.includes('/src/') &&
+            !sourcePath.includes('.test.') &&
+            !sourcePath.includes('setupTests') &&
+            !sourcePath.includes('__mocks__')
+          );
+        },
+        reports: [
+          ['v8'],
+          ['lcovonly', { outputFile: 'coverage-e2e/lcov.info' }],
+          ['json', { outputFile: 'coverage-e2e/coverage-final.json' }],
+        ],
+      },
+    },
+  ],
+];
+
 export default defineConfig({
   testDir: './e2e',
-  fullyParallel: true,
+  fullyParallel: !collectCoverage, // Run sequentially when collecting coverage
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 3 : 0,
-  workers: process.env.CI ? 1 : undefined,
-  reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'html',
+  retries: process.env.CI && !collectCoverage ? 3 : 0,
+  workers: collectCoverage ? 1 : process.env.CI ? 1 : undefined,
+  reporter: collectCoverage ? coverageReporter : defaultReporters,
   use: {
     baseURL: 'http://localhost:3000',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
-  projects,
+  projects: collectCoverage
+    ? [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]
+    : projects,
   webServer: {
     command: 'npm start',
     url: 'http://localhost:3000',

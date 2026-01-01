@@ -15,8 +15,8 @@ CREATE TABLE wiki_entries (
     ('chat', 'manual', 'url', 'task', 'github')),
   source_id UUID,
   source_url TEXT,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
   metadata JSONB DEFAULT '{}'::jsonb
 );
 
@@ -30,7 +30,7 @@ CREATE TABLE wiki_chunks (
   content TEXT NOT NULL,
   embedding vector(1024),
   token_count INTEGER,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_wiki_chunks_entry_id ON wiki_chunks(wiki_entry_id);

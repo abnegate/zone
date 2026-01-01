@@ -6,7 +6,7 @@ BEGIN;
 -- Migration tracking table
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
-  applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  applied_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Chats
@@ -14,8 +14,8 @@ CREATE TABLE chats (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
   model_name TEXT NOT NULL,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
   archived BOOLEAN DEFAULT FALSE
 );
 
@@ -24,7 +24,7 @@ CREATE TABLE messages (
   chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
   content TEXT NOT NULL,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP DEFAULT NOW(),
   metadata JSONB DEFAULT '{}'::jsonb
 );
 
@@ -39,8 +39,8 @@ CREATE TABLE projects (
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'on_hold', 'cancelled')),
   github_repo_url TEXT,
   github_access_token TEXT,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_projects_status ON projects(status);
@@ -57,10 +57,10 @@ CREATE TABLE tasks (
   priority INTEGER DEFAULT 3 CHECK (priority >= 1 AND priority <= 5),
   model_name TEXT,
   dependencies JSONB DEFAULT '[]'::jsonb,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  started_at TIMESTAMP WITH TIME ZONE,
-  completed_at TIMESTAMP WITH TIME ZONE
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  started_at TIMESTAMP,
+  completed_at TIMESTAMP
 );
 
 CREATE INDEX idx_tasks_project_id ON tasks(project_id);
@@ -73,8 +73,8 @@ CREATE TABLE task_runs (
   status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
   current_phase TEXT,
   progress_percent INTEGER DEFAULT 0 CHECK (progress_percent >= 0 AND progress_percent <= 100),
-  started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  completed_at TIMESTAMP WITH TIME ZONE,
+  started_at TIMESTAMP DEFAULT NOW(),
+  completed_at TIMESTAMP,
   error_message TEXT,
   artifacts JSONB DEFAULT '{}'::jsonb
 );
@@ -91,7 +91,7 @@ CREATE TABLE task_run_logs (
   log_level TEXT NOT NULL CHECK (log_level IN ('debug', 'info', 'warning', 'error')),
   message TEXT NOT NULL,
   metadata JSONB DEFAULT '{}'::jsonb,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_task_run_logs_run_id ON task_run_logs(task_run_id);

@@ -76,7 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   });
 
-  const refreshTimeoutRef = useRef<NodeJS.Timeout>();
+  const refreshTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
 
   // Update API client token whenever it changes
   useEffect(() => {

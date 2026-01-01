@@ -6,7 +6,7 @@ BEGIN;
 -- Add agentic task fields to tasks table
 ALTER TABLE tasks ADD COLUMN is_agentic BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE tasks ADD COLUMN github_repo_url TEXT;
-ALTER TABLE tasks ADD COLUMN queued_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE tasks ADD COLUMN queued_at TIMESTAMP;
 ALTER TABLE tasks ADD COLUMN worker_id TEXT;
 
 -- Index for finding queued tasks efficiently
@@ -25,8 +25,8 @@ CREATE TABLE task_tool_calls (
   tool_output JSONB,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
   error_message TEXT,
-  started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  completed_at TIMESTAMP WITH TIME ZONE
+  started_at TIMESTAMP DEFAULT NOW(),
+  completed_at TIMESTAMP
 );
 
 CREATE INDEX idx_task_tool_calls_run_id ON task_tool_calls(task_run_id);
@@ -42,10 +42,10 @@ CREATE TABLE task_file_changes (
   new_content TEXT,
   diff TEXT,
   applied BOOLEAN DEFAULT FALSE,
-  applied_at TIMESTAMP WITH TIME ZONE,
+  applied_at TIMESTAMP,
   reverted BOOLEAN DEFAULT FALSE,
-  reverted_at TIMESTAMP WITH TIME ZONE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  reverted_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_task_file_changes_run_id ON task_file_changes(task_run_id);
@@ -56,8 +56,8 @@ CREATE TABLE task_queue (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   priority INTEGER NOT NULL DEFAULT 3,
-  queued_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  started_at TIMESTAMP WITH TIME ZONE,
+  queued_at TIMESTAMP DEFAULT NOW(),
+  started_at TIMESTAMP,
   worker_id TEXT,
   attempts INTEGER DEFAULT 0,
   max_attempts INTEGER DEFAULT 3,

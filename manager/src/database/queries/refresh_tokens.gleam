@@ -1,10 +1,10 @@
 import auth/jwt
-import birl
 import database/connection.{type Connection, query_error_to_string}
 import gleam/dynamic/decode
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/time/timestamp
 import pog
 
 /// Store a refresh token (hashed)
@@ -17,20 +17,19 @@ pub fn create_refresh_token(
   ip_address: Option(String),
 ) -> Result(Nil, String) {
   let token_hash = jwt.hash_token(token)
-  let expires_at_str =
-    birl.from_unix(expires_at)
-    |> birl.to_iso8601
+  // Convert Unix timestamp (seconds) to gleam timestamp
+  let expires_ts = timestamp.from_unix_seconds(expires_at)
 
   let sql =
     "
     INSERT INTO refresh_tokens (user_id, token_hash, expires_at, user_agent, ip_address)
-    VALUES ($1, $2, $3::timestamptz, $4, $5)
+    VALUES ($1::uuid, $2, $3, $4, $5)
   "
 
   pog.query(sql)
   |> pog.parameter(pog.text(user_id))
   |> pog.parameter(pog.text(token_hash))
-  |> pog.parameter(pog.text(expires_at_str))
+  |> pog.parameter(pog.timestamp(expires_ts))
   |> pog.parameter(pog.nullable(pog.text, user_agent))
   |> pog.parameter(pog.nullable(pog.text, ip_address))
   |> pog.execute(db)

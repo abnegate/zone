@@ -11,8 +11,8 @@ CREATE TABLE organizations (
   slug TEXT NOT NULL UNIQUE,
   description TEXT,
   is_active BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_organizations_slug ON organizations(slug);
@@ -26,8 +26,8 @@ CREATE TABLE workspaces (
   slug TEXT NOT NULL,
   description TEXT,
   is_active BOOLEAN DEFAULT TRUE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
   UNIQUE(organization_id, slug)
 );
 

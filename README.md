@@ -1,52 +1,71 @@
-# Zone - Self-Hosted AI Stack
+# Zone - Self-Hosted AI Platform
 
-A production-ready, privacy-focused AI stack featuring local LLM inference, semantic routing, and web search capabilities—all behind a secure VPN.
+Your AI, your data, your infrastructure—put your backlog on autopilot.
 
 ## Features
 
+### AI & LLM
 - **Local LLM Inference**: Run powerful language models locally with Ollama
 - **Intelligent Routing**: Automatic model selection based on query complexity (LiteLLM)
 - **ChatGPT-like Interface**: Modern web UI with conversation history (Open WebUI)
 - **Private Web Search** (optional): VPN-protected metasearch engine (SearXNG + Gluetun)
+
+### Platform Management
+- **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration
+- **Role-Based Access Control**: Fine-grained permissions with users, roles, and policies
+- **Project & Task Management**: Organize work with agentic task execution
+- **Source Integration**: Connect and manage various data sources
+- **Wiki & Documentation**: Built-in knowledge base per workspace
+- **Theme Customization**: Workspace-specific theming
+
+### Infrastructure
 - **Reverse Proxy**: Automatic HTTPS with Let's Encrypt (Traefik)
-- **Security First**: Basic authentication, secrets management, no telemetry
+- **Comprehensive Monitoring**: Prometheus metrics with Grafana dashboards
+- **Security First**: JWT authentication, basic auth, secrets management, no telemetry
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         Internet                             │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                    ┌──────▼────────┐
-                    │    Traefik    │  (Reverse Proxy + TLS)
-                    │  Basic Auth   │
-                    └───┬───────┬───┘
-                        │       │
-           ┌────────────┘       └────────────┐
-           │                                 │
-      ┌────▼─────┐                    ┌─────▼────┐
-      │ Open     │───────────────────▶│ LiteLLM  │  (Semantic Routing)
-      │ WebUI    │                    │  Proxy   │
-      └────┬─────┘                    └─────┬────┘
-           │                                 │
-           │                          ┌──────▼──────┐
-           │                          │   Ollama    │  (LLM Inference)
-           │                          │             │  + GPU Support
-           │                          └─────────────┘
-           │
-      ┌────▼──────────┐
-      │   Gluetun     │  (VPN Tunnel)
-      │               │
-      │  ┌─────────┐  │
-      │  │SearXNG  │  │  (Private Search)
-      │  └─────────┘  │
-      └───────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                 Internet                                     │
+└─────────────────────────────────────┬───────────────────────────────────────┘
+                                      │
+                               ┌──────▼────────┐
+                               │    Traefik    │  (Reverse Proxy + TLS)
+                               │  Basic Auth   │
+                               └───┬───┬───┬───┘
+                                   │   │   │
+          ┌────────────────────────┘   │   └────────────────────────┐
+          │                            │                            │
+     ┌────▼─────┐               ┌──────▼──────┐              ┌──────▼──────┐
+     │  Manager │               │   Open      │              │  Grafana    │
+     │  Console │               │   WebUI     │              │  Dashboards │
+     │ (React)  │               │             │              │             │
+     └────┬─────┘               └──────┬──────┘              └─────────────┘
+          │                            │
+     ┌────▼─────┐               ┌──────▼──────┐
+     │  Manager │               │   LiteLLM   │  (Semantic Routing)
+     │   API    │               │    Proxy    │
+     │ (Gleam)  │               └──────┬──────┘
+     └────┬─────┘                      │
+          │                     ┌──────▼──────┐
+     ┌────▼─────┐               │   Ollama    │  (LLM Inference)
+     │PostgreSQL│               │             │  + GPU Support
+     │ + Valkey │               └─────────────┘
+     └──────────┘
+
+     ┌────────────────┐
+     │   Gluetun      │  (VPN Tunnel - Optional)
+     │                │
+     │  ┌──────────┐  │
+     │  │ SearXNG  │  │  (Private Search)
+     │  └──────────┘  │
+     └────────────────┘
 ```
 
 ## Quick Start
 
-**ZERO configuration required!** Just copy `.env.example` to `.env`, create basic auth, and start:
+**Zero configuration required!** Just copy `.env.example` to `.env`, create basic auth, and start:
 
 ```bash
 cp .env.example .env
@@ -54,7 +73,10 @@ mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
 make up
 ```
 
-Access at `https://webui.localhost` (add to /etc/hosts if needed)
+Access the services:
+- **Console**: `https://manager.localhost` (workspace management)
+- **WebUI**: `https://webui.localhost` (chat interface)
+- **API**: `https://manager.localhost/api/`
 
 ### Prerequisites
 
@@ -68,38 +90,23 @@ Access at `https://webui.localhost` (add to /etc/hosts if needed)
 
 Choose your preferred installation method:
 
-#### 🌐 Option 1: Web Installer (Recommended for First-Time Users)
+#### Option 1: Web Installer (Recommended)
 
-Beautiful web-based wizard built with **Gleam** (type-safe functional language on the BEAM).
+Beautiful web-based wizard built with Gleam.
 
-1. **Clone and start installer**
+```bash
+git clone <repository-url>
+cd zone
+make install
+```
 
-   ```bash
-   git clone <repository-url>
-   cd zone
-   make install
-   ```
+Open browser to `http://localhost:8000` and follow the 7-step wizard:
+- Generate secure secrets with one click
+- Choose models based on your hardware
+- Configure VPN (optional)
+- Click "Install Now" and watch live progress
 
-2. **Configure via web interface**
-
-   - Open browser to `http://localhost:8000`
-   - Step through 7-step configuration wizard
-   - Generate secure secrets with one click (cryptographically secure)
-   - Choose models based on your hardware
-   - Optional: Configure VPN (OpenVPN or WireGuard)
-   - Click "Install Now" and watch live progress
-
-3. **Start the stack**
-
-   ```bash
-   make up          # Without VPN
-   # or
-   make up-vpn      # With VPN-protected search
-   ```
-
-**Tech Stack**: Gleam + Wisp + Mist (backend) | Vanilla HTML + JS + Tailwind (frontend)
-
-#### ⚡ Option 2: Quick Start (Zero Configuration)
+#### Option 2: Quick Start
 
 ```bash
 cp .env.example .env
@@ -107,21 +114,17 @@ mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
 make up
 ```
 
-That's it! Uses insecure defaults (fine for development).
+Uses insecure defaults (fine for development).
 
-#### 💻 Option 3: CLI Setup Script
+#### Option 3: CLI Setup Script
 
 ```bash
 ./scripts/setup.sh
 ```
 
-Interactive command-line wizard for those who prefer the terminal.
-
----
+Interactive command-line wizard for terminal users.
 
 ### Post-Installation
-
-After using any installation method above:
 
 1. **Monitor initial setup** (models downloading)
 
@@ -131,9 +134,33 @@ After using any installation method above:
 
    Wait for models to download (10-30 minutes depending on your connection).
 
-6. **Access the web UI**
+2. **Access the services**
 
-   Navigate to `https://your-webui-host.com` and log in with your basic auth credentials.
+   - Console: `https://manager.localhost` - Manage workspaces, projects, tasks
+   - WebUI: `https://webui.localhost` - Chat with AI models
+
+## Services
+
+### Core Services
+
+| Service | Description | Port | Tech Stack |
+|---------|-------------|------|------------|
+| **Manager API** | Backend API for platform management | 8000 | Gleam, Wisp, Mist |
+| **Manager Console** | Web frontend for workspace management | 5173 | React 19, TypeScript, Tailwind |
+| **Open WebUI** | ChatGPT-like interface | 8080 | Python, Svelte |
+| **LiteLLM** | LLM proxy with semantic routing | 4000 | Python |
+| **Ollama** | Local LLM inference engine | 11434 | Go |
+| **PostgreSQL** | Database with pgvector | 5432 | PostgreSQL 16 |
+| **Valkey** | In-memory cache | 6379 | Valkey (Redis fork) |
+| **Traefik** | Reverse proxy with TLS | 80, 443 | Go |
+
+### Optional Services (Profiles)
+
+| Profile | Services | Description |
+|---------|----------|-------------|
+| `vpn` | Gluetun, SearXNG | VPN-protected web search |
+| `monitoring` | Prometheus, Grafana | Metrics and dashboards |
+| `installer` | Web Installer | One-time setup wizard |
 
 ## Configuration
 
@@ -151,34 +178,35 @@ Browse more models at [Ollama Library](https://ollama.com/library).
 
 ### VPN Configuration (Optional)
 
-**VPN is completely optional**. The system works perfectly without it - you'll just have direct (non-VPN) web search or no search at all.
+VPN is optional. The system works without it - you'll just have direct web search or no search.
 
 To enable VPN-protected search:
-1. Add VPN credentials to `.env`
-2. Start with VPN profile: `docker compose --profile vpn up -d`
-
-### VPN Providers
-
-Gluetun supports many providers. See [Gluetun Wiki](https://github.com/qdm12/gluetun-wiki) for configuration:
-
-- Surfshark (default)
-- NordVPN
-- ExpressVPN
-- ProtonVPN
-- Mullvad
-- And many more...
-
-### Resource Limits
-
-Default resource limits are conservative. Adjust in `docker-compose.yml`:
-
-```yaml
-deploy:
-  resources:
-    limits:
-      cpus: '4.0'
-      memory: 4G
+```bash
+# Add VPN credentials to .env
+# Start with VPN profile
+docker compose --profile vpn up -d
 ```
+
+Supported providers: Surfshark, NordVPN, ExpressVPN, ProtonVPN, Mullvad, and more. See [Gluetun Wiki](https://github.com/qdm12/gluetun-wiki).
+
+### Monitoring
+
+Enable comprehensive monitoring with Grafana dashboards:
+
+```bash
+docker compose --profile monitoring up -d
+```
+
+Pre-built dashboards for:
+- Manager Console & API
+- Ollama (LLM inference metrics)
+- LiteLLM (routing metrics)
+- PostgreSQL (database performance)
+- Traefik (proxy metrics)
+- Valkey (cache metrics)
+- SearXNG & Gluetun (search/VPN)
+
+Access Grafana at `https://grafana.localhost`.
 
 ## Usage
 
@@ -188,6 +216,7 @@ deploy:
 make help              # Show all available commands
 
 # Setup
+make install           # Run web installer
 make setup             # Run interactive setup
 make setup-auth        # Generate basic auth
 make validate          # Validate configuration
@@ -200,6 +229,10 @@ make logs              # Show recent logs
 make logs-follow       # Follow logs
 make ps                # Show service status
 
+# With Profiles
+make up-vpn            # Start with VPN
+make up-monitoring     # Start with monitoring
+
 # Health & Monitoring
 make health            # Check service health
 make stats             # Show resource usage
@@ -208,37 +241,22 @@ make stats             # Show resource usage
 make pull-models       # Manually pull models
 make list-models       # List downloaded models
 
+# Development
+make dev               # Start with live logs
+make rebuild           # Rebuild and restart
+make test              # Run tests
+make lint              # Run linters
+
 # Maintenance
 make backup            # Backup volumes
 make restore BACKUP=x  # Restore from backup
 make clean             # Remove containers
 make update            # Update images
-
-# Development
-make dev               # Start with live logs
-make rebuild           # Rebuild and restart
-make shell-ollama      # Shell into Ollama
 ```
 
-### Manual Commands
+### API Usage
 
-```bash
-# View logs for specific service
-docker compose logs -f litellm
-
-# Execute command in container
-docker exec -it ollama ollama list
-
-# Check VPN status
-docker exec gluetun wget -qO- ifconfig.me
-
-# Restart single service
-docker compose restart openwebui
-```
-
-## API Usage
-
-### LiteLLM OpenAI-Compatible API
+#### LiteLLM OpenAI-Compatible API
 
 ```bash
 curl https://api.yourdomain.com/v1/chat/completions \
@@ -250,253 +268,119 @@ curl https://api.yourdomain.com/v1/chat/completions \
   }'
 ```
 
+#### Manager API
+
+```bash
+# Authenticate
+curl -X POST https://manager.yourdomain.com/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "password"}'
+
+# List workspaces (with JWT token)
+curl https://manager.yourdomain.com/api/workspaces \
+  -H "Authorization: Bearer ${JWT_TOKEN}"
+```
+
 ### Model Selection
 
-The system provides three models available in the Open WebUI interface:
+The system provides three models:
 
-- **auto** (default): Intelligently routes to fast or reason based on query complexity using semantic similarity
-- **fast** (llama3.1:8b): Faster responses for general queries, summaries, rewrites, simple questions
-- **reason** (deepseek-r1:14b): Slower but more thorough reasoning for complex analysis, debugging, system design
+- **auto** (default): Routes to fast or reason based on query complexity
+- **fast** (llama3.1:8b): Quick responses for simple queries
+- **reason** (deepseek-r1:14b): Thorough reasoning for complex analysis
 
-**How Auto Routing Works**:
-1. Your query is analyzed using semantic embeddings (nomic-embed-text)
-2. It's compared against example "utterances" for each model type
-3. If the query is semantically similar to complex reasoning tasks, it routes to `reason`
-4. If the query is semantically similar to simple tasks, it routes to `fast`
-5. Default fallback is `fast` if no strong match is found
+## Development
 
-**Examples**:
-- "Summarize this article" → routes to **fast**
-- "Prove this algorithm is correct" → routes to **reason**
-- "Analyze the time complexity of this code" → routes to **reason**
-- "Translate this text" → routes to **fast**
+### Tech Stack
 
-**Manual Override**: You can always select `fast` or `reason` directly if you want to bypass auto routing.
+| Component | Technology |
+|-----------|------------|
+| Backend | Gleam 1.7.1+, Wisp, Mist, Pog |
+| Frontend | React 19, TypeScript, Tailwind CSS, React Router |
+| Database | PostgreSQL 16 with pgvector |
+| Cache | Valkey (Redis fork) |
+| Testing | Gleeunit (backend), Jest + Playwright (frontend) |
+| CI/CD | GitHub Actions |
 
-**Automatic Fallback**: If any model fails, it automatically falls back to the reason model for reliability.
+### Local Development
+
+```bash
+# Start in development mode
+make dev
+
+# Run backend tests
+cd manager && gleam test
+
+# Run frontend tests
+cd manager/frontend && npm test
+
+# Run E2E tests
+cd manager/frontend && npm run test:e2e
+```
+
+### Database Migrations
+
+Migrations are in `manager/migrations/`:
+
+1. `001_initial_schema.sql` - Core tables (chats, messages, projects, tasks)
+2. `002_wiki_schema.sql` - Wiki/documentation
+3. `003_agentic_tasks.sql` - Task execution framework
+4. `004_sources.sql` - Source integration
+5. `005_source_categories.sql` - Source taxonomy
+6. `006_auth_rbac.sql` - Users, roles, permissions
+7. `007_organizations_workspaces.sql` - Multi-tenancy
+8. `008_workspace_themes.sql` - Theme customization
+
+### Project Structure
+
+```
+zone/
+├── manager/                 # Platform backend + frontend
+│   ├── src/                 # Gleam backend source
+│   │   ├── controllers/     # HTTP endpoint handlers
+│   │   ├── database/        # Database queries
+│   │   ├── models/          # Data models
+│   │   ├── auth/            # Authentication & JWT
+│   │   ├── middleware/      # Auth, metrics middleware
+│   │   └── router.gleam     # API routing
+│   ├── frontend/            # React frontend
+│   │   ├── src/components/  # UI components
+│   │   ├── src/pages/       # Page components
+│   │   ├── src/context/     # React context (Auth, Theme, Workspace)
+│   │   └── src/hooks/       # Custom hooks
+│   ├── migrations/          # SQL migrations
+│   └── test/                # Backend tests
+├── installer/               # Web-based setup wizard
+├── litellm/                 # LLM proxy configuration
+├── ollama/                  # Model pulling scripts
+├── searxng/                 # Search engine config
+├── traefik/                 # Reverse proxy config
+├── prometheus/              # Metrics collection
+├── grafana/                 # Dashboards
+│   └── dashboards/          # Pre-built dashboard JSON
+├── docker-compose.yml       # Multi-profile deployment
+├── docker-compose.dev.yml   # Development overrides
+├── Makefile                 # Operational commands
+└── .env.example             # Configuration template
+```
 
 ## Security
 
 ### Best Practices
 
-1. **Never commit `.env` file** - Contains secrets!
-2. **Use strong passwords** - For basic auth
-3. **Rotate secrets regularly** - Master keys and VPN credentials
+1. **Never commit `.env` file** - Contains secrets
+2. **Use strong passwords** - For basic auth and user accounts
+3. **Rotate secrets regularly** - JWT secrets, API keys
 4. **Keep images updated** - Run `make update` monthly
 5. **Review logs** - Monitor for suspicious activity
-6. **Use VPN for search** - Already configured via Gluetun
+6. **Use VPN for search** - Privacy-respecting web search
 7. **Enable fail2ban** - On the host system (optional)
 
-### Secret Generation
-
-Generate new secrets:
-
-```bash
-openssl rand -base64 32
-```
-
-Update basic auth password:
-
-```bash
-htpasswd -B auth/users.htpasswd username
-```
-
-## Troubleshooting
-
-### Models not pulling
-
-```bash
-# Check ollama-init logs
-docker compose logs ollama-init
-
-# Manually pull a model
-docker exec ollama ollama pull llama3.1:8b
-```
-
-### VPN not connecting
-
-```bash
-# Check Gluetun logs
-docker compose logs gluetun
-
-# Verify credentials in .env
-# Check provider-specific requirements in Gluetun docs
-```
-
-### Out of memory
-
-```bash
-# Use smaller models
-OLLAMA_MODEL_FAST=llama3.2:3b
-OLLAMA_MODEL_REASON=deepseek-r1:7b
-
-# Or reduce concurrent requests
-LITELLM_WORKERS=2
-```
-
-### TLS certificate issues
-
-```bash
-# Check Traefik logs
-docker compose logs traefik
-
-# Verify ACME_EMAIL is set
-# Ensure ports 80/443 are accessible
-# Check DNS points to your server
-```
-
-### Service won't start
-
-```bash
-# Check service health
-make health
-
-# View specific service logs
-docker compose logs <service-name>
-
-# Restart service
-docker compose restart <service-name>
-```
-
-## Backup & Recovery
-
-### Backup
-
-```bash
-# Automatic backup to ./backups
-make backup
-
-# Manual backup of specific volume
-docker run --rm \
-  -v zone_ollama_data:/data \
-  -v $(pwd)/backups:/backup \
-  alpine tar czf /backup/ollama.tar.gz -C /data .
-```
-
-### Restore
-
-```bash
-# Restore from backup
-make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz
-
-# Or manually
-docker run --rm \
-  -v zone_ollama_data:/data \
-  -v $(pwd)/backups:/backup \
-  alpine tar xzf /backup/ollama.tar.gz -C /data
-```
-
-## Monitoring
-
-### Resource Usage
-
-```bash
-make stats
-```
-
-### Health Checks
-
-All services have health checks. View with:
-
-```bash
-make health
-docker compose ps
-```
-
-### Logs
-
-```bash
-# All services
-make logs-follow
-
-# Specific service
-docker compose logs -f ollama
-
-# Tail last 100 lines
-docker compose logs --tail=100
-```
-
-## Updating
-
-### Update Docker Images
-
-```bash
-make update
-```
-
-### Update Models
-
-```bash
-# Remove old models
-docker exec ollama ollama rm llama3.1:8b
-
-# Pull new models
-docker exec ollama ollama pull llama3.2:8b
-
-# Or edit .env and restart
-docker compose restart ollama-init
-```
-
-## Performance Tuning
-
-### LiteLLM Workers
-
-Increase for higher concurrency:
-
-```env
-LITELLM_WORKERS=8
-```
-
-### Ollama GPU Configuration
-
-For multiple GPUs:
-
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          device_ids: ['0', '1']
-          capabilities: [gpu]
-```
-
-### Model Caching
-
-Keep models in memory longer:
-
-```env
-OLLAMA_KEEP_ALIVE=24h
-```
-
-## Development
-
-### Local Development
-
-```bash
-# Start with live logs
-make dev
-
-# Make changes and rebuild
-make rebuild
-
-# Open shell for debugging
-make shell-ollama
-```
-
-### Adding Custom Models
-
-Edit `.env`:
-
-```env
-OLLAMA_MODEL_FAST=your-custom-model:tag
-```
-
-Restart:
-
-```bash
-docker compose restart ollama-init
-```
+### Authentication
+
+- **Basic Auth**: Traefik-level authentication for all services
+- **JWT Tokens**: API authentication with refresh tokens
+- **RBAC**: Role-based access control for fine-grained permissions
 
 ## System Requirements
 
@@ -522,6 +406,55 @@ docker compose restart ollama-init
 - macOS (Docker Desktop)
 - Windows 11 (Docker Desktop + WSL2)
 
+## Troubleshooting
+
+### Models not pulling
+
+```bash
+docker compose logs ollama-init
+docker exec ollama ollama pull llama3.1:8b
+```
+
+### VPN not connecting
+
+```bash
+docker compose logs gluetun
+# Check credentials in .env
+```
+
+### Database connection issues
+
+```bash
+docker compose logs postgres
+docker exec -it postgres pg_isready
+```
+
+### Out of memory
+
+```bash
+# Use smaller models in .env
+OLLAMA_MODEL_FAST=llama3.2:3b
+OLLAMA_MODEL_REASON=deepseek-r1:7b
+```
+
+### Service won't start
+
+```bash
+make health
+docker compose logs <service-name>
+docker compose restart <service-name>
+```
+
+## Backup & Recovery
+
+```bash
+# Backup all volumes
+make backup
+
+# Restore from backup
+make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz
+```
+
 ## License
 
 MIT License - See [LICENSE](LICENSE) file for details.
@@ -538,17 +471,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 - [SearXNG](https://github.com/searxng/searxng) - Metasearch engine
 - [Gluetun](https://github.com/qdm12/gluetun) - VPN client
 - [Traefik](https://traefik.io/) - Reverse proxy
-
-## Support
-
-For issues, questions, or contributions:
-
-1. Check [Troubleshooting](#troubleshooting) section
-2. Review existing [GitHub Issues](issues)
-3. Open a new issue with details:
-   - Output of `make version`
-   - Relevant logs from `make logs`
-   - Steps to reproduce
+- [Gleam](https://gleam.run/) - Type-safe language on the BEAM
+- [Wisp](https://github.com/gleam-wisp/wisp) - Gleam web framework
 
 ---
 

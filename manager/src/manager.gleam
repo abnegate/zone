@@ -4,6 +4,7 @@ import gleam/erlang/process
 import gleam/http/request
 import gleam/http/response
 import gleam/io
+import middleware/metrics
 import mist.{type Connection, type ResponseData}
 import router
 import web.{type Context, Context}
@@ -14,6 +15,12 @@ import wisp/wisp_mist
 
 pub fn main() {
   wisp.configure_logger()
+
+  // Initialize Prometheus metrics
+  case metrics.init() {
+    Ok(_) -> io.println("Prometheus metrics initialized")
+    Error(_) -> io.println("Warning: Failed to initialize metrics")
+  }
 
   // Initialize database connection pool
   case db_connection.connect() {

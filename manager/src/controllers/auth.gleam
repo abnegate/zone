@@ -162,8 +162,8 @@ fn complete_user_registration(
   new_user: user.User,
   role_name: String,
 ) -> Response {
-  // Assign role
-  case users.assign_role(ctx.db, new_user.id, role_name, None) {
+  // Assign role (user self-assigns during registration)
+  case users.assign_role(ctx.db, new_user.id, role_name, new_user.id) {
     Ok(_) -> {
       // Generate tokens
       case generate_auth_response(ctx, new_user.id, req) {

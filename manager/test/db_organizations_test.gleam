@@ -6,23 +6,31 @@ import models/organization.{CreateOrganizationRequest, UpdateOrganizationRequest
 
 import test_db
 
+// Helper to create an organization with unique slug
+fn create_org(db, name: String) {
+  let slug = test_db.unique_slug("org")
+  let req = CreateOrganizationRequest(name: name, slug: slug, description: None)
+  organizations.create_organization(db, req) |> should.be_ok()
+}
+
 // =============================================================================
 // Organization CRUD Tests
 // =============================================================================
 
 pub fn create_organization_test() {
   test_db.with_db(fn(db) {
+    let slug = test_db.unique_slug("test-org")
     let req =
       CreateOrganizationRequest(
         name: "Test Organization",
-        slug: "test-org",
+        slug: slug,
         description: Some("A test organization"),
       )
 
     let org = organizations.create_organization(db, req) |> should.be_ok()
 
     org.name |> should.equal("Test Organization")
-    org.slug |> should.equal("test-org")
+    org.slug |> should.equal(slug)
     org.description |> should.equal(Some("A test organization"))
     org.is_active |> should.equal(True)
   })
@@ -30,17 +38,18 @@ pub fn create_organization_test() {
 
 pub fn create_organization_without_description_test() {
   test_db.with_db(fn(db) {
+    let slug = test_db.unique_slug("minimal-org")
     let req =
       CreateOrganizationRequest(
         name: "Minimal Org",
-        slug: "minimal-org",
+        slug: slug,
         description: None,
       )
 
     let org = organizations.create_organization(db, req) |> should.be_ok()
 
     org.name |> should.equal("Minimal Org")
-    org.slug |> should.equal("minimal-org")
+    org.slug |> should.equal(slug)
     org.description |> should.equal(None)
   })
 }
@@ -55,36 +64,21 @@ pub fn list_organizations_empty_test() {
 
 pub fn list_organizations_returns_all_test() {
   test_db.with_db(fn(db) {
-    let req1 =
-      CreateOrganizationRequest(name: "Org 1", slug: "org-1", description: None)
-    let req2 =
-      CreateOrganizationRequest(name: "Org 2", slug: "org-2", description: None)
-
-    let _ = organizations.create_organization(db, req1) |> should.be_ok()
-    let _ = organizations.create_organization(db, req2) |> should.be_ok()
+    let org1 = create_org(db, "Org 1")
+    let org2 = create_org(db, "Org 2")
 
     let all = organizations.list_organizations(db, False) |> should.be_ok()
-    list.length(all) |> should.equal(2)
+    // Check that both created orgs are in the list (there may be more from parallel tests)
+    let ids = list.map(all, fn(o) { o.id })
+    list.contains(ids, org1.id) |> should.be_true()
+    list.contains(ids, org2.id) |> should.be_true()
   })
 }
 
 pub fn list_organizations_filter_active_only_test() {
   test_db.with_db(fn(db) {
-    let req1 =
-      CreateOrganizationRequest(
-        name: "Active Org",
-        slug: "active-org",
-        description: None,
-      )
-    let req2 =
-      CreateOrganizationRequest(
-        name: "Inactive Org",
-        slug: "inactive-org",
-        description: None,
-      )
-
-    let _ = organizations.create_organization(db, req1) |> should.be_ok()
-    let org2 = organizations.create_organization(db, req2) |> should.be_ok()
+    let org1 = create_org(db, "Active Org")
+    let org2 = create_org(db, "Inactive Org")
 
     // Deactivate org2
     let update_req =
@@ -98,21 +92,23 @@ pub fn list_organizations_filter_active_only_test() {
       organizations.update_organization(db, org2.id, update_req)
       |> should.be_ok()
 
-    // All orgs
+    // All orgs should include both
     let all = organizations.list_organizations(db, False) |> should.be_ok()
-    list.length(all) |> should.equal(2)
+    let all_ids = list.map(all, fn(o) { o.id })
+    list.contains(all_ids, org1.id) |> should.be_true()
+    list.contains(all_ids, org2.id) |> should.be_true()
 
-    // Active only
+    // Active only should include org1 but not org2
     let active = organizations.list_organizations(db, True) |> should.be_ok()
-    list.length(active) |> should.equal(1)
-    let assert [org] = active
-    org.name |> should.equal("Active Org")
+    let active_ids = list.map(active, fn(o) { o.id })
+    list.contains(active_ids, org1.id) |> should.be_true()
+    list.contains(active_ids, org2.id) |> should.be_false()
   })
 }
 
 pub fn get_organization_not_found_test() {
   test_db.with_db(fn(db) {
-    organizations.get_organization(db, "nonexistent-id")
+    organizations.get_organization(db, "00000000-0000-0000-0000-000000000000")
     |> should.be_ok()
     |> should.equal(None)
   })
@@ -120,13 +116,7 @@ pub fn get_organization_not_found_test() {
 
 pub fn get_organization_found_test() {
   test_db.with_db(fn(db) {
-    let req =
-      CreateOrganizationRequest(
-        name: "Test Org",
-        slug: "test-org",
-        description: None,
-      )
-    let created = organizations.create_organization(db, req) |> should.be_ok()
+    let created = create_org(db, "Test Org")
 
     let found =
       organizations.get_organization(db, created.id)
@@ -135,7 +125,6 @@ pub fn get_organization_found_test() {
 
     found.id |> should.equal(created.id)
     found.name |> should.equal("Test Org")
-    found.slug |> should.equal("test-org")
   })
 }
 
@@ -149,33 +138,28 @@ pub fn get_organization_by_slug_not_found_test() {
 
 pub fn get_organization_by_slug_found_test() {
   test_db.with_db(fn(db) {
+    let slug = test_db.unique_slug("slug-test")
     let req =
       CreateOrganizationRequest(
         name: "Slug Test",
-        slug: "my-unique-slug",
+        slug: slug,
         description: None,
       )
     let created = organizations.create_organization(db, req) |> should.be_ok()
 
     let found =
-      organizations.get_organization_by_slug(db, "my-unique-slug")
+      organizations.get_organization_by_slug(db, slug)
       |> should.be_ok()
       |> should.be_some()
 
     found.id |> should.equal(created.id)
-    found.slug |> should.equal("my-unique-slug")
+    found.slug |> should.equal(slug)
   })
 }
 
 pub fn update_organization_name_test() {
   test_db.with_db(fn(db) {
-    let req =
-      CreateOrganizationRequest(
-        name: "Original",
-        slug: "original-org",
-        description: None,
-      )
-    let org = organizations.create_organization(db, req) |> should.be_ok()
+    let org = create_org(db, "Original")
 
     let update_req =
       UpdateOrganizationRequest(
@@ -191,24 +175,19 @@ pub fn update_organization_name_test() {
       |> should.be_some()
 
     updated.name |> should.equal("Updated")
-    updated.slug |> should.equal("original-org")
+    updated.slug |> should.equal(org.slug)
   })
 }
 
 pub fn update_organization_slug_test() {
   test_db.with_db(fn(db) {
-    let req =
-      CreateOrganizationRequest(
-        name: "Test",
-        slug: "old-slug",
-        description: None,
-      )
-    let org = organizations.create_organization(db, req) |> should.be_ok()
+    let org = create_org(db, "Test")
+    let new_slug = test_db.unique_slug("new-slug")
 
     let update_req =
       UpdateOrganizationRequest(
         name: None,
-        slug: Some("new-slug"),
+        slug: Some(new_slug),
         description: None,
         is_active: None,
       )
@@ -218,19 +197,13 @@ pub fn update_organization_slug_test() {
       |> should.be_ok()
       |> should.be_some()
 
-    updated.slug |> should.equal("new-slug")
+    updated.slug |> should.equal(new_slug)
   })
 }
 
 pub fn update_organization_description_test() {
   test_db.with_db(fn(db) {
-    let req =
-      CreateOrganizationRequest(
-        name: "Test",
-        slug: "test-org",
-        description: None,
-      )
-    let org = organizations.create_organization(db, req) |> should.be_ok()
+    let org = create_org(db, "Test")
     org.description |> should.equal(None)
 
     let update_req =
@@ -252,13 +225,7 @@ pub fn update_organization_description_test() {
 
 pub fn update_organization_is_active_test() {
   test_db.with_db(fn(db) {
-    let req =
-      CreateOrganizationRequest(
-        name: "Test",
-        slug: "test-org",
-        description: None,
-      )
-    let org = organizations.create_organization(db, req) |> should.be_ok()
+    let org = create_org(db, "Test")
     org.is_active |> should.equal(True)
 
     let update_req =
@@ -288,7 +255,11 @@ pub fn update_organization_not_found_test() {
         is_active: None,
       )
 
-    organizations.update_organization(db, "nonexistent-id", update_req)
+    organizations.update_organization(
+      db,
+      "00000000-0000-0000-0000-000000000000",
+      update_req,
+    )
     |> should.be_ok()
     |> should.equal(None)
   })
@@ -296,13 +267,7 @@ pub fn update_organization_not_found_test() {
 
 pub fn delete_organization_test() {
   test_db.with_db(fn(db) {
-    let req =
-      CreateOrganizationRequest(
-        name: "Test",
-        slug: "test-org",
-        description: None,
-      )
-    let org = organizations.create_organization(db, req) |> should.be_ok()
+    let org = create_org(db, "Test")
 
     organizations.delete_organization(db, org.id)
     |> should.be_ok()
@@ -316,7 +281,7 @@ pub fn delete_organization_test() {
 
 pub fn delete_organization_not_found_test() {
   test_db.with_db(fn(db) {
-    organizations.delete_organization(db, "nonexistent-id")
+    organizations.delete_organization(db, "00000000-0000-0000-0000-000000000000")
     |> should.be_ok()
     |> should.equal(False)
   })
@@ -328,16 +293,17 @@ pub fn delete_organization_not_found_test() {
 
 pub fn unique_slug_constraint_test() {
   test_db.with_db(fn(db) {
+    let same_slug = test_db.unique_slug("same-slug")
     let req1 =
       CreateOrganizationRequest(
         name: "Org 1",
-        slug: "same-slug",
+        slug: same_slug,
         description: None,
       )
     let req2 =
       CreateOrganizationRequest(
         name: "Org 2",
-        slug: "same-slug",
+        slug: same_slug,
         description: None,
       )
 

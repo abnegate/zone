@@ -1,28 +1,51 @@
 services:
+  # =============================================================================
+  # Data Storage
+  # =============================================================================
+  postgres:
+    command: postgres -c max_connections=255
+    networks:
+      - internal
+      - edge
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  valkey:
+    networks:
+      - internal
+      - edge
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  # =============================================================================
+  # Application Services
+  # =============================================================================
   manager:
     ports:
       - "127.0.0.1:8000:8000"
-
-  valkey:
-    ports:
-      - "127.0.0.1:6379:6379"
 
   console:
     image: node:20-alpine
     container_name: console
     restart: unless-stopped
-    working_dir: /app
-    volumes:
-      - ./manager/frontend:/app
-      - frontend_node_modules:/app/node_modules
     environment:
       - WATCHPACK_POLLING=true
       - CHOKIDAR_USEPOLLING=true
       - WDS_SOCKET_PORT=0
       - REACT_APP_API_URL=http://localhost:8000
+    volumes:
+      - ./manager/frontend:/app
+      - frontend_node_modules:/app/node_modules
+    working_dir: /app
     command: sh -c "npm install && npm start"
     ports:
       - "3000:3000"
+
+networks:
+  internal:
+    name: zone_internal
+  edge:
+    name: zone_edge
 
 volumes:
   frontend_node_modules:

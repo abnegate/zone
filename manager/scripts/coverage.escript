@@ -38,9 +38,9 @@ main(Args) ->
 
     io:format("~nRunning tests...~n~n"),
 
-    %% Run gleeunit tests
-    TestResult = os:cmd("gleam test 2>&1"),
-    io:format("~s~n", [TestResult]),
+    %% Run gleeunit tests (convert to binary for proper unicode handling)
+    TestResult = unicode:characters_to_binary(os:cmd("gleam test 2>&1")),
+    io:format("~ts~n", [TestResult]),
 
     %% Analyze coverage
     io:format("~n=== Coverage Results ===~n~n"),
@@ -116,7 +116,7 @@ truncate_module_name(Name, MaxLen) ->
 
 analyze_modules(Modules, CoverageDir, Verbose) ->
     lists:foldl(fun(Mod, {AccCovered, AccTotal, AccStats}) ->
-        case cover:analyse(Mod, coverage, line) of
+        case cover:analyse(Mod, coverage, module) of
             {ok, {_, {Covered, NotCovered}}} ->
                 Total = Covered + NotCovered,
                 Pct = case Total of
@@ -143,18 +143,19 @@ generate_html_report(CoverageDir, ModuleStats, TotalCoverage) ->
 
     SortedStats = lists:reverse(lists:keysort(4, ModuleStats)),
 
-    ModuleRows = lists:map(fun({Mod, Lines, Covered, Pct}) ->
+    ModuleRowsList = lists:map(fun({Mod, Lines, Covered, Pct}) ->
         ModName = atom_to_list(Mod),
         StatusClass = if Pct >= 80 -> "high"; Pct >= 50 -> "medium"; true -> "low" end,
-        io_lib:format(
+        lists:flatten(io_lib:format(
             "<tr class=\"~s\">"
             "<td><a href=\"~s.html\">~s</a></td>"
             "<td>~p</td>"
             "<td>~p</td>"
             "<td>~.1f%</td>"
             "</tr>~n",
-            [StatusClass, ModName, ModName, Lines, Covered, Pct])
+            [StatusClass, ModName, ModName, Lines, Covered, Pct]))
     end, SortedStats),
+    ModuleRows = lists:flatten(ModuleRowsList),
 
     StatusClass = if TotalCoverage >= 80 -> "high"; TotalCoverage >= 50 -> "medium"; true -> "low" end,
 
@@ -231,11 +232,13 @@ generate_html_report(CoverageDir, ModuleStats, TotalCoverage) ->
          length(ModuleStats),
          lists:sum([L || {_, L, _, _} <- ModuleStats]),
          if TotalCoverage >= 80 -> "pass"; true -> "fail" end,
-         if TotalCoverage >= 80 ->
-            io_lib:format("✓ Coverage meets 80% threshold (~.1f%)", [TotalCoverage]);
+         lists:flatten(if TotalCoverage >= 80 ->
+            io_lib:format("Coverage meets 80% threshold (~.1f%)", [TotalCoverage]);
          true ->
-            io_lib:format("✗ Coverage below 80% threshold (~.1f%)", [TotalCoverage])
-         end,
+            io_lib:format("Coverage below 80% threshold (~.1f%)", [TotalCoverage])
+         end),
          ModuleRows]),
 
-    file:write_file(IndexFile, Html).
+    %% Convert iolist to binary for proper file writing
+    HtmlBinary = unicode:characters_to_binary(lists:flatten(Html)),
+    file:write_file(IndexFile, HtmlBinary).

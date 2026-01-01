@@ -30,6 +30,7 @@
     "test:coverage:watch": "react-scripts test --coverage",
     "eject": "react-scripts eject",
     "test:e2e": "playwright test",
+    "test:e2e:coverage": "COLLECT_COVERAGE=true playwright test --project=chromium",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headed": "playwright test --headed",
     "lint": "biome lint src",
@@ -60,6 +61,8 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@playwright/test": "^1.57.0",
+    "monocart-reporter": "^2.9.23",
+    "nyc": "^17.1.0",
     "yaml": "^2.8.2"
   },
   "jest": {

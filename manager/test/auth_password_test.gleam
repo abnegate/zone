@@ -13,18 +13,18 @@ pub fn hash_password_returns_non_empty_string_test() {
 }
 
 pub fn hash_password_includes_salt_test() {
-  // Hash format should be: algorithm$iterations$salt$hash
+  // Hash format should be: $pbkdf2-sha256$iterations$salt$hash
   let hash = password.hash_password("test_password")
 
   hash
   |> string.contains("$")
   |> should.be_true
 
-  // Should have 4 parts separated by $
+  // Should have 5 parts separated by $ (empty first part due to leading $)
   let parts = string.split(hash, "$")
   parts
   |> list.length
-  |> should.equal(4)
+  |> should.equal(5)
 }
 
 pub fn hash_password_different_salts_produce_different_hashes_test() {
@@ -41,7 +41,7 @@ pub fn hash_password_uses_pbkdf2_algorithm_test() {
   let hash = password.hash_password("test")
 
   hash
-  |> string.starts_with("pbkdf2-sha256$")
+  |> string.starts_with("$pbkdf2-sha256$")
   |> should.be_true
 }
 

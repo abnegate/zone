@@ -12,6 +12,10 @@ import pog
 pub type Connection =
   pog.Connection
 
+// Fixed pool name (same name every time, unlike process.new_name which adds unique suffixes)
+@external(erlang, "database_connection_ffi", "fixed_pool_name")
+fn fixed_pool_name() -> process.Name(msg)
+
 /// Initialize the database connection pool
 /// Should be called once at application startup
 pub fn connect() -> Result(Connection, String) {
@@ -21,8 +25,8 @@ pub fn connect() -> Result(Connection, String) {
   let user = config.get_postgres_user()
   let password = config.get_postgres_password()
 
-  // Create pool name
-  let pool_name = process.new_name("manager_db_pool")
+  // Use fixed pool name so named_connection() can find it
+  let pool_name = fixed_pool_name()
 
   // Build configuration
   let db_config =
@@ -45,7 +49,7 @@ pub fn connect() -> Result(Connection, String) {
 
 /// Get a connection by name (for use after pool is started)
 pub fn named_connection() -> Connection {
-  let pool_name = process.new_name("manager_db_pool")
+  let pool_name = fixed_pool_name()
   pog.named_connection(pool_name)
 }
 
