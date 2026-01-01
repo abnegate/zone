@@ -1,10 +1,10 @@
-# Voiz Configuration Reference
+# Zone Configuration Reference
 
 Complete documentation of all configuration options available in `.env`
 
 ## 📝 Configuration Philosophy
 
-**Voiz requires ZERO configuration to start!**
+**Zone requires ZERO configuration to start!**
 
 All variables have working defaults. The system will run immediately after:
 ```bash
@@ -31,7 +31,7 @@ For production, regenerate secrets for security.
 ## 🔐 Security & Authentication
 
 ### `BASICAUTH_REALM`
-- **Default**: `"Voiz AI Stack"`
+- **Default**: `"Zone AI Stack"`
 - **Description**: Realm name displayed in browser authentication prompt
 - **Example**: `"My Private AI"`
 - **Note**: Quotes required if contains spaces
@@ -188,7 +188,7 @@ For production, regenerate secrets for security.
 - **Usage**: SearXNG internal setting
 
 ### `SEARXNG_INSTANCE_NAME`
-- **Default**: `Voiz Search`
+- **Default**: `Zone Search`
 - **Description**: Display name for SearXNG instance
 - **Example**: `My Private Search`
 

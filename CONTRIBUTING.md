@@ -1,6 +1,6 @@
-# Contributing to Voiz
+# Contributing to Zone
 
-Thank you for your interest in contributing to Voiz! This document provides guidelines and instructions for contributing to the project.
+Thank you for your interest in contributing to Zone! This document provides guidelines and instructions for contributing to the project.
 
 ## Table of Contents
 
@@ -26,14 +26,14 @@ Be respectful, professional, and constructive in all interactions. We aim to mai
 2. **Clone your fork**
 
    ```bash
-   git clone https://github.com/yourusername/voiz.git
-   cd voiz
+   git clone https://github.com/yourusername/zone.git
+   cd zone
    ```
 
 3. **Add upstream remote**
 
    ```bash
-   git remote add upstream https://github.com/original/voiz.git
+   git remote add upstream https://github.com/original/zone.git
    ```
 
 4. **Create a feature branch**
@@ -297,7 +297,7 @@ main "$@"
 ## Project Structure
 
 ```
-voiz/
+zone/
 ├── .env.example              # Environment configuration template
 ├── .gitignore                # Git ignore rules
 ├── docker-compose.yml        # Main service definitions
@@ -403,4 +403,4 @@ Contributors will be acknowledged in:
 - README contributors section
 - Git commit history
 
-Thank you for contributing to Voiz!
+Thank you for contributing to Zone!

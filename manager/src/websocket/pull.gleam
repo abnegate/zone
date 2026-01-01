@@ -1,3 +1,4 @@
+import auth/jwt as auth_jwt
 import config
 import controllers/models
 import gleam/bytes_tree
@@ -12,47 +13,22 @@ import gleam/result
 import gleam/string
 import gleam/uri
 import httpp/jsonl.{Closed, Line}
-import mist.{type Connection, type ResponseData, type WebsocketConnection, type WebsocketMessage}
+import mist.{
+  type Connection, type ResponseData, type WebsocketConnection,
+  type WebsocketMessage,
+}
 import pull_stream
 
 /// WebSocket state
 pub type WsState {
-  WsState(conn: WebsocketConnection)
+  WsState(conn: WebsocketConnection, authenticated: Bool)
 }
 
-/// Handle WebSocket upgrade with authentication
+/// Handle WebSocket upgrade - authentication happens via message after connection
 pub fn handle_websocket_upgrade_with_auth(
   req: HttpRequest(Connection),
 ) -> response.Response(ResponseData) {
-  let expected_key = config.get_manager_api_key()
-
-  case expected_key {
-    "" -> {
-      // No API key configured - reject
-      response.new(401)
-      |> response.set_body(mist.Bytes(bytes_tree.from_string("Unauthorized: API key not configured")))
-    }
-    key -> {
-      // Parse query string to get api_key parameter
-      let query_params = case req.query {
-        Some(query) -> parse_query_params(query)
-        None -> []
-      }
-
-      let provided_key = case list.find(query_params, fn(pair) { pair.0 == "api_key" }) {
-        Ok(pair) -> pair.1
-        Error(_) -> ""
-      }
-
-      case provided_key == key {
-        True -> handle_websocket_upgrade(req)
-        False -> {
-          response.new(401)
-          |> response.set_body(mist.Bytes(bytes_tree.from_string("Unauthorized: Invalid API key")))
-        }
-      }
-    }
-  }
+  handle_websocket_upgrade(req)
 }
 
 /// Parse query string parameters into key-value pairs
@@ -62,7 +38,8 @@ pub fn parse_query_params(query: String) -> List(#(String, String)) {
   |> list.filter(fn(p) { p != "" })
   |> list.filter_map(fn(param) {
     case string.split_once(param, "=") {
-      Ok(#(key, value)) -> Ok(#(key, uri.percent_decode(value) |> result.unwrap(value)))
+      Ok(#(key, value)) ->
+        Ok(#(key, uri.percent_decode(value) |> result.unwrap(value)))
       Error(_) -> Ok(#(param, ""))
     }
   })
@@ -74,7 +51,7 @@ fn handle_websocket_upgrade(
 ) -> response.Response(ResponseData) {
   mist.websocket(
     request: req,
-    on_init: fn(conn) { #(WsState(conn), None) },
+    on_init: fn(conn) { #(WsState(conn, False), None) },
     on_close: fn(_state) { Nil },
     handler: handle_websocket_message,
   )
@@ -88,23 +65,85 @@ fn handle_websocket_message(
 ) -> mist.Next(WsState, String) {
   case message {
     mist.Text(text) -> {
-      // Parse the incoming message to get the model name
-      case parse_ws_pull_request(text) {
-        Ok(model_name) -> {
-          // Start the pull in the current process
-          do_streaming_pull(conn, model_name)
-          mist.continue(WsState(conn))
+      case state.authenticated {
+        False -> {
+          // First message must be authentication
+          case parse_ws_auth_request(text) {
+            Ok(token) -> {
+              case verify_token(token) {
+                True -> {
+                  let _ =
+                    mist.send_text_frame(
+                      conn,
+                      json.object([#("type", json.string("authenticated"))])
+                        |> json.to_string,
+                    )
+                  mist.continue(WsState(conn, True))
+                }
+                False -> {
+                  let _ =
+                    mist.send_text_frame(
+                      conn,
+                      pull_stream.error_to_json("Invalid authentication token"),
+                    )
+                  mist.stop()
+                }
+              }
+            }
+            Error(err) -> {
+              let _ = mist.send_text_frame(conn, pull_stream.error_to_json(err))
+              mist.stop()
+            }
+          }
         }
-        Error(err) -> {
-          // Send error and continue
-          let _ = mist.send_text_frame(conn, pull_stream.error_to_json(err))
-          mist.continue(WsState(conn))
+        True -> {
+          // Parse the incoming message to get the model name
+          case parse_ws_pull_request(text) {
+            Ok(model_name) -> {
+              // Start the pull in the current process
+              do_streaming_pull(conn, model_name)
+              mist.continue(state)
+            }
+            Error(err) -> {
+              // Send error and continue
+              let _ = mist.send_text_frame(conn, pull_stream.error_to_json(err))
+              mist.continue(state)
+            }
+          }
         }
       }
     }
     mist.Binary(_) -> mist.continue(state)
     mist.Custom(_) -> mist.continue(state)
     mist.Closed | mist.Shutdown -> mist.stop()
+  }
+}
+
+/// Parse WebSocket authentication request JSON
+fn parse_ws_auth_request(text: String) -> Result(String, String) {
+  let decoder = {
+    use token <- decode.field("token", decode.string)
+    decode.success(token)
+  }
+
+  case json.parse(text, decoder) {
+    Ok(token) -> {
+      case string.trim(token) {
+        "" -> Error("Token cannot be empty")
+        trimmed -> Ok(trimmed)
+      }
+    }
+    Error(_) -> Error("Invalid auth request: expected {\"token\": \"...\"}")
+  }
+}
+
+/// Verify JWT token
+fn verify_token(token: String) -> Bool {
+  let jwt_secret = config.get_jwt_secret()
+  // Use JWT verification from auth/jwt module
+  case auth_jwt.validate_token(token, jwt_secret) {
+    Ok(_) -> True
+    Error(_) -> False
   }
 }
 
@@ -142,54 +181,77 @@ fn do_streaming_pull(conn: WebsocketConnection, model_name: String) -> Nil {
       case pull_success {
         True -> {
           // Send pull success step
-          let _ = mist.send_text_frame(
-            conn,
-            pull_stream.step_to_json("pull", True, "Model pulled successfully"),
-          )
+          let _ =
+            mist.send_text_frame(
+              conn,
+              pull_stream.step_to_json(
+                "pull",
+                True,
+                "Model pulled successfully",
+              ),
+            )
 
           // Register in LiteLLM
-          let register_result = models.register_model_in_litellm(
-            litellm_host,
-            litellm_key,
-            ollama_host,
-            model_name,
-          )
+          let register_result =
+            models.register_model_in_litellm(
+              litellm_host,
+              litellm_key,
+              ollama_host,
+              model_name,
+            )
 
-          let _ = mist.send_text_frame(
-            conn,
-            pull_stream.step_to_json("register", register_result.success, register_result.message),
-          )
+          let _ =
+            mist.send_text_frame(
+              conn,
+              pull_stream.step_to_json(
+                "register",
+                register_result.success,
+                register_result.message,
+              ),
+            )
 
           // Send complete message
-          let _ = mist.send_text_frame(
-            conn,
-            pull_stream.complete_to_json(True, "Model '" <> model_name <> "' added successfully!"),
-          )
+          let _ =
+            mist.send_text_frame(
+              conn,
+              pull_stream.complete_to_json(
+                True,
+                "Model '" <> model_name <> "' added successfully!",
+              ),
+            )
           Nil
         }
         False -> {
-          let _ = mist.send_text_frame(
-            conn,
-            pull_stream.step_to_json("pull", False, "Model pull failed"),
-          )
-          let _ = mist.send_text_frame(
-            conn,
-            pull_stream.complete_to_json(False, "Failed to pull model"),
-          )
+          let _ =
+            mist.send_text_frame(
+              conn,
+              pull_stream.step_to_json("pull", False, "Model pull failed"),
+            )
+          let _ =
+            mist.send_text_frame(
+              conn,
+              pull_stream.complete_to_json(False, "Failed to pull model"),
+            )
           Nil
         }
       }
     }
     Error(err) -> {
       // Failed to start pull
-      let _ = mist.send_text_frame(
-        conn,
-        pull_stream.step_to_json("pull", False, "Failed to start pull: " <> err),
-      )
-      let _ = mist.send_text_frame(
-        conn,
-        pull_stream.complete_to_json(False, "Failed to pull model"),
-      )
+      let _ =
+        mist.send_text_frame(
+          conn,
+          pull_stream.step_to_json(
+            "pull",
+            False,
+            "Failed to start pull: " <> err,
+          ),
+        )
+      let _ =
+        mist.send_text_frame(
+          conn,
+          pull_stream.complete_to_json(False, "Failed to pull model"),
+        )
       Nil
     }
   }

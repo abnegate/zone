@@ -205,6 +205,10 @@ pub fn task_to_json_test() {
       updated_at: "2025-01-01T00:00:00Z",
       started_at: None,
       completed_at: None,
+      is_agentic: False,
+      github_repo_url: None,
+      queued_at: None,
+      worker_id: None,
     )
 
   let json_str =

@@ -23,7 +23,7 @@ const mockBrowseModels = [
 
 test.describe('Models Page', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -35,7 +35,7 @@ test.describe('Models Page', () => {
       }
     });
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -76,7 +76,7 @@ test.describe('Models Page', () => {
 
   test('search filters browse results', async ({ page }) => {
     // Mock filtered results
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const query = url.searchParams.get('q');
       if (query === 'code') {
@@ -106,7 +106,7 @@ test.describe('Models Page', () => {
 
   test('switches between Ollama and HuggingFace tabs', async ({ page }) => {
     // Mock HuggingFace response
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
       if (source === 'huggingface') {
@@ -182,7 +182,7 @@ test.describe('Models Page', () => {
   });
 
   test('deletes model on confirmation', async ({ page }) => {
-    await page.route('/api/models/*', (route) => {
+    await page.route('**/api/models/*', (route) => {
       if (route.request().method() === 'DELETE') {
         route.fulfill({ status: 200 });
       } else {
@@ -226,7 +226,7 @@ test.describe('Models Page', () => {
     await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
 
     // Create a delayed response
-    await page.route('/api/models', async (route) => {
+    await page.route('**/api/models', async (route) => {
       await new Promise(resolve => setTimeout(resolve, 300));
       route.fulfill({
         status: 200,
@@ -235,7 +235,7 @@ test.describe('Models Page', () => {
       });
     });
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -257,7 +257,7 @@ test.describe('Models Page', () => {
     await expect(page.locator('.login-overlay')).not.toBeVisible();
 
     // Now set up failure for refresh
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({ status: 500, body: 'Internal Server Error' });
       } else {
@@ -272,7 +272,7 @@ test.describe('Models Page', () => {
   });
 
   test('shows empty state when no models installed', async ({ page }) => {
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -294,7 +294,7 @@ test.describe('Models Page', () => {
 
   test('shows error when browse API fails', async ({ page }) => {
     // Set up browse to fail
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({ status: 500, body: 'Internal Server Error' });
     });
 
@@ -315,7 +315,7 @@ test.describe('Models Page', () => {
       details: { family: 'llama' },
     };
 
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -337,7 +337,7 @@ test.describe('Models Page', () => {
 
   test('shows delete button loading state', async ({ page }) => {
     let deleteResolved = false;
-    await page.route('/api/models/*', async (route) => {
+    await page.route('**/api/models/*', async (route) => {
       if (route.request().method() === 'DELETE') {
         await new Promise(resolve => setTimeout(resolve, 300));
         deleteResolved = true;
@@ -358,7 +358,7 @@ test.describe('Models Page', () => {
   test('handles delete API failure gracefully', async ({ page }) => {
     // Unroute and reroute to capture DELETE
     await page.unroute('/api/models/*');
-    await page.route('/api/models/*', (route) => {
+    await page.route('**/api/models/*', (route) => {
       if (route.request().method() === 'DELETE') {
         route.fulfill({ status: 500, body: 'Failed to delete' });
       } else {
@@ -376,7 +376,7 @@ test.describe('Models Page', () => {
   });
 
   test('shows empty browse results message', async ({ page }) => {
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -392,7 +392,7 @@ test.describe('Models Page', () => {
   });
 
   test('clears search results on source tab change', async ({ page }) => {
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
       route.fulfill({
@@ -447,7 +447,7 @@ test.describe('Models Page', () => {
       { name: 'medium:latest', size: 1024 * 1024 * 500, modified_at: '2024-01-15T10:30:00Z', details: {} },
     ];
 
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -478,7 +478,7 @@ test.describe('Models Page', () => {
 
     // Unroute existing and set new route
     await page.unroute('/api/browse*');
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',

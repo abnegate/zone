@@ -1,73 +1,115 @@
+import auth/jwt.{type JwtClaims}
+import controllers/auth as auth_routes
+import controllers/chats as chats_routes
 import controllers/models
-import controllers/static
-import database/connection as db_connection
+import controllers/organizations as organizations_routes
+import controllers/projects as projects_routes
+import controllers/sources as sources_routes
+import controllers/tasks as tasks_routes
 import middleware/auth
-import routes/chats as chats_routes
+import web.{type Context}
 import wisp.{type Request, type Response}
 
 /// Main request router
 /// Handles all HTTP requests (WebSocket is handled separately in manager.gleam)
-pub fn handle_request(req: Request) -> Response {
-  // SECURITY MODEL for Manager API:
-  // - Primary protection: API key authentication (Bearer token or X-API-Key header)
-  // - Secondary protection: Network isolation (accessible only via voiz_edge network)
-  // - Tertiary protection: Path traversal validation on static file serving
-  //
-  // All API endpoints require valid API key authentication.
-  // The index page injects the API key for frontend use.
-  // Static files (CSS/JS) are served without auth.
-
-  use <- wisp.log_request(req)
-  use <- wisp.rescue_crashes
-  use req <- wisp.handle_head(req)
+pub fn handle_request(req: Request, ctx: Context) -> Response {
+  // Apply centralized middleware stack (logging, crash recovery, CSRF)
+  use req <- web.middleware(req, ctx)
 
   case wisp.path_segments(req) {
-    // Index page - no auth (frontend handles login UI)
-    [] -> static.serve_index()
+    // Health check - no auth required
+    ["api", "health"] -> wisp.ok()
 
-    // Static files - no auth (CSS/JS are public)
-    ["static", ..rest] -> static.serve_static(rest)
+    // Auth routes - no auth required (login, register, refresh, logout)
+    ["api", "auth", ..rest] -> auth_routes.handle_auth_route(req, rest, ctx)
 
-    // API endpoints - all require API key auth
+    // Protected API routes - require JWT authentication
     ["api", ..rest] -> {
-      use <- auth.require_auth(req)
-      route_api(req, rest)
+      use claims <- auth.require_jwt_auth(req)
+      route_api(req, ctx, rest, claims)
     }
 
+    // All other routes return 404 (frontend handles SPA routing)
     _ -> wisp.not_found()
   }
 }
 
-/// Route API requests to appropriate controllers
-fn route_api(req: Request, path: List(String)) -> Response {
+/// Route API requests to appropriate controllers with permission checks
+fn route_api(
+  req: Request,
+  ctx: Context,
+  path: List(String),
+  claims: JwtClaims,
+) -> Response {
   case path {
+    // Organizations API (includes nested workspaces, projects, chats, tasks)
+    ["organizations", ..rest] -> {
+      let permission = auth.permission_for_method("organizations", req.method)
+      case jwt.has_permission(claims, permission) {
+        True -> organizations_routes.handle_organizations_route(req, rest, ctx)
+        False -> auth.forbidden_response("Requires " <> permission)
+      }
+    }
+
     // Models API
-    ["models"] -> models.handle_models(req)
-    ["models", author, model_name] -> models.handle_model_by_name(req, author <> "/" <> model_name)
-    ["models", model_name] -> models.handle_model_by_name(req, model_name)
+    ["models"] -> {
+      let permission = auth.permission_for_method("models", req.method)
+      case jwt.has_permission(claims, permission) {
+        True -> models.handle_models(req)
+        False -> auth.forbidden_response("Requires " <> permission)
+      }
+    }
+    ["models", author, model_name] -> {
+      let permission = auth.permission_for_method("models", req.method)
+      case jwt.has_permission(claims, permission) {
+        True -> models.handle_model_by_name(req, author <> "/" <> model_name)
+        False -> auth.forbidden_response("Requires " <> permission)
+      }
+    }
+    ["models", model_name] -> {
+      let permission = auth.permission_for_method("models", req.method)
+      case jwt.has_permission(claims, permission) {
+        True -> models.handle_model_by_name(req, model_name)
+        False -> auth.forbidden_response("Requires " <> permission)
+      }
+    }
 
     // Chats API
     ["chats", ..rest] -> {
-      let db = get_db_connection()
-      chats_routes.handle_chats_route(req, rest, db)
+      let permission = auth.permission_for_method("chats", req.method)
+      case jwt.has_permission(claims, permission) {
+        True -> chats_routes.handle_chats_route(req, rest, ctx)
+        False -> auth.forbidden_response("Requires " <> permission)
+      }
+    }
+
+    // Projects API
+    ["projects", ..rest] -> {
+      let permission = auth.permission_for_method("projects", req.method)
+      case jwt.has_permission(claims, permission) {
+        True -> projects_routes.handle_projects_route(req, rest, ctx)
+        False -> auth.forbidden_response("Requires " <> permission)
+      }
+    }
+
+    // Tasks API
+    ["tasks", ..rest] -> {
+      let permission = auth.permission_for_method("tasks", req.method)
+      case jwt.has_permission(claims, permission) {
+        True -> tasks_routes.handle_tasks_route(req, rest, ctx)
+        False -> auth.forbidden_response("Requires " <> permission)
+      }
+    }
+
+    // Sources API
+    ["sources", ..rest] -> {
+      let permission = auth.permission_for_method("sources", req.method)
+      case jwt.has_permission(claims, permission) {
+        True -> sources_routes.handle_sources_route(req, rest, ctx)
+        False -> auth.forbidden_response("Requires " <> permission)
+      }
     }
 
     _ -> wisp.not_found()
-  }
-}
-
-/// Get database connection (lazy initialization)
-fn get_db_connection() -> db_connection.Connection {
-  case db_connection.connect() {
-    Ok(conn) -> conn
-    Error(_) -> {
-      // Return a dummy connection for now (DB is stubbed)
-      db_connection.Connection(db_connection.DbConfig(
-        host: "",
-        database: "",
-        user: "",
-        password: "",
-      ))
-    }
   }
 }

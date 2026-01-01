@@ -1,9 +1,4 @@
 .models-page {
-  max-width: 900px;
-}
-
-.page-header {
-  margin-bottom: var(--spacing-md);
 }
 
 /* Main Tabs */
@@ -58,16 +53,6 @@
   color: var(--color-primary);
 }
 
-.page-header h1 {
-  margin: 0 0 var(--spacing-xs) 0;
-  font-size: 1.75rem;
-  font-weight: 600;
-}
-
-.page-header .subtitle {
-  margin: 0;
-  color: var(--color-text-muted);
-}
 
 /* Progress bar */
 .progress-bar-container {

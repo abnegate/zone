@@ -1,0 +1,37 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Traefik metrics
+  - job_name: 'traefik'
+    static_configs:
+      - targets: ['traefik:8080']
+
+  # PostgreSQL metrics via postgres_exporter
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # Ollama metrics (if available)
+  - job_name: 'ollama'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['ollama:11434']
+
+  # LiteLLM metrics
+  - job_name: 'litellm'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['litellm:4000']
+
+  # Manager metrics (if available)
+  - job_name: 'manager'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['manager:8000']

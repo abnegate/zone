@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pre-commit hook for voiz repository
+# Pre-commit hook for zone repository
 # Runs formatters on staged files before committing (in parallel)
 
 set -e

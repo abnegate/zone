@@ -35,13 +35,18 @@ pub fn start_pull(
   ollama_host: String,
   model_name: String,
 ) -> Result(
-  #(Subject(JsonlEvent(PullProgress)), hackney.ClientRef, Subject(jsonl.JsonlManagerMessage)),
+  #(
+    Subject(JsonlEvent(PullProgress)),
+    hackney.ClientRef,
+    Subject(jsonl.JsonlManagerMessage),
+  ),
   String,
 ) {
   let url = ollama_host <> "/api/pull"
 
   // Create the request
-  let req_result = uri.parse(url)
+  let req_result =
+    uri.parse(url)
     |> result.map(fn(u) {
       request.from_uri(u)
       |> result.map(fn(req) {
@@ -53,7 +58,7 @@ pub fn start_pull(
             #("name", json.string(model_name)),
             #("stream", json.bool(True)),
           ])
-          |> json.to_string
+          |> json.to_string,
         ))
       })
     })
@@ -82,9 +87,21 @@ pub fn start_pull(
 /// Decoder for Ollama pull progress
 fn progress_decoder() -> decode.Decoder(PullProgress) {
   use status <- decode.field("status", decode.string)
-  use digest <- decode.optional_field("digest", None, decode.string |> decode.map(Some))
-  use total <- decode.optional_field("total", None, decode.int |> decode.map(Some))
-  use completed <- decode.optional_field("completed", None, decode.int |> decode.map(Some))
+  use digest <- decode.optional_field(
+    "digest",
+    None,
+    decode.string |> decode.map(Some),
+  )
+  use total <- decode.optional_field(
+    "total",
+    None,
+    decode.int |> decode.map(Some),
+  )
+  use completed <- decode.optional_field(
+    "completed",
+    None,
+    decode.int |> decode.map(Some),
+  )
   decode.success(PullProgress(status, digest, total, completed))
 }
 

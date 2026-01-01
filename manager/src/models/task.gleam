@@ -28,6 +28,14 @@ pub type Task {
     updated_at: String,
     started_at: Option(String),
     completed_at: Option(String),
+    /// Whether this task uses agent tools (file read/write, KB search, etc.)
+    is_agentic: Bool,
+    /// Optional GitHub repo URL (overrides project's repo if set)
+    github_repo_url: Option(String),
+    /// When the task was added to the execution queue
+    queued_at: Option(String),
+    /// ID of the worker currently processing this task
+    worker_id: Option(String),
   )
 }
 
@@ -84,6 +92,10 @@ pub type CreateTaskRequest {
     priority: Option(Int),
     model_name: Option(String),
     dependencies: Option(List(String)),
+    /// Whether this task uses agent tools
+    is_agentic: Option(Bool),
+    /// Optional GitHub repo URL for agentic tasks
+    github_repo_url: Option(String),
   )
 }
 
@@ -97,6 +109,10 @@ pub type UpdateTaskRequest {
     priority: Option(Int),
     model_name: Option(String),
     dependencies: Option(List(String)),
+    /// Whether this task uses agent tools
+    is_agentic: Option(Bool),
+    /// Optional GitHub repo URL for agentic tasks
+    github_repo_url: Option(String),
   )
 }
 
@@ -216,6 +232,10 @@ pub fn to_json(task: Task) -> json.Json {
     #("updated_at", json.string(task.updated_at)),
     #("started_at", option_to_json(task.started_at)),
     #("completed_at", option_to_json(task.completed_at)),
+    #("is_agentic", json.bool(task.is_agentic)),
+    #("github_repo_url", option_to_json(task.github_repo_url)),
+    #("queued_at", option_to_json(task.queued_at)),
+    #("worker_id", option_to_json(task.worker_id)),
   ])
 }
 

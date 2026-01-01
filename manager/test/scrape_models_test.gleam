@@ -56,12 +56,12 @@ pub fn format_number_thousands_test() {
 }
 
 pub fn format_number_millions_test() {
-  scrape_models.format_number(1234567)
+  scrape_models.format_number(1_234_567)
   |> should.equal("1_234_567")
 }
 
 pub fn format_number_billions_test() {
-  scrape_models.format_number(1234567890)
+  scrape_models.format_number(1_234_567_890)
   |> should.equal("1_234_567_890")
 }
 
@@ -205,7 +205,11 @@ pub fn categorize_dolphincoder_not_uncensored_test() {
 
 pub fn categorize_multiple_tags_test() {
   // A model can have multiple tags
-  let tags = scrape_models.categorize("deepseek-coder-v2", "MoE coding model with reasoning")
+  let tags =
+    scrape_models.categorize(
+      "deepseek-coder-v2",
+      "MoE coding model with reasoning",
+    )
 
   // Should have both code and potentially other tags
   tags |> list.contains("code") |> should.be_true()

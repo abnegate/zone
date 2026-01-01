@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import { FixedSizeList as List, type ListChildComponentProps } from 'react-window';
-import type { BrowseModel, HuggingFaceModel } from '../types';
+import type { BrowseModel } from '../types';
 import './VirtualBrowseList.css';
 
 interface VirtualBrowseListProps {
-  models: (BrowseModel | HuggingFaceModel)[];
-  onItemClick: (model: BrowseModel | HuggingFaceModel) => void;
-  onInstall: (model: BrowseModel | HuggingFaceModel) => void;
+  models: BrowseModel[];
+  onItemClick: (model: BrowseModel) => void;
+  onInstall: (model: BrowseModel) => void;
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;

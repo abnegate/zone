@@ -138,22 +138,22 @@ backup: ## Backup volumes to ./backups directory
 	@mkdir -p backups
 	@DATE=$$(date +%Y%m%d_%H%M%S); \
 	docker run --rm \
-		-v voiz_ollama_data:/data/ollama:ro \
-		-v voiz_openwebui_data:/data/openwebui:ro \
+		-v zone_ollama_data:/data/ollama:ro \
+		-v zone_openwebui_data:/data/openwebui:ro \
 		-v $$(pwd)/backups:/backup \
-		alpine tar czf /backup/voiz_backup_$$DATE.tar.gz -C /data .; \
-	echo "$(GREEN)Backup created: backups/voiz_backup_$$DATE.tar.gz$(NC)"
+		alpine tar czf /backup/zone_backup_$$DATE.tar.gz -C /data .; \
+	echo "$(GREEN)Backup created: backups/zone_backup_$$DATE.tar.gz$(NC)"
 
-restore: ## Restore from backup (usage: make restore BACKUP=backups/voiz_backup_YYYYMMDD_HHMMSS.tar.gz)
+restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_YYYYMMDD_HHMMSS.tar.gz)
 	@if [ -z "$(BACKUP)" ]; then \
 		echo "$(RED)Error: Please specify BACKUP file$(NC)"; \
-		echo "Usage: make restore BACKUP=backups/voiz_backup_20250101_120000.tar.gz"; \
+		echo "Usage: make restore BACKUP=backups/zone_backup_20250101_120000.tar.gz"; \
 		exit 1; \
 	fi
 	@echo "$(YELLOW)Restoring from $(BACKUP)...$(NC)"
 	@docker run --rm \
-		-v voiz_ollama_data:/data/ollama \
-		-v voiz_openwebui_data:/data/openwebui \
+		-v zone_ollama_data:/data/ollama \
+		-v zone_openwebui_data:/data/openwebui \
 		-v $$(pwd)/backups:/backup \
 		alpine tar xzf /backup/$$(basename $(BACKUP)) -C /data
 	@echo "$(GREEN)Restore complete!$(NC)"
@@ -221,6 +221,6 @@ urls: ## Show access URLs for services
 	fi
 
 help: ## Display this help message
-	@awk 'BEGIN {FS = ":.*##"; printf "$(BLUE)Voiz AI Stack - Makefile Commands$(NC)\n\n"} \
+	@awk 'BEGIN {FS = ":.*##"; printf "$(BLUE)Zone AI Stack - Makefile Commands$(NC)\n\n"} \
 		/^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-20s$(NC) %s\n", $$1, $$2 } \
 		/^##@/ { printf "\n$(YELLOW)%s$(NC)\n", substr($$0, 5) } ' $(MAKEFILE_LIST)

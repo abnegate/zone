@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # =============================================================================
-# Voiz Setup Script
+# Zone Setup Script
 # =============================================================================
-# This script helps you set up your Voiz AI stack by:
+# This script helps you set up your Zone AI stack by:
 # 1. Checking prerequisites
 # 2. Generating secure secrets
 # 3. Creating basic auth credentials
@@ -357,7 +357,7 @@ print_next_steps() {
 # Main menu
 main_menu() {
     echo -e "\n${BLUE}╔════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║      Voiz Setup Script                 ║${NC}"
+    echo -e "${BLUE}║      Zone Setup Script                 ║${NC}"
     echo -e "${BLUE}╚════════════════════════════════════════╝${NC}\n"
 
     echo "1) Full setup (recommended for first-time setup)"

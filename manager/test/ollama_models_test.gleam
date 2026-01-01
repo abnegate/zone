@@ -104,15 +104,17 @@ fn check_sorted_descending(models: List(ollama_models.OllamaModel)) -> Bool {
 // =============================================================================
 
 pub fn code_models_have_code_tag_test() {
-  let code_models = ollama_models.get_all_models()
+  let code_models =
+    ollama_models.get_all_models()
     |> list.filter(fn(m) {
-      string.contains(m.name, "code") ||
-      string.contains(m.name, "coder") ||
-      string.contains(m.name, "starcoder")
+      string.contains(m.name, "code")
+      || string.contains(m.name, "coder")
+      || string.contains(m.name, "starcoder")
     })
 
   // Most code-related models should have the "code" tag
-  let tagged_count = list.count(code_models, fn(m) { list.contains(m.tags, "code") })
+  let tagged_count =
+    list.count(code_models, fn(m) { list.contains(m.tags, "code") })
   let total_count = list.length(code_models)
 
   // At least 80% should be tagged correctly
@@ -124,14 +126,15 @@ pub fn code_models_have_code_tag_test() {
 }
 
 pub fn embedding_models_have_embedding_tag_test() {
-  let embedding_models = ollama_models.get_all_models()
+  let embedding_models =
+    ollama_models.get_all_models()
     |> list.filter(fn(m) {
-      string.contains(m.name, "embed") ||
-      string.contains(m.name, "bge")
+      string.contains(m.name, "embed") || string.contains(m.name, "bge")
     })
 
   // Embedding models should have the "embedding" tag
-  let tagged_count = list.count(embedding_models, fn(m) { list.contains(m.tags, "embedding") })
+  let tagged_count =
+    list.count(embedding_models, fn(m) { list.contains(m.tags, "embedding") })
   let total_count = list.length(embedding_models)
 
   case total_count > 0 {
@@ -142,14 +145,16 @@ pub fn embedding_models_have_embedding_tag_test() {
 }
 
 pub fn vision_models_have_vision_tag_test() {
-  let vision_models = ollama_models.get_all_models()
+  let vision_models =
+    ollama_models.get_all_models()
     |> list.filter(fn(m) {
-      string.contains(m.name, "vision") ||
-      string.contains(m.name, "llava") ||
-      string.contains(m.name, "-vl")
+      string.contains(m.name, "vision")
+      || string.contains(m.name, "llava")
+      || string.contains(m.name, "-vl")
     })
 
-  let tagged_count = list.count(vision_models, fn(m) { list.contains(m.tags, "vision") })
+  let tagged_count =
+    list.count(vision_models, fn(m) { list.contains(m.tags, "vision") })
   let total_count = list.length(vision_models)
 
   case total_count > 0 {

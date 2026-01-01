@@ -1,0 +1,14 @@
+node_modules
+build
+.git
+.gitignore
+*.md
+.env
+.env.*
+npm-debug.log*
+.DS_Store
+coverage
+.nyc_output
+e2e
+playwright-report
+test-results

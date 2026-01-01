@@ -4,19 +4,18 @@ import { useAuth } from '../context/AuthContext';
 import type { InstalledModel } from '../types';
 
 export function useModels() {
-  const { apiKey, logout } = useAuth();
+  const { isAuthenticated, logout } = useAuth();
   const [models, setModels] = useState<InstalledModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchModels = useCallback(async () => {
-    if (!apiKey) return;
+    if (!isAuthenticated) return;
 
     setLoading(true);
     setError(null);
 
     try {
-      client.setApiKey(apiKey);
       const response = await client.getModels();
       setModels(response.models || []);
     } catch (err) {
@@ -28,27 +27,23 @@ export function useModels() {
     } finally {
       setLoading(false);
     }
-  }, [apiKey, logout]);
+  }, [isAuthenticated, logout]);
 
   useEffect(() => {
     fetchModels();
   }, [fetchModels]);
 
-  const deleteModel = useCallback(
-    async (name: string): Promise<boolean> => {
-      try {
-        client.setApiKey(apiKey);
-        await client.deleteModel(name);
-        setModels((prev) => prev.filter((m) => m.name !== name));
-        return true;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Failed to delete model';
-        setError(message);
-        return false;
-      }
-    },
-    [apiKey]
-  );
+  const deleteModel = useCallback(async (name: string): Promise<boolean> => {
+    try {
+      await client.deleteModel(name);
+      setModels((prev) => prev.filter((m) => m.name !== name));
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to delete model';
+      setError(message);
+      return false;
+    }
+  }, []);
 
   return { models, loading, error, refresh: fetchModels, deleteModel };
 }

@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Model Installation', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -10,7 +10,7 @@ test.describe('Model Installation', () => {
       });
     });
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -66,7 +66,7 @@ test.describe('Model Installation', () => {
 
 test.describe('Add Model Section UI', () => {
   test.beforeEach(async ({ page }) => {
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -74,7 +74,7 @@ test.describe('Add Model Section UI', () => {
       });
     });
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -110,7 +110,7 @@ test.describe('Install from Browse', () => {
   ];
 
   test.beforeEach(async ({ page }) => {
-    await page.route('/api/models', (route) => {
+    await page.route('**/api/models', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -118,7 +118,7 @@ test.describe('Install from Browse', () => {
       });
     });
 
-    await page.route('/api/browse*', (route) => {
+    await page.route('**/api/browse*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',

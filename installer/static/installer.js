@@ -1,6 +1,6 @@
-// Voiz Web Installer - Clean, Professional JavaScript
+// Zone Web Installer - Clean, Professional JavaScript
 
-console.log('Voiz Installer JS loaded');
+console.log('Zone Installer JS loaded');
 
 var currentStep = 1;
 var totalSteps = 7;
@@ -187,6 +187,21 @@ function toggleVPNProtocol() {
     }
 }
 
+function toggleMonitoringFields() {
+    const enabled = document.getElementById('enable-monitoring').checked;
+    const monitoringFields = document.getElementById('monitoring-fields');
+
+    if (enabled) {
+        monitoringFields.classList.remove('hidden');
+        // Auto-generate password if empty
+        const passwordField = document.querySelector('input[name="MONITORING_GRAFANA_ADMIN_PASSWORD"]');
+        if (passwordField && !passwordField.value) {
+            generateSecret('MONITORING_GRAFANA_ADMIN_PASSWORD');
+        }
+    } else {
+        monitoringFields.classList.add('hidden');
+    }
+}
 
 function updateUI() {
     console.log('updateUI called, currentStep:', currentStep);

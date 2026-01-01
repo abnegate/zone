@@ -120,7 +120,11 @@ pub fn decode_update_request(
   data: String,
 ) -> Result(UpdateProjectRequest, json.DecodeError) {
   let decoder = {
-    use name <- decode.optional_field("name", None, decode.optional(decode.string))
+    use name <- decode.optional_field(
+      "name",
+      None,
+      decode.optional(decode.string),
+    )
     use description <- decode.optional_field(
       "description",
       None,

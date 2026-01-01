@@ -116,9 +116,7 @@ pub fn decode_send_message_request_empty_content_test() {
 
   chat.decode_send_message_request(json_str)
   |> should.be_ok()
-  |> fn(req: chat.SendMessageRequest) {
-    should.equal(req.content, "")
-  }
+  |> fn(req: chat.SendMessageRequest) { should.equal(req.content, "") }
 }
 
 // =============================================================================

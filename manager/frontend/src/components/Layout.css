@@ -7,7 +7,11 @@
   flex: 1;
   margin-left: 240px;
   padding: var(--spacing-xl);
-  max-width: calc(100% - 240px);
+  transition: margin-left var(--transition-normal);
+}
+
+:root[data-sidebar-collapsed='true'] .main-content {
+  margin-left: 64px;
 }
 
 @media (max-width: 768px) {
@@ -15,6 +19,5 @@
     margin-left: 0;
     padding: var(--spacing-md);
     padding-top: 60px;
-    max-width: 100%;
   }
 }
