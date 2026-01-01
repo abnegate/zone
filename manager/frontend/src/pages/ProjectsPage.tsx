@@ -8,6 +8,7 @@ import type {
   Source,
   UpdateProjectRequest,
 } from '../types';
+import { getErrors, CreateProjectRequestSchema, UpdateProjectRequestSchema } from '../validation';
 import './ProjectsPage.css';
 
 function formatDate(dateStr: string): string {
@@ -47,6 +48,7 @@ export default function ProjectsPage() {
   const [formStatus, setFormStatus] = useState<ProjectStatus>('active');
   const [formSourceId, setFormSourceId] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const loadProjects = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -72,16 +74,24 @@ export default function ProjectsPage() {
 
   const handleCreateProject = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isAuthenticated || !formName.trim()) return;
+    if (!isAuthenticated) return;
 
+    const request: CreateProjectRequest = {
+      name: formName.trim(),
+      description: formDescription.trim() || undefined,
+      status: formStatus,
+      source_id: formSourceId || undefined,
+    };
+
+    const errors = getErrors(CreateProjectRequestSchema, request);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+
+    setFieldErrors({});
     setSubmitting(true);
     try {
-      const request: CreateProjectRequest = {
-        name: formName.trim(),
-        description: formDescription.trim() || undefined,
-        status: formStatus,
-        source_id: formSourceId || undefined,
-      };
       const project = await client.createProject(request);
       setProjects((prev) => [project, ...prev]);
       setShowCreateModal(false);
@@ -97,13 +107,21 @@ export default function ProjectsPage() {
     e.preventDefault();
     if (!isAuthenticated || !selectedProject) return;
 
+    const request: UpdateProjectRequest = {
+      name: formName.trim() || undefined,
+      description: formDescription.trim() || undefined,
+      status: formStatus,
+    };
+
+    const errors = getErrors(UpdateProjectRequestSchema, request);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+
+    setFieldErrors({});
     setSubmitting(true);
     try {
-      const request: UpdateProjectRequest = {
-        name: formName.trim() || undefined,
-        description: formDescription.trim() || undefined,
-        status: formStatus,
-      };
       const updated = await client.updateProject(selectedProject.id, request);
       setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
       setSelectedProject(updated);
@@ -173,6 +191,7 @@ export default function ProjectsPage() {
     setFormDescription('');
     setFormStatus('active');
     setFormSourceId('');
+    setFieldErrors({});
   };
 
   // Helper to get source info for display
@@ -440,8 +459,9 @@ export default function ProjectsPage() {
                   value={formName}
                   onChange={(e) => setFormName(e.target.value)}
                   placeholder="Project name"
-                  required
+                  className={fieldErrors.name ? 'input-error' : ''}
                 />
+                {fieldErrors.name && <span className="field-error">{fieldErrors.name}</span>}
               </div>
               <div className="form-group">
                 <label htmlFor="project-description">Description</label>
@@ -531,8 +551,9 @@ export default function ProjectsPage() {
                   value={formName}
                   onChange={(e) => setFormName(e.target.value)}
                   placeholder="Project name"
-                  required
+                  className={fieldErrors.name ? 'input-error' : ''}
                 />
+                {fieldErrors.name && <span className="field-error">{fieldErrors.name}</span>}
               </div>
               <div className="form-group">
                 <label htmlFor="edit-description">Description</label>

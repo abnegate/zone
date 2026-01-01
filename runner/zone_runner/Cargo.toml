@@ -1,0 +1,27 @@
+[package]
+name = "zone_runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "CLI binary for Zone tool runner"
+
+[[bin]]
+name = "zone-runner"
+path = "src/main.rs"
+
+[dependencies]
+tool_runner = { path = "../tool_runner" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }

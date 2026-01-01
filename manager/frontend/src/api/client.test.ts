@@ -247,14 +247,14 @@ describe('Client', () => {
         json: async () => mockChat,
       });
 
-      const result = await client.createChat({ title: 'New Chat', model: 'llama2' });
+      const result = await client.createChat({ model_name: 'llama2' });
 
       expect(result).toEqual(mockChat.chat);
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/chats',
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ title: 'New Chat', model: 'llama2' }),
+          body: JSON.stringify({ model_name: 'llama2' }),
         })
       );
     });
@@ -333,13 +333,13 @@ describe('Client', () => {
         json: async () => ({ message: { id: '1', content: 'Hello' } }),
       });
 
-      await client.sendMessage('chat-1', { content: 'Hello', role: 'user' });
+      await client.sendMessage('chat-1', { content: 'Hello' });
 
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/chats/chat-1/messages',
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ content: 'Hello', role: 'user' }),
+          body: JSON.stringify({ content: 'Hello' }),
         })
       );
     });
@@ -489,7 +489,7 @@ describe('Client', () => {
         json: async () => ({ task: { id: '1' } }),
       });
 
-      await client.createTask({ project_id: 'p1', name: 'Task', prompt: 'Do something' });
+      await client.createTask({ project_id: 'p1', title: 'Task', description: 'Do something' });
 
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/tasks',
@@ -584,7 +584,7 @@ describe('Client', () => {
         json: async () => ({ source: { id: '1' } }),
       });
 
-      await client.createSource({ type: 'github', name: 'Test', config: {} });
+      await client.createSource({ name: 'Test', source_type: 'github', config: { owner: 'test', repo: 'test' } });
 
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/sources',
@@ -781,7 +781,7 @@ describe('Client', () => {
     it('createChat throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createChat({ title: 'Test', model: 'llama2' })).rejects.toThrow('Failed to create chat: 400');
+      await expect(client.createChat({ model_name: 'llama2' })).rejects.toThrow('Failed to create chat: 400');
     });
 
     it('updateChatTitle throws on failed request', async () => {
@@ -817,7 +817,7 @@ describe('Client', () => {
     it('sendMessage throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.sendMessage('chat-1', { content: 'Test', role: 'user' })).rejects.toThrow('Failed to send message: 400');
+      await expect(client.sendMessage('chat-1', { content: 'Test' })).rejects.toThrow('Failed to send message: 400');
     });
 
     it('deleteMessage throws on failed request', async () => {
@@ -877,7 +877,7 @@ describe('Client', () => {
     it('createTask throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createTask({ project_id: 'p1', name: 'Task', prompt: 'Do something' })).rejects.toThrow('Failed to create task: 400');
+      await expect(client.createTask({ project_id: 'p1', title: 'Task', description: 'Do something' })).rejects.toThrow('Failed to create task: 400');
     });
 
     it('startTask throws on failed request', async () => {
@@ -919,7 +919,7 @@ describe('Client', () => {
     it('createSource throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createSource({ type: 'github', name: 'Test', config: {} })).rejects.toThrow('Failed to create source: 400');
+      await expect(client.createSource({ name: 'Test', source_type: 'github', config: { owner: 'test', repo: 'test' } })).rejects.toThrow('Failed to create source: 400');
     });
 
     it('verifySource throws on failed request', async () => {

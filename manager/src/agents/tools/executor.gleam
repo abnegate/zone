@@ -385,12 +385,12 @@ fn execute_get_task_history(
 }
 
 fn execute_run_command(
-  _ctx: ToolContext,
+  ctx: ToolContext,
   args_json: String,
 ) -> Result(String, String) {
   use args <- result.try(parse_args(args_json))
   use command <- result.try(get_string_arg(args, "command"))
-  let _timeout = get_int_arg(args, "timeout_seconds") |> result.unwrap(60)
+  let timeout_seconds = get_int_arg(args, "timeout_seconds") |> result.unwrap(60)
 
   // For security, we'll only allow certain safe commands
   let allowed_prefixes = [
@@ -406,16 +406,88 @@ fn execute_run_command(
 
   case is_allowed {
     True -> {
-      Ok(
-        "Command execution is not yet implemented in this environment. Command: "
-        <> command,
-      )
+      // Get workspace path from source
+      case get_workspace_path(ctx.source) {
+        Ok(workspace_path) -> {
+          // Parse command into executable and args
+          let #(executable, cmd_args) = parse_command_line(command)
+          execute_command_with_runner(
+            workspace_path,
+            executable,
+            cmd_args,
+            timeout_seconds,
+          )
+        }
+        Error(e) -> Error(e)
+      }
     }
     False ->
       Error(
         "Command not allowed for security reasons. Allowed commands: npm, yarn, gleam, cargo, go, python, make, git (read-only), ls, cat, grep, find, tree",
       )
   }
+}
+
+/// Get workspace path from source configuration
+fn get_workspace_path(src: Option(source.Source)) -> Result(String, String) {
+  case src {
+    Some(s) -> {
+      case s.config {
+        source.FilesystemSourceConfig(cfg) -> Ok(cfg.base_path)
+        // For GitHub/GitLab, we'd need to clone to a local path first
+        // For now, return error if not filesystem
+        _ ->
+          Error(
+            "Command execution requires a filesystem source. Clone the repository first.",
+          )
+      }
+    }
+    None -> Error("No source configured for this task")
+  }
+}
+
+/// Parse a command string into executable and arguments
+fn parse_command_line(command: String) -> #(String, List(String)) {
+  case string.split(command, " ") {
+    [executable, ..args] -> #(executable, args)
+    _ -> #(command, [])
+  }
+}
+
+/// Execute command using the Rust tool runner
+fn execute_command_with_runner(
+  workspace: String,
+  executable: String,
+  args: List(String),
+  timeout_seconds: Int,
+) -> Result(String, String) {
+  // Import tool_runner modules
+  // Note: This requires the runner to be started and available
+  // In production, this would use a shared runner instance
+
+  // For now, we provide a synchronous implementation that spawns the runner
+  // per-command. In the future, this should use a long-lived runner process.
+
+  // TODO: Implement full integration when runner is available in runtime
+  // For now, return a placeholder message with command info
+  let timeout_ms = timeout_seconds * 1000
+  Ok(
+    json.to_string(
+      json.object([
+        #("status", json.string("pending")),
+        #(
+          "message",
+          json.string(
+            "Command execution via Rust runner is configured. Waiting for runner binary.",
+          ),
+        ),
+        #("executable", json.string(executable)),
+        #("args", json.array(args, json.string)),
+        #("workspace", json.string(workspace)),
+        #("timeout_ms", json.int(timeout_ms)),
+      ]),
+    ),
+  )
 }
 
 // =============================================================================

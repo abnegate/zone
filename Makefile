@@ -7,7 +7,10 @@
 	test-manager test-console test-console-coverage test-e2e test-e2e-ui \
 	lint-console format-console check-console \
 	list-models stats prune version env urls install \
-	generate-sql verify-sql
+	generate-sql verify-sql \
+	build-runner test-runner setup-runner-coverage test-runner-coverage \
+	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
+	install-runner
 
 .DEFAULT_GOAL := help
 
@@ -288,6 +291,98 @@ test-manager: ## Run manager (Gleam) unit tests
 	@echo "$(BLUE)Running manager tests...$(NC)"
 	cd manager && gleam test
 
+build-runner: ## Build the Rust tool runner binary
+	@echo "$(BLUE)Building Rust tool runner...$(NC)"
+	cd runner && cargo build --release
+	@echo "$(GREEN)Runner built: runner/target/release/zone-runner$(NC)"
+
+test-runner: ## Run Rust tool runner tests
+	@echo "$(BLUE)Running tool runner tests...$(NC)"
+	cd runner && cargo test
+	@echo "$(GREEN)Tool runner tests passed!$(NC)"
+
+setup-runner-coverage: ## Install dependencies for Rust code coverage
+	@echo "$(BLUE)Setting up Rust code coverage tools...$(NC)"
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "$(YELLOW)Installing cargo-llvm-cov...$(NC)"; \
+		cargo install cargo-llvm-cov; \
+	fi
+	@echo "$(YELLOW)Installing llvm-tools-preview component...$(NC)"
+	@rustup component add llvm-tools-preview 2>/dev/null || \
+		echo "$(YELLOW)Note: Using system rustup. Run 'rustup default stable && rustup component add llvm-tools-preview' if needed$(NC)"
+	@echo "$(GREEN)Coverage tools setup complete!$(NC)"
+
+test-runner-coverage: ## Run tool runner tests with code coverage (requires cargo-llvm-cov)
+	@echo "$(BLUE)Running tool runner tests with coverage...$(NC)"
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "$(RED)Error: cargo-llvm-cov not installed. Run 'make setup-runner-coverage' first$(NC)"; \
+		exit 1; \
+	fi
+	@cd runner && cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info 2>&1 || { \
+		echo "$(RED)Coverage failed. Ensure llvm-tools-preview is installed:$(NC)"; \
+		echo "  rustup default stable"; \
+		echo "  rustup component add llvm-tools-preview"; \
+		exit 1; \
+	}
+	@echo "$(GREEN)Coverage report generated: runner/lcov.info$(NC)"
+	@echo ""
+	@echo "$(BLUE)Coverage Summary:$(NC)"
+	@cd runner && cargo llvm-cov report --lcov --output-path /dev/null 2>/dev/null || true
+
+test-runner-coverage-html: ## Generate HTML coverage report for tool runner
+	@echo "$(BLUE)Generating HTML coverage report...$(NC)"
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "$(RED)Error: cargo-llvm-cov not installed. Run 'make setup-runner-coverage' first$(NC)"; \
+		exit 1; \
+	fi
+	@cd runner && cargo llvm-cov --all-features --workspace --html --output-dir coverage 2>&1 || { \
+		echo "$(RED)Coverage failed. Ensure llvm-tools-preview is installed:$(NC)"; \
+		echo "  rustup default stable"; \
+		echo "  rustup component add llvm-tools-preview"; \
+		exit 1; \
+	}
+	@echo "$(GREEN)HTML coverage report: runner/coverage/html/index.html$(NC)"
+	@echo "$(BLUE)Opening in browser...$(NC)"
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		open runner/coverage/html/index.html; \
+	elif [ "$$(uname)" = "Linux" ]; then \
+		xdg-open runner/coverage/html/index.html 2>/dev/null || echo "Open runner/coverage/html/index.html in your browser"; \
+	fi
+
+test-runner-coverage-json: ## Generate JSON coverage report for tool runner (CI integration)
+	@echo "$(BLUE)Generating JSON coverage report...$(NC)"
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "$(RED)Error: cargo-llvm-cov not installed. Run 'make setup-runner-coverage' first$(NC)"; \
+		exit 1; \
+	fi
+	@cd runner && cargo llvm-cov --all-features --workspace --json --output-path coverage.json 2>&1 || { \
+		echo "$(RED)Coverage failed. Ensure llvm-tools-preview is installed:$(NC)"; \
+		echo "  rustup default stable"; \
+		echo "  rustup component add llvm-tools-preview"; \
+		exit 1; \
+	}
+	@echo "$(GREEN)JSON coverage report: runner/coverage.json$(NC)"
+
+test-runner-coverage-text: ## Show coverage summary in terminal
+	@echo "$(BLUE)Running tool runner tests with coverage...$(NC)"
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "$(RED)Error: cargo-llvm-cov not installed. Run 'make setup-runner-coverage' first$(NC)"; \
+		exit 1; \
+	fi
+	@cd runner && cargo llvm-cov --all-features --workspace 2>&1 || { \
+		echo "$(RED)Coverage failed. Ensure llvm-tools-preview is installed:$(NC)"; \
+		echo "  rustup default stable"; \
+		echo "  rustup component add llvm-tools-preview"; \
+		exit 1; \
+	}
+
+install-runner: ## Install runner binary to manager priv/bin
+	@echo "$(BLUE)Installing runner to manager/priv/bin...$(NC)"
+	@mkdir -p manager/priv/bin
+	@cp runner/target/release/zone-runner manager/priv/bin/
+	@chmod +x manager/priv/bin/zone-runner
+	@echo "$(GREEN)Runner installed!$(NC)"
+
 generate-sql: ## Generate SQL module from .sql files using squirrel (requires running postgres)
 	@echo "$(BLUE)Generating SQL module with squirrel...$(NC)"
 	@if docker ps --format '{{.Names}}' | grep -q '^postgres$$'; then \
@@ -334,6 +429,7 @@ test-e2e-headed: ## Run Playwright tests in headed mode
 
 test-all: ## Run all tests (unit + E2E)
 	@echo "$(BLUE)Running all tests...$(NC)"
+	@$(MAKE) test-runner
 	@$(MAKE) test-manager
 	@$(MAKE) test-console
 	@$(MAKE) test-e2e

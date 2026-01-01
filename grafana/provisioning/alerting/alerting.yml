@@ -1,0 +1,27 @@
+# Grafana Alerting Provisioning
+# This file configures contact points and notification policies for alerts
+
+apiVersion: 1
+
+# Contact points define where alerts are sent
+contactPoints:
+  - orgId: 1
+    name: email-notifications
+    receivers:
+      - uid: email-receiver
+        type: email
+        settings:
+          addresses: ${ALERT_EMAIL_RECIPIENTS}
+          singleEmail: false
+        disableResolveMessage: false
+
+# Notification policies define routing rules for alerts
+policies:
+  - orgId: 1
+    receiver: email-notifications
+    group_by:
+      - grafana_folder
+      - alertname
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

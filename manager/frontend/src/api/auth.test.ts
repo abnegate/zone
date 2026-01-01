@@ -75,7 +75,6 @@ describe('auth API', () => {
       const result = await register({
         email: 'new@test.com',
         password: 'password',
-        password_confirmation: 'password',
       });
 
       expect(result).toEqual(mockResponse);
@@ -85,7 +84,6 @@ describe('auth API', () => {
         body: JSON.stringify({
           email: 'new@test.com',
           password: 'password',
-          password_confirmation: 'password',
         }),
       });
     });
@@ -100,7 +98,6 @@ describe('auth API', () => {
         register({
           email: 'existing@test.com',
           password: 'password',
-          password_confirmation: 'password',
         })
       ).rejects.toThrow('Email already exists');
     });
@@ -115,7 +112,6 @@ describe('auth API', () => {
         register({
           email: 'test@test.com',
           password: 'password',
-          password_confirmation: 'password',
         })
       ).rejects.toThrow('Registration failed');
     });

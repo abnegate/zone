@@ -91,6 +91,20 @@
   cursor: not-allowed;
 }
 
+.auth-form .form-group input.input-error {
+  border-color: var(--color-error);
+}
+
+.auth-form .form-group input.input-error:focus {
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+}
+
+.field-error {
+  color: var(--color-error);
+  font-size: 0.75rem;
+  margin-top: var(--spacing-xs);
+}
+
 .auth-error {
   color: var(--color-error);
   font-size: 0.875rem;

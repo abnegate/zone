@@ -5,6 +5,7 @@ import type { InstallerConfig } from '../types';
 interface InterfaceStepProps {
   config: InstallerConfig;
   onChange: (key: keyof InstallerConfig, value: string) => void;
+  getFieldError: (field: string) => string | undefined;
 }
 
 const localeOptions = [
@@ -17,11 +18,14 @@ const localeOptions = [
   { value: 'zh-CN', label: 'Chinese (Simplified)' },
 ];
 
-export function InterfaceStep({ config, onChange }: InterfaceStepProps) {
+export function InterfaceStep({ config, onChange, getFieldError }: InterfaceStepProps) {
+  void getFieldError; // Interface uses checkboxes and selects, no validation errors shown
   return (
     <div className="step-content">
-      <h2>Interface Settings</h2>
-      <p>Configure the web interface</p>
+      <div className="step-header">
+        <h2>Interface Settings</h2>
+        <p>Configure the web interface</p>
+      </div>
 
       <div className="form-field">
         <Checkbox

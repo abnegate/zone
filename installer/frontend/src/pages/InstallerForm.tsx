@@ -16,64 +16,79 @@ import {
   VPNStep,
   AdvancedStep,
 } from '../steps';
-import { useInstallation, useKeyboardNavigation } from '../hooks';
+import { useInstallation, useKeyboardNavigation, useValidation, useConfigPersistence } from '../hooks';
 import type { InstallerConfig } from '../types';
 import { STEPS } from '../types';
+import type { StepSchemaKey } from '../validation/schemas';
 
 const DEFAULT_CONFIG: InstallerConfig = {
   // Domain
-  WEBUI_HOSTNAME: 'webui.localhost',
+  DOMAIN_HOST_WEBUI: 'webui.localhost',
 
   // Security
-  SECURITY_AUTH_REALM: 'Zone AI Stack',
-  LITELLM_MASTER_KEY: 'dev-insecure-key-change-for-production',
-  LITELLM_SALT_KEY: 'dev-insecure-salt-change-for-production',
-  SEARXNG_SECRET_KEY: 'dev-insecure-key-change-for-production',
+  SECURITY_BASICAUTH_REALM: 'Zone AI Stack',
+  SECURITY_LITELLM_MASTER_KEY: '',
+  SECURITY_LITELLM_SALT_KEY: '',
+  SECURITY_SEARXNG_SECRET_KEY: '',
+  SECURITY_MANAGER_API_KEY: '',
+  POSTGRES_PASSWORD: '',
+  SECURITY_HTTP_REDIRECT: 'false',
+  SECURITY_GENERATE_CERTIFICATE: 'false',
 
   // Models
-  OLLAMA_FAST_MODEL: 'llama3.1:8b',
-  OLLAMA_REASONING_MODEL: 'deepseek-r1:32b',
-  OLLAMA_EMBEDDING_MODEL: 'nomic-embed-text',
+  OLLAMA_MODEL_FAST: 'llama3.1:8b',
+  OLLAMA_MODEL_REASON: 'deepseek-r1:32b',
+  OLLAMA_MODEL_EMBED: 'nomic-embed-text',
 
   // Interface
-  WEBUI_AUTH: 'false',
+  WEBUI_AUTH: 'true',
   WEBUI_ENABLE_SIGNUP: 'false',
   WEBUI_DEFAULT_LOCALE: 'en-US',
 
   // Search
-  ENABLE_RAG_WEB_SEARCH: 'true',
-  RAG_WEB_SEARCH_RESULT_COUNT: '5',
-  RAG_WEB_SEARCH_CONCURRENT_REQUESTS: '8',
-  SEARXNG_INSTANCE_NAME: 'Zone Search',
+  SEARCH_ENABLE_WEB_SEARCH: 'true',
+  SEARCH_RESULT_COUNT: '5',
+  SEARCH_CONCURRENT_REQUESTS: '8',
+  SEARCH_SEARXNG_INSTANCE_NAME: 'Zone Search',
 
   // VPN
-  ENABLE_VPN: 'false',
-  VPN_PROVIDER: 'surfshark',
-  VPN_PROTOCOL: 'openvpn',
-  OPENVPN_USER: '',
-  OPENVPN_PASS: '',
-  WIREGUARD_PRIVATE_KEY: '',
-  WIREGUARD_ADDRESS: '',
+  VPN_SERVICE_PROVIDER: 'surfshark',
+  VPN_TYPE: 'openvpn',
+  VPN_OPENVPN_USER: '',
+  VPN_OPENVPN_PASSWORD: '',
+  VPN_WIREGUARD_PRIVATE_KEY: '',
+  VPN_WIREGUARD_ADDRESSES: '',
+  VPN_SERVER_COUNTRIES: '',
+  VPN_SERVER_CITIES: '',
+  VPN_SERVER_REGIONS: '',
 
-  // Advanced - Monitoring
-  ENABLE_MONITORING: 'false',
-  GF_SECURITY_ADMIN_USER: 'admin',
-  GF_SECURITY_ADMIN_PASSWORD: '',
-  METRICS_RETENTION: '15d',
+  // Monitoring
+  MONITORING_ENABLED: 'false',
+  MONITORING_GRAFANA_ADMIN_USER: 'admin',
+  MONITORING_GRAFANA_ADMIN_PASSWORD: '',
+  MONITORING_RETENTION_TIME: '15d',
 
-  // Advanced - Performance
-  WORKERS: '4',
-  REQUEST_TIMEOUT: '600',
-  TZ: 'UTC',
-  ACME_EMAIL: 'admin@example.com',
+  // Alerting
+  ALERT_ENABLED: 'false',
+  ALERT_EMAIL_RECIPIENTS: '',
+  ALERT_SMTP_HOST: '',
+  ALERT_SMTP_PORT: '587',
+  ALERT_SMTP_USER: '',
+  ALERT_SMTP_PASSWORD: '',
+  ALERT_SMTP_FROM_ADDRESS: 'alerts@example.com',
+  ALERT_SMTP_FROM_NAME: 'Zone Alerts',
+
+  // Advanced
+  ADVANCED_LITELLM_WORKERS: '4',
+  ADVANCED_LITELLM_REQUEST_TIMEOUT: '600',
+  ADVANCED_TZ: 'UTC',
+  ADVANCED_ACME_EMAIL: 'admin@example.com',
 
   // Derived/computed values
   SECURITY_BASIC_AUTH_USERS_FILE: './auth/users.htpasswd',
   OLLAMA_HOST: '0.0.0.0:11434',
   OLLAMA_KEEP_ALIVE: '24h',
   OLLAMA_MAX_LOADED_MODELS: '3',
-  WEBUI_OPENAI_API_BASE_URL: 'http://litellm:4000/v1',
-  WEBUI_OPENAI_API_KEY: '',
 };
 
 export default function InstallerForm() {
@@ -91,39 +106,46 @@ export default function InstallerForm() {
     reset,
   } = useInstallation();
 
+  const { validateStep, getFieldError, clearErrors } = useValidation();
+  useConfigPersistence(config, setConfig, DEFAULT_CONFIG);
+
   const totalSteps = STEPS.length;
 
   const handleChange = useCallback((key: keyof InstallerConfig, value: string) => {
-    setConfig(prev => {
-      const updated = { ...prev, [key]: value };
-      // Sync WEBUI_OPENAI_API_KEY with LITELLM_MASTER_KEY
-      if (key === 'LITELLM_MASTER_KEY') {
-        updated.WEBUI_OPENAI_API_KEY = value;
-      }
-      return updated;
-    });
+    setConfig(prev => ({ ...prev, [key]: value }));
   }, []);
 
   const handleNext = useCallback(() => {
+    const stepId = STEPS[currentStep - 1].id as StepSchemaKey;
+    if (!validateStep(stepId, config)) {
+      return;
+    }
+    clearErrors();
     if (currentStep < totalSteps) {
       setCurrentStep(prev => prev + 1);
     }
-  }, [currentStep, totalSteps]);
+  }, [currentStep, totalSteps, config, validateStep, clearErrors]);
 
   const handlePrevious = useCallback(() => {
     if (currentStep > 1) {
+      clearErrors();
       setCurrentStep(prev => prev - 1);
     }
-  }, [currentStep]);
+  }, [currentStep, clearErrors]);
 
   const handleStepClick = useCallback((step: number) => {
+    clearErrors();
     setCurrentStep(step);
-  }, []);
+  }, [clearErrors]);
 
   const handleInstall = useCallback(() => {
+    const stepId = STEPS[currentStep - 1].id as StepSchemaKey;
+    if (!validateStep(stepId, config)) {
+      return;
+    }
     setShowModal(true);
     install(config);
-  }, [config, install]);
+  }, [currentStep, config, install, validateStep]);
 
   const handleCloseModal = useCallback(() => {
     setShowModal(false);
@@ -141,19 +163,19 @@ export default function InstallerForm() {
   const renderStep = () => {
     switch (currentStep) {
       case 1:
-        return <DomainStep config={config} onChange={handleChange} />;
+        return <DomainStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 2:
-        return <SecurityStep config={config} onChange={handleChange} />;
+        return <SecurityStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 3:
-        return <ModelsStep config={config} onChange={handleChange} />;
+        return <ModelsStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 4:
-        return <InterfaceStep config={config} onChange={handleChange} />;
+        return <InterfaceStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 5:
-        return <SearchStep config={config} onChange={handleChange} />;
+        return <SearchStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 6:
-        return <VPNStep config={config} onChange={handleChange} />;
+        return <VPNStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 7:
-        return <AdvancedStep config={config} onChange={handleChange} />;
+        return <AdvancedStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       default:
         return null;
     }

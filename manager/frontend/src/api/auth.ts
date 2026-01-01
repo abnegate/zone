@@ -1,4 +1,6 @@
 import type { AuthResponse, LoginRequest, RegisterRequest } from '../types';
+import { parse } from '../validation';
+import { AuthResponseSchema } from '../validation/schemas';
 
 const API_BASE = process.env.REACT_APP_API_URL || '';
 
@@ -15,7 +17,7 @@ export async function login(request: LoginRequest): Promise<AuthResponse> {
   }
 
   const data = await response.json();
-  return data.data;
+  return parse(AuthResponseSchema, data.data);
 }
 
 export async function register(request: RegisterRequest): Promise<AuthResponse> {
@@ -31,7 +33,7 @@ export async function register(request: RegisterRequest): Promise<AuthResponse> 
   }
 
   const data = await response.json();
-  return data.data;
+  return parse(AuthResponseSchema, data.data);
 }
 
 export async function refreshToken(token: string): Promise<AuthResponse> {
@@ -46,7 +48,7 @@ export async function refreshToken(token: string): Promise<AuthResponse> {
   }
 
   const data = await response.json();
-  return data.data;
+  return parse(AuthResponseSchema, data.data);
 }
 
 export async function logout(token: string): Promise<void> {

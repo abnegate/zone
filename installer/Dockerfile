@@ -28,10 +28,6 @@ WORKDIR /build
 COPY --from=builder /build /build
 COPY --from=frontend-builder /frontend/build /build/frontend/build
 
-# Keep legacy static/templates for fallback during development
-COPY static static
-COPY templates templates
-
 RUN chown -R appuser:appuser /build
 
 USER appuser

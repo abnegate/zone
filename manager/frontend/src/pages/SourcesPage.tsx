@@ -10,6 +10,7 @@ import {
   sourceRegistry,
 } from '../sources';
 import type { CreateSourceRequest, Source, SourceType } from '../types';
+import { getErrors, CreateSourceRequestSchema } from '../validation';
 import './SourcesPage.css';
 
 function SourceTypeBadge({ type }: { type: SourceType }) {
@@ -166,6 +167,7 @@ function CreateSourceModal({ onClose, onCreated }: CreateSourceModalProps) {
   const [credentials, setCredentials] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const currentSource = getSourceById(sourceType);
 
@@ -174,31 +176,48 @@ function CreateSourceModal({ onClose, onCreated }: CreateSourceModalProps) {
     setSourceType(newType);
     setFormState(initializeFormState(newType));
     setCredentials('');
+    setFieldErrors({});
   };
 
   const handleFieldChange = (id: string, value: unknown) => {
     setFormState((prev) => ({ ...prev, [id]: value }));
+    // Clear field error when user types
+    if (fieldErrors[id]) {
+      setFieldErrors((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentSource) return;
 
+    const config = currentSource.buildConfig(formState);
+    const defaultName = currentSource.getDefaultName(formState);
+
+    const request: CreateSourceRequest = {
+      name: name || defaultName,
+      source_type: sourceType,
+      config,
+      description: description || undefined,
+      credentials: credentials || undefined,
+    };
+
+    // Validate the request
+    const errors = getErrors(CreateSourceRequestSchema, request);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+
+    setFieldErrors({});
     setLoading(true);
     setError(null);
 
     try {
-      const config = currentSource.buildConfig(formState);
-      const defaultName = currentSource.getDefaultName(formState);
-
-      const request: CreateSourceRequest = {
-        name: name || defaultName,
-        source_type: sourceType,
-        config,
-        description: description || undefined,
-        credentials: credentials || undefined,
-      };
-
       const source = await client.createSource(request);
       onCreated(source);
       onClose();
@@ -339,6 +358,13 @@ function CreateSourceModal({ onClose, onCreated }: CreateSourceModalProps) {
             </details>
           </div>
 
+          {Object.keys(fieldErrors).length > 0 && (
+            <div className="form-error">
+              {Object.entries(fieldErrors).map(([field, message]) => (
+                <div key={field}>{message}</div>
+              ))}
+            </div>
+          )}
           {error && <div className="form-error">{error}</div>}
 
           <div className="form-actions">

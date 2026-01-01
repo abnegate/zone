@@ -1,8 +1,5 @@
 import type {
-  BrowseResponse,
   Chat,
-  ChatResponse,
-  ChatsResponse,
   CreateChatRequest,
   CreateOrganizationRequest,
   CreateProjectRequest,
@@ -10,23 +7,12 @@ import type {
   CreateTaskRequest,
   CreateWorkspaceRequest,
   Message,
-  MessageResponse,
-  MessagesResponse,
   ModelSource,
-  ModelsResponse,
   Organization,
-  OrganizationResponse,
-  OrganizationsResponse,
   Project,
-  ProjectResponse,
-  ProjectsResponse,
   SendMessageRequest,
   Source,
-  SourceResponse,
   SourceType,
-  SourceTypesResponse,
-  SourceVerifyResponse,
-  SourcesResponse,
   Task,
   TaskRun,
   TaskRunLog,
@@ -37,11 +23,34 @@ import type {
   UpdateWorkspaceRequest,
   UpdateWorkspaceThemeRequest,
   Workspace,
-  WorkspaceResponse,
   WorkspaceTheme,
-  WorkspaceThemeResponse,
-  WorkspacesResponse,
 } from '../types';
+import { parse } from '../validation';
+import {
+  BrowseResponseSchema,
+  ChatResponseSchema,
+  ChatsResponseSchema,
+  MessageResponseSchema,
+  MessagesResponseSchema,
+  ModelsResponseSchema,
+  OrganizationResponseSchema,
+  OrganizationsResponseSchema,
+  ProjectResponseSchema,
+  ProjectsResponseSchema,
+  SourceResponseSchema,
+  SourceTypesResponseSchema,
+  SourceVerifyResponseSchema,
+  SourcesResponseSchema,
+  TaskResponseSchema,
+  TaskRunLogsResponseSchema,
+  TaskRunResponseSchema,
+  TaskRunsResponseSchema,
+  TasksResponseSchema,
+  WorkspaceResponseSchema,
+  WorkspaceThemeResponseSchema,
+  WorkspacesResponseSchema,
+} from '../validation/schemas';
+import type { SourceTypesResponse, SourceVerifyResponse } from '../types';
 
 // In development, set REACT_APP_API_URL=http://localhost:8000
 // In production (served by backend), leave empty to use relative URLs
@@ -64,7 +73,7 @@ class Client {
     return headers;
   }
 
-  async getModels(): Promise<ModelsResponse> {
+  async getModels(): Promise<{ models: Array<{ name: string; size: number; modified_at: string; details?: { description?: string; family?: string } }> }> {
     const response = await fetch(`${API_BASE}/api/models`, {
       headers: this.getHeaders(),
     });
@@ -76,9 +85,13 @@ class Client {
       return { models: [] };
     }
     try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error('Invalid response from server');
+      const data = JSON.parse(text);
+      return parse(ModelsResponseSchema, data);
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        throw new Error('Invalid response from server');
+      }
+      throw e;
     }
   }
 
@@ -97,7 +110,7 @@ class Client {
     query = '',
     offset = 0,
     limit = 20
-  ): Promise<BrowseResponse> {
+  ): Promise<{ source: ModelSource; models: Array<{ id: string; name: string; description: string; downloads: number; tags: string[] }>; total?: number | null; has_more: boolean }> {
     const params = new URLSearchParams({
       source,
       q: query,
@@ -110,7 +123,8 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to browse models: ${response.status}`);
     }
-    return response.json();
+    const data = await response.json();
+    return parse(BrowseResponseSchema, data);
   }
 
   async getModelInfo(
@@ -153,18 +167,18 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch chats: ${response.status}`);
     }
-    const data: ChatsResponse = await response.json();
+    const data = parse(ChatsResponseSchema, await response.json());
     return data.chats;
   }
 
-  async getChat(id: string): Promise<ChatResponse['chat']> {
+  async getChat(id: string): Promise<Chat & { messages: Message[] }> {
     const response = await fetch(`${API_BASE}/api/chats/${id}`, {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
       throw new Error(`Failed to fetch chat: ${response.status}`);
     }
-    const data: ChatResponse = await response.json();
+    const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
   }
 
@@ -177,7 +191,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to create chat: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
   }
 
@@ -190,7 +204,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update chat: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
   }
 
@@ -212,7 +226,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to archive chat: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
   }
 
@@ -224,7 +238,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to unarchive chat: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(ChatResponseSchema, await response.json());
     return data.chat;
   }
 
@@ -235,7 +249,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch messages: ${response.status}`);
     }
-    const data: MessagesResponse = await response.json();
+    const data = parse(MessagesResponseSchema, await response.json());
     return data.messages;
   }
 
@@ -248,7 +262,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to send message: ${response.status}`);
     }
-    const data: MessageResponse = await response.json();
+    const data = parse(MessageResponseSchema, await response.json());
     return data.message;
   }
 
@@ -274,7 +288,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch projects: ${response.status}`);
     }
-    const data: ProjectsResponse = await response.json();
+    const data = parse(ProjectsResponseSchema, await response.json());
     return data.projects;
   }
 
@@ -285,7 +299,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch project: ${response.status}`);
     }
-    const data: ProjectResponse = await response.json();
+    const data = parse(ProjectResponseSchema, await response.json());
     return data.project;
   }
 
@@ -298,7 +312,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to create project: ${response.status}`);
     }
-    const data: ProjectResponse = await response.json();
+    const data = parse(ProjectResponseSchema, await response.json());
     return data.project;
   }
 
@@ -311,7 +325,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update project: ${response.status}`);
     }
-    const data: ProjectResponse = await response.json();
+    const data = parse(ProjectResponseSchema, await response.json());
     return data.project;
   }
 
@@ -334,7 +348,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to link GitHub: ${response.status}`);
     }
-    const data: ProjectResponse = await response.json();
+    const data = parse(ProjectResponseSchema, await response.json());
     return data.project;
   }
 
@@ -346,7 +360,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to unlink GitHub: ${response.status}`);
     }
-    const data: ProjectResponse = await response.json();
+    const data = parse(ProjectResponseSchema, await response.json());
     return data.project;
   }
 
@@ -366,7 +380,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch tasks: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(TasksResponseSchema, await response.json());
     return data.tasks;
   }
 
@@ -377,7 +391,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch task: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(TaskResponseSchema, await response.json());
     return data.task;
   }
 
@@ -390,7 +404,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to create task: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(TaskResponseSchema, await response.json());
     return data.task;
   }
 
@@ -403,7 +417,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update task: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(TaskResponseSchema, await response.json());
     return data.task;
   }
 
@@ -446,7 +460,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch task runs: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(TaskRunsResponseSchema, await response.json());
     return data.runs;
   }
 
@@ -457,7 +471,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch task run: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(TaskRunResponseSchema, await response.json());
     return data.run;
   }
 
@@ -468,7 +482,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch task run logs: ${response.status}`);
     }
-    const data = await response.json();
+    const data = parse(TaskRunLogsResponseSchema, await response.json());
     return data.logs;
   }
 
@@ -495,7 +509,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch source types: ${response.status}`);
     }
-    const data: SourceTypesResponse = await response.json();
+    const data = parse(SourceTypesResponseSchema, await response.json());
     return data.types;
   }
 
@@ -511,7 +525,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch sources: ${response.status}`);
     }
-    const data: SourcesResponse = await response.json();
+    const data = parse(SourcesResponseSchema, await response.json());
     return data.sources;
   }
 
@@ -522,7 +536,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch source: ${response.status}`);
     }
-    const data: SourceResponse = await response.json();
+    const data = parse(SourceResponseSchema, await response.json());
     return data.source;
   }
 
@@ -535,7 +549,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to create source: ${response.status}`);
     }
-    const data: SourceResponse = await response.json();
+    const data = parse(SourceResponseSchema, await response.json());
     return data.source;
   }
 
@@ -548,7 +562,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update source: ${response.status}`);
     }
-    const data: SourceResponse = await response.json();
+    const data = parse(SourceResponseSchema, await response.json());
     return data.source;
   }
 
@@ -570,7 +584,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to verify source: ${response.status}`);
     }
-    return response.json();
+    return parse(SourceVerifyResponseSchema, await response.json());
   }
 
   async linkSource(projectId: string, sourceId: string): Promise<Project> {
@@ -582,7 +596,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to link source: ${response.status}`);
     }
-    const data: ProjectResponse = await response.json();
+    const data = parse(ProjectResponseSchema, await response.json());
     return data.project;
   }
 
@@ -594,7 +608,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to unlink source: ${response.status}`);
     }
-    const data: ProjectResponse = await response.json();
+    const data = parse(ProjectResponseSchema, await response.json());
     return data.project;
   }
 
@@ -610,7 +624,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch organizations: ${response.status}`);
     }
-    const data: OrganizationsResponse = await response.json();
+    const data = parse(OrganizationsResponseSchema, await response.json());
     return data.organizations;
   }
 
@@ -621,7 +635,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch organization: ${response.status}`);
     }
-    const data: OrganizationResponse = await response.json();
+    const data = parse(OrganizationResponseSchema, await response.json());
     return data.organization;
   }
 
@@ -634,7 +648,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to create organization: ${response.status}`);
     }
-    const data: OrganizationResponse = await response.json();
+    const data = parse(OrganizationResponseSchema, await response.json());
     return data.organization;
   }
 
@@ -647,7 +661,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update organization: ${response.status}`);
     }
-    const data: OrganizationResponse = await response.json();
+    const data = parse(OrganizationResponseSchema, await response.json());
     return data.organization;
   }
 
@@ -673,7 +687,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch workspaces: ${response.status}`);
     }
-    const data: WorkspacesResponse = await response.json();
+    const data = parse(WorkspacesResponseSchema, await response.json());
     return data.workspaces;
   }
 
@@ -684,7 +698,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch workspace: ${response.status}`);
     }
-    const data: WorkspaceResponse = await response.json();
+    const data = parse(WorkspaceResponseSchema, await response.json());
     return data.workspace;
   }
 
@@ -697,7 +711,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to create workspace: ${response.status}`);
     }
-    const data: WorkspaceResponse = await response.json();
+    const data = parse(WorkspaceResponseSchema, await response.json());
     return data.workspace;
   }
 
@@ -714,7 +728,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update workspace: ${response.status}`);
     }
-    const data: WorkspaceResponse = await response.json();
+    const data = parse(WorkspaceResponseSchema, await response.json());
     return data.workspace;
   }
 
@@ -740,7 +754,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to fetch workspace theme: ${response.status}`);
     }
-    const data: WorkspaceThemeResponse = await response.json();
+    const data = parse(WorkspaceThemeResponseSchema, await response.json());
     return data.theme;
   }
 
@@ -760,7 +774,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to update workspace theme: ${response.status}`);
     }
-    const data: WorkspaceThemeResponse = await response.json();
+    const data = parse(WorkspaceThemeResponseSchema, await response.json());
     return data.theme;
   }
 
@@ -775,7 +789,7 @@ class Client {
     if (!response.ok) {
       throw new Error(`Failed to reset workspace theme: ${response.status}`);
     }
-    const data: WorkspaceThemeResponse = await response.json();
+    const data = parse(WorkspaceThemeResponseSchema, await response.json());
     return data.theme;
   }
 }

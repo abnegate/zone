@@ -9,7 +9,6 @@ const mockModels: BrowseModel[] = [
     description: 'A large language model',
     downloads: 1500000,
     tags: ['llm', 'text-generation', 'chat'],
-    source: 'ollama',
   },
   {
     id: 'model-2',
@@ -17,7 +16,6 @@ const mockModels: BrowseModel[] = [
     description: 'Fast and efficient model',
     downloads: 750000,
     tags: ['llm', 'fast'],
-    source: 'ollama',
   },
 ];
 
@@ -188,7 +186,6 @@ describe('VirtualBrowseList', () => {
         description: 'A model with few downloads',
         downloads: 42,
         tags: [],
-        source: 'ollama',
       },
     ];
 
@@ -214,7 +211,6 @@ describe('VirtualBrowseList', () => {
         description: '',
         downloads: 1000,
         tags: ['test'],
-        source: 'ollama',
       },
     ];
 
@@ -241,7 +237,6 @@ describe('VirtualBrowseList', () => {
         description: 'A model',
         downloads: 500,
         tags: [],
-        source: 'ollama',
       },
     ];
 

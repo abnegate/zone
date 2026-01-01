@@ -6,6 +6,7 @@ import type { InstallerConfig } from '../types';
 interface AdvancedStepProps {
   config: InstallerConfig;
   onChange: (key: keyof InstallerConfig, value: string) => void;
+  getFieldError: (field: string) => string | undefined;
 }
 
 const retentionOptions = [
@@ -23,22 +24,40 @@ const timezoneOptions = [
   { value: 'Asia/Tokyo', label: 'Asia/Tokyo' },
 ];
 
-export function AdvancedStep({ config, onChange }: AdvancedStepProps) {
+const smtpPortOptions = [
+  { value: '25', label: '25 (SMTP)' },
+  { value: '465', label: '465 (SMTPS)' },
+  { value: '587', label: '587 (Submission)' },
+  { value: '2525', label: '2525 (Alternate)' },
+];
+
+export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepProps) {
   const { generateSecret } = useSecretGenerator();
-  const monitoringEnabled = config.ENABLE_MONITORING === 'true';
+  const monitoringEnabled = config.MONITORING_ENABLED === 'true';
+  const alertingEnabled = config.ALERT_ENABLED === 'true';
 
   const handleMonitoringToggle = (checked: boolean) => {
-    onChange('ENABLE_MONITORING', checked ? 'true' : 'false');
+    onChange('MONITORING_ENABLED', checked ? 'true' : 'false');
     // Auto-generate password if enabling and password is empty
-    if (checked && !config.GF_SECURITY_ADMIN_PASSWORD) {
-      onChange('GF_SECURITY_ADMIN_PASSWORD', generateSecret());
+    if (checked && !config.MONITORING_GRAFANA_ADMIN_PASSWORD) {
+      onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', generateSecret());
     }
+    // Disable alerting if monitoring is disabled
+    if (!checked) {
+      onChange('ALERT_ENABLED', 'false');
+    }
+  };
+
+  const handleAlertingToggle = (checked: boolean) => {
+    onChange('ALERT_ENABLED', checked ? 'true' : 'false');
   };
 
   return (
     <div className="step-content">
-      <h2>Advanced Settings</h2>
-      <p>Performance tuning and system configuration</p>
+      <div className="step-header">
+        <h2>Advanced Settings</h2>
+        <p>Performance tuning and system configuration</p>
+      </div>
 
       <h3 className="section-header">Monitoring</h3>
 
@@ -58,31 +77,119 @@ export function AdvancedStep({ config, onChange }: AdvancedStepProps) {
           <Input
             label="Grafana Admin Username"
             type="text"
-            value={config.GF_SECURITY_ADMIN_USER}
-            onChange={e => onChange('GF_SECURITY_ADMIN_USER', e.target.value)}
+            value={config.MONITORING_GRAFANA_ADMIN_USER}
+            onChange={e => onChange('MONITORING_GRAFANA_ADMIN_USER', e.target.value)}
+            error={getFieldError('MONITORING_GRAFANA_ADMIN_USER')}
           />
 
           <Input
             label="Grafana Admin Password"
             type="text"
-            value={config.GF_SECURITY_ADMIN_PASSWORD}
-            onChange={e => onChange('GF_SECURITY_ADMIN_PASSWORD', e.target.value)}
-            onGenerate={() => onChange('GF_SECURITY_ADMIN_PASSWORD', generateSecret())}
+            value={config.MONITORING_GRAFANA_ADMIN_PASSWORD}
+            onChange={e => onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', e.target.value)}
+            onGenerate={() => onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', generateSecret())}
             placeholder="Leave empty to auto-generate"
             className="font-mono"
+            error={getFieldError('MONITORING_GRAFANA_ADMIN_PASSWORD')}
           />
 
           <Select
             label="Metrics Retention"
             options={retentionOptions}
-            value={config.METRICS_RETENTION}
-            onChange={e => onChange('METRICS_RETENTION', e.target.value)}
+            value={config.MONITORING_RETENTION_TIME}
+            onChange={e => onChange('MONITORING_RETENTION_TIME', e.target.value)}
             helpText="How long to keep metrics data"
           />
 
           <InfoBox variant="info">
             Start with: <code style={{ background: 'var(--bg-base)', padding: '0.25rem 0.5rem', borderRadius: '0.25rem' }}>docker compose --profile monitoring up</code>
           </InfoBox>
+
+          <h4 className="section-header" style={{ marginTop: 'var(--space-lg)' }}>Email Alerts</h4>
+
+          <div className="form-field">
+            <Checkbox
+              label="Enable email alerts for critical events"
+              checked={alertingEnabled}
+              onChange={e => handleAlertingToggle(e.target.checked)}
+            />
+            <p className="help-text" style={{ marginLeft: '2.25rem' }}>
+              Get notified when services go down or performance degrades
+            </p>
+          </div>
+
+          {alertingEnabled && (
+            <div className="conditional-fields">
+              <Input
+                label="Alert Recipients"
+                type="email"
+                value={config.ALERT_EMAIL_RECIPIENTS}
+                onChange={e => onChange('ALERT_EMAIL_RECIPIENTS', e.target.value)}
+                placeholder="admin@example.com"
+                helpText="Comma-separated list of email addresses"
+                error={getFieldError('ALERT_EMAIL_RECIPIENTS')}
+              />
+
+              <Input
+                label="SMTP Host"
+                type="text"
+                value={config.ALERT_SMTP_HOST}
+                onChange={e => onChange('ALERT_SMTP_HOST', e.target.value)}
+                placeholder="smtp.gmail.com"
+                helpText="e.g., smtp.gmail.com, smtp.sendgrid.net"
+                error={getFieldError('ALERT_SMTP_HOST')}
+              />
+
+              <Select
+                label="SMTP Port"
+                options={smtpPortOptions}
+                value={config.ALERT_SMTP_PORT}
+                onChange={e => onChange('ALERT_SMTP_PORT', e.target.value)}
+                helpText="587 recommended for most providers"
+              />
+
+              <Input
+                label="SMTP Username"
+                type="text"
+                value={config.ALERT_SMTP_USER}
+                onChange={e => onChange('ALERT_SMTP_USER', e.target.value)}
+                placeholder="your-email@gmail.com"
+                error={getFieldError('ALERT_SMTP_USER')}
+              />
+
+              <Input
+                label="SMTP Password"
+                type="password"
+                value={config.ALERT_SMTP_PASSWORD}
+                onChange={e => onChange('ALERT_SMTP_PASSWORD', e.target.value)}
+                placeholder="App password or API key"
+                helpText="For Gmail, use an App Password"
+                error={getFieldError('ALERT_SMTP_PASSWORD')}
+              />
+
+              <Input
+                label="From Address"
+                type="email"
+                value={config.ALERT_SMTP_FROM_ADDRESS}
+                onChange={e => onChange('ALERT_SMTP_FROM_ADDRESS', e.target.value)}
+                placeholder="alerts@example.com"
+                error={getFieldError('ALERT_SMTP_FROM_ADDRESS')}
+              />
+
+              <Input
+                label="From Name"
+                type="text"
+                value={config.ALERT_SMTP_FROM_NAME}
+                onChange={e => onChange('ALERT_SMTP_FROM_NAME', e.target.value)}
+                placeholder="Zone Alerts"
+                error={getFieldError('ALERT_SMTP_FROM_NAME')}
+              />
+
+              <InfoBox variant="info">
+                Alerts include: service outages, high latency, error spikes, database issues, and memory warnings.
+              </InfoBox>
+            </div>
+          )}
         </div>
       )}
 
@@ -91,35 +198,38 @@ export function AdvancedStep({ config, onChange }: AdvancedStepProps) {
       <Input
         label="Worker Count"
         type="number"
-        value={config.WORKERS}
-        onChange={e => onChange('WORKERS', e.target.value)}
+        value={config.ADVANCED_LITELLM_WORKERS}
+        onChange={e => onChange('ADVANCED_LITELLM_WORKERS', e.target.value)}
         min={1}
         max={16}
         helpText="1-2 per CPU core recommended"
+        error={getFieldError('ADVANCED_LITELLM_WORKERS')}
       />
 
       <Input
         label="Request Timeout (seconds)"
         type="number"
-        value={config.REQUEST_TIMEOUT}
-        onChange={e => onChange('REQUEST_TIMEOUT', e.target.value)}
+        value={config.ADVANCED_LITELLM_REQUEST_TIMEOUT}
+        onChange={e => onChange('ADVANCED_LITELLM_REQUEST_TIMEOUT', e.target.value)}
         min={60}
         max={1800}
+        error={getFieldError('ADVANCED_LITELLM_REQUEST_TIMEOUT')}
       />
 
       <Select
         label="Timezone"
         options={timezoneOptions}
-        value={config.TZ}
-        onChange={e => onChange('TZ', e.target.value)}
+        value={config.ADVANCED_TZ}
+        onChange={e => onChange('ADVANCED_TZ', e.target.value)}
       />
 
       <Input
         label="ACME Email (for Let's Encrypt)"
         type="email"
-        value={config.ACME_EMAIL}
-        onChange={e => onChange('ACME_EMAIL', e.target.value)}
+        value={config.ADVANCED_ACME_EMAIL}
+        onChange={e => onChange('ADVANCED_ACME_EMAIL', e.target.value)}
         helpText="Required for automatic TLS certificates"
+        error={getFieldError('ADVANCED_ACME_EMAIL')}
       />
 
       <InfoBox variant="success">

@@ -221,8 +221,8 @@ services:
   # =============================================================================
   manager:
     build:
-      context: ./manager
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: manager/Dockerfile
     container_name: manager
     restart: unless-stopped
     depends_on:
@@ -476,6 +476,19 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${MONITORING_GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=http://grafana.${DOMAIN_HOST_WEBUI}
+      # SMTP Configuration for alerting
+      - GF_SMTP_ENABLED=${ALERT_ENABLED:-false}
+      - GF_SMTP_HOST=${ALERT_SMTP_HOST}:${ALERT_SMTP_PORT:-587}
+      - GF_SMTP_USER=${ALERT_SMTP_USER}
+      - GF_SMTP_PASSWORD=${ALERT_SMTP_PASSWORD}
+      - GF_SMTP_FROM_ADDRESS=${ALERT_SMTP_FROM_ADDRESS:-alerts@example.com}
+      - GF_SMTP_FROM_NAME=${ALERT_SMTP_FROM_NAME:-Zone Alerts}
+      - GF_SMTP_STARTTLS_POLICY=MandatoryStartTLS
+      # Unified Alerting
+      - GF_UNIFIED_ALERTING_ENABLED=true
+      - GF_ALERTING_ENABLED=false
+      # Alert recipient email (used in provisioned contact points)
+      - ALERT_EMAIL_RECIPIENTS=${ALERT_EMAIL_RECIPIENTS:-admin@example.com}
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
