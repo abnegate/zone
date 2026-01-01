@@ -14,13 +14,13 @@ jest.mock('../api/client', () => ({
 const mockClient = client as jest.Mocked<typeof client>;
 
 const mockOrganizations: Organization[] = [
-  { id: 'org-1', name: 'Org 1', slug: 'org-1', is_active: true, created_at: '', updated_at: '' },
-  { id: 'org-2', name: 'Org 2', slug: 'org-2', is_active: true, created_at: '', updated_at: '' },
+  { id: 'org-1', name: 'Org 1', slug: 'org-1', description: null, is_active: true, created_at: '', updated_at: '' },
+  { id: 'org-2', name: 'Org 2', slug: 'org-2', description: null, is_active: true, created_at: '', updated_at: '' },
 ];
 
 const mockWorkspaces: Workspace[] = [
-  { id: 'ws-1', organization_id: 'org-1', name: 'Workspace 1', slug: 'ws-1', is_active: true, created_at: '', updated_at: '' },
-  { id: 'ws-2', organization_id: 'org-1', name: 'Workspace 2', slug: 'ws-2', is_active: true, created_at: '', updated_at: '' },
+  { id: 'ws-1', organization_id: 'org-1', name: 'Workspace 1', slug: 'ws-1', description: null, is_active: true, created_at: '', updated_at: '' },
+  { id: 'ws-2', organization_id: 'org-1', name: 'Workspace 2', slug: 'ws-2', description: null, is_active: true, created_at: '', updated_at: '' },
 ];
 
 // Test component to access context
@@ -241,7 +241,7 @@ describe('WorkspaceContext', () => {
       mockClient.getOrganizations
         .mockResolvedValueOnce(mockOrganizations)
         .mockResolvedValueOnce([
-          { id: 'org-3', name: 'Org 3', slug: 'org-3', is_active: true, created_at: '', updated_at: '' },
+          { id: 'org-3', name: 'Org 3', slug: 'org-3', description: null, is_active: true, created_at: '', updated_at: '' },
         ]);
       mockClient.getWorkspaces.mockResolvedValue([]);
 
@@ -271,7 +271,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces
         .mockResolvedValueOnce(mockWorkspaces)
         .mockResolvedValueOnce([
-          { id: 'ws-3', organization_id: 'org-1', name: 'Workspace 3', slug: 'ws-3', is_active: true, created_at: '', updated_at: '' },
+          { id: 'ws-3', organization_id: 'org-1', name: 'Workspace 3', slug: 'ws-3', description: null, is_active: true, created_at: '', updated_at: '' },
         ]);
 
       render(

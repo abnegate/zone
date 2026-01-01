@@ -25,8 +25,8 @@ jest.mock('../api/client', () => ({
 jest.mock('../hooks/useModels', () => ({
   useModels: () => ({
     models: [
-      { name: 'llama2', size: 1, modified_at: '', digest: '' },
-      { name: 'mistral', size: 1, modified_at: '', digest: '' },
+      { name: 'llama2', size: 1, modified_at: '' },
+      { name: 'mistral', size: 1, modified_at: '' },
     ],
     loading: false,
     error: null,
@@ -547,7 +547,8 @@ describe('ChatsPage', () => {
 
   describe('archive/unarchive chat', () => {
     it('archives chat when archive button clicked', async () => {
-      mockClient.archiveChat.mockResolvedValueOnce(undefined);
+      const archivedChat: Chat = { id: 'chat-1', title: 'Chat 1', model_name: 'llama2', updated_at: '2024-01-01T00:00:00Z', archived: true, created_at: '2024-01-01T00:00:00Z' };
+      mockClient.archiveChat.mockResolvedValueOnce(archivedChat);
 
       renderChatsPage();
 
@@ -588,7 +589,8 @@ describe('ChatsPage', () => {
       mockClient.getChats
         .mockResolvedValueOnce(mockChats)
         .mockResolvedValueOnce(archivedChats);
-      mockClient.unarchiveChat.mockResolvedValueOnce(undefined);
+      const unarchivedChat: Chat = { id: 'chat-archived', title: 'Archived Chat', model_name: 'llama2', updated_at: '2024-01-01T00:00:00Z', archived: false, created_at: '2024-01-01T00:00:00Z' };
+      mockClient.unarchiveChat.mockResolvedValueOnce(unarchivedChat);
 
       renderChatsPage();
 
@@ -657,7 +659,8 @@ describe('ChatsPage', () => {
     });
 
     it('clears active chat when archiving it', async () => {
-      mockClient.archiveChat.mockResolvedValueOnce(undefined);
+      const archivedChat: Chat = { id: 'chat-1', title: 'Chat 1', model_name: 'llama2', updated_at: '2024-01-01T00:00:00Z', archived: true, created_at: '2024-01-01T00:00:00Z' };
+      mockClient.archiveChat.mockResolvedValueOnce(archivedChat);
 
       renderChatsPage();
 

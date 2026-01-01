@@ -38,36 +38,20 @@ pub fn handle_request(req: wisp.Request) -> wisp.Response {
 }
 
 fn serve_index() -> wisp.Response {
-  // Serve the React build index.html
   case simplifile.read("frontend/build/index.html") {
     Ok(html) -> wisp.html_response(html, 200)
-    Error(_) -> {
-      // Fallback to old templates location for development
-      case simplifile.read("templates/index.html") {
-        Ok(html) -> wisp.html_response(html, 200)
-        Error(_) -> wisp.not_found()
-      }
-    }
+    Error(_) -> wisp.not_found()
   }
 }
 
 fn serve_static(path: List(String)) -> wisp.Response {
-  // Validate path segments to prevent directory traversal
   case validate_path_segments(path) {
     False -> wisp.bad_request()
     True -> {
-      // Try React build directory first, then fall back to old static directory
-      let react_path = "frontend/build/static/" <> string.join(path, "/")
-      let legacy_path = "static/" <> string.join(path, "/")
-
-      case simplifile.read(react_path) {
-        Ok(content) -> serve_static_content(react_path, content)
-        Error(_) -> {
-          case simplifile.read(legacy_path) {
-            Ok(content) -> serve_static_content(legacy_path, content)
-            Error(_) -> wisp.not_found()
-          }
-        }
+      let file_path = "frontend/build/static/" <> string.join(path, "/")
+      case simplifile.read(file_path) {
+        Ok(content) -> serve_static_content(file_path, content)
+        Error(_) -> wisp.not_found()
       }
     }
   }

@@ -5,6 +5,7 @@ import type { InstallerConfig } from '../types';
 interface ModelsStepProps {
   config: InstallerConfig;
   onChange: (key: keyof InstallerConfig, value: string) => void;
+  getFieldError: (field: string) => string | undefined;
 }
 
 const fastModelOptions = [
@@ -26,33 +27,36 @@ const embeddingModelOptions = [
   { value: 'mxbai-embed-large', label: 'mxbai-embed-large - 669MB' },
 ];
 
-export function ModelsStep({ config, onChange }: ModelsStepProps) {
+export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps) {
+  void getFieldError; // Models use select dropdowns with predefined options, no validation errors shown
   return (
     <div className="step-content">
-      <h2>Model Selection</h2>
-      <p>Choose AI models based on your hardware</p>
+      <div className="step-header">
+        <h2>Model Selection</h2>
+        <p>Choose AI models based on your hardware</p>
+      </div>
 
       <Select
         label="Fast Model (4-8GB RAM)"
         options={fastModelOptions}
-        value={config.OLLAMA_FAST_MODEL}
-        onChange={e => onChange('OLLAMA_FAST_MODEL', e.target.value)}
+        value={config.OLLAMA_MODEL_FAST}
+        onChange={e => onChange('OLLAMA_MODEL_FAST', e.target.value)}
         helpText="For general queries and quick responses"
       />
 
       <Select
         label="Reasoning Model (8-32GB RAM)"
         options={reasoningModelOptions}
-        value={config.OLLAMA_REASONING_MODEL}
-        onChange={e => onChange('OLLAMA_REASONING_MODEL', e.target.value)}
+        value={config.OLLAMA_MODEL_REASON}
+        onChange={e => onChange('OLLAMA_MODEL_REASON', e.target.value)}
         helpText="For complex analysis and detailed reasoning"
       />
 
       <Select
         label="Embedding Model (1-2GB RAM)"
         options={embeddingModelOptions}
-        value={config.OLLAMA_EMBEDDING_MODEL}
-        onChange={e => onChange('OLLAMA_EMBEDDING_MODEL', e.target.value)}
+        value={config.OLLAMA_MODEL_EMBED}
+        onChange={e => onChange('OLLAMA_MODEL_EMBED', e.target.value)}
         helpText="For semantic routing and search"
       />
 

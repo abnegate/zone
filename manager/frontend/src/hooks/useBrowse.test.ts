@@ -44,9 +44,10 @@ describe('useBrowse', () => {
 
   it('searches models when authenticated', async () => {
     const mockModels = [
-      { id: 'model1', name: 'llama2', description: 'A model' },
+      { id: 'model1', name: 'llama2', description: 'A model', downloads: 1000, tags: ['llm'] },
     ];
     mockClient.browseModels.mockResolvedValueOnce({
+      source: 'ollama',
       models: mockModels,
       has_more: false,
     });
@@ -98,12 +99,12 @@ describe('useBrowse', () => {
   });
 
   it('loads more models', async () => {
-    const firstPage = [{ id: '1', name: 'model1', description: '' }];
-    const secondPage = [{ id: '2', name: 'model2', description: '' }];
+    const firstPage = [{ id: '1', name: 'model1', description: '', downloads: 100, tags: [] }];
+    const secondPage = [{ id: '2', name: 'model2', description: '', downloads: 200, tags: [] }];
 
     mockClient.browseModels
-      .mockResolvedValueOnce({ models: firstPage, has_more: true })
-      .mockResolvedValueOnce({ models: secondPage, has_more: false });
+      .mockResolvedValueOnce({ source: 'ollama', models: firstPage, has_more: true })
+      .mockResolvedValueOnce({ source: 'ollama', models: secondPage, has_more: false });
 
     const { result } = renderHook(() => useBrowse());
 
@@ -128,7 +129,7 @@ describe('useBrowse', () => {
   });
 
   it('does not load more when no more results available', async () => {
-    mockClient.browseModels.mockResolvedValueOnce({ models: [], has_more: false });
+    mockClient.browseModels.mockResolvedValueOnce({ source: 'ollama', models: [], has_more: false });
 
     const { result } = renderHook(() => useBrowse());
 
@@ -153,8 +154,8 @@ describe('useBrowse', () => {
 
   it('changes source and clears results', async () => {
     mockClient.browseModels
-      .mockResolvedValueOnce({ models: [{ id: '1', name: 'ollama-model', description: '' }], has_more: false })
-      .mockResolvedValueOnce({ models: [{ id: '2', name: 'hf-model', description: '' }], has_more: false });
+      .mockResolvedValueOnce({ source: 'ollama', models: [{ id: '1', name: 'ollama-model', description: '', downloads: 100, tags: [] }], has_more: false })
+      .mockResolvedValueOnce({ source: 'huggingface', models: [{ id: '2', name: 'hf-model', description: '', downloads: 200, tags: [] }], has_more: false });
 
     const { result } = renderHook(() => useBrowse());
 
@@ -190,7 +191,7 @@ describe('useBrowse', () => {
 
   it('handles loadMore error', async () => {
     mockClient.browseModels
-      .mockResolvedValueOnce({ models: [{ id: '1', name: 'model', description: '' }], has_more: true })
+      .mockResolvedValueOnce({ source: 'ollama', models: [{ id: '1', name: 'model', description: '', downloads: 100, tags: [] }], has_more: true })
       .mockRejectedValueOnce(new Error('Load more failed'));
 
     const { result } = renderHook(() => useBrowse());
@@ -231,7 +232,7 @@ describe('useBrowse', () => {
 
   it('handles non-Error object in loadMore error', async () => {
     mockClient.browseModels
-      .mockResolvedValueOnce({ models: [{ id: '1', name: 'model', description: '' }], has_more: true })
+      .mockResolvedValueOnce({ source: 'ollama', models: [{ id: '1', name: 'model', description: '', downloads: 100, tags: [] }], has_more: true })
       .mockRejectedValueOnce('String error');
 
     const { result } = renderHook(() => useBrowse());

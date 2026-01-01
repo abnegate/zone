@@ -92,7 +92,7 @@ describe('useModels', () => {
   });
 
   it('handles undefined models in response', async () => {
-    mockClient.getModels.mockResolvedValueOnce({});
+    mockClient.getModels.mockResolvedValueOnce({ models: [] });
 
     const { result } = renderHook(() => useModels());
 
@@ -105,8 +105,8 @@ describe('useModels', () => {
 
   it('deletes a model successfully', async () => {
     const mockModels = [
-      { name: 'llama2', size: 3800000000, modified_at: '2024-01-01', digest: 'abc123' },
-      { name: 'mistral', size: 4000000000, modified_at: '2024-01-02', digest: 'def456' },
+      { name: 'llama2', size: 3800000000, modified_at: '2024-01-01' },
+      { name: 'mistral', size: 4000000000, modified_at: '2024-01-02' },
     ];
     mockClient.getModels.mockResolvedValueOnce({ models: mockModels });
     mockClient.deleteModel.mockResolvedValueOnce(undefined);
@@ -129,7 +129,7 @@ describe('useModels', () => {
 
   it('handles delete error', async () => {
     const mockModels = [
-      { name: 'llama2', size: 3800000000, modified_at: '2024-01-01', digest: 'abc123' },
+      { name: 'llama2', size: 3800000000, modified_at: '2024-01-01' },
     ];
     mockClient.getModels.mockResolvedValueOnce({ models: mockModels });
     mockClient.deleteModel.mockRejectedValueOnce(new Error('Delete failed'));
@@ -152,8 +152,8 @@ describe('useModels', () => {
 
   it('refreshes models', async () => {
     mockClient.getModels
-      .mockResolvedValueOnce({ models: [{ name: 'llama2', size: 1, modified_at: '', digest: '' }] })
-      .mockResolvedValueOnce({ models: [{ name: 'mistral', size: 2, modified_at: '', digest: '' }] });
+      .mockResolvedValueOnce({ models: [{ name: 'llama2', size: 1, modified_at: '' }] })
+      .mockResolvedValueOnce({ models: [{ name: 'mistral', size: 2, modified_at: '' }] });
 
     const { result } = renderHook(() => useModels());
 

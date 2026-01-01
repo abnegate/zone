@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { getErrors, RegisterRequestSchema } from '../validation';
 import './AuthPage.css';
 
 export default function RegisterPage() {
@@ -11,6 +12,7 @@ export default function RegisterPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
 
   // Redirect if already authenticated
@@ -23,21 +25,23 @@ export default function RegisterPage() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
 
-    if (!email.trim() || !password) {
-      setError('Email and password are required');
-      return;
-    }
-
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters');
-      return;
-    }
+    const formData = {
+      email: email.trim(),
+      password,
+      display_name: displayName.trim() || undefined,
+    };
+    const errors = getErrors(RegisterRequestSchema, formData);
 
     if (password !== confirmPassword) {
-      setError('Passwords do not match');
+      errors.confirmPassword = 'Passwords do not match';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
       return;
     }
 
+    setFieldErrors({});
     setLoading(true);
     setError('');
 
@@ -99,8 +103,9 @@ export default function RegisterPage() {
               disabled={loading}
               autoFocus
               autoComplete="email"
-              required
+              className={fieldErrors.email ? 'input-error' : ''}
             />
+            {fieldErrors.email && <span className="field-error">{fieldErrors.email}</span>}
           </div>
 
           <div className="form-group">
@@ -113,9 +118,9 @@ export default function RegisterPage() {
               onChange={(e) => setPassword(e.target.value)}
               disabled={loading}
               autoComplete="new-password"
-              required
-              minLength={8}
+              className={fieldErrors.password ? 'input-error' : ''}
             />
+            {fieldErrors.password && <span className="field-error">{fieldErrors.password}</span>}
           </div>
 
           <div className="form-group">
@@ -128,8 +133,11 @@ export default function RegisterPage() {
               onChange={(e) => setConfirmPassword(e.target.value)}
               disabled={loading}
               autoComplete="new-password"
-              required
+              className={fieldErrors.confirmPassword ? 'input-error' : ''}
             />
+            {fieldErrors.confirmPassword && (
+              <span className="field-error">{fieldErrors.confirmPassword}</span>
+            )}
           </div>
 
           {error && <div className="auth-error">{error}</div>}

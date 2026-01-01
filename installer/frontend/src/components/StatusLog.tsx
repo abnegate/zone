@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 
 interface StatusLine {
   message: string;
-  type?: 'normal' | 'success' | 'error';
+  type?: 'normal' | 'success' | 'error' | 'retry';
 }
 
 interface StatusLogProps {

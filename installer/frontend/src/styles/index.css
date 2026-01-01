@@ -170,6 +170,8 @@ body {
   padding: var(--space-2xl);
   box-shadow: var(--shadow-xl);
   min-height: 32rem;
+  max-height: calc(100vh - 20rem);
+  overflow-y: auto;
   position: relative;
 }
 
@@ -187,6 +189,50 @@ body {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* Step Header (Sticky) */
+.step-header {
+  position: sticky;
+  top: calc(-1 * var(--space-2xl));
+  background: var(--bg-elevated);
+  padding-top: var(--space-2xl);
+  padding-bottom: var(--space-md);
+  margin-top: calc(-1 * var(--space-2xl));
+  margin-left: calc(-1 * var(--space-2xl));
+  margin-right: calc(-1 * var(--space-2xl));
+  padding-left: var(--space-2xl);
+  padding-right: var(--space-2xl);
+  z-index: 10;
+}
+
+.step-header::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: var(--space-2xl);
+  right: var(--space-2xl);
+  height: 1px;
+  background: var(--border);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.card:not([data-scrolled="false"]) .step-header::after {
+  opacity: 1;
+}
+
+.step-header h2 {
+  font-size: 1.875rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: var(--space-sm);
+  letter-spacing: -0.025em;
+}
+
+.step-header p {
+  color: var(--text-secondary);
+  margin: 0;
 }
 
 .step-content h2 {
@@ -245,6 +291,24 @@ body {
   margin-top: var(--space-xs);
   font-size: 0.8125rem;
   color: var(--text-muted);
+}
+
+/* Field Error */
+.form-field .field-error {
+  margin-top: var(--space-xs);
+  font-size: 0.8125rem;
+  color: var(--error);
+}
+
+.form-field input.input-error,
+.form-field select.input-error {
+  border-color: var(--error);
+}
+
+.form-field input.input-error:focus,
+.form-field select.input-error:focus {
+  border-color: var(--error);
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
 }
 
 /* Input with button */
@@ -485,6 +549,10 @@ body {
   color: var(--error);
 }
 
+.status-line.retry {
+  color: var(--warning);
+}
+
 /* Modal Progress */
 .modal-progress {
   margin-bottom: var(--space-lg);
@@ -496,6 +564,25 @@ body {
   justify-content: flex-end;
   gap: var(--space-md);
   margin-top: var(--space-lg);
+}
+
+/* Card Scrollbar */
+.card::-webkit-scrollbar {
+  width: 0.5rem;
+}
+
+.card::-webkit-scrollbar-track {
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+}
+
+.card::-webkit-scrollbar-thumb {
+  background: var(--primary-700);
+  border-radius: var(--radius-sm);
+}
+
+.card::-webkit-scrollbar-thumb:hover {
+  background: var(--primary-600);
 }
 
 /* Responsive */
@@ -510,6 +597,22 @@ body {
 
   .card {
     padding: var(--space-lg);
+    max-height: calc(100vh - 16rem);
+  }
+
+  .step-header {
+    top: calc(-1 * var(--space-lg));
+    padding-top: var(--space-lg);
+    margin-top: calc(-1 * var(--space-lg));
+    margin-left: calc(-1 * var(--space-lg));
+    margin-right: calc(-1 * var(--space-lg));
+    padding-left: var(--space-lg);
+    padding-right: var(--space-lg);
+  }
+
+  .step-header::after {
+    left: var(--space-lg);
+    right: var(--space-lg);
   }
 
   .steps-nav {

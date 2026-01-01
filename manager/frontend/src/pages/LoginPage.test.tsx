@@ -223,7 +223,7 @@ describe('LoginPage', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com' },
+        user: { id: '1', email: 'test@test.com', display_name: null, is_active: true, is_admin: false, created_at: '', updated_at: '', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: [],

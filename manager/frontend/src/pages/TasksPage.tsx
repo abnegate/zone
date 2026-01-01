@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
 import type { CreateTaskRequest, Project, Source, Task, TaskProgressMessage } from '../types';
+import { getErrors, CreateTaskRequestSchema } from '../validation';
 import './TasksPage.css';
 
 // Phase display names for progress visualization
@@ -244,6 +245,7 @@ function CreateTaskModal({ projects, sources, onClose, onCreated }: CreateTaskMo
   const [sourceId, setSourceId] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   // Get selected project to show its linked source
   const selectedProject = projects.find((p) => p.id === projectId);
@@ -251,26 +253,32 @@ function CreateTaskModal({ projects, sources, onClose, onCreated }: CreateTaskMo
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!projectId || !title || !description) return;
 
+    const request: CreateTaskRequest = {
+      project_id: projectId,
+      title,
+      description,
+      priority,
+      is_agentic: isAgentic,
+    };
+    if (criteria) {
+      request.acceptance_criteria = criteria;
+    }
+    if (isAgentic && sourceId) {
+      request.source_id = sourceId;
+    }
+
+    const errors = getErrors(CreateTaskRequestSchema, request);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+
+    setFieldErrors({});
     setLoading(true);
     setError(null);
 
     try {
-      const request: CreateTaskRequest = {
-        project_id: projectId,
-        title,
-        description,
-        priority,
-        is_agentic: isAgentic,
-      };
-      if (criteria) {
-        request.acceptance_criteria = criteria;
-      }
-      if (isAgentic && sourceId) {
-        request.source_id = sourceId;
-      }
-
       const task = await client.createTask(request);
       onCreated(task);
       onClose();
@@ -316,8 +324,9 @@ function CreateTaskModal({ projects, sources, onClose, onCreated }: CreateTaskMo
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="What needs to be done?"
-              required
+              className={fieldErrors.title ? 'input-error' : ''}
             />
+            {fieldErrors.title && <span className="field-error">{fieldErrors.title}</span>}
           </div>
 
           <div className="form-group">
@@ -328,8 +337,11 @@ function CreateTaskModal({ projects, sources, onClose, onCreated }: CreateTaskMo
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Detailed description of the task..."
               rows={4}
-              required
+              className={fieldErrors.description ? 'input-error' : ''}
             />
+            {fieldErrors.description && (
+              <span className="field-error">{fieldErrors.description}</span>
+            )}
           </div>
 
           <div className="form-group">

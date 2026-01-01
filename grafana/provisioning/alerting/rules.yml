@@ -1,0 +1,390 @@
+# Grafana Alert Rules Provisioning
+# Critical alerts for Zone AI Stack infrastructure
+
+apiVersion: 1
+
+groups:
+  # =============================================================================
+  # Service Availability Alerts
+  # =============================================================================
+  - orgId: 1
+    name: Service Availability
+    folder: Zone Alerts
+    interval: 1m
+    rules:
+      # Manager Service Down
+      - uid: manager-down
+        title: Manager Service Down
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: up{job="manager"} == 0
+              refId: A
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: Manager service is down
+          description: The Manager service has been unreachable for more than 2 minutes.
+        labels:
+          severity: critical
+          service: manager
+
+      # Traefik Down
+      - uid: traefik-down
+        title: Traefik Reverse Proxy Down
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: up{job="traefik"} == 0
+              refId: A
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: Traefik reverse proxy is down
+          description: Traefik has been unreachable for more than 2 minutes. All services may be inaccessible.
+        labels:
+          severity: critical
+          service: traefik
+
+      # PostgreSQL Down
+      - uid: postgres-down
+        title: PostgreSQL Database Down
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: up{job="postgres"} == 0
+              refId: A
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: PostgreSQL database is down
+          description: PostgreSQL has been unreachable for more than 2 minutes.
+        labels:
+          severity: critical
+          service: postgres
+
+      # Valkey/Redis Down
+      - uid: valkey-down
+        title: Valkey Cache Down
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: up{job="valkey"} == 0
+              refId: A
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: Valkey cache is down
+          description: Valkey cache has been unreachable for more than 2 minutes.
+        labels:
+          severity: critical
+          service: valkey
+
+      # Ollama Down
+      - uid: ollama-down
+        title: Ollama LLM Service Down
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: up{job="ollama"} == 0
+              refId: A
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: Ollama LLM service is down
+          description: Ollama has been unreachable for more than 5 minutes. AI inference is unavailable.
+        labels:
+          severity: critical
+          service: ollama
+
+      # LiteLLM Down
+      - uid: litellm-down
+        title: LiteLLM API Gateway Down
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: up{job="litellm"} == 0
+              refId: A
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: LiteLLM API gateway is down
+          description: LiteLLM has been unreachable for more than 2 minutes.
+        labels:
+          severity: critical
+          service: litellm
+
+  # =============================================================================
+  # Performance Alerts
+  # =============================================================================
+  - orgId: 1
+    name: Performance
+    folder: Zone Alerts
+    interval: 1m
+    rules:
+      # High Latency - Manager P95 > 2s
+      - uid: manager-high-latency
+        title: Manager High Latency
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="manager"}[5m])) by (le)) > 2
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: Manager P95 latency is high
+          description: The 95th percentile latency for the Manager service has exceeded 2 seconds for 5 minutes.
+        labels:
+          severity: warning
+          service: manager
+
+      # High Error Rate - Manager 5xx > 5%
+      - uid: manager-high-error-rate
+        title: Manager High Error Rate
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: (sum(rate(http_requests_total{job="manager", status=~"5.."}[5m])) / sum(rate(http_requests_total{job="manager"}[5m]))) > 0.05
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: Manager has high 5xx error rate
+          description: More than 5% of requests to the Manager service are returning 5xx errors.
+        labels:
+          severity: warning
+          service: manager
+
+      # Traefik High Error Rate
+      - uid: traefik-high-error-rate
+        title: Traefik High Error Rate
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: (sum(rate(traefik_service_requests_total{code=~"5.."}[5m])) / sum(rate(traefik_service_requests_total[5m]))) > 0.05
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: Traefik has high 5xx error rate
+          description: More than 5% of requests through Traefik are returning 5xx errors.
+        labels:
+          severity: warning
+          service: traefik
+
+  # =============================================================================
+  # Database Alerts
+  # =============================================================================
+  - orgId: 1
+    name: Database
+    folder: Zone Alerts
+    interval: 1m
+    rules:
+      # PostgreSQL Too Many Connections
+      - uid: postgres-too-many-connections
+        title: PostgreSQL High Connection Count
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: pg_stat_activity_count > 80
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: PostgreSQL has too many connections
+          description: PostgreSQL has more than 80 active connections. Default max is 100.
+        labels:
+          severity: warning
+          service: postgres
+
+      # PostgreSQL Low Cache Hit Ratio
+      - uid: postgres-low-cache-hit
+        title: PostgreSQL Low Cache Hit Ratio
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: pg_stat_database_blks_hit / (pg_stat_database_blks_hit + pg_stat_database_blks_read) < 0.90
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: PostgreSQL cache hit ratio is low
+          description: PostgreSQL buffer cache hit ratio is below 90%. Consider increasing shared_buffers.
+        labels:
+          severity: warning
+          service: postgres
+
+  # =============================================================================
+  # Cache Alerts
+  # =============================================================================
+  - orgId: 1
+    name: Cache
+    folder: Zone Alerts
+    interval: 1m
+    rules:
+      # Valkey High Memory Usage
+      - uid: valkey-high-memory
+        title: Valkey High Memory Usage
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.90
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: Valkey memory usage is high
+          description: Valkey is using more than 90% of its configured memory limit.
+        labels:
+          severity: warning
+          service: valkey
+
+      # Valkey Evictions
+      - uid: valkey-evictions
+        title: Valkey Key Evictions
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: rate(redis_evicted_keys_total[5m]) > 10
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: Valkey is evicting keys frequently
+          description: Valkey is evicting more than 10 keys per second. Consider increasing memory.
+        labels:
+          severity: warning
+          service: valkey
+
+  # =============================================================================
+  # LLM Service Alerts
+  # =============================================================================
+  - orgId: 1
+    name: LLM Services
+    folder: Zone Alerts
+    interval: 1m
+    rules:
+      # LiteLLM High Latency
+      - uid: litellm-high-latency
+        title: LiteLLM High Latency
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: histogram_quantile(0.95, sum(rate(litellm_request_duration_seconds_bucket[5m])) by (le)) > 30
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: LiteLLM P95 latency is very high
+          description: The 95th percentile latency for LiteLLM requests has exceeded 30 seconds.
+        labels:
+          severity: warning
+          service: litellm
+
+      # LiteLLM Rate Limiting
+      - uid: litellm-rate-limited
+        title: LiteLLM Rate Limiting Active
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: rate(litellm_requests_total{status="429"}[5m]) > 0.1
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: LiteLLM is rate limiting requests
+          description: LiteLLM is returning 429 rate limit responses.
+        labels:
+          severity: warning
+          service: litellm

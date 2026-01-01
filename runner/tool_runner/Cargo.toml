@@ -1,0 +1,27 @@
+[package]
+name = "tool_runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Core library for Zone tool runner - command execution with streaming output"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }
+dashmap = { workspace = true }
+nix = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.10"
+proptest = "1.4"

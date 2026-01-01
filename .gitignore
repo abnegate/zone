@@ -48,3 +48,9 @@ node_modules/
 /playwright/.auth/
 manager/build
 manager/coverage
+runner/target
+runner/coverage
+runner/lcov.info
+runner/coverage.json
+**/playwright-report
+**/frontend/test-results

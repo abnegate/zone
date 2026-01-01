@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { getErrors, LoginRequestSchema } from '../validation';
 import './AuthPage.css';
 
 export default function LoginPage() {
@@ -9,6 +10,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
 
   // Redirect if already authenticated
@@ -20,11 +22,15 @@ export default function LoginPage() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!email.trim() || !password) {
-      setError('Please enter both email and password');
+    const formData = { email: email.trim(), password };
+    const errors = getErrors(LoginRequestSchema, formData);
+
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
       return;
     }
 
+    setFieldErrors({});
     setLoading(true);
     setError('');
 
@@ -69,7 +75,9 @@ export default function LoginPage() {
               disabled={loading}
               autoFocus
               autoComplete="email"
+              className={fieldErrors.email ? 'input-error' : ''}
             />
+            {fieldErrors.email && <span className="field-error">{fieldErrors.email}</span>}
           </div>
 
           <div className="form-group">
@@ -82,7 +90,9 @@ export default function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               disabled={loading}
               autoComplete="current-password"
+              className={fieldErrors.password ? 'input-error' : ''}
             />
+            {fieldErrors.password && <span className="field-error">{fieldErrors.password}</span>}
           </div>
 
           {error && <div className="auth-error">{error}</div>}
