@@ -5401,6 +5401,309 @@ WHERE id = $4
   |> pog.execute(db)
 }
 
+/// A row you get from running the `list_sources_all` query
+/// defined in `./src/database/queries/sql/list_sources_all.sql`.
+///
+/// > 🐿️ This type definition was generated automatically using v4.6.0 of the
+/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub type ListSourcesAllRow {
+  ListSourcesAllRow(
+    id: Uuid,
+    name: String,
+    source_type: String,
+    config: String,
+    credentials_encrypted: Option(String),
+    description: Option(String),
+    url: Option(String),
+    is_active: Option(Bool),
+    last_verified_at: Option(Timestamp),
+    last_error: Option(String),
+    created_at: Option(Timestamp),
+    updated_at: Option(Timestamp),
+  )
+}
+
+/// List all sources
+///
+/// > 🐿️ This function was generated automatically using v4.6.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn list_sources_all(
+  db: pog.Connection,
+) -> Result(pog.Returned(ListSourcesAllRow), pog.QueryError) {
+  let decoder = {
+    use id <- decode.field(0, uuid_decoder())
+    use name <- decode.field(1, decode.string)
+    use source_type <- decode.field(2, decode.string)
+    use config <- decode.field(3, decode.string)
+    use credentials_encrypted <- decode.field(4, decode.optional(decode.string))
+    use description <- decode.field(5, decode.optional(decode.string))
+    use url <- decode.field(6, decode.optional(decode.string))
+    use is_active <- decode.field(7, decode.optional(decode.bool))
+    use last_verified_at <- decode.field(
+      8,
+      decode.optional(pog.timestamp_decoder()),
+    )
+    use last_error <- decode.field(9, decode.optional(decode.string))
+    use created_at <- decode.field(10, decode.optional(pog.timestamp_decoder()))
+    use updated_at <- decode.field(11, decode.optional(pog.timestamp_decoder()))
+    decode.success(ListSourcesAllRow(
+      id:,
+      name:,
+      source_type:,
+      config:,
+      credentials_encrypted:,
+      description:,
+      url:,
+      is_active:,
+      last_verified_at:,
+      last_error:,
+      created_at:,
+      updated_at:,
+    ))
+  }
+
+  "-- List all sources
+SELECT id, name, source_type, config, credentials_encrypted, description, url,
+       is_active, last_verified_at::timestamp, last_error, created_at::timestamp, updated_at::timestamp
+FROM sources
+ORDER BY name ASC
+"
+  |> pog.query
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
+/// A row you get from running the `list_sources_active` query
+/// defined in `./src/database/queries/sql/list_sources_active.sql`.
+///
+/// > 🐿️ This type definition was generated automatically using v4.6.0 of the
+/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub type ListSourcesActiveRow {
+  ListSourcesActiveRow(
+    id: Uuid,
+    name: String,
+    source_type: String,
+    config: String,
+    credentials_encrypted: Option(String),
+    description: Option(String),
+    url: Option(String),
+    is_active: Option(Bool),
+    last_verified_at: Option(Timestamp),
+    last_error: Option(String),
+    created_at: Option(Timestamp),
+    updated_at: Option(Timestamp),
+  )
+}
+
+/// List active sources only
+///
+/// > 🐿️ This function was generated automatically using v4.6.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn list_sources_active(
+  db: pog.Connection,
+) -> Result(pog.Returned(ListSourcesActiveRow), pog.QueryError) {
+  let decoder = {
+    use id <- decode.field(0, uuid_decoder())
+    use name <- decode.field(1, decode.string)
+    use source_type <- decode.field(2, decode.string)
+    use config <- decode.field(3, decode.string)
+    use credentials_encrypted <- decode.field(4, decode.optional(decode.string))
+    use description <- decode.field(5, decode.optional(decode.string))
+    use url <- decode.field(6, decode.optional(decode.string))
+    use is_active <- decode.field(7, decode.optional(decode.bool))
+    use last_verified_at <- decode.field(
+      8,
+      decode.optional(pog.timestamp_decoder()),
+    )
+    use last_error <- decode.field(9, decode.optional(decode.string))
+    use created_at <- decode.field(10, decode.optional(pog.timestamp_decoder()))
+    use updated_at <- decode.field(11, decode.optional(pog.timestamp_decoder()))
+    decode.success(ListSourcesActiveRow(
+      id:,
+      name:,
+      source_type:,
+      config:,
+      credentials_encrypted:,
+      description:,
+      url:,
+      is_active:,
+      last_verified_at:,
+      last_error:,
+      created_at:,
+      updated_at:,
+    ))
+  }
+
+  "-- List active sources only
+SELECT id, name, source_type, config, credentials_encrypted, description, url,
+       is_active, last_verified_at::timestamp, last_error, created_at::timestamp, updated_at::timestamp
+FROM sources
+WHERE is_active = TRUE
+ORDER BY name ASC
+"
+  |> pog.query
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
+/// A row you get from running the `list_sources_by_type` query
+/// defined in `./src/database/queries/sql/list_sources_by_type.sql`.
+///
+/// > 🐿️ This type definition was generated automatically using v4.6.0 of the
+/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub type ListSourcesByTypeRow {
+  ListSourcesByTypeRow(
+    id: Uuid,
+    name: String,
+    source_type: String,
+    config: String,
+    credentials_encrypted: Option(String),
+    description: Option(String),
+    url: Option(String),
+    is_active: Option(Bool),
+    last_verified_at: Option(Timestamp),
+    last_error: Option(String),
+    created_at: Option(Timestamp),
+    updated_at: Option(Timestamp),
+  )
+}
+
+/// List sources by type (all)
+///
+/// > 🐿️ This function was generated automatically using v4.6.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn list_sources_by_type(
+  db: pog.Connection,
+  arg_1: String,
+) -> Result(pog.Returned(ListSourcesByTypeRow), pog.QueryError) {
+  let decoder = {
+    use id <- decode.field(0, uuid_decoder())
+    use name <- decode.field(1, decode.string)
+    use source_type <- decode.field(2, decode.string)
+    use config <- decode.field(3, decode.string)
+    use credentials_encrypted <- decode.field(4, decode.optional(decode.string))
+    use description <- decode.field(5, decode.optional(decode.string))
+    use url <- decode.field(6, decode.optional(decode.string))
+    use is_active <- decode.field(7, decode.optional(decode.bool))
+    use last_verified_at <- decode.field(
+      8,
+      decode.optional(pog.timestamp_decoder()),
+    )
+    use last_error <- decode.field(9, decode.optional(decode.string))
+    use created_at <- decode.field(10, decode.optional(pog.timestamp_decoder()))
+    use updated_at <- decode.field(11, decode.optional(pog.timestamp_decoder()))
+    decode.success(ListSourcesByTypeRow(
+      id:,
+      name:,
+      source_type:,
+      config:,
+      credentials_encrypted:,
+      description:,
+      url:,
+      is_active:,
+      last_verified_at:,
+      last_error:,
+      created_at:,
+      updated_at:,
+    ))
+  }
+
+  "-- List sources by type (all)
+SELECT id, name, source_type, config, credentials_encrypted, description, url,
+       is_active, last_verified_at::timestamp, last_error, created_at::timestamp, updated_at::timestamp
+FROM sources
+WHERE source_type = $1
+ORDER BY name ASC
+"
+  |> pog.query
+  |> pog.parameter(pog.text(arg_1))
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
+/// A row you get from running the `list_sources_by_type_active` query
+/// defined in `./src/database/queries/sql/list_sources_by_type_active.sql`.
+///
+/// > 🐿️ This type definition was generated automatically using v4.6.0 of the
+/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub type ListSourcesByTypeActiveRow {
+  ListSourcesByTypeActiveRow(
+    id: Uuid,
+    name: String,
+    source_type: String,
+    config: String,
+    credentials_encrypted: Option(String),
+    description: Option(String),
+    url: Option(String),
+    is_active: Option(Bool),
+    last_verified_at: Option(Timestamp),
+    last_error: Option(String),
+    created_at: Option(Timestamp),
+    updated_at: Option(Timestamp),
+  )
+}
+
+/// List sources by type (active only)
+///
+/// > 🐿️ This function was generated automatically using v4.6.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn list_sources_by_type_active(
+  db: pog.Connection,
+  arg_1: String,
+) -> Result(pog.Returned(ListSourcesByTypeActiveRow), pog.QueryError) {
+  let decoder = {
+    use id <- decode.field(0, uuid_decoder())
+    use name <- decode.field(1, decode.string)
+    use source_type <- decode.field(2, decode.string)
+    use config <- decode.field(3, decode.string)
+    use credentials_encrypted <- decode.field(4, decode.optional(decode.string))
+    use description <- decode.field(5, decode.optional(decode.string))
+    use url <- decode.field(6, decode.optional(decode.string))
+    use is_active <- decode.field(7, decode.optional(decode.bool))
+    use last_verified_at <- decode.field(
+      8,
+      decode.optional(pog.timestamp_decoder()),
+    )
+    use last_error <- decode.field(9, decode.optional(decode.string))
+    use created_at <- decode.field(10, decode.optional(pog.timestamp_decoder()))
+    use updated_at <- decode.field(11, decode.optional(pog.timestamp_decoder()))
+    decode.success(ListSourcesByTypeActiveRow(
+      id:,
+      name:,
+      source_type:,
+      config:,
+      credentials_encrypted:,
+      description:,
+      url:,
+      is_active:,
+      last_verified_at:,
+      last_error:,
+      created_at:,
+      updated_at:,
+    ))
+  }
+
+  "-- List sources by type (active only)
+SELECT id, name, source_type, config, credentials_encrypted, description, url,
+       is_active, last_verified_at::timestamp, last_error, created_at::timestamp, updated_at::timestamp
+FROM sources
+WHERE source_type = $1 AND is_active = TRUE
+ORDER BY name ASC
+"
+  |> pog.query
+  |> pog.parameter(pog.text(arg_1))
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
 // --- Encoding/decoding utils -------------------------------------------------
 
 /// A decoder to decode `Uuid`s coming from a Postgres query.

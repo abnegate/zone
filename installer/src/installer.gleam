@@ -1,4 +1,4 @@
-import gleam/erlang/os
+import gleam/erlang/charlist.{type Charlist}
 import gleam/erlang/process
 import gleam/http.{Post}
 import gleam/json
@@ -8,6 +8,16 @@ import mist
 import simplifile
 import wisp
 import wisp/wisp_mist
+
+@external(erlang, "os", "cmd")
+fn os_cmd(command: Charlist) -> Charlist
+
+fn run_command(command: String) -> String {
+  command
+  |> charlist.from_string
+  |> os_cmd
+  |> charlist.to_string
+}
 
 pub fn main() {
   wisp.configure_logger()
@@ -46,7 +56,7 @@ fn serve_index() -> wisp.Response {
 
 fn serve_static(path: List(String)) -> wisp.Response {
   case validate_path_segments(path) {
-    False -> wisp.bad_request()
+    False -> wisp.response(400)
     True -> {
       let file_path = "frontend/build/static/" <> string.join(path, "/")
       case simplifile.read(file_path) {
@@ -66,17 +76,33 @@ fn serve_static_content(file_path: String, content: String) -> wisp.Response {
 }
 
 fn get_content_type(file_path: String) -> String {
-  case True {
-    _ if string.ends_with(file_path, ".css") -> "text/css"
-    _ if string.ends_with(file_path, ".js") -> "application/javascript"
-    _ if string.ends_with(file_path, ".json") -> "application/json"
-    _ if string.ends_with(file_path, ".svg") -> "image/svg+xml"
-    _ if string.ends_with(file_path, ".png") -> "image/png"
-    _ if string.ends_with(file_path, ".ico") -> "image/x-icon"
-    _ if string.ends_with(file_path, ".woff") -> "font/woff"
-    _ if string.ends_with(file_path, ".woff2") -> "font/woff2"
-    _ if string.ends_with(file_path, ".ttf") -> "font/ttf"
-    _ -> "text/plain"
+  case string.ends_with(file_path, ".css") {
+    True -> "text/css"
+    False -> case string.ends_with(file_path, ".js") {
+      True -> "application/javascript"
+      False -> case string.ends_with(file_path, ".json") {
+        True -> "application/json"
+        False -> case string.ends_with(file_path, ".svg") {
+          True -> "image/svg+xml"
+          False -> case string.ends_with(file_path, ".png") {
+            True -> "image/png"
+            False -> case string.ends_with(file_path, ".ico") {
+              True -> "image/x-icon"
+              False -> case string.ends_with(file_path, ".woff2") {
+                True -> "font/woff2"
+                False -> case string.ends_with(file_path, ".woff") {
+                  True -> "font/woff"
+                  False -> case string.ends_with(file_path, ".ttf") {
+                    True -> "font/ttf"
+                    False -> "text/plain"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
 
@@ -159,12 +185,8 @@ fn create_auth_file() -> Result(Nil, simplifile.FileError) {
 
 fn generate_secure_password() -> String {
   // Generate a cryptographically secure random password
-  // Using base64-like encoding of random bytes for readability
-  let chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-  let length = 24
-
   // Use wisp's random_string which uses crypto-secure RNG
-  wisp.random_string(length)
+  wisp.random_string(24)
 }
 
 fn create_htpasswd_entry(username: String, password: String) -> Result(String, simplifile.FileError) {
@@ -173,7 +195,7 @@ fn create_htpasswd_entry(username: String, password: String) -> Result(String, s
   let command = "htpasswd -nbB '" <> username <> "' '" <> password <> "'"
 
   // Use Erlang's os:cmd to execute the command
-  let output = os.system(command)
+  let output = run_command(command)
 
   // Check if command succeeded (htpasswd returns username:hash format)
   case string.contains(output, ":") {

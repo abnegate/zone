@@ -54,3 +54,4 @@ runner/lcov.info
 runner/coverage.json
 **/playwright-report
 **/frontend/test-results
+tools/dev-cli/target

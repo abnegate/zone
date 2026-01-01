@@ -56,9 +56,9 @@ impl DaemonProcess {
     }
 
     /// Read messages until a predicate is satisfied or timeout
-    fn recv_until<F>(&mut self, timeout: Duration, predicate: F) -> Vec<Value>
+    fn recv_until<F>(&mut self, timeout: Duration, mut predicate: F) -> Vec<Value>
     where
-        F: Fn(&Value) -> bool,
+        F: FnMut(&Value) -> bool,
     {
         let start = std::time::Instant::now();
         let mut messages = Vec::new();
@@ -402,11 +402,15 @@ fn test_multiple_jobs() {
         daemon.send(&run);
     }
 
-    // Collect all messages
-    let messages = daemon.recv_until(Duration::from_secs(10), |_| false);
-
-    // Wait a bit more for all jobs to complete
-    std::thread::sleep(Duration::from_millis(500));
+    // Collect messages - we expect 3 RunStarted + 3 RunStdout + 3 RunExit = 9+ messages
+    // But just wait for a reasonable time
+    let mut exit_count = 0;
+    let messages = daemon.recv_until(Duration::from_secs(5), |msg| {
+        if msg["type"] == "RunExit" {
+            exit_count += 1;
+        }
+        exit_count >= 3
+    });
 
     // Verify we got messages for all jobs
     let job_ids: std::collections::HashSet<&str> = messages
