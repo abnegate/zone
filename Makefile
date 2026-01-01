@@ -1,6 +1,12 @@
 .PHONY: help setup up down restart logs logs-follow ps health check \
 	pull-models clean clean-volumes backup restore \
-	setup-auth add-user validate test
+	setup-auth add-user validate test \
+	up-vpn up-monitoring up-all dev rebuild update \
+	shell-ollama shell-litellm shell-openwebui shell-manager shell-console \
+	shell-postgres shell-valkey db-shell db-migrate \
+	test-manager test-console test-console-coverage test-e2e test-e2e-ui \
+	lint-console format-console check-console \
+	list-models stats prune version env urls install
 
 .DEFAULT_GOAL := help
 
@@ -55,7 +61,7 @@ validate: ## Validate configuration
 
 ##@ Docker Operations
 
-up: ## Start all services (without VPN)
+up: ## Start all services (without VPN or monitoring)
 	@echo "$(GREEN)Starting services...$(NC)"
 	$(DOCKER_COMPOSE) up -d
 	@echo "$(GREEN)Services started! Check status with: make ps$(NC)"
@@ -66,16 +72,28 @@ up-vpn: ## Start all services with VPN-protected search
 	$(DOCKER_COMPOSE) --profile vpn up -d
 	@echo "$(GREEN)Services started with VPN! Check status with: make ps$(NC)"
 
+up-monitoring: ## Start all services with monitoring (Prometheus + Grafana)
+	@echo "$(GREEN)Starting services with monitoring...$(NC)"
+	$(DOCKER_COMPOSE) --profile monitoring up -d
+	@echo "$(GREEN)Services started with monitoring! Check status with: make ps$(NC)"
+	@echo "$(BLUE)Grafana: http://grafana.$${DOMAIN_HOST_WEBUI:-localhost}$(NC)"
+	@echo "$(BLUE)Prometheus: http://prometheus.$${DOMAIN_HOST_WEBUI:-localhost}$(NC)"
+
+up-all: ## Start all services with VPN and monitoring
+	@echo "$(GREEN)Starting all services (VPN + monitoring)...$(NC)"
+	$(DOCKER_COMPOSE) --profile vpn --profile monitoring up -d
+	@echo "$(GREEN)All services started! Check status with: make ps$(NC)"
+
 down: ## Stop all services
 	@echo "$(YELLOW)Stopping services...$(NC)"
-	$(DOCKER_COMPOSE) down
+	$(DOCKER_COMPOSE) --profile vpn --profile monitoring --profile installer down
 
 restart: ## Restart all services
 	@echo "$(YELLOW)Restarting services...$(NC)"
 	$(DOCKER_COMPOSE) restart
 
 ps: ## Show service status
-	@$(DOCKER_COMPOSE) ps
+	@$(DOCKER_COMPOSE) --profile vpn --profile monitoring ps
 
 logs: ## Show recent logs (non-following)
 	@$(DOCKER_COMPOSE) logs --tail=100
@@ -90,8 +108,8 @@ logs-service: ## Follow logs for a specific service (usage: make logs-service SE
 
 health: ## Check health status of all services
 	@echo "$(BLUE)Service Health Status:$(NC)"
-	@$(DOCKER_COMPOSE) ps --format json | jq -r '.[] | "\(.Name): \(.Health)"' 2>/dev/null || \
-	$(DOCKER_COMPOSE) ps | grep -E '(Up|Exited|Restarting)'
+	@$(DOCKER_COMPOSE) --profile vpn --profile monitoring ps --format json | jq -r '.[] | "\(.Name): \(.Health)"' 2>/dev/null || \
+	$(DOCKER_COMPOSE) --profile vpn --profile monitoring ps | grep -E '(Up|Exited|Restarting)'
 
 check: health ## Alias for health check
 
@@ -108,19 +126,46 @@ list-models: ## List downloaded Ollama models
 	@echo "$(BLUE)Downloaded Ollama models:$(NC)"
 	@docker exec ollama ollama list
 
+##@ Database Operations
+
+db-shell: ## Open PostgreSQL shell
+	@echo "$(BLUE)Opening PostgreSQL shell...$(NC)"
+	@docker exec -it postgres psql -U $${POSTGRES_USER:-zone} -d $${POSTGRES_DB:-zone}
+
+db-migrate: ## Run database migrations
+	@echo "$(BLUE)Running database migrations...$(NC)"
+	@for migration in manager/migrations/*.sql; do \
+		echo "$(GREEN)Applying $$migration...$(NC)"; \
+		docker exec -i postgres psql -U $${POSTGRES_USER:-zone} -d $${POSTGRES_DB:-zone} < "$$migration" 2>&1 | grep -v "already exists" || true; \
+	done
+	@echo "$(GREEN)Migrations complete!$(NC)"
+
+db-reset: ## DANGER: Reset database (requires confirmation)
+	@echo "$(RED)WARNING: This will delete ALL database data!$(NC)"
+	@read -p "Are you sure? Type 'yes' to confirm: " confirm; \
+	if [ "$$confirm" = "yes" ]; then \
+		echo "$(RED)Resetting database...$(NC)"; \
+		docker exec postgres psql -U $${POSTGRES_USER:-zone} -c "DROP DATABASE IF EXISTS $${POSTGRES_DB:-zone}"; \
+		docker exec postgres psql -U $${POSTGRES_USER:-zone} -c "CREATE DATABASE $${POSTGRES_DB:-zone}"; \
+		$(MAKE) db-migrate; \
+		echo "$(GREEN)Database reset complete!$(NC)"; \
+	else \
+		echo "$(GREEN)Cancelled.$(NC)"; \
+	fi
+
 ##@ Maintenance
 
 clean: ## Stop services and remove containers (keeps volumes)
 	@echo "$(YELLOW)Cleaning up containers...$(NC)"
-	$(DOCKER_COMPOSE) down --remove-orphans
+	$(DOCKER_COMPOSE) --profile vpn --profile monitoring --profile installer down --remove-orphans
 	@echo "$(GREEN)Cleanup complete (volumes preserved)$(NC)"
 
 clean-volumes: ## DANGER: Remove all data volumes (requires confirmation)
-	@echo "$(RED)WARNING: This will delete ALL data including models and conversations!$(NC)"
+	@echo "$(RED)WARNING: This will delete ALL data including models, database, and conversations!$(NC)"
 	@read -p "Are you sure? Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" = "yes" ]; then \
 		echo "$(RED)Removing volumes...$(NC)"; \
-		$(DOCKER_COMPOSE) down -v; \
+		$(DOCKER_COMPOSE) --profile vpn --profile monitoring --profile installer down -v; \
 		echo "$(RED)All data deleted!$(NC)"; \
 	else \
 		echo "$(GREEN)Cancelled.$(NC)"; \
@@ -140,6 +185,13 @@ backup: ## Backup volumes to ./backups directory
 	docker run --rm \
 		-v zone_ollama_data:/data/ollama:ro \
 		-v zone_openwebui_data:/data/openwebui:ro \
+		-v zone_postgres_data:/data/postgres:ro \
+		-v zone_valkey_data:/data/valkey:ro \
+		-v zone_manager_repos:/data/manager_repos:ro \
+		-v zone_manager_artifacts:/data/manager_artifacts:ro \
+		-v zone_prometheus_data:/data/prometheus:ro \
+		-v zone_grafana_data:/data/grafana:ro \
+		-v zone_traefik_letsencrypt:/data/traefik:ro \
 		-v $$(pwd)/backups:/backup \
 		alpine tar czf /backup/zone_backup_$$DATE.tar.gz -C /data .; \
 	echo "$(GREEN)Backup created: backups/zone_backup_$$DATE.tar.gz$(NC)"
@@ -154,6 +206,13 @@ restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_
 	@docker run --rm \
 		-v zone_ollama_data:/data/ollama \
 		-v zone_openwebui_data:/data/openwebui \
+		-v zone_postgres_data:/data/postgres \
+		-v zone_valkey_data:/data/valkey \
+		-v zone_manager_repos:/data/manager_repos \
+		-v zone_manager_artifacts:/data/manager_artifacts \
+		-v zone_prometheus_data:/data/prometheus \
+		-v zone_grafana_data:/data/grafana \
+		-v zone_traefik_letsencrypt:/data/traefik \
 		-v $$(pwd)/backups:/backup \
 		alpine tar xzf /backup/$$(basename $(BACKUP)) -C /data
 	@echo "$(GREEN)Restore complete!$(NC)"
@@ -164,15 +223,29 @@ dev: ## Start in development mode with live logs
 	@echo "$(BLUE)Starting in development mode...$(NC)"
 	$(DOCKER_COMPOSE) up
 
+dev-console: ## Start console frontend in development mode
+	@echo "$(BLUE)Starting console frontend dev server...$(NC)"
+	cd manager/frontend && npm start
+
+dev-installer: ## Start installer frontend in development mode
+	@echo "$(BLUE)Starting installer frontend dev server...$(NC)"
+	cd installer/frontend && npm start
+
 rebuild: ## Rebuild and restart all services
 	@echo "$(BLUE)Rebuilding services...$(NC)"
 	$(DOCKER_COMPOSE) up -d --build --force-recreate
+
+rebuild-manager: ## Rebuild only manager and console services
+	@echo "$(BLUE)Rebuilding manager and console...$(NC)"
+	$(DOCKER_COMPOSE) up -d --build --force-recreate manager console
 
 update: ## Pull latest images and restart
 	@echo "$(BLUE)Updating Docker images...$(NC)"
 	$(DOCKER_COMPOSE) pull
 	$(DOCKER_COMPOSE) up -d --remove-orphans
 	@echo "$(GREEN)Update complete!$(NC)"
+
+##@ Shell Access
 
 shell-ollama: ## Open shell in ollama container
 	@docker exec -it ollama /bin/bash
@@ -183,16 +256,88 @@ shell-litellm: ## Open shell in litellm container
 shell-openwebui: ## Open shell in openwebui container
 	@docker exec -it openwebui /bin/bash
 
+shell-manager: ## Open shell in manager container
+	@docker exec -it manager /bin/sh
+
+shell-console: ## Open shell in console container
+	@docker exec -it console /bin/sh
+
+shell-postgres: ## Open shell in postgres container
+	@docker exec -it postgres /bin/bash
+
+shell-valkey: ## Open shell in valkey container
+	@docker exec -it valkey /bin/sh
+
 ##@ Testing
 
-test: ## Run basic smoke tests
+test: ## Run basic smoke tests for all services
 	@echo "$(BLUE)Running smoke tests...$(NC)"
 	@echo "Testing Ollama API..."
-	@curl -f http://localhost:11434/api/tags >/dev/null 2>&1 && echo "$(GREEN)✓ Ollama$(NC)" || echo "$(RED)✗ Ollama$(NC)"
+	@curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "$(GREEN)✓ Ollama$(NC)" || echo "$(RED)✗ Ollama$(NC)"
 	@echo "Testing LiteLLM API..."
-	@curl -f http://localhost:4000/health >/dev/null 2>&1 && echo "$(GREEN)✓ LiteLLM$(NC)" || echo "$(RED)✗ LiteLLM$(NC)"
+	@curl -sf http://localhost:4000/health >/dev/null 2>&1 && echo "$(GREEN)✓ LiteLLM$(NC)" || echo "$(RED)✗ LiteLLM$(NC)"
 	@echo "Testing Open WebUI..."
-	@curl -f http://localhost:8080/health >/dev/null 2>&1 && echo "$(GREEN)✓ Open WebUI$(NC)" || echo "$(RED)✗ Open WebUI$(NC)"
+	@curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "$(GREEN)✓ Open WebUI$(NC)" || echo "$(RED)✗ Open WebUI$(NC)"
+	@echo "Testing Manager API..."
+	@curl -sf http://localhost:8000/api/health >/dev/null 2>&1 && echo "$(GREEN)✓ Manager$(NC)" || echo "$(RED)✗ Manager$(NC)"
+	@echo "Testing Console..."
+	@curl -sf http://localhost:3000/health >/dev/null 2>&1 && echo "$(GREEN)✓ Console$(NC)" || echo "$(RED)✗ Console$(NC)"
+
+test-manager: ## Run manager (Gleam) unit tests
+	@echo "$(BLUE)Running manager tests...$(NC)"
+	cd manager && gleam test
+
+test-console: ## Run console (React) unit tests
+	@echo "$(BLUE)Running console unit tests...$(NC)"
+	cd manager/frontend && npm test -- --watchAll=false
+
+test-console-coverage: ## Run console tests with coverage report
+	@echo "$(BLUE)Running console tests with coverage...$(NC)"
+	cd manager/frontend && npm run test:coverage
+
+test-e2e: ## Run Playwright end-to-end tests
+	@echo "$(BLUE)Running E2E tests...$(NC)"
+	cd manager/frontend && npm run test:e2e
+
+test-e2e-ui: ## Run Playwright tests with UI
+	@echo "$(BLUE)Running E2E tests with UI...$(NC)"
+	cd manager/frontend && npm run test:e2e:ui
+
+test-e2e-headed: ## Run Playwright tests in headed mode
+	@echo "$(BLUE)Running E2E tests in headed mode...$(NC)"
+	cd manager/frontend && npm run test:e2e:headed
+
+test-all: ## Run all tests (unit + E2E)
+	@echo "$(BLUE)Running all tests...$(NC)"
+	@$(MAKE) test-manager
+	@$(MAKE) test-console
+	@$(MAKE) test-e2e
+
+##@ Code Quality
+
+lint-console: ## Run linter on console code
+	@echo "$(BLUE)Linting console code...$(NC)"
+	cd manager/frontend && npm run lint
+
+lint-console-fix: ## Run linter and fix issues
+	@echo "$(BLUE)Linting and fixing console code...$(NC)"
+	cd manager/frontend && npm run lint:fix
+
+format-console: ## Check console code formatting
+	@echo "$(BLUE)Checking console code formatting...$(NC)"
+	cd manager/frontend && npm run format
+
+format-console-fix: ## Format console code
+	@echo "$(BLUE)Formatting console code...$(NC)"
+	cd manager/frontend && npm run format:fix
+
+check-console: ## Run all Biome checks on console
+	@echo "$(BLUE)Running Biome checks...$(NC)"
+	cd manager/frontend && npm run check
+
+check-console-fix: ## Run Biome checks and fix issues
+	@echo "$(BLUE)Running Biome checks with fixes...$(NC)"
+	cd manager/frontend && npm run check:fix
 
 ##@ Information
 
@@ -212,15 +357,17 @@ urls: ## Show access URLs for services
 	@echo "$(BLUE)Service URLs:$(NC)"
 	@if [ -f .env ]; then \
 		. ./.env; \
-		echo "  Web UI:     https://$$WEBUI_HOST"; \
-		echo "  API:        https://$$API_HOST"; \
-		echo "  Search:     https://$$SEARX_HOST (internal)"; \
-		echo "  Traefik:    https://traefik.$$WEBUI_HOST"; \
+		echo "  Web UI:       https://$$DOMAIN_HOST_WEBUI"; \
+		echo "  Manager:      https://manager.$$DOMAIN_HOST_WEBUI"; \
+		echo "  LiteLLM:      https://litellm.$$DOMAIN_HOST_WEBUI"; \
+		echo "  Traefik:      https://traefik.$$DOMAIN_HOST_WEBUI"; \
+		echo "  Grafana:      https://grafana.$$DOMAIN_HOST_WEBUI (monitoring profile)"; \
+		echo "  Prometheus:   https://prometheus.$$DOMAIN_HOST_WEBUI (monitoring profile)"; \
 	else \
 		echo "$(RED)No .env file found. Run 'make setup' first.$(NC)"; \
 	fi
 
 help: ## Display this help message
 	@awk 'BEGIN {FS = ":.*##"; printf "$(BLUE)Zone AI Stack - Makefile Commands$(NC)\n\n"} \
-		/^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-20s$(NC) %s\n", $$1, $$2 } \
+		/^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-25s$(NC) %s\n", $$1, $$2 } \
 		/^##@/ { printf "\n$(YELLOW)%s$(NC)\n", substr($$0, 5) } ' $(MAKEFILE_LIST)

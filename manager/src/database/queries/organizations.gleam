@@ -1,6 +1,6 @@
 import birl
 import database/connection.{type Connection, query_error_to_string}
-import gleam/dynamic/decode
+import database/queries/sql
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -8,10 +8,9 @@ import models/organization.{
   type CreateOrganizationRequest, type Organization,
   type UpdateOrganizationRequest, Organization,
 }
-import pog
 
 // =============================================================================
-// Organization Queries
+// Organization Queries (using Squirrel-generated SQL)
 // =============================================================================
 
 /// List all organizations, optionally filtered by active status
@@ -19,19 +18,13 @@ pub fn list_organizations(
   db: Connection,
   active_only: Bool,
 ) -> Result(List(Organization), String) {
-  let sql = case active_only {
-    True ->
-      "SELECT id, name, slug, description, is_active, created_at, updated_at
-       FROM organizations WHERE is_active = true ORDER BY name ASC"
-    False ->
-      "SELECT id, name, slug, description, is_active, created_at, updated_at
-       FROM organizations ORDER BY name ASC"
+  let result = case active_only {
+    True -> sql.list_organizations_active(db)
+    False -> sql.list_organizations_all(db)
   }
 
-  pog.query(sql)
-  |> pog.returning(organization_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.rows })
+  result
+  |> result.map(fn(rows) { list.map(rows, row_to_organization) })
   |> result.map_error(query_error_to_string)
 }
 
@@ -40,15 +33,12 @@ pub fn get_organization(
   db: Connection,
   id: String,
 ) -> Result(Option(Organization), String) {
-  let sql =
-    "SELECT id, name, slug, description, is_active, created_at, updated_at
-     FROM organizations WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.returning(organization_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
+  sql.get_organization_by_id(db, id)
+  |> result.map(fn(rows) {
+    list.first(rows)
+    |> result.map(row_to_organization)
+    |> option.from_result
+  })
   |> result.map_error(query_error_to_string)
 }
 
@@ -57,15 +47,12 @@ pub fn get_organization_by_slug(
   db: Connection,
   slug: String,
 ) -> Result(Option(Organization), String) {
-  let sql =
-    "SELECT id, name, slug, description, is_active, created_at, updated_at
-     FROM organizations WHERE slug = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(slug))
-  |> pog.returning(organization_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
+  sql.get_organization_by_slug(db, slug)
+  |> result.map(fn(rows) {
+    list.first(rows)
+    |> result.map(row_to_organization)
+    |> option.from_result
+  })
   |> result.map_error(query_error_to_string)
 }
 
@@ -76,22 +63,10 @@ pub fn create_organization(
 ) -> Result(Organization, String) {
   let now = birl.to_iso8601(birl.now())
 
-  let sql =
-    "INSERT INTO organizations (name, slug, description, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, name, slug, description, is_active, created_at, updated_at"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(req.name))
-  |> pog.parameter(pog.text(req.slug))
-  |> pog.parameter(pog.nullable(pog.text, req.description))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(now))
-  |> pog.returning(organization_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) {
-    case list.first(returned.rows) {
-      Ok(org) -> org
+  sql.create_organization(db, req.name, req.slug, req.description, now, now)
+  |> result.map(fn(rows) {
+    case list.first(rows) {
+      Ok(row) -> row_to_organization(row)
       Error(_) -> panic as "Insert should return a row"
     }
   })
@@ -116,23 +91,11 @@ pub fn update_organization(
       }
       let is_active = option.unwrap(req.is_active, existing.is_active)
 
-      let sql =
-        "UPDATE organizations SET name = $1, slug = $2, description = $3,
-         is_active = $4, updated_at = $5
-         WHERE id = $6
-         RETURNING id, name, slug, description, is_active, created_at, updated_at"
-
-      pog.query(sql)
-      |> pog.parameter(pog.text(name))
-      |> pog.parameter(pog.text(slug))
-      |> pog.parameter(pog.nullable(pog.text, description))
-      |> pog.parameter(pog.bool(is_active))
-      |> pog.parameter(pog.text(now))
-      |> pog.parameter(pog.text(id))
-      |> pog.returning(organization_row_decoder())
-      |> pog.execute(db)
-      |> result.map(fn(returned) {
-        list.first(returned.rows) |> option.from_result
+      sql.update_organization(db, name, slug, description, is_active, now, id)
+      |> result.map(fn(rows) {
+        list.first(rows)
+        |> result.map(row_to_organization)
+        |> option.from_result
       })
       |> result.map_error(query_error_to_string)
     }
@@ -143,35 +106,23 @@ pub fn update_organization(
 
 /// Delete an organization by ID
 pub fn delete_organization(db: Connection, id: String) -> Result(Bool, String) {
-  let sql = "DELETE FROM organizations WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.count > 0 })
+  sql.delete_organization(db, id)
+  |> result.map(fn(count) { count > 0 })
   |> result.map_error(query_error_to_string)
 }
 
 // =============================================================================
-// Row Decoders
+// Row Mapping
 // =============================================================================
 
-fn organization_row_decoder() -> decode.Decoder(Organization) {
-  use id <- decode.field(0, decode.string)
-  use name <- decode.field(1, decode.string)
-  use slug <- decode.field(2, decode.string)
-  use description <- decode.field(3, decode.optional(decode.string))
-  use is_active <- decode.field(4, decode.bool)
-  use created_at <- decode.field(5, decode.string)
-  use updated_at <- decode.field(6, decode.string)
-
-  decode.success(Organization(
-    id: id,
-    name: name,
-    slug: slug,
-    description: description,
-    is_active: is_active,
-    created_at: created_at,
-    updated_at: updated_at,
-  ))
+fn row_to_organization(row: sql.ListOrganizationsAllRow) -> Organization {
+  Organization(
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    description: row.description,
+    is_active: row.is_active,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  )
 }
