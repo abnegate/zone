@@ -10,7 +10,8 @@
 	generate-sql verify-sql \
 	build-runner test-runner setup-runner-coverage test-runner-coverage \
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
-	install-runner
+	install-runner \
+	build-dev-cli install-dev-cli dev-format dev-format-check dev-lint dev-test dev-coverage dev-check
 
 .DEFAULT_GOAL := help
 
@@ -487,6 +488,74 @@ urls: ## Show access URLs for services
 	else \
 		echo "$(RED)No .env file found. Run 'make setup' first.$(NC)"; \
 	fi
+
+##@ Dev CLI (zone-dev)
+
+build-dev-cli: ## Build the zone-dev CLI tool
+	@echo "$(BLUE)Building zone-dev CLI...$(NC)"
+	cd tools/dev-cli && cargo build --release
+	@echo "$(GREEN)zone-dev built: tools/dev-cli/target/release/zone-dev$(NC)"
+
+install-dev-cli: build-dev-cli ## Install zone-dev to /usr/local/bin
+	@echo "$(BLUE)Installing zone-dev...$(NC)"
+	@sudo cp tools/dev-cli/target/release/zone-dev /usr/local/bin/
+	@echo "$(GREEN)zone-dev installed! Run 'zone-dev --help' to get started.$(NC)"
+
+dev-format: ## Format all projects (with TUI)
+	@if [ -f tools/dev-cli/target/release/zone-dev ]; then \
+		./tools/dev-cli/target/release/zone-dev format; \
+	else \
+		echo "$(YELLOW)zone-dev not built. Building...$(NC)"; \
+		$(MAKE) build-dev-cli; \
+		./tools/dev-cli/target/release/zone-dev format; \
+	fi
+
+dev-format-check: ## Check formatting across all projects (with TUI)
+	@if [ -f tools/dev-cli/target/release/zone-dev ]; then \
+		./tools/dev-cli/target/release/zone-dev format --check; \
+	else \
+		echo "$(YELLOW)zone-dev not built. Building...$(NC)"; \
+		$(MAKE) build-dev-cli; \
+		./tools/dev-cli/target/release/zone-dev format --check; \
+	fi
+
+dev-lint: ## Lint all projects (with TUI)
+	@if [ -f tools/dev-cli/target/release/zone-dev ]; then \
+		./tools/dev-cli/target/release/zone-dev lint; \
+	else \
+		echo "$(YELLOW)zone-dev not built. Building...$(NC)"; \
+		$(MAKE) build-dev-cli; \
+		./tools/dev-cli/target/release/zone-dev lint; \
+	fi
+
+dev-test: ## Test all projects (with TUI)
+	@if [ -f tools/dev-cli/target/release/zone-dev ]; then \
+		./tools/dev-cli/target/release/zone-dev test; \
+	else \
+		echo "$(YELLOW)zone-dev not built. Building...$(NC)"; \
+		$(MAKE) build-dev-cli; \
+		./tools/dev-cli/target/release/zone-dev test; \
+	fi
+
+dev-coverage: ## Coverage for all projects (with TUI)
+	@if [ -f tools/dev-cli/target/release/zone-dev ]; then \
+		./tools/dev-cli/target/release/zone-dev coverage; \
+	else \
+		echo "$(YELLOW)zone-dev not built. Building...$(NC)"; \
+		$(MAKE) build-dev-cli; \
+		./tools/dev-cli/target/release/zone-dev coverage; \
+	fi
+
+dev-check: ## Run format check + lint + test on all projects (with TUI)
+	@if [ -f tools/dev-cli/target/release/zone-dev ]; then \
+		./tools/dev-cli/target/release/zone-dev check; \
+	else \
+		echo "$(YELLOW)zone-dev not built. Building...$(NC)"; \
+		$(MAKE) build-dev-cli; \
+		./tools/dev-cli/target/release/zone-dev check; \
+	fi
+
+##@ Information
 
 help: ## Display this help message
 	@awk 'BEGIN {FS = ":.*##"; printf "$(BLUE)Zone AI Stack - Makefile Commands$(NC)\n\n"} \

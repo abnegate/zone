@@ -1,10 +1,13 @@
 import birl
 import database/connection.{type Connection, query_error_to_string}
+import database/queries/sql
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
+import gleam/time/timestamp.{type Timestamp}
 import models/source.{
   type CreateSourceRequest, type Source, type SourceCategory, type SourceConfig,
   type SourceType, type UpdateSourceRequest, Discord, DiscordConfig,
@@ -14,10 +17,10 @@ import models/source.{
   IMAPSourceConfig, Slack, SlackConfig, SlackSourceConfig, Source, Text,
   TextConfig, TextSourceConfig, Web, WebConfig, WebSourceConfig,
 }
-import pog
+import youid/uuid
 
 // =============================================================================
-// Source Queries
+// Source Queries (using Squirrel-generated SQL)
 // =============================================================================
 
 /// List all sources, optionally filtered by type
@@ -26,53 +29,50 @@ pub fn list_sources(
   type_filter: Option(SourceType),
   active_only: Bool,
 ) -> Result(List(Source), String) {
-  let base_sql =
-    "SELECT id, name, source_type, config, credentials_encrypted, description, url,
-            is_active, last_verified_at, last_error, created_at, updated_at
-     FROM sources"
+  case type_filter, active_only {
+    None, False ->
+      sql.list_sources_all(db)
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_sources_all_row_to_source)
+      })
+      |> result.map_error(query_error_to_string)
 
-  let where_clauses = []
-  let where_clauses = case active_only {
-    True -> ["is_active = TRUE", ..where_clauses]
-    False -> where_clauses
-  }
-  let where_clauses = case type_filter {
-    Some(t) -> [
-      "source_type = '" <> source.source_type_to_string(t) <> "'",
-      ..where_clauses
-    ]
-    None -> where_clauses
-  }
+    None, True ->
+      sql.list_sources_active(db)
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_sources_active_row_to_source)
+      })
+      |> result.map_error(query_error_to_string)
 
-  let sql = case where_clauses {
-    [] -> base_sql <> " ORDER BY name ASC"
-    clauses ->
-      base_sql
-      <> " WHERE "
-      <> list.reverse(clauses) |> string.join(" AND ")
-      <> " ORDER BY name ASC"
-  }
+    Some(t), False ->
+      sql.list_sources_by_type(db, source.source_type_to_string(t))
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_sources_by_type_row_to_source)
+      })
+      |> result.map_error(query_error_to_string)
 
-  pog.query(sql)
-  |> pog.returning(source_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.rows })
-  |> result.map_error(query_error_to_string)
+    Some(t), True ->
+      sql.list_sources_by_type_active(db, source.source_type_to_string(t))
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_sources_by_type_active_row_to_source)
+      })
+      |> result.map_error(query_error_to_string)
+  }
 }
 
 /// Get a single source by ID
 pub fn get_source(db: Connection, id: String) -> Result(Option(Source), String) {
-  let sql =
-    "SELECT id, name, source_type, config, credentials_encrypted, description, url,
-            is_active, last_verified_at, last_error, created_at, updated_at
-     FROM sources WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.returning(source_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(id) {
+    Ok(uuid_id) ->
+      sql.get_source_by_id(db, uuid_id)
+      |> result.map(fn(returned) {
+        list.first(returned.rows)
+        |> result.map(get_source_row_to_source)
+        |> option.from_result
+      })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Get source for a task (task source or fallback to project source)
@@ -80,20 +80,17 @@ pub fn get_task_source(
   db: Connection,
   task_id: String,
 ) -> Result(Option(Source), String) {
-  let sql =
-    "SELECT s.id, s.name, s.source_type, s.config, s.credentials_encrypted, s.description, s.url,
-            s.is_active, s.last_verified_at, s.last_error, s.created_at, s.updated_at
-     FROM tasks t
-     JOIN projects p ON p.id = t.project_id
-     LEFT JOIN sources s ON s.id = COALESCE(t.source_id, p.source_id)
-     WHERE t.id = $1 AND s.is_active = TRUE"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(task_id))
-  |> pog.returning(source_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) ->
+      sql.get_task_source(db, uuid_id)
+      |> result.map(fn(returned) {
+        list.first(returned.rows)
+        |> result.map(get_task_source_row_to_source)
+        |> option.from_result
+      })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Create a new source
@@ -101,31 +98,27 @@ pub fn create_source(
   db: Connection,
   req: CreateSourceRequest,
 ) -> Result(Source, String) {
-  let now = birl.to_iso8601(birl.now())
+  let now = timestamp.system_time()
   let type_str = source.source_type_to_string(req.source_type)
-  let config_json = source.config_to_json(req.config) |> json.to_string
+  let config_json = source.config_to_json(req.config)
   let url = build_source_url(req.source_type, req.config)
+  let credentials = option.unwrap(req.credentials, "")
+  let description = option.unwrap(req.description, "")
 
-  let sql =
-    "INSERT INTO sources (name, source_type, config, credentials_encrypted, description, url, created_at, updated_at)
-     VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8)
-     RETURNING id, name, source_type, config, credentials_encrypted, description, url,
-               is_active, last_verified_at, last_error, created_at, updated_at"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(req.name))
-  |> pog.parameter(pog.text(type_str))
-  |> pog.parameter(pog.text(config_json))
-  |> pog.parameter(pog.nullable(pog.text, req.credentials))
-  |> pog.parameter(pog.nullable(pog.text, req.description))
-  |> pog.parameter(pog.text(url))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(now))
-  |> pog.returning(source_row_decoder())
-  |> pog.execute(db)
+  sql.create_source(
+    db,
+    req.name,
+    type_str,
+    config_json,
+    credentials,
+    description,
+    url,
+    now,
+    now,
+  )
   |> result.map(fn(returned) {
     case list.first(returned.rows) {
-      Ok(src) -> src
+      Ok(row) -> create_source_row_to_source(row)
       Error(_) -> panic as "Insert should return a row"
     }
   })
@@ -140,43 +133,43 @@ pub fn update_source(
 ) -> Result(Option(Source), String) {
   case get_source(db, id) {
     Ok(Some(existing)) -> {
-      let now = birl.to_iso8601(birl.now())
-      let name = option.unwrap(req.name, existing.name)
-      let config = option.unwrap(req.config, existing.config)
-      let config_json = source.config_to_json(config) |> json.to_string
-      let credentials = case req.credentials {
-        Some(c) -> Some(c)
-        None -> existing.credentials
-      }
-      let description = case req.description {
-        Some(d) -> Some(d)
-        None -> existing.description
-      }
-      let is_active = option.unwrap(req.is_active, existing.is_active)
-      let url = build_source_url(existing.source_type, config)
+      case uuid.from_string(id) {
+        Ok(uuid_id) -> {
+          let now = timestamp.system_time()
+          let name = option.unwrap(req.name, existing.name)
+          let config = option.unwrap(req.config, existing.config)
+          let config_json = source.config_to_json(config)
+          let credentials = case req.credentials {
+            Some(c) -> c
+            None -> option.unwrap(existing.credentials, "")
+          }
+          let description = case req.description {
+            Some(d) -> d
+            None -> option.unwrap(existing.description, "")
+          }
+          let is_active = option.unwrap(req.is_active, existing.is_active)
+          let url = build_source_url(existing.source_type, config)
 
-      let sql =
-        "UPDATE sources SET name = $1, config = $2::jsonb, credentials_encrypted = $3,
-         description = $4, url = $5, is_active = $6, updated_at = $7
-         WHERE id = $8
-         RETURNING id, name, source_type, config, credentials_encrypted, description, url,
-                   is_active, last_verified_at, last_error, created_at, updated_at"
-
-      pog.query(sql)
-      |> pog.parameter(pog.text(name))
-      |> pog.parameter(pog.text(config_json))
-      |> pog.parameter(pog.nullable(pog.text, credentials))
-      |> pog.parameter(pog.nullable(pog.text, description))
-      |> pog.parameter(pog.text(url))
-      |> pog.parameter(pog.bool(is_active))
-      |> pog.parameter(pog.text(now))
-      |> pog.parameter(pog.text(id))
-      |> pog.returning(source_row_decoder())
-      |> pog.execute(db)
-      |> result.map(fn(returned) {
-        list.first(returned.rows) |> option.from_result
-      })
-      |> result.map_error(query_error_to_string)
+          sql.update_source(
+            db,
+            name,
+            config_json,
+            credentials,
+            description,
+            url,
+            is_active,
+            now,
+            uuid_id,
+          )
+          |> result.map(fn(returned) {
+            list.first(returned.rows)
+            |> result.map(update_source_row_to_source)
+            |> option.from_result
+          })
+          |> result.map_error(query_error_to_string)
+        }
+        Error(_) -> Error("Invalid UUID format")
+      }
     }
     Ok(None) -> Ok(None)
     Error(err) -> Error(err)
@@ -185,35 +178,33 @@ pub fn update_source(
 
 /// Delete a source by ID
 pub fn delete_source(db: Connection, id: String) -> Result(Bool, String) {
-  let sql = "DELETE FROM sources WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.count > 0 })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(id) {
+    Ok(uuid_id) ->
+      sql.delete_source(db, uuid_id)
+      |> result.map(fn(returned) { returned.count > 0 })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Verify a source connection and update status
 pub fn verify_source(
   db: Connection,
   id: String,
-  success: Bool,
+  _success: Bool,
   error_msg: Option(String),
 ) -> Result(Nil, String) {
-  let now = birl.to_iso8601(birl.now())
-  let sql =
-    "UPDATE sources SET last_verified_at = $1, last_error = $2, updated_at = $3
-     WHERE id = $4"
+  case uuid.from_string(id) {
+    Ok(uuid_id) -> {
+      let now = timestamp.system_time()
+      let error_str = option.unwrap(error_msg, "")
 
-  pog.query(sql)
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.nullable(pog.text, error_msg))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(id))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+      sql.verify_source(db, now, error_str, now, uuid_id)
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    }
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Link a source to a project
@@ -222,16 +213,15 @@ pub fn link_source_to_project(
   project_id: String,
   source_id: String,
 ) -> Result(Nil, String) {
-  let now = birl.to_iso8601(birl.now())
-  let sql = "UPDATE projects SET source_id = $1, updated_at = $2 WHERE id = $3"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(source_id))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(project_id))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(source_id), uuid.from_string(project_id) {
+    Ok(source_uuid), Ok(project_uuid) -> {
+      let now = timestamp.system_time()
+      sql.link_source_to_project(db, source_uuid, now, project_uuid)
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    }
+    _, _ -> Error("Invalid UUID format")
+  }
 }
 
 /// Unlink source from a project
@@ -239,16 +229,15 @@ pub fn unlink_source_from_project(
   db: Connection,
   project_id: String,
 ) -> Result(Nil, String) {
-  let now = birl.to_iso8601(birl.now())
-  let sql =
-    "UPDATE projects SET source_id = NULL, updated_at = $1 WHERE id = $2"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(project_id))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(project_id) {
+    Ok(uuid_id) -> {
+      let now = timestamp.system_time()
+      sql.unlink_source_from_project(db, now, uuid_id)
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    }
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Link a source to a task
@@ -257,16 +246,15 @@ pub fn link_source_to_task(
   task_id: String,
   source_id: String,
 ) -> Result(Nil, String) {
-  let now = birl.to_iso8601(birl.now())
-  let sql = "UPDATE tasks SET source_id = $1, updated_at = $2 WHERE id = $3"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(source_id))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(task_id))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(source_id), uuid.from_string(task_id) {
+    Ok(source_uuid), Ok(task_uuid) -> {
+      let now = timestamp.system_time()
+      sql.link_source_to_task(db, source_uuid, now, task_uuid)
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    }
+    _, _ -> Error("Invalid UUID format")
+  }
 }
 
 /// Link multiple sources to a task
@@ -275,18 +263,19 @@ pub fn link_sources_to_task(
   task_id: String,
   source_ids: List(String),
 ) -> Result(Nil, String) {
-  let now = birl.to_iso8601(birl.now())
-  let ids_array = "{" <> string.join(source_ids, ",") <> "}"
-  let sql =
-    "UPDATE tasks SET source_ids = $1::uuid[], updated_at = $2 WHERE id = $3"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(ids_array))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(task_id))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(task_id) {
+    Ok(task_uuid) -> {
+      let now = timestamp.system_time()
+      // Convert string UUIDs to Uuid types
+      let uuids =
+        source_ids
+        |> list.filter_map(fn(s) { uuid.from_string(s) })
+      sql.link_sources_to_task(db, uuids, now, task_uuid)
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    }
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Get all sources for a task (from source_ids array or fallback to project source)
@@ -294,33 +283,29 @@ pub fn get_task_sources(
   db: Connection,
   task_id: String,
 ) -> Result(List(Source), String) {
-  // First try to get sources from source_ids array
-  let sql_array =
-    "SELECT s.id, s.name, s.source_type, s.config, s.credentials_encrypted, s.description, s.url,
-            s.is_active, s.last_verified_at, s.last_error, s.created_at, s.updated_at
-     FROM tasks t
-     CROSS JOIN LATERAL unnest(t.source_ids) AS task_source_id
-     JOIN sources s ON s.id = task_source_id
-     WHERE t.id = $1 AND s.is_active = TRUE"
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) -> {
+      // First try to get sources from source_ids array
+      let array_result =
+        sql.get_task_sources_array(db, uuid_id)
+        |> result.map(fn(returned) {
+          list.map(returned.rows, get_task_sources_array_row_to_source)
+        })
+        |> result.map_error(query_error_to_string)
 
-  let array_result =
-    pog.query(sql_array)
-    |> pog.parameter(pog.text(task_id))
-    |> pog.returning(source_row_decoder())
-    |> pog.execute(db)
-    |> result.map(fn(returned) { returned.rows })
-    |> result.map_error(query_error_to_string)
-
-  case array_result {
-    Ok([_, ..] as sources) -> Ok(sources)
-    Ok([]) | Error(_) -> {
-      // Fallback to single source_id or project source
-      case get_task_source(db, task_id) {
-        Ok(Some(source)) -> Ok([source])
-        Ok(None) -> Ok([])
-        Error(err) -> Error(err)
+      case array_result {
+        Ok([_, ..] as sources) -> Ok(sources)
+        Ok([]) | Error(_) -> {
+          // Fallback to single source_id or project source
+          case get_task_source(db, task_id) {
+            Ok(Some(src)) -> Ok([src])
+            Ok(None) -> Ok([])
+            Error(err) -> Error(err)
+          }
+        }
       }
     }
+    Error(_) -> Error("Invalid UUID format")
   }
 }
 
@@ -351,24 +336,21 @@ pub fn list_sources_by_category(
 ) -> Result(List(Source), String) {
   let category_str = source.source_category_to_string(category)
 
-  let base_sql =
-    "SELECT s.id, s.name, s.source_type, s.config, s.credentials_encrypted, s.description, s.url,
-            s.is_active, s.last_verified_at, s.last_error, s.created_at, s.updated_at
-     FROM sources s
-     JOIN source_types st ON st.name = s.source_type
-     WHERE st.category = $1"
+  case active_only {
+    True ->
+      sql.list_sources_by_category(db, category_str)
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_sources_by_category_row_to_source)
+      })
+      |> result.map_error(query_error_to_string)
 
-  let sql = case active_only {
-    True -> base_sql <> " AND s.is_active = TRUE ORDER BY s.name ASC"
-    False -> base_sql <> " ORDER BY s.name ASC"
+    False ->
+      sql.list_sources_by_category_all(db, category_str)
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_sources_by_category_all_row_to_source)
+      })
+      |> result.map_error(query_error_to_string)
   }
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(category_str))
-  |> pog.returning(source_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.rows })
-  |> result.map_error(query_error_to_string)
 }
 
 // =============================================================================
@@ -391,44 +373,36 @@ fn build_source_url(_source_type: SourceType, config: SourceConfig) -> String {
 }
 
 // =============================================================================
-// Row Decoders
+// Row Mapping Helpers
 // =============================================================================
 
-fn source_row_decoder() -> decode.Decoder(Source) {
-  use id <- decode.field(0, decode.string)
-  use name <- decode.field(1, decode.string)
-  use type_str <- decode.field(2, decode.string)
-  use config_json <- decode.field(3, decode.string)
-  use credentials <- decode.field(4, decode.optional(decode.string))
-  use description <- decode.field(5, decode.optional(decode.string))
-  use url <- decode.field(6, decode.optional(decode.string))
-  use is_active <- decode.field(7, decode.bool)
-  use last_verified_at <- decode.field(8, decode.optional(decode.string))
-  use last_error <- decode.field(9, decode.optional(decode.string))
-  use created_at <- decode.field(10, decode.string)
-  use updated_at <- decode.field(11, decode.string)
+fn timestamp_to_string(ts: Option(Timestamp)) -> String {
+  case ts {
+    Some(t) -> {
+      let #(seconds, _nanoseconds) = timestamp.to_unix_seconds_and_nanoseconds(t)
+      birl.from_unix(seconds) |> birl.to_iso8601
+    }
+    None -> ""
+  }
+}
 
-  let source_type = case source.source_type_from_string(type_str) {
+fn timestamp_to_option_string(
+  ts: Option(Timestamp),
+) -> Option(String) {
+  case ts {
+    Some(t) -> {
+      let #(seconds, _nanoseconds) = timestamp.to_unix_seconds_and_nanoseconds(t)
+      Some(birl.from_unix(seconds) |> birl.to_iso8601)
+    }
+    None -> None
+  }
+}
+
+fn source_type_from_string(type_str: String) -> SourceType {
+  case source.source_type_from_string(type_str) {
     Ok(t) -> t
     Error(_) -> GitHub
   }
-
-  let config = parse_config(source_type, config_json)
-
-  decode.success(Source(
-    id: id,
-    name: name,
-    source_type: source_type,
-    config: config,
-    credentials: credentials,
-    description: description,
-    url: url,
-    is_active: is_active,
-    last_verified_at: last_verified_at,
-    last_error: last_error,
-    created_at: created_at,
-    updated_at: updated_at,
-  ))
 }
 
 fn parse_config(source_type: SourceType, config_json: String) -> SourceConfig {
@@ -543,7 +517,6 @@ fn parse_config(source_type: SourceType, config_json: String) -> SourceConfig {
       }
     }
     Web -> {
-      // For web source, just decode url and ignore complex headers for now
       let decoder = {
         use url <- decode.field("url", decode.string)
         decode.success(WebConfig(url, None))
@@ -571,4 +544,210 @@ fn parse_config(source_type: SourceType, config_json: String) -> SourceConfig {
   }
 }
 
-import gleam/string
+// Row mappers for each query type
+
+fn list_sources_all_row_to_source(row: sql.ListSourcesAllRow) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn list_sources_active_row_to_source(row: sql.ListSourcesActiveRow) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn list_sources_by_type_row_to_source(row: sql.ListSourcesByTypeRow) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn list_sources_by_type_active_row_to_source(
+  row: sql.ListSourcesByTypeActiveRow,
+) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn get_source_row_to_source(row: sql.GetSourceByIdRow) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn get_task_source_row_to_source(row: sql.GetTaskSourceRow) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn create_source_row_to_source(row: sql.CreateSourceRow) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn update_source_row_to_source(row: sql.UpdateSourceRow) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn get_task_sources_array_row_to_source(
+  row: sql.GetTaskSourcesArrayRow,
+) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn list_sources_by_category_row_to_source(
+  row: sql.ListSourcesByCategoryRow,
+) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}
+
+fn list_sources_by_category_all_row_to_source(
+  row: sql.ListSourcesByCategoryAllRow,
+) -> Source {
+  let source_type = source_type_from_string(row.source_type)
+  Source(
+    id: uuid.to_string(row.id),
+    name: row.name,
+    source_type: source_type,
+    config: parse_config(source_type, row.config),
+    credentials: row.credentials_encrypted,
+    description: row.description,
+    url: row.url,
+    is_active: option.unwrap(row.is_active, True),
+    last_verified_at: timestamp_to_option_string(row.last_verified_at),
+    last_error: row.last_error,
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+  )
+}

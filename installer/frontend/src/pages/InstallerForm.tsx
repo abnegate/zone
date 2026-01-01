@@ -3,7 +3,6 @@ import {
   Button,
   Modal,
   StatusLog,
-  ProgressBar,
   StepPills,
   InfoBox,
 } from '../components';
@@ -188,7 +187,6 @@ export default function InstallerForm() {
         <p>Set up your self-hosted AI stack</p>
       </header>
 
-      <ProgressBar currentStep={currentStep} />
       <StepPills currentStep={currentStep} onStepClick={handleStepClick} />
 
       <div className="card">

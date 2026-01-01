@@ -23,6 +23,7 @@ export function StepPills({ currentStep, onStepClick }: StepPillsProps) {
             className={className}
             onClick={() => onStepClick(step.number)}
             aria-current={isActive ? 'step' : undefined}
+            data-step={step.number}
           >
             {step.label}
           </button>

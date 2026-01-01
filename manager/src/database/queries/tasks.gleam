@@ -1,26 +1,22 @@
 import birl
 import database/connection.{type Connection, query_error_to_string}
+import database/queries/sql
 import gleam/dynamic/decode
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/string
+import gleam/time/timestamp
 import models/task.{
   type CreateTaskRequest, type LogLevel, type Task, type TaskRun,
-  type TaskRunLog, type TaskRunStatus, type TaskStatus, type UpdateTaskRequest,
-  Created, LogInfo, Running, Task, TaskRun, TaskRunLog,
+  type TaskRunLog, type TaskRunStatus, type TaskStatus, Created, LogInfo,
+  Running, Task, TaskRun, TaskRunLog,
 }
-import pog
+import youid/uuid
 
 // =============================================================================
-// Task Queries
+// Task Queries (using Squirrel-generated SQL)
 // =============================================================================
-
-// All task SELECT columns (used in multiple queries)
-const task_select_cols = "id, project_id, title, description, acceptance_criteria, status,
-            priority, model_name, dependencies, created_at, updated_at,
-            started_at, completed_at, is_agentic, github_repo_url, queued_at, worker_id"
 
 /// List all tasks, optionally filtered by project or status
 pub fn list_tasks(
@@ -28,54 +24,60 @@ pub fn list_tasks(
   project_id: Option(String),
   status_filter: Option(TaskStatus),
 ) -> Result(List(Task), String) {
-  let base_sql = "SELECT " <> task_select_cols <> " FROM tasks"
+  case project_id, status_filter {
+    None, None ->
+      sql.list_tasks_all(db)
+      |> result.map(fn(returned) { list.map(returned.rows, list_tasks_row_to_task) })
+      |> result.map_error(query_error_to_string)
 
-  let #(sql, params) = case project_id, status_filter {
-    None, None -> #(base_sql <> " ORDER BY priority ASC, updated_at DESC", [])
-    Some(pid), None -> #(
-      base_sql
-        <> " WHERE project_id = $1 ORDER BY priority ASC, updated_at DESC",
-      [pog.text(pid)],
-    )
-    None, Some(status) -> #(
-      base_sql <> " WHERE status = $1 ORDER BY priority ASC, updated_at DESC",
-      [pog.text(task.status_to_string(status))],
-    )
-    Some(pid), Some(status) -> #(
-      base_sql
-        <> " WHERE project_id = $1 AND status = $2 ORDER BY priority ASC, updated_at DESC",
-      [pog.text(pid), pog.text(task.status_to_string(status))],
-    )
+    Some(pid), None ->
+      case uuid.from_string(pid) {
+        Ok(uuid_id) ->
+          sql.list_tasks_by_project(db, uuid_id)
+          |> result.map(fn(returned) {
+            list.map(returned.rows, list_tasks_by_project_row_to_task)
+          })
+          |> result.map_error(query_error_to_string)
+        Error(_) -> Error("Invalid project UUID format")
+      }
+
+    None, Some(status) ->
+      sql.list_tasks_by_status(db, task.status_to_string(status))
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_tasks_by_status_row_to_task)
+      })
+      |> result.map_error(query_error_to_string)
+
+    Some(pid), Some(status) ->
+      case uuid.from_string(pid) {
+        Ok(uuid_id) ->
+          sql.list_tasks_by_project_and_status(
+            db,
+            uuid_id,
+            task.status_to_string(status),
+          )
+          |> result.map(fn(returned) {
+            list.map(returned.rows, list_tasks_by_project_and_status_row_to_task)
+          })
+          |> result.map_error(query_error_to_string)
+        Error(_) -> Error("Invalid project UUID format")
+      }
   }
-
-  execute_task_query(db, sql, params)
-}
-
-fn execute_task_query(
-  db: Connection,
-  sql: String,
-  params: List(pog.Value),
-) -> Result(List(Task), String) {
-  let query = pog.query(sql)
-  let query = list.fold(params, query, fn(q, p) { pog.parameter(q, p) })
-
-  query
-  |> pog.returning(task_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.rows })
-  |> result.map_error(query_error_to_string)
 }
 
 /// Get a single task by ID
 pub fn get_task(db: Connection, id: String) -> Result(Option(Task), String) {
-  let sql = "SELECT " <> task_select_cols <> " FROM tasks WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.returning(task_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(id) {
+    Ok(uuid_id) ->
+      sql.get_task_by_id(db, uuid_id)
+      |> result.map(fn(returned) {
+        list.first(returned.rows)
+        |> result.map(get_task_row_to_task)
+        |> option.from_result
+      })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Create a new task
@@ -83,100 +85,100 @@ pub fn create_task(
   db: Connection,
   req: CreateTaskRequest,
 ) -> Result(Task, String) {
-  let now = birl.to_iso8601(birl.now())
-  let priority = option.unwrap(req.priority, 3)
-  let deps = option.unwrap(req.dependencies, [])
-  let deps_json = json.array(deps, json.string) |> json.to_string
-  let is_agentic = option.unwrap(req.is_agentic, False)
+  case uuid.from_string(req.project_id) {
+    Ok(project_uuid) -> {
+      let now = timestamp.system_time()
+      let priority = option.unwrap(req.priority, 3)
+      let deps = option.unwrap(req.dependencies, [])
+      let deps_json = json.array(deps, json.string)
+      let is_agentic = option.unwrap(req.is_agentic, False)
+      let acceptance_criteria = option.unwrap(req.acceptance_criteria, "")
+      let model_name = option.unwrap(req.model_name, "")
+      let github_repo_url = option.unwrap(req.github_repo_url, "")
 
-  let sql =
-    "INSERT INTO tasks (project_id, title, description, acceptance_criteria,
-                        status, priority, model_name, dependencies,
-                        is_agentic, github_repo_url, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, 'created', $5, $6, $7, $8, $9, $10, $11)
-     RETURNING " <> task_select_cols
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(req.project_id))
-  |> pog.parameter(pog.text(req.title))
-  |> pog.parameter(pog.text(req.description))
-  |> pog.parameter(pog.nullable(pog.text, req.acceptance_criteria))
-  |> pog.parameter(pog.int(priority))
-  |> pog.parameter(pog.nullable(pog.text, req.model_name))
-  |> pog.parameter(pog.text(deps_json))
-  |> pog.parameter(pog.bool(is_agentic))
-  |> pog.parameter(pog.nullable(pog.text, req.github_repo_url))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(now))
-  |> pog.returning(task_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) {
-    case list.first(returned.rows) {
-      Ok(t) -> t
-      Error(_) -> panic as "Insert should return a row"
+      sql.create_task(
+        db,
+        project_uuid,
+        req.title,
+        req.description,
+        acceptance_criteria,
+        priority,
+        model_name,
+        deps_json,
+        is_agentic,
+        github_repo_url,
+        now,
+        now,
+      )
+      |> result.map(fn(returned) {
+        case list.first(returned.rows) {
+          Ok(row) -> create_task_row_to_task(row)
+          Error(_) -> panic as "Insert should return a row"
+        }
+      })
+      |> result.map_error(query_error_to_string)
     }
-  })
-  |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid project UUID format")
+  }
 }
 
 /// Update a task
 pub fn update_task(
   db: Connection,
   id: String,
-  req: UpdateTaskRequest,
+  req: task.UpdateTaskRequest,
 ) -> Result(Option(Task), String) {
   case get_task(db, id) {
     Ok(Some(existing)) -> {
-      let now = birl.to_iso8601(birl.now())
-      let title = option.unwrap(req.title, existing.title)
-      let description = option.unwrap(req.description, existing.description)
-      let acceptance_criteria = case req.acceptance_criteria {
-        Some(ac) -> Some(ac)
-        None -> existing.acceptance_criteria
-      }
-      let status = case req.status {
-        Some(s) -> task.status_to_string(s)
-        None -> task.status_to_string(existing.status)
-      }
-      let priority = option.unwrap(req.priority, existing.priority)
-      let model_name = case req.model_name {
-        Some(m) -> Some(m)
-        None -> existing.model_name
-      }
-      let deps = option.unwrap(req.dependencies, existing.dependencies)
-      let deps_json = json.array(deps, json.string) |> json.to_string
-      let is_agentic = option.unwrap(req.is_agentic, existing.is_agentic)
-      let github_repo_url = case req.github_repo_url {
-        Some(url) -> Some(url)
-        None -> existing.github_repo_url
-      }
+      case uuid.from_string(id) {
+        Ok(uuid_id) -> {
+          let now = timestamp.system_time()
+          let title = option.unwrap(req.title, existing.title)
+          let description = option.unwrap(req.description, existing.description)
+          let acceptance_criteria = case req.acceptance_criteria {
+            Some(ac) -> ac
+            None -> option.unwrap(existing.acceptance_criteria, "")
+          }
+          let status = case req.status {
+            Some(s) -> task.status_to_string(s)
+            None -> task.status_to_string(existing.status)
+          }
+          let priority = option.unwrap(req.priority, existing.priority)
+          let model_name = case req.model_name {
+            Some(m) -> m
+            None -> option.unwrap(existing.model_name, "")
+          }
+          let deps = option.unwrap(req.dependencies, existing.dependencies)
+          let deps_json = json.array(deps, json.string)
+          let is_agentic = option.unwrap(req.is_agentic, existing.is_agentic)
+          let github_repo_url = case req.github_repo_url {
+            Some(url) -> url
+            None -> option.unwrap(existing.github_repo_url, "")
+          }
 
-      let sql =
-        "UPDATE tasks SET title = $1, description = $2, acceptance_criteria = $3,
-                status = $4, priority = $5, model_name = $6, dependencies = $7,
-                is_agentic = $8, github_repo_url = $9, updated_at = $10
-         WHERE id = $11
-         RETURNING "
-        <> task_select_cols
-
-      pog.query(sql)
-      |> pog.parameter(pog.text(title))
-      |> pog.parameter(pog.text(description))
-      |> pog.parameter(pog.nullable(pog.text, acceptance_criteria))
-      |> pog.parameter(pog.text(status))
-      |> pog.parameter(pog.int(priority))
-      |> pog.parameter(pog.nullable(pog.text, model_name))
-      |> pog.parameter(pog.text(deps_json))
-      |> pog.parameter(pog.bool(is_agentic))
-      |> pog.parameter(pog.nullable(pog.text, github_repo_url))
-      |> pog.parameter(pog.text(now))
-      |> pog.parameter(pog.text(id))
-      |> pog.returning(task_row_decoder())
-      |> pog.execute(db)
-      |> result.map(fn(returned) {
-        list.first(returned.rows) |> option.from_result
-      })
-      |> result.map_error(query_error_to_string)
+          sql.update_task(
+            db,
+            title,
+            description,
+            acceptance_criteria,
+            status,
+            priority,
+            model_name,
+            deps_json,
+            is_agentic,
+            github_repo_url,
+            now,
+            uuid_id,
+          )
+          |> result.map(fn(returned) {
+            list.first(returned.rows)
+            |> result.map(update_task_row_to_task)
+            |> option.from_result
+          })
+          |> result.map_error(query_error_to_string)
+        }
+        Error(_) -> Error("Invalid UUID format")
+      }
     }
     Ok(None) -> Ok(None)
     Error(err) -> Error(err)
@@ -189,45 +191,63 @@ pub fn update_task_status(
   id: String,
   status: TaskStatus,
 ) -> Result(Option(Task), String) {
-  let now = birl.to_iso8601(birl.now())
-  let status_str = task.status_to_string(status)
+  case uuid.from_string(id) {
+    Ok(uuid_id) -> {
+      let now = timestamp.system_time()
+      let status_str = task.status_to_string(status)
 
-  // Also update started_at/completed_at based on status
-  let sql = case status {
-    task.InProgress ->
-      "UPDATE tasks SET status = $1, started_at = COALESCE(started_at, $2), updated_at = $2
-       WHERE id = $3 RETURNING "
-      <> task_select_cols
-    task.Complete ->
-      "UPDATE tasks SET status = $1, completed_at = $2, updated_at = $2
-       WHERE id = $3 RETURNING " <> task_select_cols
-    task.Queued ->
-      "UPDATE tasks SET status = $1, queued_at = COALESCE(queued_at, $2), updated_at = $2
-       WHERE id = $3 RETURNING "
-      <> task_select_cols
-    _ -> "UPDATE tasks SET status = $1, updated_at = $2
-       WHERE id = $3 RETURNING " <> task_select_cols
+      // Use the appropriate status-specific SQL based on status
+      case status {
+        task.InProgress ->
+          sql.update_task_status_in_progress(db, status_str, now, uuid_id)
+          |> result.map(fn(returned) {
+            list.first(returned.rows)
+            |> result.map(update_task_status_in_progress_row_to_task)
+            |> option.from_result
+          })
+          |> result.map_error(query_error_to_string)
+
+        task.Complete ->
+          sql.update_task_status_complete(db, status_str, now, uuid_id)
+          |> result.map(fn(returned) {
+            list.first(returned.rows)
+            |> result.map(update_task_status_complete_row_to_task)
+            |> option.from_result
+          })
+          |> result.map_error(query_error_to_string)
+
+        task.Queued ->
+          sql.update_task_status_queued(db, status_str, now, uuid_id)
+          |> result.map(fn(returned) {
+            list.first(returned.rows)
+            |> result.map(update_task_status_queued_row_to_task)
+            |> option.from_result
+          })
+          |> result.map_error(query_error_to_string)
+
+        _ ->
+          sql.update_task_status_generic(db, status_str, now, uuid_id)
+          |> result.map(fn(returned) {
+            list.first(returned.rows)
+            |> result.map(update_task_status_generic_row_to_task)
+            |> option.from_result
+          })
+          |> result.map_error(query_error_to_string)
+      }
+    }
+    Error(_) -> Error("Invalid UUID format")
   }
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(status_str))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(id))
-  |> pog.returning(task_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
 }
 
 /// Delete a task
 pub fn delete_task(db: Connection, id: String) -> Result(Bool, String) {
-  let sql = "DELETE FROM tasks WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.count > 0 })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(id) {
+    Ok(uuid_id) ->
+      sql.delete_task(db, uuid_id)
+      |> result.map(fn(returned) { returned.count > 0 })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 // =============================================================================
@@ -239,26 +259,21 @@ pub fn create_task_run(
   db: Connection,
   task_id: String,
 ) -> Result(TaskRun, String) {
-  let now = birl.to_iso8601(birl.now())
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) -> {
+      let now = timestamp.system_time()
 
-  let sql =
-    "INSERT INTO task_runs (task_id, status, progress_percent, started_at)
-     VALUES ($1, 'running', 0, $2)
-     RETURNING id, task_id, status, current_phase, progress_percent,
-               started_at, completed_at, error_message"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(task_id))
-  |> pog.parameter(pog.text(now))
-  |> pog.returning(task_run_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) {
-    case list.first(returned.rows) {
-      Ok(run) -> run
-      Error(_) -> panic as "Insert should return a row"
+      sql.create_task_run(db, uuid_id, now)
+      |> result.map(fn(returned) {
+        case list.first(returned.rows) {
+          Ok(row) -> create_task_run_row_to_task_run(row)
+          Error(_) -> panic as "Insert should return a row"
+        }
+      })
+      |> result.map_error(query_error_to_string)
     }
-  })
-  |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Get a task run by ID
@@ -266,17 +281,17 @@ pub fn get_task_run(
   db: Connection,
   id: String,
 ) -> Result(Option(TaskRun), String) {
-  let sql =
-    "SELECT id, task_id, status, current_phase, progress_percent,
-            started_at, completed_at, error_message
-     FROM task_runs WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.returning(task_run_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(id) {
+    Ok(uuid_id) ->
+      sql.get_task_run_by_id(db, uuid_id)
+      |> result.map(fn(returned) {
+        list.first(returned.rows)
+        |> result.map(get_task_run_row_to_task_run)
+        |> option.from_result
+      })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// List runs for a task
@@ -284,18 +299,15 @@ pub fn list_task_runs(
   db: Connection,
   task_id: String,
 ) -> Result(List(TaskRun), String) {
-  let sql =
-    "SELECT id, task_id, status, current_phase, progress_percent,
-            started_at, completed_at, error_message
-     FROM task_runs WHERE task_id = $1
-     ORDER BY started_at DESC"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(task_id))
-  |> pog.returning(task_run_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.rows })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) ->
+      sql.list_task_runs(db, uuid_id)
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_task_runs_row_to_task_run)
+      })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Update task run progress
@@ -305,20 +317,17 @@ pub fn update_run_progress(
   phase: String,
   progress_percent: Int,
 ) -> Result(Option(TaskRun), String) {
-  let sql =
-    "UPDATE task_runs SET current_phase = $1, progress_percent = $2
-     WHERE id = $3
-     RETURNING id, task_id, status, current_phase, progress_percent,
-               started_at, completed_at, error_message"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(phase))
-  |> pog.parameter(pog.int(progress_percent))
-  |> pog.parameter(pog.text(run_id))
-  |> pog.returning(task_run_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(run_id) {
+    Ok(uuid_id) ->
+      sql.update_task_run_progress(db, phase, progress_percent, uuid_id)
+      |> result.map(fn(returned) {
+        list.first(returned.rows)
+        |> result.map(update_task_run_progress_row_to_task_run)
+        |> option.from_result
+      })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Complete a task run (success or failure)
@@ -328,25 +337,22 @@ pub fn complete_task_run(
   status: TaskRunStatus,
   error_message: Option(String),
 ) -> Result(Option(TaskRun), String) {
-  let now = birl.to_iso8601(birl.now())
-  let status_str = task.run_status_to_string(status)
+  case uuid.from_string(run_id) {
+    Ok(uuid_id) -> {
+      let now = timestamp.system_time()
+      let status_str = task.run_status_to_string(status)
+      let error_msg = option.unwrap(error_message, "")
 
-  let sql =
-    "UPDATE task_runs SET status = $1, completed_at = $2, error_message = $3,
-            progress_percent = CASE WHEN $1 = 'completed' THEN 100 ELSE progress_percent END
-     WHERE id = $4
-     RETURNING id, task_id, status, current_phase, progress_percent,
-               started_at, completed_at, error_message"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(status_str))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.nullable(pog.text, error_message))
-  |> pog.parameter(pog.text(run_id))
-  |> pog.returning(task_run_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
+      sql.complete_task_run(db, status_str, now, error_msg, uuid_id)
+      |> result.map(fn(returned) {
+        list.first(returned.rows)
+        |> result.map(complete_task_run_row_to_task_run)
+        |> option.from_result
+      })
+      |> result.map_error(query_error_to_string)
+    }
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 // =============================================================================
@@ -362,30 +368,22 @@ pub fn add_run_log(
   log_level: LogLevel,
   message: String,
 ) -> Result(TaskRunLog, String) {
-  let now = birl.to_iso8601(birl.now())
-  let level_str = task.log_level_to_string(log_level)
+  case uuid.from_string(run_id) {
+    Ok(uuid_id) -> {
+      let now = timestamp.system_time()
+      let level_str = task.log_level_to_string(log_level)
 
-  let sql =
-    "INSERT INTO task_run_logs (task_run_id, phase, agent_type, log_level, message, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, task_run_id, phase, agent_type, log_level, message, created_at"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(run_id))
-  |> pog.parameter(pog.text(phase))
-  |> pog.parameter(pog.text(agent_type))
-  |> pog.parameter(pog.text(level_str))
-  |> pog.parameter(pog.text(message))
-  |> pog.parameter(pog.text(now))
-  |> pog.returning(task_run_log_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) {
-    case list.first(returned.rows) {
-      Ok(log) -> log
-      Error(_) -> panic as "Insert should return a row"
+      sql.add_task_run_log(db, uuid_id, phase, agent_type, level_str, message, now)
+      |> result.map(fn(returned) {
+        case list.first(returned.rows) {
+          Ok(row) -> add_task_run_log_row_to_task_run_log(row)
+          Error(_) -> panic as "Insert should return a row"
+        }
+      })
+      |> result.map_error(query_error_to_string)
     }
-  })
-  |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// List logs for a task run
@@ -393,128 +391,15 @@ pub fn list_run_logs(
   db: Connection,
   run_id: String,
 ) -> Result(List(TaskRunLog), String) {
-  let sql =
-    "SELECT id, task_run_id, phase, agent_type, log_level, message, created_at
-     FROM task_run_logs WHERE task_run_id = $1
-     ORDER BY created_at ASC"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(run_id))
-  |> pog.returning(task_run_log_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.rows })
-  |> result.map_error(query_error_to_string)
-}
-
-// =============================================================================
-// Row Decoders
-// =============================================================================
-
-fn task_row_decoder() -> decode.Decoder(Task) {
-  use id <- decode.field(0, decode.string)
-  use project_id <- decode.field(1, decode.string)
-  use title <- decode.field(2, decode.string)
-  use description <- decode.field(3, decode.string)
-  use acceptance_criteria <- decode.field(4, decode.optional(decode.string))
-  use status_str <- decode.field(5, decode.string)
-  use priority <- decode.field(6, decode.int)
-  use model_name <- decode.field(7, decode.optional(decode.string))
-  use dependencies_json <- decode.field(8, decode.string)
-  use created_at <- decode.field(9, decode.string)
-  use updated_at <- decode.field(10, decode.string)
-  use started_at <- decode.field(11, decode.optional(decode.string))
-  use completed_at <- decode.field(12, decode.optional(decode.string))
-  use is_agentic <- decode.field(13, decode.bool)
-  use github_repo_url <- decode.field(14, decode.optional(decode.string))
-  use queued_at <- decode.field(15, decode.optional(decode.string))
-  use worker_id <- decode.field(16, decode.optional(decode.string))
-
-  let status = case task.status_from_string(status_str) {
-    Ok(s) -> s
-    Error(_) -> Created
+  case uuid.from_string(run_id) {
+    Ok(uuid_id) ->
+      sql.list_task_run_logs(db, uuid_id)
+      |> result.map(fn(returned) {
+        list.map(returned.rows, list_task_run_logs_row_to_task_run_log)
+      })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
   }
-
-  let dependencies = parse_dependencies(dependencies_json)
-
-  decode.success(Task(
-    id: id,
-    project_id: project_id,
-    title: title,
-    description: description,
-    acceptance_criteria: acceptance_criteria,
-    status: status,
-    priority: priority,
-    model_name: model_name,
-    dependencies: dependencies,
-    created_at: created_at,
-    updated_at: updated_at,
-    started_at: started_at,
-    completed_at: completed_at,
-    is_agentic: is_agentic,
-    github_repo_url: github_repo_url,
-    queued_at: queued_at,
-    worker_id: worker_id,
-  ))
-}
-
-fn parse_dependencies(json_str: String) -> List(String) {
-  let decoder = decode.list(decode.string)
-  case json.parse(json_str, decoder) {
-    Ok(deps) -> deps
-    Error(_) -> []
-  }
-}
-
-fn task_run_row_decoder() -> decode.Decoder(TaskRun) {
-  use id <- decode.field(0, decode.string)
-  use task_id <- decode.field(1, decode.string)
-  use status_str <- decode.field(2, decode.string)
-  use current_phase <- decode.field(3, decode.optional(decode.string))
-  use progress_percent <- decode.field(4, decode.int)
-  use started_at <- decode.field(5, decode.string)
-  use completed_at <- decode.field(6, decode.optional(decode.string))
-  use error_message <- decode.field(7, decode.optional(decode.string))
-
-  let status = case task.run_status_from_string(status_str) {
-    Ok(s) -> s
-    Error(_) -> Running
-  }
-
-  decode.success(TaskRun(
-    id: id,
-    task_id: task_id,
-    status: status,
-    current_phase: current_phase,
-    progress_percent: progress_percent,
-    started_at: started_at,
-    completed_at: completed_at,
-    error_message: error_message,
-  ))
-}
-
-fn task_run_log_row_decoder() -> decode.Decoder(TaskRunLog) {
-  use id <- decode.field(0, decode.string)
-  use task_run_id <- decode.field(1, decode.string)
-  use phase <- decode.field(2, decode.string)
-  use agent_type <- decode.field(3, decode.string)
-  use level_str <- decode.field(4, decode.string)
-  use message <- decode.field(5, decode.string)
-  use created_at <- decode.field(6, decode.string)
-
-  let log_level = case task.log_level_from_string(level_str) {
-    Ok(l) -> l
-    Error(_) -> LogInfo
-  }
-
-  decode.success(TaskRunLog(
-    id: id,
-    task_run_id: task_run_id,
-    phase: phase,
-    agent_type: agent_type,
-    log_level: log_level,
-    message: message,
-    created_at: created_at,
-  ))
 }
 
 // =============================================================================
@@ -527,17 +412,13 @@ pub fn enqueue_task(
   task_id: String,
   priority: Int,
 ) -> Result(Nil, String) {
-  let sql =
-    "INSERT INTO task_queue (task_id, priority)
-     VALUES ($1, $2)
-     ON CONFLICT (task_id) DO UPDATE SET priority = $2, queued_at = NOW()"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(task_id))
-  |> pog.parameter(pog.int(priority))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) ->
+      sql.enqueue_task(db, uuid_id, priority)
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Claim the next task from the queue for a worker
@@ -546,21 +427,11 @@ pub fn claim_next_task(
   db: Connection,
   worker_id: String,
 ) -> Result(Option(#(String, String)), String) {
-  // Use the PostgreSQL function we created in the migration
-  let sql = "SELECT * FROM claim_next_task($1)"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(worker_id))
-  |> pog.returning({
-    use task_id <- decode.field(0, decode.optional(decode.string))
-    use queue_id <- decode.field(1, decode.optional(decode.string))
-    decode.success(#(task_id, queue_id))
-  })
-  |> pog.execute(db)
+  sql.claim_next_task(db, worker_id)
   |> result.map(fn(returned) {
     case list.first(returned.rows) {
-      Ok(#(Some(tid), Some(qid))) -> Some(#(tid, qid))
-      _ -> None
+      Ok(row) -> Some(#(uuid.to_string(row.task_id), uuid.to_string(row.queue_id)))
+      Error(_) -> None
     }
   })
   |> result.map_error(query_error_to_string)
@@ -572,14 +443,15 @@ pub fn release_task(
   task_id: String,
   error_message: Option(String),
 ) -> Result(Nil, String) {
-  let sql = "SELECT release_task($1, $2)"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(task_id))
-  |> pog.parameter(pog.nullable(pog.text, error_message))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) -> {
+      let error_msg = option.unwrap(error_message, "")
+      sql.release_task(db, uuid_id, error_msg)
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    }
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Complete a task in the queue (removes from queue)
@@ -588,32 +460,22 @@ pub fn complete_task_in_queue(
   task_id: String,
   success: Bool,
 ) -> Result(Nil, String) {
-  let sql = "SELECT complete_task_in_queue($1, $2)"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(task_id))
-  |> pog.parameter(pog.bool(success))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) ->
+      sql.complete_task_queue(db, uuid_id, success)
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Recover orphaned tasks (called on worker startup)
 /// Returns the number of tasks recovered
 pub fn recover_orphaned_tasks(db: Connection) -> Result(Int, String) {
-  let sql = "SELECT recover_orphaned_tasks()"
-
-  let count_decoder = {
-    use count <- decode.field(0, decode.int)
-    decode.success(count)
-  }
-
-  pog.query(sql)
-  |> pog.returning(count_decoder)
-  |> pog.execute(db)
+  sql.recover_orphaned_tasks(db)
   |> result.map(fn(returned) {
     case list.first(returned.rows) {
-      Ok(count) -> count
+      Ok(row) -> row.recover_orphaned_tasks
       Error(_) -> 0
     }
   })
@@ -622,15 +484,10 @@ pub fn recover_orphaned_tasks(db: Connection) -> Result(Int, String) {
 
 /// Get queued tasks for a worker (for display/monitoring)
 pub fn list_queued_tasks(db: Connection) -> Result(List(Task), String) {
-  let sql = "SELECT " <> task_select_cols <> "
-     FROM tasks t
-     JOIN task_queue tq ON tq.task_id = t.id
-     ORDER BY tq.priority DESC, tq.queued_at ASC"
-
-  pog.query(sql)
-  |> pog.returning(task_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.rows })
+  sql.list_queued_tasks(db)
+  |> result.map(fn(returned) {
+    list.map(returned.rows, list_queued_tasks_row_to_task)
+  })
   |> result.map_error(query_error_to_string)
 }
 
@@ -640,20 +497,20 @@ pub fn assign_task_to_worker(
   task_id: String,
   worker_id: String,
 ) -> Result(Option(Task), String) {
-  let now = birl.to_iso8601(birl.now())
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) -> {
+      let now = timestamp.system_time()
 
-  let sql = "UPDATE tasks SET worker_id = $1, status = 'in_progress',
-            started_at = COALESCE(started_at, $2), updated_at = $2
-     WHERE id = $3 RETURNING " <> task_select_cols
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(worker_id))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(task_id))
-  |> pog.returning(task_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
+      sql.assign_task_worker(db, worker_id, now, uuid_id)
+      |> result.map(fn(returned) {
+        list.first(returned.rows)
+        |> result.map(assign_task_worker_row_to_task)
+        |> option.from_result
+      })
+      |> result.map_error(query_error_to_string)
+    }
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Clear worker assignment from task
@@ -661,16 +518,496 @@ pub fn unassign_task_worker(
   db: Connection,
   task_id: String,
 ) -> Result(Option(Task), String) {
-  let now = birl.to_iso8601(birl.now())
+  case uuid.from_string(task_id) {
+    Ok(uuid_id) -> {
+      let now = timestamp.system_time()
 
-  let sql = "UPDATE tasks SET worker_id = NULL, updated_at = $1
-     WHERE id = $2 RETURNING " <> task_select_cols
+      sql.unassign_task_worker(db, now, uuid_id)
+      |> result.map(fn(returned) {
+        list.first(returned.rows)
+        |> result.map(unassign_task_worker_row_to_task)
+        |> option.from_result
+      })
+      |> result.map_error(query_error_to_string)
+    }
+    Error(_) -> Error("Invalid UUID format")
+  }
+}
 
-  pog.query(sql)
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(task_id))
-  |> pog.returning(task_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
-  |> result.map_error(query_error_to_string)
+// =============================================================================
+// Row Mapping Helpers
+// =============================================================================
+
+fn timestamp_to_string(ts: Option(timestamp.Timestamp)) -> String {
+  case ts {
+    Some(t) -> {
+      let #(seconds, _nanoseconds) = timestamp.to_unix_seconds_and_nanoseconds(t)
+      birl.from_unix(seconds) |> birl.to_iso8601
+    }
+    None -> ""
+  }
+}
+
+fn timestamp_to_option_string(
+  ts: Option(timestamp.Timestamp),
+) -> Option(String) {
+  case ts {
+    Some(t) -> {
+      let #(seconds, _nanoseconds) = timestamp.to_unix_seconds_and_nanoseconds(t)
+      Some(birl.from_unix(seconds) |> birl.to_iso8601)
+    }
+    None -> None
+  }
+}
+
+fn parse_dependencies(json_str: Option(String)) -> List(String) {
+  case json_str {
+    Some(s) -> {
+      case json.parse(s, decode.list(decode.string)) {
+        Ok(deps) -> deps
+        Error(_) -> []
+      }
+    }
+    None -> []
+  }
+}
+
+fn status_from_string(s: String) -> TaskStatus {
+  case task.status_from_string(s) {
+    Ok(status) -> status
+    Error(_) -> Created
+  }
+}
+
+fn run_status_from_string(s: String) -> TaskRunStatus {
+  case task.run_status_from_string(s) {
+    Ok(status) -> status
+    Error(_) -> Running
+  }
+}
+
+fn log_level_from_string(s: String) -> LogLevel {
+  case task.log_level_from_string(s) {
+    Ok(level) -> level
+    Error(_) -> LogInfo
+  }
+}
+
+// Task row mappers for each query type
+
+fn list_tasks_row_to_task(row: sql.ListTasksAllRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn list_tasks_by_project_row_to_task(row: sql.ListTasksByProjectRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn list_tasks_by_status_row_to_task(row: sql.ListTasksByStatusRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn list_tasks_by_project_and_status_row_to_task(
+  row: sql.ListTasksByProjectAndStatusRow,
+) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn get_task_row_to_task(row: sql.GetTaskByIdRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn create_task_row_to_task(row: sql.CreateTaskRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn update_task_row_to_task(row: sql.UpdateTaskRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn update_task_status_in_progress_row_to_task(
+  row: sql.UpdateTaskStatusInProgressRow,
+) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn update_task_status_complete_row_to_task(
+  row: sql.UpdateTaskStatusCompleteRow,
+) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn update_task_status_queued_row_to_task(
+  row: sql.UpdateTaskStatusQueuedRow,
+) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn update_task_status_generic_row_to_task(
+  row: sql.UpdateTaskStatusGenericRow,
+) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn list_queued_tasks_row_to_task(row: sql.ListQueuedTasksRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn assign_task_worker_row_to_task(row: sql.AssignTaskWorkerRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+fn unassign_task_worker_row_to_task(row: sql.UnassignTaskWorkerRow) -> Task {
+  Task(
+    id: uuid.to_string(row.id),
+    project_id: uuid.to_string(row.project_id),
+    title: row.title,
+    description: row.description,
+    acceptance_criteria: row.acceptance_criteria,
+    status: status_from_string(row.status),
+    priority: option.unwrap(row.priority, 3),
+    model_name: row.model_name,
+    dependencies: parse_dependencies(row.dependencies),
+    created_at: timestamp_to_string(row.created_at),
+    updated_at: timestamp_to_string(row.updated_at),
+    started_at: timestamp_to_option_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    is_agentic: row.is_agentic,
+    github_repo_url: row.github_repo_url,
+    queued_at: timestamp_to_option_string(row.queued_at),
+    worker_id: row.worker_id,
+  )
+}
+
+// Task run row mappers
+
+fn create_task_run_row_to_task_run(row: sql.CreateTaskRunRow) -> TaskRun {
+  TaskRun(
+    id: uuid.to_string(row.id),
+    task_id: uuid.to_string(row.task_id),
+    status: run_status_from_string(row.status),
+    current_phase: row.current_phase,
+    progress_percent: option.unwrap(row.progress_percent, 0),
+    started_at: timestamp_to_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    error_message: row.error_message,
+  )
+}
+
+fn get_task_run_row_to_task_run(row: sql.GetTaskRunByIdRow) -> TaskRun {
+  TaskRun(
+    id: uuid.to_string(row.id),
+    task_id: uuid.to_string(row.task_id),
+    status: run_status_from_string(row.status),
+    current_phase: row.current_phase,
+    progress_percent: option.unwrap(row.progress_percent, 0),
+    started_at: timestamp_to_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    error_message: row.error_message,
+  )
+}
+
+fn list_task_runs_row_to_task_run(row: sql.ListTaskRunsRow) -> TaskRun {
+  TaskRun(
+    id: uuid.to_string(row.id),
+    task_id: uuid.to_string(row.task_id),
+    status: run_status_from_string(row.status),
+    current_phase: row.current_phase,
+    progress_percent: option.unwrap(row.progress_percent, 0),
+    started_at: timestamp_to_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    error_message: row.error_message,
+  )
+}
+
+fn update_task_run_progress_row_to_task_run(
+  row: sql.UpdateTaskRunProgressRow,
+) -> TaskRun {
+  TaskRun(
+    id: uuid.to_string(row.id),
+    task_id: uuid.to_string(row.task_id),
+    status: run_status_from_string(row.status),
+    current_phase: row.current_phase,
+    progress_percent: option.unwrap(row.progress_percent, 0),
+    started_at: timestamp_to_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    error_message: row.error_message,
+  )
+}
+
+fn complete_task_run_row_to_task_run(row: sql.CompleteTaskRunRow) -> TaskRun {
+  TaskRun(
+    id: uuid.to_string(row.id),
+    task_id: uuid.to_string(row.task_id),
+    status: run_status_from_string(row.status),
+    current_phase: row.current_phase,
+    progress_percent: option.unwrap(row.progress_percent, 0),
+    started_at: timestamp_to_string(row.started_at),
+    completed_at: timestamp_to_option_string(row.completed_at),
+    error_message: row.error_message,
+  )
+}
+
+// Task run log row mappers
+
+fn add_task_run_log_row_to_task_run_log(
+  row: sql.AddTaskRunLogRow,
+) -> TaskRunLog {
+  TaskRunLog(
+    id: uuid.to_string(row.id),
+    task_run_id: uuid.to_string(row.task_run_id),
+    phase: row.phase,
+    agent_type: row.agent_type,
+    log_level: log_level_from_string(row.log_level),
+    message: row.message,
+    created_at: timestamp_to_string(row.created_at),
+  )
+}
+
+fn list_task_run_logs_row_to_task_run_log(
+  row: sql.ListTaskRunLogsRow,
+) -> TaskRunLog {
+  TaskRunLog(
+    id: uuid.to_string(row.id),
+    task_run_id: uuid.to_string(row.task_run_id),
+    phase: row.phase,
+    agent_type: row.agent_type,
+    log_level: log_level_from_string(row.log_level),
+    message: row.message,
+    created_at: timestamp_to_string(row.created_at),
+  )
 }

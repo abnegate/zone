@@ -11,7 +11,7 @@
 # Stage 1: Build Rust tool runner (optional)
 # This stage is skipped if runner directory doesn't exist
 # =============================================================================
-FROM rust:1.84-slim-bookworm AS rust-builder
+FROM rust:1.92-slim-bookworm AS rust-builder
 
 WORKDIR /build
 

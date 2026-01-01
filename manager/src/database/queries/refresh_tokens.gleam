@@ -1,11 +1,15 @@
 import auth/jwt
 import database/connection.{type Connection, query_error_to_string}
-import gleam/dynamic/decode
+import database/queries/sql
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/time/timestamp
-import pog
+import youid/uuid
+
+// =============================================================================
+// Refresh Token Queries (using Squirrel-generated SQL)
+// =============================================================================
 
 /// Store a refresh token (hashed)
 pub fn create_refresh_token(
@@ -16,25 +20,27 @@ pub fn create_refresh_token(
   user_agent: Option(String),
   ip_address: Option(String),
 ) -> Result(Nil, String) {
-  let token_hash = jwt.hash_token(token)
-  // Convert Unix timestamp (seconds) to gleam timestamp
-  let expires_ts = timestamp.from_unix_seconds(expires_at)
+  case uuid.from_string(user_id) {
+    Ok(uuid_id) -> {
+      let token_hash = jwt.hash_token(token)
+      // Convert Unix timestamp (seconds) to gleam timestamp
+      let expires_ts = timestamp.from_unix_seconds(expires_at)
+      let user_agent_str = option.unwrap(user_agent, "")
+      let ip_address_str = option.unwrap(ip_address, "")
 
-  let sql =
-    "
-    INSERT INTO refresh_tokens (user_id, token_hash, expires_at, user_agent, ip_address)
-    VALUES ($1::uuid, $2, $3, $4, $5)
-  "
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(user_id))
-  |> pog.parameter(pog.text(token_hash))
-  |> pog.parameter(pog.timestamp(expires_ts))
-  |> pog.parameter(pog.nullable(pog.text, user_agent))
-  |> pog.parameter(pog.nullable(pog.text, ip_address))
-  |> pog.execute(db)
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(query_error_to_string)
+      sql.create_refresh_token(
+        db,
+        uuid_id,
+        token_hash,
+        expires_ts,
+        user_agent_str,
+        ip_address_str,
+      )
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(query_error_to_string)
+    }
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Validate a refresh token and get user_id
@@ -44,19 +50,12 @@ pub fn validate_refresh_token(
 ) -> Result(Option(String), String) {
   let token_hash = jwt.hash_token(token)
 
-  let sql =
-    "
-    SELECT user_id FROM refresh_tokens
-    WHERE token_hash = $1
-      AND expires_at > NOW()
-      AND revoked_at IS NULL
-  "
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(token_hash))
-  |> pog.returning(user_id_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(r) { list.first(r.rows) |> option.from_result })
+  sql.validate_refresh_token(db, token_hash)
+  |> result.map(fn(returned) {
+    list.first(returned.rows)
+    |> result.map(fn(row) { uuid.to_string(row.user_id) })
+    |> option.from_result
+  })
   |> result.map_error(query_error_to_string)
 }
 
@@ -67,17 +66,8 @@ pub fn revoke_refresh_token(
 ) -> Result(Bool, String) {
   let token_hash = jwt.hash_token(token)
 
-  let sql =
-    "
-    UPDATE refresh_tokens
-    SET revoked_at = NOW()
-    WHERE token_hash = $1 AND revoked_at IS NULL
-  "
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(token_hash))
-  |> pog.execute(db)
-  |> result.map(fn(r) { r.count > 0 })
+  sql.revoke_refresh_token(db, token_hash)
+  |> result.map(fn(returned) { returned.count > 0 })
   |> result.map_error(query_error_to_string)
 }
 
@@ -86,57 +76,34 @@ pub fn revoke_all_user_tokens(
   db: Connection,
   user_id: String,
 ) -> Result(Int, String) {
-  let sql =
-    "
-    UPDATE refresh_tokens
-    SET revoked_at = NOW()
-    WHERE user_id = $1 AND revoked_at IS NULL
-  "
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(user_id))
-  |> pog.execute(db)
-  |> result.map(fn(r) { r.count })
-  |> result.map_error(query_error_to_string)
+  case uuid.from_string(user_id) {
+    Ok(uuid_id) ->
+      sql.revoke_all_user_tokens(db, uuid_id)
+      |> result.map(fn(returned) { returned.count })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
 
 /// Clean up expired tokens (run periodically)
 pub fn cleanup_expired_tokens(db: Connection) -> Result(Int, String) {
-  let sql = "DELETE FROM refresh_tokens WHERE expires_at < NOW()"
-
-  pog.query(sql)
-  |> pog.execute(db)
-  |> result.map(fn(r) { r.count })
+  sql.cleanup_expired_tokens(db)
+  |> result.map(fn(returned) { returned.count })
   |> result.map_error(query_error_to_string)
 }
 
 /// Get count of active tokens for a user
 pub fn count_user_tokens(db: Connection, user_id: String) -> Result(Int, String) {
-  let sql =
-    "
-    SELECT COUNT(*)::int FROM refresh_tokens
-    WHERE user_id = $1 AND expires_at > NOW() AND revoked_at IS NULL
-  "
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(user_id))
-  |> pog.returning(count_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(r) {
-    case list.first(r.rows) {
-      Ok(count) -> count
-      Error(_) -> 0
-    }
-  })
-  |> result.map_error(query_error_to_string)
-}
-
-// --- Decoders ---
-
-fn user_id_decoder() -> decode.Decoder(String) {
-  decode.at([0], decode.string)
-}
-
-fn count_decoder() -> decode.Decoder(Int) {
-  decode.at([0], decode.int)
+  case uuid.from_string(user_id) {
+    Ok(uuid_id) ->
+      sql.count_user_tokens(db, uuid_id)
+      |> result.map(fn(returned) {
+        case list.first(returned.rows) {
+          Ok(row) -> row.count
+          Error(_) -> 0
+        }
+      })
+      |> result.map_error(query_error_to_string)
+    Error(_) -> Error("Invalid UUID format")
+  }
 }
