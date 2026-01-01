@@ -1,6 +1,6 @@
 import birl
 import database/connection.{type Connection, query_error_to_string}
-import gleam/dynamic/decode
+import database/queries/sql
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -8,10 +8,9 @@ import models/project.{
   type CreateProjectRequest, type Project, type ProjectStatus,
   type UpdateProjectRequest, Active, Project,
 }
-import pog
 
 // =============================================================================
-// Project Queries
+// Project Queries (using Squirrel-generated SQL)
 // =============================================================================
 
 /// List all projects, optionally filtered by status
@@ -21,27 +20,14 @@ pub fn list_projects(
 ) -> Result(List(Project), String) {
   case status_filter {
     None -> {
-      let sql =
-        "SELECT id, name, description, status, github_repo_url, created_at, updated_at
-         FROM projects ORDER BY updated_at DESC"
-
-      pog.query(sql)
-      |> pog.returning(project_row_decoder())
-      |> pog.execute(db)
-      |> result.map(fn(returned) { returned.rows })
+      sql.list_projects_all(db)
+      |> result.map(fn(rows) { list.map(rows, row_to_project) })
       |> result.map_error(query_error_to_string)
     }
     Some(status) -> {
       let status_str = project.status_to_string(status)
-      let sql =
-        "SELECT id, name, description, status, github_repo_url, created_at, updated_at
-         FROM projects WHERE status = $1 ORDER BY updated_at DESC"
-
-      pog.query(sql)
-      |> pog.parameter(pog.text(status_str))
-      |> pog.returning(project_row_decoder())
-      |> pog.execute(db)
-      |> result.map(fn(returned) { returned.rows })
+      sql.list_projects_by_status(db, status_str)
+      |> result.map(fn(rows) { list.map(rows, row_to_project) })
       |> result.map_error(query_error_to_string)
     }
   }
@@ -52,15 +38,12 @@ pub fn get_project(
   db: Connection,
   id: String,
 ) -> Result(Option(Project), String) {
-  let sql =
-    "SELECT id, name, description, status, github_repo_url, created_at, updated_at
-     FROM projects WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.returning(project_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
+  sql.get_project_by_id(db, id)
+  |> result.map(fn(rows) {
+    list.first(rows)
+    |> result.map(row_to_project)
+    |> option.from_result
+  })
   |> result.map_error(query_error_to_string)
 }
 
@@ -75,23 +58,18 @@ pub fn create_project(
     None -> "active"
   }
 
-  let sql =
-    "INSERT INTO projects (name, description, status, github_repo_url, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING id, name, description, status, github_repo_url, created_at, updated_at"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(req.name))
-  |> pog.parameter(pog.nullable(pog.text, req.description))
-  |> pog.parameter(pog.text(status_str))
-  |> pog.parameter(pog.nullable(pog.text, req.github_repo_url))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(now))
-  |> pog.returning(project_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) {
-    case list.first(returned.rows) {
-      Ok(proj) -> proj
+  sql.create_project(
+    db,
+    req.name,
+    req.description,
+    status_str,
+    req.github_repo_url,
+    now,
+    now,
+  )
+  |> result.map(fn(rows) {
+    case list.first(rows) {
+      Ok(row) -> row_to_project(row)
       Error(_) -> panic as "Insert should return a row"
     }
   })
@@ -122,23 +100,11 @@ pub fn update_project(
         None -> existing.github_repo_url
       }
 
-      let sql =
-        "UPDATE projects SET name = $1, description = $2, status = $3,
-         github_repo_url = $4, updated_at = $5
-         WHERE id = $6
-         RETURNING id, name, description, status, github_repo_url, created_at, updated_at"
-
-      pog.query(sql)
-      |> pog.parameter(pog.text(name))
-      |> pog.parameter(pog.nullable(pog.text, description))
-      |> pog.parameter(pog.text(status))
-      |> pog.parameter(pog.nullable(pog.text, github_repo_url))
-      |> pog.parameter(pog.text(now))
-      |> pog.parameter(pog.text(id))
-      |> pog.returning(project_row_decoder())
-      |> pog.execute(db)
-      |> result.map(fn(returned) {
-        list.first(returned.rows) |> option.from_result
+      sql.update_project(db, name, description, status, github_repo_url, now, id)
+      |> result.map(fn(rows) {
+        list.first(rows)
+        |> result.map(row_to_project)
+        |> option.from_result
       })
       |> result.map_error(query_error_to_string)
     }
@@ -149,12 +115,8 @@ pub fn update_project(
 
 /// Delete a project by ID
 pub fn delete_project(db: Connection, id: String) -> Result(Bool, String) {
-  let sql = "DELETE FROM projects WHERE id = $1"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(id))
-  |> pog.execute(db)
-  |> result.map(fn(returned) { returned.count > 0 })
+  sql.delete_project(db, id)
+  |> result.map(fn(count) { count > 0 })
   |> result.map_error(query_error_to_string)
 }
 
@@ -165,18 +127,12 @@ pub fn link_github(
   repo_url: String,
 ) -> Result(Option(Project), String) {
   let now = birl.to_iso8601(birl.now())
-  let sql =
-    "UPDATE projects SET github_repo_url = $1, updated_at = $2
-     WHERE id = $3
-     RETURNING id, name, description, status, github_repo_url, created_at, updated_at"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(repo_url))
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(id))
-  |> pog.returning(project_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
+  sql.link_project_github(db, repo_url, now, id)
+  |> result.map(fn(rows) {
+    list.first(rows)
+    |> result.map(row_to_project)
+    |> option.from_result
+  })
   |> result.map_error(query_error_to_string)
 }
 
@@ -186,45 +142,32 @@ pub fn unlink_github(
   id: String,
 ) -> Result(Option(Project), String) {
   let now = birl.to_iso8601(birl.now())
-  let sql =
-    "UPDATE projects SET github_repo_url = NULL, updated_at = $1
-     WHERE id = $2
-     RETURNING id, name, description, status, github_repo_url, created_at, updated_at"
-
-  pog.query(sql)
-  |> pog.parameter(pog.text(now))
-  |> pog.parameter(pog.text(id))
-  |> pog.returning(project_row_decoder())
-  |> pog.execute(db)
-  |> result.map(fn(returned) { list.first(returned.rows) |> option.from_result })
+  sql.unlink_project_github(db, now, id)
+  |> result.map(fn(rows) {
+    list.first(rows)
+    |> result.map(row_to_project)
+    |> option.from_result
+  })
   |> result.map_error(query_error_to_string)
 }
 
 // =============================================================================
-// Row Decoders
+// Row Mapping
 // =============================================================================
 
-fn project_row_decoder() -> decode.Decoder(Project) {
-  use id <- decode.field(0, decode.string)
-  use name <- decode.field(1, decode.string)
-  use description <- decode.field(2, decode.optional(decode.string))
-  use status_str <- decode.field(3, decode.string)
-  use github_repo_url <- decode.field(4, decode.optional(decode.string))
-  use created_at <- decode.field(5, decode.string)
-  use updated_at <- decode.field(6, decode.string)
-
-  let status = case project.status_from_string(status_str) {
+fn row_to_project(row: sql.ListProjectsAllRow) -> Project {
+  let status = case project.status_from_string(row.status) {
     Ok(s) -> s
     Error(_) -> Active
   }
 
-  decode.success(Project(
-    id: id,
-    name: name,
-    description: description,
+  Project(
+    id: row.id,
+    name: row.name,
+    description: row.description,
     status: status,
-    github_repo_url: github_repo_url,
-    created_at: created_at,
-    updated_at: updated_at,
-  ))
+    github_repo_url: row.github_repo_url,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  )
 }

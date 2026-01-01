@@ -101,7 +101,7 @@ fn fetch_url(cfg: WebConfig) -> Result(ContentItem, ContentSourceError) {
       // Add User-Agent header
       let final_req =
         req_with_headers
-        |> request.set_header("User-Agent", "Voiz/1.0")
+        |> request.set_header("User-Agent", "Zone/1.0")
 
       // Make the request
       case httpc.send(final_req) {

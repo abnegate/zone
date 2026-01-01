@@ -143,7 +143,7 @@ fn fetch_ical(url: String) -> Result(String, ContentSourceError) {
     Ok(req) -> {
       let final_req =
         req
-        |> request.set_header("User-Agent", "Voiz/1.0")
+        |> request.set_header("User-Agent", "Zone/1.0")
         |> request.set_header("Accept", "text/calendar")
 
       case httpc.send(final_req) {
