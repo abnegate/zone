@@ -1,4 +1,7 @@
 services:
+  # =============================================================================
+  # Infrastructure
+  # =============================================================================
   traefik:
     image: traefik:${DOCKER_VERSION_TRAEFIK:-v3.6}
     container_name: traefik
@@ -16,6 +19,7 @@ services:
     entrypoint: ["/custom-entrypoint.sh"]
     command:
       - --api.dashboard=true
+      - --api.insecure=false
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=zone_edge
@@ -29,7 +33,7 @@ services:
       - --metrics.prometheus.addEntryPointsLabels=true
       - --metrics.prometheus.addServicesLabels=true
       - --metrics.prometheus.addRoutersLabels=true
-      - --entrypoints.metrics.address=:8080
+      - --entrypoints.metrics.address=:8083
     ports:
       - "80:80"
       - "443:443"
@@ -65,6 +69,47 @@ services:
       retries: 3
       start_period: 10s
 
+  # =============================================================================
+  # Data Storage
+  # =============================================================================
+  postgres:
+    image: pgvector/pgvector:${DOCKER_VERSION_POSTGRES:-pg16}
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  valkey:
+    image: valkey/valkey:${DOCKER_VERSION_VALKEY:-8.1-alpine}
+    container_name: valkey
+    restart: unless-stopped
+    volumes:
+      - valkey_data:/data
+    command: valkey-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # =============================================================================
+  # AI/LLM Services
+  # =============================================================================
   ollama:
     image: ollama/ollama:${DOCKER_VERSION_OLLAMA:-0.13.5}
     container_name: ollama
@@ -75,16 +120,17 @@ services:
       - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS}
     volumes:
       - ollama_data:/root/.ollama
+    # Uncomment for GPU acceleration (requires nvidia-docker)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     networks:
       - internal
       - edge  # Needs internet access to pull models
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
@@ -107,64 +153,9 @@ services:
     volumes:
       - ollama_data:/root/.ollama
       - ./ollama/pull-models.sh:/pull-models.sh:ro
-    networks:
-      - internal
     entrypoint: ["/bin/sh", "/pull-models.sh"]
-
-  postgres:
-    image: pgvector/pgvector:${DOCKER_VERSION_POSTGRES:-pg16}
-    container_name: postgres
-    restart: unless-stopped
-    environment:
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
     networks:
       - internal
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  valkey:
-    image: valkey/valkey:${DOCKER_VERSION_VALKEY:-8.1-alpine}
-    container_name: valkey
-    restart: unless-stopped
-    command: valkey-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-    volumes:
-      - valkey_data:/data
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
-
-  postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:${DOCKER_VERSION_POSTGRES_EXPORTER:-v0.16.0}
-    container_name: postgres-exporter
-    restart: unless-stopped
-    profiles:
-      - monitoring
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9187/metrics"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
 
   litellm:
     image: ghcr.io/berriai/litellm:${DOCKER_VERSION_LITELLM:-main-v1.59.13}
@@ -225,132 +216,9 @@ services:
       retries: 5
       start_period: 60s
 
-  installer:
-    build:
-      context: ./installer
-      dockerfile: Dockerfile
-    container_name: zone-installer
-    restart: "no"
-    profiles:
-      - installer
-    ports:
-      - "127.0.0.1:8000:8000"
-    volumes:
-      - ./.env.example:/project/.env.example:ro
-      - ./.env:/project/.env
-      - ./auth:/project/auth
-    working_dir: /project
-
-  gluetun:
-    image: qmcgaw/gluetun:${DOCKER_VERSION_GLUETUN:-v3.41}
-    container_name: gluetun
-    restart: unless-stopped
-    profiles:
-      - vpn
-    cap_add:
-      - NET_ADMIN
-    environment:
-      - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
-      - VPN_TYPE=${VPN_TYPE}
-      # VPN_TYPE=openvpn
-      - OPENVPN_USER=${VPN_OPENVPN_USER}
-      - OPENVPN_PASSWORD=${VPN_OPENVPN_PASSWORD}
-      # VPN_TYPE=wireguard
-      - WIREGUARD_PRIVATE_KEY=${VPN_WIREGUARD_PRIVATE_KEY}
-      - WIREGUARD_ADDRESSES=${VPN_WIREGUARD_ADDRESSES}
-      - TZ=${ADVANCED_TZ}
-      - FIREWALL_OUTBOUND_SUBNETS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
-      - UPDATER_PERIOD=24h
-    networks:
-      - internal
-      - edge
-    healthcheck:
-      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
-      interval: 60s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-
-  searxng:
-    image: searxng/searxng:${DOCKER_VERSION_SEARXNG:-2024.12.28-93f5c6cc0}
-    container_name: searxng
-    restart: unless-stopped
-    profiles:
-      - vpn
-    network_mode: "service:gluetun"
-    depends_on:
-      gluetun:
-        condition: service_healthy
-    environment:
-      - SEARXNG_SECRET_KEY=${SECURITY_SEARXNG_SECRET_KEY}
-      - SEARXNG_SERVER__BASE_URL=${SEARCH_SEARXNG_SERVER_BASE_URL}
-      - SEARXNG_SERVER__INSTANCE_NAME=${SEARCH_SEARXNG_INSTANCE_NAME}
-      - SEARXNG_GENERAL__INSTANCE_NAME=${SEARCH_SEARXNG_INSTANCE_NAME}
-      - TZ=${ADVANCED_TZ}
-    volumes:
-      - ./searxng/settings.yml.template:/searxng/settings.yml.template:ro
-      - ./searxng/entrypoint.sh:/searxng/entrypoint.sh:ro
-      - ./searxng/limiter.toml:/etc/searxng/limiter.toml:ro
-    entrypoint: ["/bin/sh", "/searxng/entrypoint.sh"]
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-  openwebui:
-    image: ghcr.io/open-webui/open-webui:${DOCKER_VERSION_OPENWEBUI:-v0.5.6}
-    container_name: openwebui
-    restart: unless-stopped
-    depends_on:
-      litellm:
-        condition: service_healthy
-    environment:
-      - OPENAI_API_BASE_URLS=http://litellm:4000/v1
-      - OPENAI_API_KEYS=${SECURITY_LITELLM_MASTER_KEY}
-      - ENABLE_OLLAMA_API=false
-      - ENABLE_OPENAI_API=true
-      - TASK_MODEL_EXTERNAL=${WEBUI_TASK_MODEL_EXTERNAL}
-      - ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
-      - WEB_SEARCH_ENGINE=${SEARCH_ENGINE}
-      - WEB_SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT}
-      - WEB_SEARCH_CONCURRENT_REQUESTS=${SEARCH_CONCURRENT_REQUESTS}
-      - SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL}
-      - WEBUI_AUTH=${WEBUI_AUTH}
-      - ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}
-      - DEFAULT_USER_ROLE=${WEBUI_DEFAULT_USER_ROLE:-pending}
-      - DEFAULT_LOCALE=${WEBUI_DEFAULT_LOCALE}
-      - ENABLE_PERSISTENT_CONFIG=${WEBUI_ENABLE_PERSISTENT_CONFIG}
-      - CORS_ALLOW_ORIGIN=${WEBUI_CORS_ALLOW_ORIGIN}
-      - USER_AGENT=${WEBUI_USER_AGENT:-zone/1.0}
-      - TZ=${ADVANCED_TZ}
-    volumes:
-      - openwebui_data:/app/backend/data
-    networks:
-      - internal
-      - edge
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=zone_edge
-      - traefik.http.services.openwebui.loadbalancer.server.port=8080
-      - traefik.http.routers.openwebui.rule=Host(`${DOMAIN_HOST_WEBUI}`)
-      - traefik.http.routers.openwebui.entrypoints=web
-      - traefik.http.routers.openwebui.service=openwebui
-      - traefik.http.routers.openwebui.middlewares=security-headers
-      - traefik.http.routers.openwebui-secure.rule=Host(`${DOMAIN_HOST_WEBUI}`)
-      - traefik.http.routers.openwebui-secure.entrypoints=websecure
-      - traefik.http.routers.openwebui-secure.service=openwebui
-      - traefik.http.routers.openwebui-secure.middlewares=security-headers
-      - traefik.http.routers.openwebui-secure.tls=true
-      - traefik.http.routers.openwebui-secure.tls.certresolver=letsencrypt
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
-
+  # =============================================================================
+  # Application Services
+  # =============================================================================
   manager:
     build:
       context: ./manager
@@ -371,8 +239,9 @@ services:
       - LITELLM_HOST=http://litellm:4000
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_MANAGER_API_KEY=${SECURITY_MANAGER_API_KEY}
+      - JWT_SECRET=${JWT_SECRET}
       - POSTGRES_HOST=postgres
-      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_DB=${MANAGER_POSTGRES_DB:-manager}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - VALKEY_HOST=valkey
@@ -439,6 +308,122 @@ services:
       retries: 3
       start_period: 10s
 
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:${DOCKER_VERSION_OPENWEBUI:-v0.5.6}
+    container_name: openwebui
+    restart: unless-stopped
+    depends_on:
+      litellm:
+        condition: service_healthy
+    environment:
+      - OPENAI_API_BASE_URLS=http://litellm:4000/v1
+      - OPENAI_API_KEYS=${SECURITY_LITELLM_MASTER_KEY}
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_OPENAI_API=true
+      - TASK_MODEL_EXTERNAL=${WEBUI_TASK_MODEL_EXTERNAL}
+      - ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
+      - WEB_SEARCH_ENGINE=${SEARCH_ENGINE}
+      - WEB_SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT}
+      - WEB_SEARCH_CONCURRENT_REQUESTS=${SEARCH_CONCURRENT_REQUESTS}
+      - SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL}
+      - WEBUI_AUTH=${WEBUI_AUTH}
+      - ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}
+      - DEFAULT_USER_ROLE=${WEBUI_DEFAULT_USER_ROLE:-pending}
+      - DEFAULT_LOCALE=${WEBUI_DEFAULT_LOCALE}
+      - ENABLE_PERSISTENT_CONFIG=${WEBUI_ENABLE_PERSISTENT_CONFIG}
+      - CORS_ALLOW_ORIGIN=${WEBUI_CORS_ALLOW_ORIGIN}
+      - USER_AGENT=${WEBUI_USER_AGENT:-zone/1.0}
+      - TZ=${ADVANCED_TZ}
+    volumes:
+      - openwebui_data:/app/backend/data
+    networks:
+      - internal
+      - edge
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=zone_edge
+      - traefik.http.services.openwebui.loadbalancer.server.port=8080
+      - traefik.http.routers.openwebui.rule=Host(`${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.openwebui.entrypoints=web
+      - traefik.http.routers.openwebui.service=openwebui
+      - traefik.http.routers.openwebui.middlewares=security-headers
+      - traefik.http.routers.openwebui-secure.rule=Host(`${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.openwebui-secure.entrypoints=websecure
+      - traefik.http.routers.openwebui-secure.service=openwebui
+      - traefik.http.routers.openwebui-secure.middlewares=security-headers
+      - traefik.http.routers.openwebui-secure.tls=true
+      - traefik.http.routers.openwebui-secure.tls.certresolver=letsencrypt
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # =============================================================================
+  # VPN & Search (vpn profile)
+  # =============================================================================
+  gluetun:
+    image: ghcr.io/thecfu/gluetun-exporter:${DOCKER_VERSION_GLUETUN_BUNDLED:-0.1.1-bundled}
+    container_name: gluetun
+    restart: unless-stopped
+    profiles:
+      - vpn
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
+      - VPN_TYPE=${VPN_TYPE}
+      # VPN_TYPE=openvpn
+      - OPENVPN_USER=${VPN_OPENVPN_USER}
+      - OPENVPN_PASSWORD=${VPN_OPENVPN_PASSWORD}
+      # VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${VPN_WIREGUARD_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${VPN_WIREGUARD_ADDRESSES}
+      - TZ=${ADVANCED_TZ}
+      - FIREWALL_OUTBOUND_SUBNETS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      - UPDATER_PERIOD=24h
+    networks:
+      - internal
+      - edge
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  searxng:
+    image: searxng/searxng:${DOCKER_VERSION_SEARXNG:-2024.12.28-93f5c6cc0}
+    container_name: searxng
+    restart: unless-stopped
+    profiles:
+      - vpn
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    network_mode: "service:gluetun"
+    environment:
+      - SEARXNG_SECRET_KEY=${SECURITY_SEARXNG_SECRET_KEY}
+      - SEARXNG_SERVER__BASE_URL=${SEARCH_SEARXNG_SERVER_BASE_URL}
+      - SEARXNG_SERVER__INSTANCE_NAME=${SEARCH_SEARXNG_INSTANCE_NAME}
+      - SEARXNG_GENERAL__INSTANCE_NAME=${SEARCH_SEARXNG_INSTANCE_NAME}
+      - TZ=${ADVANCED_TZ}
+    volumes:
+      - ./searxng/settings.yml.template:/searxng/settings.yml.template:ro
+      - ./searxng/entrypoint.sh:/searxng/entrypoint.sh:ro
+      - ./searxng/limiter.toml:/etc/searxng/limiter.toml:ro
+    entrypoint: ["/bin/sh", "/searxng/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # =============================================================================
+  # Monitoring (monitoring profile)
+  # =============================================================================
   prometheus:
     image: prom/prometheus:${DOCKER_VERSION_PROMETHEUS:-v3.4.0}
     container_name: prometheus
@@ -519,6 +504,74 @@ services:
       retries: 3
       start_period: 30s
 
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:${DOCKER_VERSION_POSTGRES_EXPORTER:-v0.16.0}
+    container_name: postgres-exporter
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9187/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  valkey-exporter:
+    image: oliver006/redis_exporter:${DOCKER_VERSION_REDIS_EXPORTER:-v1.67.0}
+    container_name: valkey-exporter
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    depends_on:
+      valkey:
+        condition: service_healthy
+    environment:
+      - REDIS_ADDR=redis://valkey:6379
+    networks:
+      - internal
+
+  ollama-metrics:
+    image: ghcr.io/norskhelsenett/ollama-metrics:${DOCKER_VERSION_OLLAMA_METRICS:-latest}
+    container_name: ollama-metrics
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - PORT=8080
+    networks:
+      - internal
+
+  # =============================================================================
+  # Utilities (installer profile)
+  # =============================================================================
+  installer:
+    build:
+      context: ./installer
+      dockerfile: Dockerfile
+    container_name: zone-installer
+    restart: "no"
+    profiles:
+      - installer
+    volumes:
+      - ./.env.example:/project/.env.example:ro
+      - ./.env:/project/.env
+      - ./auth:/project/auth
+    working_dir: /project
+    ports:
+      - "127.0.0.1:8000:8000"
+
 networks:
   edge:
     name: zone_edge
@@ -540,20 +593,20 @@ networks:
         - subnet: 172.19.0.0/24
 
 volumes:
-  ollama_data:
-    name: zone_ollama_data
-  openwebui_data:
-    name: zone_openwebui_data
   traefik_letsencrypt:
     name: zone_traefik_letsencrypt
   postgres_data:
     name: zone_postgres_data
   valkey_data:
     name: zone_valkey_data
+  ollama_data:
+    name: zone_ollama_data
   manager_repos:
     name: zone_manager_repos
   manager_artifacts:
     name: zone_manager_artifacts
+  openwebui_data:
+    name: zone_openwebui_data
   prometheus_data:
     name: zone_prometheus_data
   grafana_data:

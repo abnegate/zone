@@ -9,7 +9,7 @@ CREATE TABLE source_types (
   name TEXT PRIMARY KEY,
   description TEXT NOT NULL,
   config_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Insert supported source types with their config schemas
@@ -56,11 +56,11 @@ CREATE TABLE sources (
   url TEXT,
   -- Status
   is_active BOOLEAN DEFAULT TRUE,
-  last_verified_at TIMESTAMP WITH TIME ZONE,
+  last_verified_at TIMESTAMP,
   last_error TEXT,
   -- Timestamps
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
   -- Unique name per source type
   UNIQUE(name, source_type)
 );

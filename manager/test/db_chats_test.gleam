@@ -57,11 +57,14 @@ pub fn list_chats_returns_created_chats_test() {
     let req1 = CreateChatRequest(model_name: "llama3.2", first_message: None)
     let req2 = CreateChatRequest(model_name: "gpt-4", first_message: None)
 
-    let _ = chats.create_chat(db, req1) |> should.be_ok()
-    let _ = chats.create_chat(db, req2) |> should.be_ok()
+    let chat1 = chats.create_chat(db, req1) |> should.be_ok()
+    let chat2 = chats.create_chat(db, req2) |> should.be_ok()
 
     let all_chats = chats.list_chats(db, None) |> should.be_ok()
-    list.length(all_chats) |> should.equal(2)
+    // Check that both created chats are in the list (there may be more from parallel tests)
+    let ids = list.map(all_chats, fn(c) { c.id })
+    list.contains(ids, chat1.id) |> should.be_true()
+    list.contains(ids, chat2.id) |> should.be_true()
   })
 }
 
@@ -71,24 +74,28 @@ pub fn list_chats_filter_archived_test() {
     let req2 = CreateChatRequest(model_name: "gpt-4", first_message: None)
 
     let chat1 = chats.create_chat(db, req1) |> should.be_ok()
-    let _ = chats.create_chat(db, req2) |> should.be_ok()
+    let chat2 = chats.create_chat(db, req2) |> should.be_ok()
 
     // Archive one chat
     let _ = chats.archive_chat(db, chat1.id) |> should.be_ok()
 
-    // Filter by archived = false
+    // Filter by archived = false should include chat2 but not chat1
     let active = chats.list_chats(db, Some(False)) |> should.be_ok()
-    list.length(active) |> should.equal(1)
+    let active_ids = list.map(active, fn(c) { c.id })
+    list.contains(active_ids, chat2.id) |> should.be_true()
+    list.contains(active_ids, chat1.id) |> should.be_false()
 
-    // Filter by archived = true
+    // Filter by archived = true should include chat1 but not chat2
     let archived = chats.list_chats(db, Some(True)) |> should.be_ok()
-    list.length(archived) |> should.equal(1)
+    let archived_ids = list.map(archived, fn(c) { c.id })
+    list.contains(archived_ids, chat1.id) |> should.be_true()
+    list.contains(archived_ids, chat2.id) |> should.be_false()
   })
 }
 
 pub fn get_chat_not_found_test() {
   test_db.with_db(fn(db) {
-    chats.get_chat(db, "nonexistent-id")
+    chats.get_chat(db, "00000000-0000-0000-0000-000000000000")
     |> should.be_ok()
     |> should.equal(None)
   })
@@ -145,7 +152,7 @@ pub fn update_chat_title_test() {
 
 pub fn update_chat_title_not_found_test() {
   test_db.with_db(fn(db) {
-    chats.update_chat_title(db, "nonexistent-id", "New Title")
+    chats.update_chat_title(db, "00000000-0000-0000-0000-000000000000", "New Title")
     |> should.be_ok()
     |> should.equal(None)
   })
@@ -201,7 +208,7 @@ pub fn delete_chat_test() {
 
 pub fn delete_chat_not_found_test() {
   test_db.with_db(fn(db) {
-    chats.delete_chat(db, "nonexistent-id")
+    chats.delete_chat(db, "00000000-0000-0000-0000-000000000000")
     |> should.be_ok()
     |> should.equal(False)
   })

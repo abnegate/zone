@@ -12,8 +12,9 @@ import test_db
 // Helper: Create an organization for workspace tests
 // =============================================================================
 
-fn create_test_org(db, name: String, slug: String) {
-  let req = CreateOrganizationRequest(name: name, slug: slug, description: None)
+fn create_test_org(db) {
+  let slug = test_db.unique_slug("org")
+  let req = CreateOrganizationRequest(name: "Test Org", slug: slug, description: None)
   organizations.create_organization(db, req) |> should.be_ok()
 }
 
@@ -23,7 +24,7 @@ fn create_test_org(db, name: String, slug: String) {
 
 pub fn create_workspace_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(
@@ -44,7 +45,7 @@ pub fn create_workspace_test() {
 
 pub fn create_workspace_without_description_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(
@@ -62,7 +63,7 @@ pub fn create_workspace_without_description_test() {
 
 pub fn list_workspaces_empty_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     workspaces.list_workspaces(db, org.id, False)
     |> should.be_ok()
@@ -72,7 +73,7 @@ pub fn list_workspaces_empty_test() {
 
 pub fn list_workspaces_returns_all_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req1 =
       CreateWorkspaceRequest(
@@ -87,18 +88,21 @@ pub fn list_workspaces_returns_all_test() {
         description: None,
       )
 
-    let _ = workspaces.create_workspace(db, org.id, req1) |> should.be_ok()
-    let _ = workspaces.create_workspace(db, org.id, req2) |> should.be_ok()
+    let ws1 = workspaces.create_workspace(db, org.id, req1) |> should.be_ok()
+    let ws2 = workspaces.create_workspace(db, org.id, req2) |> should.be_ok()
 
     let all = workspaces.list_workspaces(db, org.id, False) |> should.be_ok()
-    list.length(all) |> should.equal(2)
+    // Check that both created workspaces are in the list
+    let ids = list.map(all, fn(w) { w.id })
+    list.contains(ids, ws1.id) |> should.be_true()
+    list.contains(ids, ws2.id) |> should.be_true()
   })
 }
 
 pub fn list_workspaces_scoped_by_organization_test() {
   test_db.with_db(fn(db) {
-    let org1 = create_test_org(db, "Org 1", "org-1")
-    let org2 = create_test_org(db, "Org 2", "org-2")
+    let org1 = create_test_org(db)
+    let org2 = create_test_org(db)
 
     let req1 =
       CreateWorkspaceRequest(
@@ -134,7 +138,7 @@ pub fn list_workspaces_scoped_by_organization_test() {
 
 pub fn list_workspaces_filter_active_only_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req1 =
       CreateWorkspaceRequest(
@@ -149,7 +153,7 @@ pub fn list_workspaces_filter_active_only_test() {
         description: None,
       )
 
-    let _ = workspaces.create_workspace(db, org.id, req1) |> should.be_ok()
+    let ws1 = workspaces.create_workspace(db, org.id, req1) |> should.be_ok()
     let ws2 = workspaces.create_workspace(db, org.id, req2) |> should.be_ok()
 
     // Deactivate ws2
@@ -164,23 +168,25 @@ pub fn list_workspaces_filter_active_only_test() {
       workspaces.update_workspace(db, org.id, ws2.id, update_req)
       |> should.be_ok()
 
-    // All workspaces
+    // All workspaces should include both
     let all = workspaces.list_workspaces(db, org.id, False) |> should.be_ok()
-    list.length(all) |> should.equal(2)
+    let all_ids = list.map(all, fn(w) { w.id })
+    list.contains(all_ids, ws1.id) |> should.be_true()
+    list.contains(all_ids, ws2.id) |> should.be_true()
 
-    // Active only
+    // Active only should include ws1 but not ws2
     let active = workspaces.list_workspaces(db, org.id, True) |> should.be_ok()
-    list.length(active) |> should.equal(1)
-    let assert [ws] = active
-    ws.name |> should.equal("Active WS")
+    let active_ids = list.map(active, fn(w) { w.id })
+    list.contains(active_ids, ws1.id) |> should.be_true()
+    list.contains(active_ids, ws2.id) |> should.be_false()
   })
 }
 
 pub fn get_workspace_not_found_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
-    workspaces.get_workspace(db, org.id, "nonexistent-id")
+    workspaces.get_workspace(db, org.id, "00000000-0000-0000-0000-000000000000")
     |> should.be_ok()
     |> should.equal(None)
   })
@@ -188,7 +194,7 @@ pub fn get_workspace_not_found_test() {
 
 pub fn get_workspace_found_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(
@@ -211,8 +217,8 @@ pub fn get_workspace_found_test() {
 
 pub fn get_workspace_wrong_organization_test() {
   test_db.with_db(fn(db) {
-    let org1 = create_test_org(db, "Org 1", "org-1")
-    let org2 = create_test_org(db, "Org 2", "org-2")
+    let org1 = create_test_org(db)
+    let org2 = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(
@@ -231,7 +237,7 @@ pub fn get_workspace_wrong_organization_test() {
 
 pub fn get_workspace_by_slug_not_found_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     workspaces.get_workspace_by_slug(db, org.id, "nonexistent-slug")
     |> should.be_ok()
@@ -241,7 +247,7 @@ pub fn get_workspace_by_slug_not_found_test() {
 
 pub fn get_workspace_by_slug_found_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(
@@ -263,7 +269,7 @@ pub fn get_workspace_by_slug_found_test() {
 
 pub fn update_workspace_name_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(
@@ -293,7 +299,7 @@ pub fn update_workspace_name_test() {
 
 pub fn update_workspace_slug_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(name: "Test", slug: "old-slug", description: None)
@@ -318,7 +324,7 @@ pub fn update_workspace_slug_test() {
 
 pub fn update_workspace_description_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(name: "Test", slug: "test-ws", description: None)
@@ -344,7 +350,7 @@ pub fn update_workspace_description_test() {
 
 pub fn update_workspace_is_active_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(name: "Test", slug: "test-ws", description: None)
@@ -370,7 +376,7 @@ pub fn update_workspace_is_active_test() {
 
 pub fn update_workspace_not_found_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let update_req =
       UpdateWorkspaceRequest(
@@ -380,7 +386,12 @@ pub fn update_workspace_not_found_test() {
         is_active: None,
       )
 
-    workspaces.update_workspace(db, org.id, "nonexistent-id", update_req)
+    workspaces.update_workspace(
+      db,
+      org.id,
+      "00000000-0000-0000-0000-000000000000",
+      update_req,
+    )
     |> should.be_ok()
     |> should.equal(None)
   })
@@ -388,8 +399,8 @@ pub fn update_workspace_not_found_test() {
 
 pub fn update_workspace_wrong_organization_test() {
   test_db.with_db(fn(db) {
-    let org1 = create_test_org(db, "Org 1", "org-1")
-    let org2 = create_test_org(db, "Org 2", "org-2")
+    let org1 = create_test_org(db)
+    let org2 = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(name: "Test", slug: "test-ws", description: None)
@@ -412,7 +423,7 @@ pub fn update_workspace_wrong_organization_test() {
 
 pub fn delete_workspace_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(name: "Test", slug: "test-ws", description: None)
@@ -430,9 +441,9 @@ pub fn delete_workspace_test() {
 
 pub fn delete_workspace_not_found_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
-    workspaces.delete_workspace(db, org.id, "nonexistent-id")
+    workspaces.delete_workspace(db, org.id, "00000000-0000-0000-0000-000000000000")
     |> should.be_ok()
     |> should.equal(False)
   })
@@ -440,8 +451,8 @@ pub fn delete_workspace_not_found_test() {
 
 pub fn delete_workspace_wrong_organization_test() {
   test_db.with_db(fn(db) {
-    let org1 = create_test_org(db, "Org 1", "org-1")
-    let org2 = create_test_org(db, "Org 2", "org-2")
+    let org1 = create_test_org(db)
+    let org2 = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(name: "Test", slug: "test-ws", description: None)
@@ -467,7 +478,7 @@ pub fn delete_workspace_wrong_organization_test() {
 
 pub fn unique_slug_within_organization_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req1 =
       CreateWorkspaceRequest(name: "WS 1", slug: "same-slug", description: None)
@@ -486,8 +497,8 @@ pub fn unique_slug_within_organization_test() {
 
 pub fn same_slug_allowed_in_different_organizations_test() {
   test_db.with_db(fn(db) {
-    let org1 = create_test_org(db, "Org 1", "org-1")
-    let org2 = create_test_org(db, "Org 2", "org-2")
+    let org1 = create_test_org(db)
+    let org2 = create_test_org(db)
 
     let req =
       CreateWorkspaceRequest(
@@ -512,7 +523,7 @@ pub fn same_slug_allowed_in_different_organizations_test() {
 
 pub fn cascade_delete_workspaces_when_organization_deleted_test() {
   test_db.with_db(fn(db) {
-    let org = create_test_org(db, "Test Org", "test-org")
+    let org = create_test_org(db)
 
     let req1 =
       CreateWorkspaceRequest(name: "WS 1", slug: "ws-1", description: None)
@@ -534,7 +545,7 @@ pub fn cascade_delete_workspaces_when_organization_deleted_test() {
 
     // Workspaces should be cascade deleted - we can't list them since org is gone
     // but we can try to get by ID (which requires org_id, so we create a new org to verify)
-    let new_org = create_test_org(db, "New Org", "new-org")
+    let new_org = create_test_org(db)
 
     // These workspace IDs should not exist anymore
     workspaces.get_workspace(db, new_org.id, ws1.id)

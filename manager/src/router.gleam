@@ -7,6 +7,7 @@ import controllers/projects as projects_routes
 import controllers/sources as sources_routes
 import controllers/tasks as tasks_routes
 import middleware/auth
+import middleware/metrics
 import web.{type Context}
 import wisp.{type Request, type Response}
 
@@ -19,6 +20,13 @@ pub fn handle_request(req: Request, ctx: Context) -> Response {
   case wisp.path_segments(req) {
     // Health check - no auth required
     ["api", "health"] -> wisp.ok()
+
+    // Prometheus metrics endpoint - no auth required for scraping
+    ["metrics"] -> {
+      wisp.response(200)
+      |> wisp.set_header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+      |> wisp.string_body(metrics.export())
+    }
 
     // Auth routes - no auth required (login, register, refresh, logout)
     ["api", "auth", ..rest] -> auth_routes.handle_auth_route(req, rest, ctx)

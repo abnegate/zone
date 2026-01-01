@@ -1,4 +1,3 @@
 -- Get a single workspace by slug within an organization
-SELECT id, organization_id, name, slug, description, is_active, created_at, updated_at
-FROM workspaces
+SELECT id, organization_id, name, slug, description, is_active, created_at::timestamp, updated_at::timestamp FROM workspaces
 WHERE organization_id = $1 AND slug = $2

@@ -94,7 +94,7 @@ describe('ProtectedRoute', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: ['user'],
@@ -124,7 +124,7 @@ describe('ProtectedRoute', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: ['user'],
@@ -153,7 +153,7 @@ describe('ProtectedRoute', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: ['user'],
@@ -185,7 +185,7 @@ describe('ProtectedRoute', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: ['user'],
@@ -214,7 +214,7 @@ describe('ProtectedRoute', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: ['user'],
@@ -243,7 +243,7 @@ describe('ProtectedRoute', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: ['user'],
@@ -271,7 +271,7 @@ describe('ProtectedRoute', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: ['user'],
@@ -300,7 +300,7 @@ describe('ProtectedRoute', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: ['user'],

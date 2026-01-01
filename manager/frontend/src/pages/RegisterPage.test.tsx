@@ -199,7 +199,69 @@ describe('RegisterPage', () => {
     });
   });
 
+  describe('Loading State', () => {
+    it('shows loading spinner when auth is loading', () => {
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: false,
+        isLoading: true,
+        user: null,
+        accessToken: null,
+        refreshToken: null,
+        roles: [],
+        permissions: [],
+        login: jest.fn(),
+        register: mockRegister,
+        logout: jest.fn(),
+        hasPermission: jest.fn(),
+        hasAnyPermission: jest.fn(),
+        hasAllPermissions: jest.fn(),
+        hasRole: jest.fn(),
+      });
+      renderRegisterPage();
+
+      expect(screen.getByText('Loading...')).toBeInTheDocument();
+    });
+
+    it('redirects to home when already authenticated', async () => {
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: true,
+        isLoading: false,
+        user: { id: '1', email: 'test@test.com' },
+        accessToken: 'token',
+        refreshToken: 'refresh',
+        roles: [],
+        permissions: [],
+        login: jest.fn(),
+        register: mockRegister,
+        logout: jest.fn(),
+        hasPermission: jest.fn(),
+        hasAnyPermission: jest.fn(),
+        hasAllPermissions: jest.fn(),
+        hasRole: jest.fn(),
+      });
+      renderRegisterPage();
+
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true });
+      });
+    });
+  });
+
   describe('Edge Cases', () => {
+    it('handles non-Error object in catch block', async () => {
+      mockRegister.mockRejectedValue('String error');
+      renderRegisterPage();
+
+      await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
+      await userEvent.type(screen.getByLabelText(/^password$/i), 'password123');
+      await userEvent.type(screen.getByLabelText(/confirm password/i), 'password123');
+      await userEvent.click(screen.getByRole('button', { name: /create account/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/registration failed/i)).toBeInTheDocument();
+      });
+    });
+
     it('trims whitespace from email', async () => {
       mockRegister.mockResolvedValue(undefined);
       renderRegisterPage();

@@ -18,11 +18,16 @@ scrape_configs:
     static_configs:
       - targets: ['postgres-exporter:9187']
 
-  # Ollama metrics (if available)
+  # Valkey metrics via redis_exporter
+  - job_name: 'valkey'
+    static_configs:
+      - targets: ['valkey-exporter:9121']
+
+  # Ollama metrics via ollama-metrics exporter
   - job_name: 'ollama'
     metrics_path: /metrics
     static_configs:
-      - targets: ['ollama:11434']
+      - targets: ['ollama-metrics:8080']
 
   # LiteLLM metrics
   - job_name: 'litellm'
@@ -35,3 +40,9 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ['manager:8000']
+
+  # Gluetun metrics via bundled exporter (vpn profile only)
+  # Bundled mode provides VPN status + traffic metrics via netlink
+  - job_name: 'gluetun'
+    static_configs:
+      - targets: ['gluetun:8001']

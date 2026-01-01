@@ -176,7 +176,7 @@ export type ModelSource = 'ollama' | 'huggingface' | 'modelscope';
 
 // Pull Progress Types
 export interface PullProgress {
-  type: 'progress' | 'step' | 'complete' | 'error';
+  type: 'progress' | 'step' | 'complete' | 'error' | 'authenticated';
   status?: string;
   percent?: number;
   completed?: number;

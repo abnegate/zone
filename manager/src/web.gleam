@@ -7,6 +7,7 @@
 import cache/connection as cache_connection
 import database/connection.{type Connection}
 import gleam/json
+import middleware/metrics
 import wisp.{type Request, type Response}
 
 // =============================================================================
@@ -55,6 +56,9 @@ pub fn middleware(
   // CSRF protection: require requests with bodies to have
   // known headers that browsers won't send cross-origin
   use req <- wisp.csrf_known_header_protection(req)
+
+  // Record request metrics (duration, count, status)
+  use <- metrics.record_request(req)
 
   handler(req)
 }

@@ -6,7 +6,8 @@
 	shell-postgres shell-valkey db-shell db-migrate \
 	test-manager test-console test-console-coverage test-e2e test-e2e-ui \
 	lint-console format-console check-console \
-	list-models stats prune version env urls install
+	list-models stats prune version env urls install \
+	generate-sql verify-sql
 
 .DEFAULT_GOAL := help
 
@@ -235,7 +236,7 @@ rebuild: ## Rebuild and restart all services
 	@echo "$(BLUE)Rebuilding services...$(NC)"
 	$(DOCKER_COMPOSE) up -d --build --force-recreate
 
-rebuild-manager: ## Rebuild only manager and console services
+rebuild-manager: generate-sql ## Rebuild only manager and console services (auto-generates SQL first)
 	@echo "$(BLUE)Rebuilding manager and console...$(NC)"
 	$(DOCKER_COMPOSE) up -d --build --force-recreate manager console
 
@@ -286,6 +287,30 @@ test: ## Run basic smoke tests for all services
 test-manager: ## Run manager (Gleam) unit tests
 	@echo "$(BLUE)Running manager tests...$(NC)"
 	cd manager && gleam test
+
+generate-sql: ## Generate SQL module from .sql files using squirrel (requires running postgres)
+	@echo "$(BLUE)Generating SQL module with squirrel...$(NC)"
+	@if docker ps --format '{{.Names}}' | grep -q '^postgres$$'; then \
+		cd manager && DATABASE_URL="postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}" gleam run -m squirrel; \
+		echo "$(GREEN)SQL module generated successfully!$(NC)"; \
+	else \
+		echo "$(RED)Error: PostgreSQL container is not running. Start it with 'make up' first.$(NC)"; \
+		exit 1; \
+	fi
+
+verify-sql: ## Verify generated SQL module matches committed version
+	@echo "$(BLUE)Verifying SQL module is up to date...$(NC)"
+	@cd manager && \
+		cp src/database/queries/sql.gleam src/database/queries/sql.gleam.bak && \
+		DATABASE_URL="postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}" gleam run -m squirrel && \
+		if diff -q src/database/queries/sql.gleam src/database/queries/sql.gleam.bak > /dev/null 2>&1; then \
+			echo "$(GREEN)✓ SQL module is up to date$(NC)"; \
+			rm src/database/queries/sql.gleam.bak; \
+		else \
+			echo "$(RED)✗ SQL module is out of date! Run 'make generate-sql' and commit the changes.$(NC)"; \
+			mv src/database/queries/sql.gleam.bak src/database/queries/sql.gleam; \
+			exit 1; \
+		fi
 
 test-console: ## Run console (React) unit tests
 	@echo "$(BLUE)Running console unit tests...$(NC)"

@@ -218,5 +218,66 @@ describe('LoginPage', () => {
       // through E2E tests instead.
       expect(true).toBe(true);
     });
+
+    it('redirects to home when already authenticated', async () => {
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: true,
+        isLoading: false,
+        user: { id: '1', email: 'test@test.com' },
+        accessToken: 'token',
+        refreshToken: 'refresh',
+        roles: [],
+        permissions: [],
+        login: mockLogin,
+        register: jest.fn(),
+        logout: jest.fn(),
+        hasPermission: jest.fn(),
+        hasAnyPermission: jest.fn(),
+        hasAllPermissions: jest.fn(),
+        hasRole: jest.fn(),
+      });
+      renderLoginPage();
+
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith('/', { replace: true });
+      });
+    });
+  });
+
+  describe('Loading State', () => {
+    it('shows loading spinner when auth is loading', () => {
+      mockUseAuth.mockReturnValue({
+        isAuthenticated: false,
+        isLoading: true,
+        user: null,
+        accessToken: null,
+        refreshToken: null,
+        roles: [],
+        permissions: [],
+        login: mockLogin,
+        register: jest.fn(),
+        logout: jest.fn(),
+        hasPermission: jest.fn(),
+        hasAnyPermission: jest.fn(),
+        hasAllPermissions: jest.fn(),
+        hasRole: jest.fn(),
+      });
+      renderLoginPage();
+
+      expect(screen.getByText('Loading...')).toBeInTheDocument();
+    });
+
+    it('handles non-Error object in catch block', async () => {
+      mockLogin.mockRejectedValue('String error');
+      renderLoginPage();
+
+      await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
+      await userEvent.type(screen.getByLabelText(/password/i), 'password123');
+      await userEvent.click(screen.getByRole('button', { name: /sign in/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/login failed/i)).toBeInTheDocument();
+      });
+    });
   });
 });

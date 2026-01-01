@@ -67,7 +67,7 @@ describe('AuthContext', () => {
     });
 
     it('restores auth state from localStorage', async () => {
-      const mockUser = { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false };
+      const mockUser = { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null };
       // Create a valid JWT with future expiry
       const payload = {
         sub: '1',
@@ -94,6 +94,61 @@ describe('AuthContext', () => {
       expect(result.current.isAuthenticated).toBe(true);
       expect(result.current.user).toEqual(mockUser);
     });
+
+    it('handles invalid JWT token format gracefully', async () => {
+      // Token with invalid format (not 3 parts)
+      const invalidToken = 'not-a-valid-jwt';
+      localStorageMock.getItem.mockImplementation((key) => {
+        if (key === 'manager_access_token') return invalidToken;
+        if (key === 'manager_refresh_token') return null;
+        return null;
+      });
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      // Should treat invalid token as unauthenticated
+      expect(result.current.isAuthenticated).toBe(false);
+      expect(result.current.roles).toEqual([]);
+      expect(result.current.permissions).toEqual([]);
+    });
+
+    it('handles malformed JWT payload gracefully', async () => {
+      // Token with 3 parts but invalid base64 in payload
+      const malformedToken = 'header.not_valid_base64!!!.signature';
+      localStorageMock.getItem.mockImplementation((key) => {
+        if (key === 'manager_access_token') return malformedToken;
+        if (key === 'manager_refresh_token') return null;
+        return null;
+      });
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      // Should treat malformed token as unauthenticated
+      expect(result.current.isAuthenticated).toBe(false);
+    });
+
+    it('treats expired token as unauthenticated', async () => {
+      // Create a JWT with past expiry
+      const payload = {
+        sub: '1',
+        email: 'test@test.com',
+        roles: ['user'],
+        permissions: ['chats:read'],
+        exp: Math.floor(Date.now() / 1000) - 3600, // 1 hour ago
+      };
+      const expiredToken = `header.${btoa(JSON.stringify(payload))}.signature`;
+
+      localStorageMock.getItem.mockImplementation((key) => {
+        if (key === 'manager_access_token') return expiredToken;
+        if (key === 'manager_refresh_token') return 'refresh-token';
+        return null;
+      });
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      // Should be treated as unauthenticated due to expiration
+      expect(result.current.isAuthenticated).toBe(false);
+    });
   });
 
   describe('Login', () => {
@@ -102,7 +157,7 @@ describe('AuthContext', () => {
         access_token: 'new-access-token',
         refresh_token: 'new-refresh-token',
         expires_in: 900,
-        user: { id: '1', email: 'user@test.com', display_name: 'User', is_admin: false },
+        user: { id: '1', email: 'user@test.com', display_name: 'User', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         roles: ['user'],
         permissions: ['chats:read', 'chats:create'],
       };
@@ -165,7 +220,7 @@ describe('AuthContext', () => {
         access_token: 'admin-access-token',
         refresh_token: 'admin-refresh-token',
         expires_in: 900,
-        user: { id: '1', email: 'admin@test.com', display_name: 'Admin', is_admin: true },
+        user: { id: '1', email: 'admin@test.com', display_name: 'Admin', is_admin: true, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         roles: ['admin'],
         permissions: ['chats:read', 'chats:create', 'users:delete'],
       };
@@ -212,7 +267,7 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         roles: ['user'],
         permissions: ['chats:read'],
       };
@@ -248,7 +303,7 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         roles: ['user'],
         permissions: [],
       });
@@ -275,7 +330,7 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false },
+        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         roles: ['user'],
         permissions: ['chats:read', 'chats:create', 'projects:read'],
       });
@@ -356,7 +411,7 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'admin@test.com', display_name: null, is_admin: true },
+        user: { id: '1', email: 'admin@test.com', display_name: null, is_admin: true, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         roles: ['admin', 'user'],
         permissions: [],
       });
@@ -376,7 +431,7 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'user@test.com', display_name: null, is_admin: false },
+        user: { id: '1', email: 'user@test.com', display_name: null, is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
         roles: ['user'],
         permissions: [],
       });

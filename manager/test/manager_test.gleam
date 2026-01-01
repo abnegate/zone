@@ -1,9 +1,13 @@
-import gleeunit
 import gleeunit/should
+import qcheck_gleeunit_utils/run
+import test_db
 import websocket/pull
 
 pub fn main() {
-  gleeunit.main()
+  // Initialize the test database pool and schema before running tests
+  // This ensures the pool is started in the main process which survives the entire test run
+  test_db.setup()
+  run.run_gleeunit()
 }
 
 // =============================================================================

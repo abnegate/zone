@@ -13,9 +13,9 @@ CREATE TABLE users (
   display_name TEXT,
   is_active BOOLEAN DEFAULT TRUE,
   is_admin BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  last_login_at TIMESTAMP WITH TIME ZONE
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW(),
+  last_login_at TIMESTAMP
 );
 
 CREATE INDEX idx_users_email ON users(email);
@@ -33,7 +33,7 @@ CREATE TABLE permissions (
   description TEXT,
   resource TEXT NOT NULL,
   action TEXT NOT NULL CHECK (action IN ('create', 'read', 'update', 'delete')),
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_permissions_resource ON permissions(resource);
@@ -85,8 +85,8 @@ CREATE TABLE roles (
   name TEXT NOT NULL UNIQUE,
   description TEXT,
   is_system BOOLEAN DEFAULT FALSE,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_roles_name ON roles(name);
@@ -108,7 +108,7 @@ CREATE INDEX idx_role_permissions_role_id ON role_permissions(role_id);
 CREATE TABLE user_roles (
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-  assigned_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  assigned_at TIMESTAMP DEFAULT NOW(),
   assigned_by UUID REFERENCES users(id),
   PRIMARY KEY (user_id, role_id)
 );
@@ -123,9 +123,9 @@ CREATE TABLE refresh_tokens (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   token_hash TEXT NOT NULL UNIQUE,
-  expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  revoked_at TIMESTAMP WITH TIME ZONE,
+  expires_at TIMESTAMP NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW(),
+  revoked_at TIMESTAMP,
   user_agent TEXT,
   ip_address TEXT
 );

@@ -21,8 +21,8 @@ CREATE TABLE workspace_themes (
   -- Corner radius: 'none', 'small', 'medium', 'large'
   border_radius TEXT DEFAULT 'medium',
 
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX idx_workspace_themes_workspace_id ON workspace_themes(workspace_id);
