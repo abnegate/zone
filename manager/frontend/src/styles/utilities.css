@@ -1,17 +1,51 @@
 /* =============================================================================
-   Utility Classes
+   Utility Classes - Obsidian Design
    ============================================================================= */
 
+/* Placeholders */
 .loading-placeholder,
 .empty-placeholder,
 .error-placeholder {
-  padding: var(--spacing-lg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--ui-space-12) var(--ui-space-6);
   text-align: center;
-  color: var(--color-text-muted);
+  color: var(--ui-text-muted);
+}
+
+.empty-placeholder {
+  background: var(--ui-bg-surface);
+  border: 1px dashed var(--ui-border);
+  border-radius: var(--ui-radius-xl);
 }
 
 .error-placeholder {
-  color: var(--color-error);
+  color: var(--ui-error-500);
+  background: var(--ui-error-muted);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--ui-radius-xl);
+}
+
+.placeholder-icon {
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--ui-space-4);
+  color: var(--ui-text-disabled);
+}
+
+.placeholder-title {
+  font-family: var(--ui-font-display);
+  font-size: var(--ui-text-lg);
+  font-weight: 600;
+  color: var(--ui-text-primary);
+  margin-bottom: var(--ui-space-2);
+}
+
+.placeholder-message {
+  font-size: var(--ui-text-sm);
+  max-width: 360px;
 }
 
 /* =============================================================================
@@ -21,30 +55,160 @@
 .page {
   max-width: 1200px;
   margin: 0 auto;
+  animation: ui-fade-up var(--ui-duration-normal) var(--ui-ease-out);
 }
 
 .page--full {
   max-width: none;
 }
 
+.page--narrow {
+  max-width: 720px;
+}
+
 .page-header {
-  margin-bottom: var(--spacing-lg);
+  margin-bottom: var(--ui-space-8);
+  padding-bottom: var(--ui-space-6);
+  border-bottom: 1px solid var(--ui-border);
 }
 
 .page-header h1 {
-  margin: 0 0 var(--spacing-xs) 0;
-  font-size: 1.75rem;
+  margin: 0 0 var(--ui-space-2) 0;
+  font-family: var(--ui-font-display);
+  font-size: var(--ui-text-3xl);
   font-weight: 600;
+  color: var(--ui-text-primary);
+  letter-spacing: var(--ui-tracking-tight);
 }
 
 .page-header .subtitle {
   margin: 0;
-  color: var(--color-text-muted);
+  font-size: var(--ui-text-base);
+  color: var(--ui-text-secondary);
+  line-height: var(--ui-leading-relaxed);
+}
+
+/* =============================================================================
+   Text Utilities
+   ============================================================================= */
+
+.text-muted {
+  color: var(--ui-text-muted);
+}
+
+.text-secondary {
+  color: var(--ui-text-secondary);
+}
+
+.text-accent {
+  color: var(--ui-accent-500);
+}
+
+.text-success {
+  color: var(--ui-success-500);
+}
+
+.text-warning {
+  color: var(--ui-warning-500);
+}
+
+.text-error {
+  color: var(--ui-error-500);
+}
+
+.text-sm {
+  font-size: var(--ui-text-sm);
+}
+
+.text-xs {
+  font-size: var(--ui-text-xs);
+}
+
+.text-mono {
+  font-family: var(--ui-font-mono);
+}
+
+.font-medium {
+  font-weight: 500;
+}
+
+.font-semibold {
+  font-weight: 600;
+}
+
+/* =============================================================================
+   Spacing Utilities
+   ============================================================================= */
+
+.mt-0 { margin-top: 0; }
+.mt-2 { margin-top: var(--ui-space-2); }
+.mt-4 { margin-top: var(--ui-space-4); }
+.mt-6 { margin-top: var(--ui-space-6); }
+.mt-8 { margin-top: var(--ui-space-8); }
+
+.mb-0 { margin-bottom: 0; }
+.mb-2 { margin-bottom: var(--ui-space-2); }
+.mb-4 { margin-bottom: var(--ui-space-4); }
+.mb-6 { margin-bottom: var(--ui-space-6); }
+.mb-8 { margin-bottom: var(--ui-space-8); }
+
+.gap-2 { gap: var(--ui-space-2); }
+.gap-4 { gap: var(--ui-space-4); }
+.gap-6 { gap: var(--ui-space-6); }
+
+/* =============================================================================
+   Flex Utilities
+   ============================================================================= */
+
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.flex-wrap { flex-wrap: wrap; }
+.items-center { align-items: center; }
+.items-start { align-items: flex-start; }
+.justify-between { justify-content: space-between; }
+.justify-center { justify-content: center; }
+.justify-end { justify-content: flex-end; }
+.flex-1 { flex: 1; }
+.flex-shrink-0 { flex-shrink: 0; }
+
+/* =============================================================================
+   Grid Utilities
+   ============================================================================= */
+
+.grid { display: grid; }
+.grid-cols-2 { grid-template-columns: repeat(2, 1fr); }
+.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+/* =============================================================================
+   Visibility
+   ============================================================================= */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.hidden {
+  display: none !important;
 }
 
 /* =============================================================================
    Responsive
    ============================================================================= */
+
+@media (max-width: 768px) {
+  .md\:hidden {
+    display: none !important;
+  }
+}
 
 @media (max-width: 640px) {
   .input-group {
@@ -68,7 +232,7 @@
   }
 
   .modal-content {
-    margin: var(--spacing-md);
+    margin: var(--ui-space-4);
   }
 
   .modal-actions {
@@ -77,5 +241,11 @@
 
   .modal-actions .btn {
     width: 100%;
+  }
+
+  .grid-cols-2,
+  .grid-cols-3,
+  .grid-cols-4 {
+    grid-template-columns: 1fr;
   }
 }

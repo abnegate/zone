@@ -1,7 +1,7 @@
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import ProjectsPage from './ProjectsPage';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { client } from '../api/client';
 import type { Project, Source } from '../types';
+import ProjectsPage from './ProjectsPage';
 
 // Mock client
 jest.mock('../api/client', () => ({
@@ -174,7 +174,9 @@ describe('ProjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '+ New Project' }));
 
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New Project' } });
-    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'New description' } });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'New description' },
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Create Project' }));
 
@@ -550,7 +552,9 @@ describe('ProjectsPage', () => {
         updated_at: '2024-01-04T00:00:00Z',
       },
     ];
-    mockClient.getProjects.mockResolvedValueOnce(mockProjects).mockResolvedValueOnce(projectsWithCancelled);
+    mockClient.getProjects
+      .mockResolvedValueOnce(mockProjects)
+      .mockResolvedValueOnce(projectsWithCancelled);
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -563,7 +567,6 @@ describe('ProjectsPage', () => {
       expect(mockClient.getProjects).toHaveBeenCalledWith('cancelled');
     });
   });
-
 
   it('selects project via keyboard', async () => {
     render(<ProjectsPage />);

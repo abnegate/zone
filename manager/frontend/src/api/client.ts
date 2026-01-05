@@ -25,6 +25,7 @@ import type {
   Workspace,
   WorkspaceTheme,
 } from '../types';
+import type { SourceTypesResponse, SourceVerifyResponse } from '../types';
 import { parse } from '../validation';
 import {
   BrowseResponseSchema,
@@ -50,7 +51,6 @@ import {
   WorkspaceThemeResponseSchema,
   WorkspacesResponseSchema,
 } from '../validation/schemas';
-import type { SourceTypesResponse, SourceVerifyResponse } from '../types';
 
 // In development, set REACT_APP_API_URL=http://localhost:8000
 // In production (served by backend), leave empty to use relative URLs
@@ -73,7 +73,14 @@ class Client {
     return headers;
   }
 
-  async getModels(): Promise<{ models: Array<{ name: string; size: number; modified_at: string; details?: { description?: string; family?: string } }> }> {
+  async getModels(): Promise<{
+    models: Array<{
+      name: string;
+      size: number;
+      modified_at: string;
+      details?: { description?: string; family?: string };
+    }>;
+  }> {
     const response = await fetch(`${API_BASE}/api/models`, {
       headers: this.getHeaders(),
     });
@@ -110,7 +117,18 @@ class Client {
     query = '',
     offset = 0,
     limit = 20
-  ): Promise<{ source: ModelSource; models: Array<{ id: string; name: string; description: string; downloads: number; tags: string[] }>; total?: number | null; has_more: boolean }> {
+  ): Promise<{
+    source: ModelSource;
+    models: Array<{
+      id: string;
+      name: string;
+      description: string;
+      downloads: number;
+      tags: string[];
+    }>;
+    total?: number | null;
+    has_more: boolean;
+  }> {
     const params = new URLSearchParams({
       source,
       q: query,

@@ -1,7 +1,7 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import WorkspaceSettingsPage from './WorkspaceSettingsPage';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { client } from '../api/client';
 import type { WorkspaceTheme } from '../types';
+import WorkspaceSettingsPage from './WorkspaceSettingsPage';
 
 // Mock client
 jest.mock('../api/client', () => ({
@@ -311,7 +311,7 @@ describe('WorkspaceSettingsPage', () => {
 
     expect(screen.getByRole('button', { name: 'Saving...' })).toBeDisabled();
 
-    resolveUpdate!(mockTheme);
+    resolveUpdate?.(mockTheme);
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Save Changes' })).toBeEnabled();
@@ -335,7 +335,7 @@ describe('WorkspaceSettingsPage', () => {
 
     expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeDisabled();
 
-    resolveReset!(mockTheme);
+    resolveReset?.(mockTheme);
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeEnabled();

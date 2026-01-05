@@ -1,7 +1,7 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { WorkspaceProvider, useWorkspace } from './WorkspaceContext';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { client } from '../api/client';
 import type { Organization, Workspace } from '../types';
+import { WorkspaceProvider, useWorkspace } from './WorkspaceContext';
 
 // Mock the client
 jest.mock('../api/client', () => ({
@@ -14,13 +14,47 @@ jest.mock('../api/client', () => ({
 const mockClient = client as jest.Mocked<typeof client>;
 
 const mockOrganizations: Organization[] = [
-  { id: 'org-1', name: 'Org 1', slug: 'org-1', description: null, is_active: true, created_at: '', updated_at: '' },
-  { id: 'org-2', name: 'Org 2', slug: 'org-2', description: null, is_active: true, created_at: '', updated_at: '' },
+  {
+    id: 'org-1',
+    name: 'Org 1',
+    slug: 'org-1',
+    description: null,
+    is_active: true,
+    created_at: '',
+    updated_at: '',
+  },
+  {
+    id: 'org-2',
+    name: 'Org 2',
+    slug: 'org-2',
+    description: null,
+    is_active: true,
+    created_at: '',
+    updated_at: '',
+  },
 ];
 
 const mockWorkspaces: Workspace[] = [
-  { id: 'ws-1', organization_id: 'org-1', name: 'Workspace 1', slug: 'ws-1', description: null, is_active: true, created_at: '', updated_at: '' },
-  { id: 'ws-2', organization_id: 'org-1', name: 'Workspace 2', slug: 'ws-2', description: null, is_active: true, created_at: '', updated_at: '' },
+  {
+    id: 'ws-1',
+    organization_id: 'org-1',
+    name: 'Workspace 1',
+    slug: 'ws-1',
+    description: null,
+    is_active: true,
+    created_at: '',
+    updated_at: '',
+  },
+  {
+    id: 'ws-2',
+    organization_id: 'org-1',
+    name: 'Workspace 2',
+    slug: 'ws-2',
+    description: null,
+    is_active: true,
+    created_at: '',
+    updated_at: '',
+  },
 ];
 
 // Test component to access context
@@ -34,12 +68,8 @@ function TestComponent() {
       <span data-testid="current-org">{ctx.currentOrganization?.name || 'none'}</span>
       <span data-testid="ws-count">{ctx.workspaces.length}</span>
       <span data-testid="current-ws">{ctx.currentWorkspace?.name || 'none'}</span>
-      <button onClick={() => ctx.setCurrentOrganization(mockOrganizations[1])}>
-        Switch Org
-      </button>
-      <button onClick={() => ctx.setCurrentWorkspace(mockWorkspaces[1])}>
-        Switch Workspace
-      </button>
+      <button onClick={() => ctx.setCurrentOrganization(mockOrganizations[1])}>Switch Org</button>
+      <button onClick={() => ctx.setCurrentWorkspace(mockWorkspaces[1])}>Switch Workspace</button>
       <button onClick={() => ctx.refreshOrganizations()}>Refresh Orgs</button>
       <button onClick={() => ctx.refreshWorkspaces()}>Refresh Workspaces</button>
     </div>
@@ -189,9 +219,7 @@ describe('WorkspaceContext', () => {
   describe('setCurrentOrganization', () => {
     it('switches organization and clears workspace', async () => {
       mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
-      mockClient.getWorkspaces
-        .mockResolvedValueOnce(mockWorkspaces)
-        .mockResolvedValueOnce([]);
+      mockClient.getWorkspaces.mockResolvedValueOnce(mockWorkspaces).mockResolvedValueOnce([]);
 
       render(
         <WorkspaceProvider>
@@ -238,11 +266,17 @@ describe('WorkspaceContext', () => {
 
   describe('refreshOrganizations', () => {
     it('refreshes organizations list', async () => {
-      mockClient.getOrganizations
-        .mockResolvedValueOnce(mockOrganizations)
-        .mockResolvedValueOnce([
-          { id: 'org-3', name: 'Org 3', slug: 'org-3', description: null, is_active: true, created_at: '', updated_at: '' },
-        ]);
+      mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations).mockResolvedValueOnce([
+        {
+          id: 'org-3',
+          name: 'Org 3',
+          slug: 'org-3',
+          description: null,
+          is_active: true,
+          created_at: '',
+          updated_at: '',
+        },
+      ]);
       mockClient.getWorkspaces.mockResolvedValue([]);
 
       render(
@@ -268,11 +302,18 @@ describe('WorkspaceContext', () => {
   describe('refreshWorkspaces', () => {
     it('refreshes workspaces list', async () => {
       mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
-      mockClient.getWorkspaces
-        .mockResolvedValueOnce(mockWorkspaces)
-        .mockResolvedValueOnce([
-          { id: 'ws-3', organization_id: 'org-1', name: 'Workspace 3', slug: 'ws-3', description: null, is_active: true, created_at: '', updated_at: '' },
-        ]);
+      mockClient.getWorkspaces.mockResolvedValueOnce(mockWorkspaces).mockResolvedValueOnce([
+        {
+          id: 'ws-3',
+          organization_id: 'org-1',
+          name: 'Workspace 3',
+          slug: 'ws-3',
+          description: null,
+          is_active: true,
+          created_at: '',
+          updated_at: '',
+        },
+      ]);
 
       render(
         <WorkspaceProvider>

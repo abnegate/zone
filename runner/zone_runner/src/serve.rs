@@ -7,9 +7,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-use tool_runner::{
-    CommandExecutor, ErrorCode, InboundMessage, JobRegistry, OutboundMessage,
-};
+use tool_runner::{CommandExecutor, ErrorCode, InboundMessage, JobRegistry, OutboundMessage};
 
 /// Run the daemon, communicating over stdio.
 pub async fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
@@ -236,7 +234,8 @@ async fn handle_message(
             match executor.spawn(&request, tx.clone()).await {
                 Ok(handle) => {
                     // Store process group in registry
-                    if let Err(e) = registry.set_process_group(&job_id, handle.process_group.clone())
+                    if let Err(e) =
+                        registry.set_process_group(&job_id, handle.process_group.clone())
                     {
                         tracing::warn!("Failed to store process group: {}", e);
                     }
@@ -245,8 +244,12 @@ async fn handle_message(
                 Err(e) => {
                     tracing::error!("Failed to spawn command: {}", e);
                     registry.remove(&job_id);
-                    tx.send(OutboundMessage::error(&job_id, e.to_error_code(), e.to_string()))
-                        .await?;
+                    tx.send(OutboundMessage::error(
+                        &job_id,
+                        e.to_error_code(),
+                        e.to_string(),
+                    ))
+                    .await?;
                 }
             }
         }

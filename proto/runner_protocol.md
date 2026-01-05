@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Zone Runner uses a newline-delimited JSON (NDJSON) protocol over stdio for communication between the Gleam backend and the Rust runner process.
+The Zone Runner uses a newline-delimited JSON (NDJSON) protocol over stdio for communication between the backend and the Rust runner process.
 
 ## Message Format
 
@@ -13,8 +13,8 @@ The Zone Runner uses a newline-delimited JSON (NDJSON) protocol over stdio for c
 
 ## Connection Lifecycle
 
-1. Gleam spawns the runner: `zone-runner serve --stdio`
-2. Gleam sends `Hello` message
+1. Backend spawns the runner: `zone-runner serve --stdio`
+2. Backend sends `Hello` message
 3. Runner responds with `HelloAck`
 4. Normal operation: `RunStart`, output streaming, `RunExit`/`RunError`
 5. Cleanup: Close stdin to signal shutdown
@@ -312,7 +312,7 @@ Runner: {"type":"Pong","id":"health-1"}
 ## Security Considerations
 
 1. **Workspace Validation**: Runner validates workspace path exists and is a directory
-2. **No Command Allowlist**: Runner executes any command; security enforcement in Gleam
+2. **No Command Allowlist**: Runner executes any command; security enforcement in backend
 3. **Resource Limits**: Timeout and output limits prevent resource exhaustion
 4. **Process Isolation**: Each command runs in its own process group
 

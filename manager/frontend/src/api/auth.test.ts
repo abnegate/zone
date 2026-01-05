@@ -1,4 +1,4 @@
-import { login, register, refreshToken, logout } from './auth';
+import { login, logout, refreshToken, register } from './auth';
 
 // Mock fetch
 global.fetch = jest.fn();
@@ -14,7 +14,17 @@ describe('auth API', () => {
       const mockResponse = {
         access_token: 'test-access-token',
         refresh_token: 'test-refresh-token',
-        user: { id: '1', email: 'test@test.com' },
+        expires_in: 3600,
+        user: {
+          id: '1',
+          email: 'test@test.com',
+          display_name: null,
+          is_active: true,
+          is_admin: false,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['user'],
         permissions: ['read'],
       };
@@ -62,7 +72,17 @@ describe('auth API', () => {
       const mockResponse = {
         access_token: 'test-access-token',
         refresh_token: 'test-refresh-token',
-        user: { id: '1', email: 'new@test.com' },
+        expires_in: 3600,
+        user: {
+          id: '1',
+          email: 'new@test.com',
+          display_name: null,
+          is_active: true,
+          is_admin: false,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['user'],
         permissions: ['read'],
       };
@@ -122,7 +142,17 @@ describe('auth API', () => {
       const mockResponse = {
         access_token: 'new-access-token',
         refresh_token: 'new-refresh-token',
-        user: { id: '1', email: 'test@test.com' },
+        expires_in: 3600,
+        user: {
+          id: '1',
+          email: 'test@test.com',
+          display_name: null,
+          is_active: true,
+          is_admin: false,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['user'],
         permissions: ['read'],
       };

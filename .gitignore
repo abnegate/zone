@@ -6,8 +6,6 @@ openwebui_data/
 
 # Installer build artifacts
 installer/build/
-installer/manifest.toml
-installer/.gleam/
 
 # Basic auth credentials
 auth/users.htpasswd

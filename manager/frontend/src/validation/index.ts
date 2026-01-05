@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import type { z } from 'zod';
 
 export * from './schemas';
 
@@ -9,9 +9,7 @@ export * from './schemas';
 export function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T> {
   const result = schema.safeParse(data);
   if (!result.success) {
-    const errors = result.error.errors
-      .map((e) => `${e.path.join('.')}: ${e.message}`)
-      .join(', ');
+    const errors = result.error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
     throw new Error(`Validation failed: ${errors}`);
   }
   return result.data;
@@ -44,10 +42,7 @@ export function isValid<T extends z.ZodType>(schema: T, data: unknown): boolean 
  * Get validation errors from a Zod schema.
  * Returns an object mapping field paths to error messages.
  */
-export function getErrors<T extends z.ZodType>(
-  schema: T,
-  data: unknown
-): Record<string, string> {
+export function getErrors<T extends z.ZodType>(schema: T, data: unknown): Record<string, string> {
   const result = schema.safeParse(data);
   if (result.success) {
     return {};

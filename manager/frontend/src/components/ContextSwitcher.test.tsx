@@ -1,6 +1,6 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import ContextSwitcher from './ContextSwitcher';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { useWorkspace } from '../context/WorkspaceContext';
+import ContextSwitcher from './ContextSwitcher';
 
 // Mock useWorkspace
 jest.mock('../context/WorkspaceContext', () => ({
@@ -15,8 +15,24 @@ const mockOrganizations = [
 ];
 
 const mockWorkspaces = [
-  { id: 'ws-1', organization_id: 'org-1', name: 'Workspace 1', slug: 'ws-1', is_active: true, created_at: '', updated_at: '' },
-  { id: 'ws-2', organization_id: 'org-1', name: 'Workspace 2', slug: 'ws-2', is_active: true, created_at: '', updated_at: '' },
+  {
+    id: 'ws-1',
+    organization_id: 'org-1',
+    name: 'Workspace 1',
+    slug: 'ws-1',
+    is_active: true,
+    created_at: '',
+    updated_at: '',
+  },
+  {
+    id: 'ws-2',
+    organization_id: 'org-1',
+    name: 'Workspace 2',
+    slug: 'ws-2',
+    is_active: true,
+    created_at: '',
+    updated_at: '',
+  },
 ];
 
 describe('ContextSwitcher', () => {

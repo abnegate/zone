@@ -1,6 +1,6 @@
-import { renderHook, waitFor, act } from '@testing-library/react';
-import { useModels } from './useModels';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { client } from '../api/client';
+import { useModels } from './useModels';
 
 // Mock the client
 jest.mock('../api/client', () => ({
@@ -60,7 +60,7 @@ describe('useModels', () => {
     const { result } = renderHook(() => useModels());
 
     // Wait a bit to ensure no fetch happens
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(mockClient.getModels).not.toHaveBeenCalled();
     expect(result.current.loading).toBe(true); // Never transitions to false since no fetch
@@ -128,9 +128,7 @@ describe('useModels', () => {
   });
 
   it('handles delete error', async () => {
-    const mockModels = [
-      { name: 'llama2', size: 3800000000, modified_at: '2024-01-01' },
-    ];
+    const mockModels = [{ name: 'llama2', size: 3800000000, modified_at: '2024-01-01' }];
     mockClient.getModels.mockResolvedValueOnce({ models: mockModels });
     mockClient.deleteModel.mockRejectedValueOnce(new Error('Delete failed'));
 

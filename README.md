@@ -46,7 +46,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
      ┌────▼─────┐               ┌──────▼──────┐
      │  Manager │               │   LiteLLM   │  (Semantic Routing)
      │   API    │               │    Proxy    │
-     │ (Gleam)  │               └──────┬──────┘
+     │  (Rust)  │               └──────┬──────┘
      └────┬─────┘                      │
           │                     ┌──────▼──────┐
      ┌────▼─────┐               │   Ollama    │  (LLM Inference)
@@ -92,7 +92,7 @@ Choose your preferred installation method:
 
 #### Option 1: Web Installer (Recommended)
 
-Beautiful web-based wizard built with Gleam.
+Beautiful web-based wizard built with Rust.
 
 ```bash
 git clone <repository-url>
@@ -145,7 +145,7 @@ Interactive command-line wizard for terminal users.
 
 | Service | Description | Port | Tech Stack |
 |---------|-------------|------|------------|
-| **Manager API** | Backend API for platform management | 8000 | Gleam, Wisp, Mist |
+| **Manager API** | Backend API for platform management | 8000 | Rust, Axum, sqlx |
 | **Manager Console** | Web frontend for workspace management | 5173 | React 19, TypeScript, Tailwind |
 | **Open WebUI** | ChatGPT-like interface | 8080 | Python, Svelte |
 | **LiteLLM** | LLM proxy with semantic routing | 4000 | Python |
@@ -281,6 +281,30 @@ curl https://manager.yourdomain.com/api/workspaces \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
+### Zone CLI
+
+The `zone` CLI tool allows you to interact with the Zone platform from your terminal:
+
+```bash
+# Install the CLI
+make install-cli
+
+# Login to your Zone server
+zone login https://zone.example.com
+
+# Run an agent task
+zone run "Add input validation to the user form"
+
+# Resume a previous session
+zone resume
+
+# List recent sessions
+zone sessions
+
+# Logout
+zone logout
+```
+
 ### Model Selection
 
 The system provides three models:
@@ -295,11 +319,11 @@ The system provides three models:
 
 | Component | Technology |
 |-----------|------------|
-| Backend | Gleam 1.7.1+, Wisp, Mist, Pog |
+| Backend | Rust 1.83+, Axum, sqlx, Redis |
 | Frontend | React 19, TypeScript, Tailwind CSS, React Router |
 | Database | PostgreSQL 16 with pgvector |
 | Cache | Valkey (Redis fork) |
-| Testing | Gleeunit (backend), Jest + Playwright (frontend) |
+| Testing | Cargo test (backend), Jest + Playwright (frontend) |
 | CI/CD | GitHub Actions |
 
 ### Local Development
@@ -309,18 +333,21 @@ The system provides three models:
 make dev
 
 # Run backend tests
-cd manager && gleam test
+cd runner && cargo test
 
 # Run frontend tests
 cd manager/frontend && npm test
 
 # Run E2E tests
 cd manager/frontend && npm run test:e2e
+
+# Install the zone CLI
+make install-cli
 ```
 
 ### Database Migrations
 
-Migrations are in `manager/migrations/`:
+Migrations are in `runner/zone_server/migrations/`:
 
 1. `001_initial_schema.sql` - Core tables (chats, messages, projects, tasks)
 2. `002_wiki_schema.sql` - Wiki/documentation
@@ -335,31 +362,34 @@ Migrations are in `manager/migrations/`:
 
 ```
 zone/
-├── manager/                 # Platform backend + frontend
-│   ├── src/                 # Gleam backend source
-│   │   ├── controllers/     # HTTP endpoint handlers
-│   │   ├── database/        # Database queries
-│   │   ├── models/          # Data models
-│   │   ├── auth/            # Authentication & JWT
-│   │   ├── middleware/      # Auth, metrics middleware
-│   │   └── router.gleam     # API routing
-│   ├── frontend/            # React frontend
-│   │   ├── src/components/  # UI components
-│   │   ├── src/pages/       # Page components
-│   │   ├── src/context/     # React context (Auth, Theme, Workspace)
-│   │   └── src/hooks/       # Custom hooks
-│   ├── migrations/          # SQL migrations
-│   └── test/                # Backend tests
-├── installer/               # Web-based setup wizard
+├── runner/                  # Rust backend workspace
+│   ├── zone_core/           # Shared agent logic & types
+│   │   ├── src/agent/       # Agent loop implementation
+│   │   ├── src/llm/         # LLM client
+│   │   ├── src/tools/       # Agent tools
+│   │   ├── src/session/     # Session management
+│   │   └── src/types/       # Shared domain types
+│   ├── zone_server/         # HTTP/WS server
+│   │   ├── src/routes/      # API endpoints
+│   │   ├── src/db/          # Database queries (sqlx)
+│   │   ├── src/cache/       # Redis cache layer
+│   │   └── src/auth/        # JWT & password auth
+│   ├── zone_cli/            # CLI tool
+│   ├── zone_runner/         # Daemon binary
+│   └── tool_runner/         # Command execution
+├── manager/                 # Manager frontend
+│   └── frontend/            # React frontend
+│       ├── src/components/  # UI components
+│       ├── src/pages/       # Page components
+│       └── src/context/     # React context
+├── installer/               # Web-based setup wizard (Rust + React)
 ├── litellm/                 # LLM proxy configuration
 ├── ollama/                  # Model pulling scripts
 ├── searxng/                 # Search engine config
 ├── traefik/                 # Reverse proxy config
 ├── prometheus/              # Metrics collection
 ├── grafana/                 # Dashboards
-│   └── dashboards/          # Pre-built dashboard JSON
 ├── docker-compose.yml       # Multi-profile deployment
-├── docker-compose.dev.yml   # Development overrides
 ├── Makefile                 # Operational commands
 └── .env.example             # Configuration template
 ```
@@ -471,8 +501,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 - [SearXNG](https://github.com/searxng/searxng) - Metasearch engine
 - [Gluetun](https://github.com/qdm12/gluetun) - VPN client
 - [Traefik](https://traefik.io/) - Reverse proxy
-- [Gleam](https://gleam.run/) - Type-safe language on the BEAM
-- [Wisp](https://github.com/gleam-wisp/wisp) - Gleam web framework
+- [Axum](https://github.com/tokio-rs/axum) - Rust web framework
+- [sqlx](https://github.com/launchbadge/sqlx) - Async Rust SQL toolkit
 
 ---
 

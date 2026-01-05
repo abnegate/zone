@@ -497,48 +497,48 @@ export interface TaskProgressMessage {
 }
 
 // API Response wrappers
-export interface ApiResponse<T> {
+export interface ApiResponse {
   success: boolean;
   error?: string;
 }
 
-export interface ChatsResponse extends ApiResponse<Chat[]> {
+export interface ChatsResponse extends ApiResponse {
   chats: Chat[];
 }
 
-export interface ChatResponse extends ApiResponse<ChatWithMessages> {
+export interface ChatResponse extends ApiResponse {
   chat: ChatWithMessages;
 }
 
-export interface MessagesResponse extends ApiResponse<Message[]> {
+export interface MessagesResponse extends ApiResponse {
   messages: Message[];
 }
 
-export interface MessageResponse extends ApiResponse<Message> {
+export interface MessageResponse extends ApiResponse {
   message: Message;
 }
 
-export interface ProjectsResponse extends ApiResponse<Project[]> {
+export interface ProjectsResponse extends ApiResponse {
   projects: Project[];
 }
 
-export interface ProjectResponse extends ApiResponse<Project> {
+export interface ProjectResponse extends ApiResponse {
   project: Project;
 }
 
-export interface SourcesResponse extends ApiResponse<Source[]> {
+export interface SourcesResponse extends ApiResponse {
   sources: Source[];
 }
 
-export interface SourceResponse extends ApiResponse<Source> {
+export interface SourceResponse extends ApiResponse {
   source: Source;
 }
 
-export interface SourceTypesResponse extends ApiResponse<SourceType_Info[]> {
+export interface SourceTypesResponse extends ApiResponse {
   types: SourceType_Info[];
 }
 
-export interface SourceVerifyResponse extends ApiResponse<boolean> {
+export interface SourceVerifyResponse extends ApiResponse {
   success: boolean;
   message: string;
   item_count?: number;
@@ -622,27 +622,27 @@ export interface ContentListResult {
   has_more: boolean;
 }
 
-export interface ContentResponse extends ApiResponse<ContentItem[]> {
+export interface ContentResponse extends ApiResponse {
   items: ContentItem[];
   total: number;
   has_more: boolean;
 }
 
 // Organization API Response Types
-export interface OrganizationsResponse extends ApiResponse<Organization[]> {
+export interface OrganizationsResponse extends ApiResponse {
   organizations: Organization[];
 }
 
-export interface OrganizationResponse extends ApiResponse<Organization> {
+export interface OrganizationResponse extends ApiResponse {
   organization: Organization;
 }
 
 // Workspace API Response Types
-export interface WorkspacesResponse extends ApiResponse<Workspace[]> {
+export interface WorkspacesResponse extends ApiResponse {
   workspaces: Workspace[];
 }
 
-export interface WorkspaceResponse extends ApiResponse<Workspace> {
+export interface WorkspaceResponse extends ApiResponse {
   workspace: Workspace;
 }
 
@@ -674,6 +674,6 @@ export interface UpdateWorkspaceThemeRequest {
   border_radius?: BorderRadius;
 }
 
-export interface WorkspaceThemeResponse extends ApiResponse<WorkspaceTheme> {
+export interface WorkspaceThemeResponse extends ApiResponse {
   theme: WorkspaceTheme;
 }

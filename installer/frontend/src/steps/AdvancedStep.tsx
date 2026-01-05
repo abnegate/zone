@@ -1,5 +1,5 @@
-import React from 'react';
-import { Checkbox, Select, Input, InfoBox } from '../components';
+import type React from 'react';
+import { Checkbox, InfoBox, Input, Select } from '../components';
 import { useSecretGenerator } from '../hooks';
 import type { InstallerConfig } from '../types';
 
@@ -65,7 +65,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
         <Checkbox
           label="Enable Prometheus + Grafana monitoring"
           checked={monitoringEnabled}
-          onChange={e => handleMonitoringToggle(e.target.checked)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            handleMonitoringToggle(e.target.checked)
+          }
         />
         <p className="help-text" style={{ marginLeft: '2.25rem' }}>
           Adds metrics collection and dashboards
@@ -78,7 +80,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
             label="Grafana Admin Username"
             type="text"
             value={config.MONITORING_GRAFANA_ADMIN_USER}
-            onChange={e => onChange('MONITORING_GRAFANA_ADMIN_USER', e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              onChange('MONITORING_GRAFANA_ADMIN_USER', e.target.value)
+            }
             error={getFieldError('MONITORING_GRAFANA_ADMIN_USER')}
           />
 
@@ -86,7 +90,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
             label="Grafana Admin Password"
             type="text"
             value={config.MONITORING_GRAFANA_ADMIN_PASSWORD}
-            onChange={e => onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', e.target.value)
+            }
             onGenerate={() => onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', generateSecret())}
             placeholder="Leave empty to auto-generate"
             className="font-mono"
@@ -97,21 +103,36 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
             label="Metrics Retention"
             options={retentionOptions}
             value={config.MONITORING_RETENTION_TIME}
-            onChange={e => onChange('MONITORING_RETENTION_TIME', e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+              onChange('MONITORING_RETENTION_TIME', e.target.value)
+            }
             helpText="How long to keep metrics data"
           />
 
           <InfoBox variant="info">
-            Start with: <code style={{ background: 'var(--bg-base)', padding: '0.25rem 0.5rem', borderRadius: '0.25rem' }}>docker compose --profile monitoring up</code>
+            Start with:{' '}
+            <code
+              style={{
+                background: 'var(--bg-base)',
+                padding: '0.25rem 0.5rem',
+                borderRadius: '0.25rem',
+              }}
+            >
+              docker compose --profile monitoring up
+            </code>
           </InfoBox>
 
-          <h4 className="section-header" style={{ marginTop: 'var(--space-lg)' }}>Email Alerts</h4>
+          <h4 className="section-header" style={{ marginTop: 'var(--space-lg)' }}>
+            Email Alerts
+          </h4>
 
           <div className="form-field">
             <Checkbox
               label="Enable email alerts for critical events"
               checked={alertingEnabled}
-              onChange={e => handleAlertingToggle(e.target.checked)}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                handleAlertingToggle(e.target.checked)
+              }
             />
             <p className="help-text" style={{ marginLeft: '2.25rem' }}>
               Get notified when services go down or performance degrades
@@ -124,7 +145,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
                 label="Alert Recipients"
                 type="email"
                 value={config.ALERT_EMAIL_RECIPIENTS}
-                onChange={e => onChange('ALERT_EMAIL_RECIPIENTS', e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  onChange('ALERT_EMAIL_RECIPIENTS', e.target.value)
+                }
                 placeholder="admin@example.com"
                 helpText="Comma-separated list of email addresses"
                 error={getFieldError('ALERT_EMAIL_RECIPIENTS')}
@@ -134,7 +157,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
                 label="SMTP Host"
                 type="text"
                 value={config.ALERT_SMTP_HOST}
-                onChange={e => onChange('ALERT_SMTP_HOST', e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  onChange('ALERT_SMTP_HOST', e.target.value)
+                }
                 placeholder="smtp.gmail.com"
                 helpText="e.g., smtp.gmail.com, smtp.sendgrid.net"
                 error={getFieldError('ALERT_SMTP_HOST')}
@@ -144,7 +169,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
                 label="SMTP Port"
                 options={smtpPortOptions}
                 value={config.ALERT_SMTP_PORT}
-                onChange={e => onChange('ALERT_SMTP_PORT', e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                  onChange('ALERT_SMTP_PORT', e.target.value)
+                }
                 helpText="587 recommended for most providers"
               />
 
@@ -152,7 +179,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
                 label="SMTP Username"
                 type="text"
                 value={config.ALERT_SMTP_USER}
-                onChange={e => onChange('ALERT_SMTP_USER', e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  onChange('ALERT_SMTP_USER', e.target.value)
+                }
                 placeholder="your-email@gmail.com"
                 error={getFieldError('ALERT_SMTP_USER')}
               />
@@ -161,7 +190,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
                 label="SMTP Password"
                 type="password"
                 value={config.ALERT_SMTP_PASSWORD}
-                onChange={e => onChange('ALERT_SMTP_PASSWORD', e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  onChange('ALERT_SMTP_PASSWORD', e.target.value)
+                }
                 placeholder="App password or API key"
                 helpText="For Gmail, use an App Password"
                 error={getFieldError('ALERT_SMTP_PASSWORD')}
@@ -171,7 +202,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
                 label="From Address"
                 type="email"
                 value={config.ALERT_SMTP_FROM_ADDRESS}
-                onChange={e => onChange('ALERT_SMTP_FROM_ADDRESS', e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  onChange('ALERT_SMTP_FROM_ADDRESS', e.target.value)
+                }
                 placeholder="alerts@example.com"
                 error={getFieldError('ALERT_SMTP_FROM_ADDRESS')}
               />
@@ -180,13 +213,16 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
                 label="From Name"
                 type="text"
                 value={config.ALERT_SMTP_FROM_NAME}
-                onChange={e => onChange('ALERT_SMTP_FROM_NAME', e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  onChange('ALERT_SMTP_FROM_NAME', e.target.value)
+                }
                 placeholder="Zone Alerts"
                 error={getFieldError('ALERT_SMTP_FROM_NAME')}
               />
 
               <InfoBox variant="info">
-                Alerts include: service outages, high latency, error spikes, database issues, and memory warnings.
+                Alerts include: service outages, high latency, error spikes, database issues, and
+                memory warnings.
               </InfoBox>
             </div>
           )}
@@ -199,7 +235,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
         label="Worker Count"
         type="number"
         value={config.ADVANCED_LITELLM_WORKERS}
-        onChange={e => onChange('ADVANCED_LITELLM_WORKERS', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('ADVANCED_LITELLM_WORKERS', e.target.value)
+        }
         min={1}
         max={16}
         helpText="1-2 per CPU core recommended"
@@ -210,7 +248,9 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
         label="Request Timeout (seconds)"
         type="number"
         value={config.ADVANCED_LITELLM_REQUEST_TIMEOUT}
-        onChange={e => onChange('ADVANCED_LITELLM_REQUEST_TIMEOUT', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('ADVANCED_LITELLM_REQUEST_TIMEOUT', e.target.value)
+        }
         min={60}
         max={1800}
         error={getFieldError('ADVANCED_LITELLM_REQUEST_TIMEOUT')}
@@ -220,21 +260,23 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
         label="Timezone"
         options={timezoneOptions}
         value={config.ADVANCED_TZ}
-        onChange={e => onChange('ADVANCED_TZ', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+          onChange('ADVANCED_TZ', e.target.value)
+        }
       />
 
       <Input
         label="ACME Email (for Let's Encrypt)"
         type="email"
         value={config.ADVANCED_ACME_EMAIL}
-        onChange={e => onChange('ADVANCED_ACME_EMAIL', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('ADVANCED_ACME_EMAIL', e.target.value)
+        }
         helpText="Required for automatic TLS certificates"
         error={getFieldError('ADVANCED_ACME_EMAIL')}
       />
 
-      <InfoBox variant="success">
-        Configuration complete. Click Install to proceed.
-      </InfoBox>
+      <InfoBox variant="success">Configuration complete. Click Install to proceed.</InfoBox>
     </div>
   );
 }

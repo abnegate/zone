@@ -5,7 +5,7 @@
 //! # Usage
 //!
 //! ```bash
-//! # Daemon mode (for integration with Gleam backend)
+//! # Daemon mode (for integration with backend)
 //! zone-runner serve --stdio
 //!
 //! # One-shot mode (for standalone usage)
@@ -15,7 +15,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 mod exec;
 mod serve;

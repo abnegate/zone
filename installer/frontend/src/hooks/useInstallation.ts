@@ -1,6 +1,6 @@
-import { useState, useCallback, useRef } from 'react';
-import { withRetry, RetryError } from '../utils/retry';
+import { useCallback, useRef, useState } from 'react';
 import type { InstallerConfig } from '../types';
+import { RetryError, withRetry } from '../utils/retry';
 
 interface StatusLine {
   message: string;
@@ -87,21 +87,21 @@ export function useInstallation() {
                     type: isSuccess ? 'success' : 'normal',
                   });
 
-                  setState(prev => ({
+                  setState((prev) => ({
                     ...prev,
                     statusLines: [...newStatusLines],
                   }));
                 }
 
                 if (data.progress) {
-                  setState(prev => ({
+                  setState((prev) => ({
                     ...prev,
                     progress: data.progress,
                   }));
                 }
 
                 if (data.complete) {
-                  setState(prev => ({
+                  setState((prev) => ({
                     ...prev,
                     isComplete: true,
                     isInstalling: false,
@@ -116,7 +116,7 @@ export function useInstallation() {
                 if (e instanceof Error && e.message !== line.trim()) {
                   if (line.trim() && !line.includes('{')) {
                     newStatusLines.push({ message: line });
-                    setState(prev => ({
+                    setState((prev) => ({
                       ...prev,
                       statusLines: [...newStatusLines],
                     }));
@@ -132,7 +132,7 @@ export function useInstallation() {
           maxAttempts: MAX_RETRIES,
           timeout: INSTALL_TIMEOUT,
           onRetry: (attempt, error) => {
-            setState(prev => ({
+            setState((prev) => ({
               ...prev,
               retryCount: attempt,
               statusLines: [
@@ -147,13 +147,14 @@ export function useInstallation() {
         }
       );
     } catch (error) {
-      const errorMessage = error instanceof RetryError
-        ? `Installation failed after ${error.attempts} attempts: ${error.lastError.message}`
-        : error instanceof Error
-        ? error.message
-        : 'Unknown error';
+      const errorMessage =
+        error instanceof RetryError
+          ? `Installation failed after ${error.attempts} attempts: ${error.lastError.message}`
+          : error instanceof Error
+            ? error.message
+            : 'Unknown error';
 
-      setState(prev => ({
+      setState((prev) => ({
         ...prev,
         isInstalling: false,
         error: errorMessage,
@@ -163,7 +164,7 @@ export function useInstallation() {
 
   const cancel = useCallback(() => {
     abortControllerRef.current?.abort();
-    setState(prev => ({
+    setState((prev) => ({
       ...prev,
       isInstalling: false,
       error: 'Installation cancelled',

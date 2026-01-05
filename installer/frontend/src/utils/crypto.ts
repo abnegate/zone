@@ -21,20 +21,16 @@ async function getOrCreateKey(): Promise<CryptoKey> {
 
   if (storedKey) {
     const keyData = JSON.parse(storedKey);
-    return await crypto.subtle.importKey(
-      'jwk',
-      keyData,
-      { name: 'AES-GCM', length: 256 },
-      true,
-      ['encrypt', 'decrypt']
-    );
+    return await crypto.subtle.importKey('jwk', keyData, { name: 'AES-GCM', length: 256 }, true, [
+      'encrypt',
+      'decrypt',
+    ]);
   }
 
-  const key = await crypto.subtle.generateKey(
-    { name: 'AES-GCM', length: 256 },
-    true,
-    ['encrypt', 'decrypt']
-  );
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
+    'encrypt',
+    'decrypt',
+  ]);
 
   const exportedKey = await crypto.subtle.exportKey('jwk', key);
   sessionStorage.setItem(ENCRYPTION_KEY_NAME, JSON.stringify(exportedKey));
@@ -46,11 +42,7 @@ async function encrypt(text: string, key: CryptoKey): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encoded = new TextEncoder().encode(text);
 
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    encoded
-  );
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
 
   const combined = new Uint8Array(iv.length + ciphertext.byteLength);
   combined.set(iv);
@@ -61,17 +53,15 @@ async function encrypt(text: string, key: CryptoKey): Promise<string> {
 
 async function decrypt(data: string, key: CryptoKey): Promise<string> {
   const combined = new Uint8Array(
-    atob(data).split('').map(c => c.charCodeAt(0))
+    atob(data)
+      .split('')
+      .map((c) => c.charCodeAt(0))
   );
 
   const iv = combined.slice(0, 12);
   const ciphertext = combined.slice(12);
 
-  const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    ciphertext
-  );
+  const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
 
   return new TextDecoder().decode(decrypted);
 }

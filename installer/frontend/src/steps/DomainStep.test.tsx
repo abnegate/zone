@@ -1,7 +1,6 @@
-import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
-import { DomainStep } from './DomainStep';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { InstallerConfig } from '../types';
+import { DomainStep } from './DomainStep';
 
 const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig => ({
   DOMAIN_HOST_WEBUI: 'test.localhost',
@@ -60,11 +59,7 @@ describe('DomainStep', () => {
     const onChange = jest.fn();
     const getFieldError = jest.fn().mockReturnValue(undefined);
     render(
-      <DomainStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
+      <DomainStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
     );
 
     expect(screen.getByLabelText(/Web Interface Hostname/i)).toBeInTheDocument();
@@ -88,11 +83,7 @@ describe('DomainStep', () => {
     const onChange = jest.fn();
     const getFieldError = jest.fn().mockReturnValue(undefined);
     render(
-      <DomainStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
+      <DomainStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
     );
 
     fireEvent.change(screen.getByLabelText(/Web Interface Hostname/i), {
@@ -106,11 +97,7 @@ describe('DomainStep', () => {
     const onChange = jest.fn();
     const getFieldError = jest.fn().mockReturnValue('Hostname is required');
     render(
-      <DomainStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
+      <DomainStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
     );
 
     expect(screen.getByText('Hostname is required')).toBeInTheDocument();
@@ -120,11 +107,7 @@ describe('DomainStep', () => {
     const onChange = jest.fn();
     const getFieldError = jest.fn().mockReturnValue(undefined);
     render(
-      <DomainStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
+      <DomainStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
     );
 
     expect(screen.getByText('Domain Configuration')).toBeInTheDocument();

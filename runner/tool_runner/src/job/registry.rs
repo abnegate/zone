@@ -1,8 +1,8 @@
 //! Job registry for tracking active and completed jobs.
 
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -584,10 +584,7 @@ mod tests {
         assert_eq!(registry.active_count(), 3);
 
         registry
-            .update_state(
-                "job-1",
-                JobState::completed(0, Duration::from_secs(1)),
-            )
+            .update_state("job-1", JobState::completed(0, Duration::from_secs(1)))
             .unwrap();
 
         assert_eq!(registry.active_count(), 2);
@@ -647,10 +644,14 @@ mod tests {
         let registry = JobRegistry::new();
         registry.register("job-1".to_string()).unwrap();
 
-        registry.update_state("job-1", JobState::running(100)).unwrap();
+        registry
+            .update_state("job-1", JobState::running(100))
+            .unwrap();
         assert!(registry.get_state("job-1").unwrap().is_running());
 
-        registry.update_state("job-1", JobState::completed(0, Duration::from_secs(1))).unwrap();
+        registry
+            .update_state("job-1", JobState::completed(0, Duration::from_secs(1)))
+            .unwrap();
         assert!(registry.get_state("job-1").unwrap().is_terminal());
     }
 }

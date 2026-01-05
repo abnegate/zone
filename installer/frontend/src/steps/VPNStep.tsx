@@ -1,5 +1,5 @@
-import React from 'react';
-import { Select, Input, InfoBox } from '../components';
+import type React from 'react';
+import { InfoBox, Input, Select } from '../components';
 import type { InstallerConfig } from '../types';
 
 interface VPNStepProps {
@@ -35,14 +35,16 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
         label="VPN Provider"
         options={providerOptions}
         value={config.VPN_SERVICE_PROVIDER}
-        onChange={e => onChange('VPN_SERVICE_PROVIDER', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+          onChange('VPN_SERVICE_PROVIDER', e.target.value)
+        }
       />
 
       <Select
         label="Protocol"
         options={protocolOptions}
         value={config.VPN_TYPE}
-        onChange={e => onChange('VPN_TYPE', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange('VPN_TYPE', e.target.value)}
       />
 
       {!isWireGuard ? (
@@ -51,14 +53,18 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
             label="Username"
             type="text"
             value={config.VPN_OPENVPN_USER}
-            onChange={e => onChange('VPN_OPENVPN_USER', e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              onChange('VPN_OPENVPN_USER', e.target.value)
+            }
             error={getFieldError('VPN_OPENVPN_USER')}
           />
           <Input
             label="Password"
             type="password"
             value={config.VPN_OPENVPN_PASSWORD}
-            onChange={e => onChange('VPN_OPENVPN_PASSWORD', e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              onChange('VPN_OPENVPN_PASSWORD', e.target.value)
+            }
             error={getFieldError('VPN_OPENVPN_PASSWORD')}
           />
         </>
@@ -68,7 +74,9 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
             label="Private Key"
             type="text"
             value={config.VPN_WIREGUARD_PRIVATE_KEY}
-            onChange={e => onChange('VPN_WIREGUARD_PRIVATE_KEY', e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              onChange('VPN_WIREGUARD_PRIVATE_KEY', e.target.value)
+            }
             className="font-mono"
             error={getFieldError('VPN_WIREGUARD_PRIVATE_KEY')}
           />
@@ -76,7 +84,9 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
             label="Addresses"
             type="text"
             value={config.VPN_WIREGUARD_ADDRESSES}
-            onChange={e => onChange('VPN_WIREGUARD_ADDRESSES', e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              onChange('VPN_WIREGUARD_ADDRESSES', e.target.value)
+            }
             placeholder="10.x.x.x/32"
             className="font-mono"
             error={getFieldError('VPN_WIREGUARD_ADDRESSES')}
@@ -90,7 +100,9 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
         label="Country"
         type="text"
         value={config.VPN_SERVER_COUNTRIES}
-        onChange={e => onChange('VPN_SERVER_COUNTRIES', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('VPN_SERVER_COUNTRIES', e.target.value)
+        }
         placeholder="United States"
         helpText="e.g., United States, Germany, Japan"
         error={getFieldError('VPN_SERVER_COUNTRIES')}
@@ -100,7 +112,9 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
         label="City"
         type="text"
         value={config.VPN_SERVER_CITIES}
-        onChange={e => onChange('VPN_SERVER_CITIES', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('VPN_SERVER_CITIES', e.target.value)
+        }
         placeholder="New York"
         helpText="e.g., New York, Los Angeles, London"
         error={getFieldError('VPN_SERVER_CITIES')}
@@ -110,14 +124,26 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
         label="Region"
         type="text"
         value={config.VPN_SERVER_REGIONS}
-        onChange={e => onChange('VPN_SERVER_REGIONS', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('VPN_SERVER_REGIONS', e.target.value)
+        }
         placeholder="California"
         helpText="e.g., California, Texas"
         error={getFieldError('VPN_SERVER_REGIONS')}
       />
 
       <InfoBox variant="info">
-        VPN is optional. Start with <code style={{ background: 'var(--bg-base)', padding: '0.25rem 0.5rem', borderRadius: '0.25rem' }}>docker compose --profile vpn up</code> to enable.
+        VPN is optional. Start with{' '}
+        <code
+          style={{
+            background: 'var(--bg-base)',
+            padding: '0.25rem 0.5rem',
+            borderRadius: '0.25rem',
+          }}
+        >
+          docker compose --profile vpn up
+        </code>{' '}
+        to enable.
       </InfoBox>
     </div>
   );

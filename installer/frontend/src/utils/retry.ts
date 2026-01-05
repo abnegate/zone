@@ -60,13 +60,10 @@ export async function withRetry<T>(
       }
 
       // Calculate delay with exponential backoff
-      const delay = Math.min(
-        initialDelay * Math.pow(backoffMultiplier, attempt - 1),
-        maxDelay
-      );
+      const delay = Math.min(initialDelay * backoffMultiplier ** (attempt - 1), maxDelay);
 
       onRetry?.(attempt, lastError);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 

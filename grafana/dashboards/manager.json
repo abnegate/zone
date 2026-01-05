@@ -415,74 +415,12 @@
       ],
       "title": "5xx Errors by Path",
       "type": "timeseries"
-    },
-    {
-      "collapsed": true,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 },
-      "id": 19,
-      "panels": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "description": "These metrics require BEAM telemetry integration in the Manager application",
-          "fieldConfig": {
-            "defaults": {
-              "color": { "mode": "palette-classic" },
-              "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": false, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } },
-              "mappings": [],
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
-              "unit": "bytes"
-            },
-            "overrides": []
-          },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 49 },
-          "id": 20,
-          "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
-          "targets": [
-            {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
-              "expr": "erlang_vm_memory_bytes_total{job=\"manager\"}",
-              "legendFormat": "{{kind}}",
-              "refId": "A"
-            }
-          ],
-          "title": "BEAM Memory",
-          "type": "timeseries"
-        },
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "fieldConfig": {
-            "defaults": {
-              "color": { "mode": "palette-classic" },
-              "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": false, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } },
-              "mappings": [],
-              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
-              "unit": "short"
-            },
-            "overrides": []
-          },
-          "gridPos": { "h": 8, "w": "12", "x": 12, "y": 49 },
-          "id": 21,
-          "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
-          "targets": [
-            {
-              "datasource": { "type": "prometheus", "uid": "prometheus" },
-              "expr": "erlang_vm_process_count{job=\"manager\"}",
-              "legendFormat": "processes",
-              "refId": "A"
-            }
-          ],
-          "title": "BEAM Process Count",
-          "type": "timeseries"
-        }
-      ],
-      "title": "BEAM VM Metrics (Future)",
-      "type": "row"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["zone", "manager", "backend", "gleam", "beam"],
+  "tags": ["zone", "manager", "backend", "rust"],
   "templating": { "list": [] },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},

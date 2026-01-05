@@ -8,27 +8,16 @@ use crate::protocol::ErrorCode;
 #[derive(Debug, Clone)]
 pub enum JobState {
     /// Job is being set up
-    Starting {
-        created_at: Instant,
-    },
+    Starting { created_at: Instant },
 
     /// Job is actively running
-    Running {
-        pid: u32,
-        started_at: Instant,
-    },
+    Running { pid: u32, started_at: Instant },
 
     /// Job completed successfully
-    Completed {
-        exit_code: i32,
-        duration: Duration,
-    },
+    Completed { exit_code: i32, duration: Duration },
 
     /// Job terminated by signal
-    Signaled {
-        signal: i32,
-        duration: Duration,
-    },
+    Signaled { signal: i32, duration: Duration },
 
     /// Job failed with an error
     Failed {
@@ -38,16 +27,10 @@ pub enum JobState {
     },
 
     /// Job was cancelled
-    Cancelled {
-        forced: bool,
-        duration: Duration,
-    },
+    Cancelled { forced: bool, duration: Duration },
 
     /// Job timed out
-    TimedOut {
-        timeout_ms: u64,
-        duration: Duration,
-    },
+    TimedOut { timeout_ms: u64, duration: Duration },
 }
 
 impl JobState {
@@ -306,7 +289,11 @@ mod tests {
 
     #[test]
     fn test_is_terminal_failed() {
-        let state = JobState::failed(ErrorCode::InternalError, "err".to_string(), Duration::from_secs(1));
+        let state = JobState::failed(
+            ErrorCode::InternalError,
+            "err".to_string(),
+            Duration::from_secs(1),
+        );
         assert!(state.is_terminal());
     }
 

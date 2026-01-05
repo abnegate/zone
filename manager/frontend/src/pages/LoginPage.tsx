@@ -1,7 +1,9 @@
+import type React from 'react';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { Button, Input } from '../components';
 import { useAuth } from '../context/AuthContext';
-import { getErrors, LoginRequestSchema } from '../validation';
+import { LoginRequestSchema, getErrors } from '../validation';
 import './AuthPage.css';
 
 export default function LoginPage() {
@@ -64,49 +66,34 @@ export default function LoginPage() {
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label htmlFor="email">Email</label>
-            <input
-              id="email"
-              type="email"
-              placeholder="you@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              disabled={loading}
-              autoFocus
-              autoComplete="email"
-              className={fieldErrors.email ? 'input-error' : ''}
-            />
-            {fieldErrors.email && <span className="field-error">{fieldErrors.email}</span>}
-          </div>
+          <Input
+            label="Email"
+            type="email"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)}
+            disabled={loading}
+            autoFocus
+            autoComplete="email"
+            error={fieldErrors.email}
+          />
 
-          <div className="form-group">
-            <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              type="password"
-              placeholder="Enter your password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={loading}
-              autoComplete="current-password"
-              className={fieldErrors.password ? 'input-error' : ''}
-            />
-            {fieldErrors.password && <span className="field-error">{fieldErrors.password}</span>}
-          </div>
+          <Input
+            label="Password"
+            type="password"
+            placeholder="Enter your password"
+            value={password}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
+            disabled={loading}
+            autoComplete="current-password"
+            error={fieldErrors.password}
+          />
 
           {error && <div className="auth-error">{error}</div>}
 
-          <button type="submit" className="btn btn-primary btn-block" disabled={loading}>
-            {loading ? (
-              <>
-                <span className="spinner" />
-                Signing in...
-              </>
-            ) : (
-              'Sign In'
-            )}
-          </button>
+          <Button type="submit" variant="primary" loading={loading} className="btn-block">
+            {loading ? 'Signing in...' : 'Sign In'}
+          </Button>
         </form>
 
         <div className="auth-footer">

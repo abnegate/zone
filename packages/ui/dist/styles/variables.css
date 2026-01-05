@@ -1,0 +1,372 @@
+/* =============================================================================
+   Zone UI - Obsidian Design System
+   A sophisticated, warm, premium interface language
+   ============================================================================= */
+
+/*
+   Typography - Fonts loaded via HTML preload for better performance
+   Fallback fonts defined inline ensure no FOUT (Flash of Unstyled Text)
+
+   Required fonts (add to HTML head):
+   - DM Sans: 400, 500, 600
+   - Fraunces: 500, 600
+   - JetBrains Mono: 400, 500 (optional, for code)
+*/
+
+:root {
+  /* ═══════════════════════════════════════════════════════════════════════════
+     TYPOGRAPHY
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  --ui-font-display: 'Fraunces', Georgia, serif;
+  --ui-font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --ui-font-mono: 'JetBrains Mono', 'SF Mono', Monaco, monospace;
+
+  /* Type Scale - Major Third (1.25) */
+  --ui-text-xs: 0.72rem;      /* 11.5px */
+  --ui-text-sm: 0.8rem;       /* 12.8px */
+  --ui-text-base: 0.9rem;     /* 14.4px */
+  --ui-text-md: 1rem;         /* 16px */
+  --ui-text-lg: 1.125rem;     /* 18px */
+  --ui-text-xl: 1.25rem;      /* 20px */
+  --ui-text-2xl: 1.5rem;      /* 24px */
+  --ui-text-3xl: 1.875rem;    /* 30px */
+  --ui-text-4xl: 2.25rem;     /* 36px */
+  --ui-text-5xl: 3rem;        /* 48px */
+
+  /* Line Heights */
+  --ui-leading-none: 1;
+  --ui-leading-tight: 1.2;
+  --ui-leading-snug: 1.375;
+  --ui-leading-normal: 1.5;
+  --ui-leading-relaxed: 1.625;
+  --ui-leading-loose: 2;
+
+  /* Letter Spacing */
+  --ui-tracking-tighter: -0.05em;
+  --ui-tracking-tight: -0.025em;
+  --ui-tracking-normal: 0;
+  --ui-tracking-wide: 0.025em;
+  --ui-tracking-wider: 0.05em;
+  --ui-tracking-widest: 0.1em;
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     SPACING SYSTEM - 4px base unit
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  --ui-space-0: 0;
+  --ui-space-px: 1px;
+  --ui-space-0-5: 0.125rem;   /* 2px */
+  --ui-space-1: 0.25rem;      /* 4px */
+  --ui-space-1-5: 0.375rem;   /* 6px */
+  --ui-space-2: 0.5rem;       /* 8px */
+  --ui-space-2-5: 0.625rem;   /* 10px */
+  --ui-space-3: 0.75rem;      /* 12px */
+  --ui-space-4: 1rem;         /* 16px */
+  --ui-space-5: 1.25rem;      /* 20px */
+  --ui-space-6: 1.5rem;       /* 24px */
+  --ui-space-8: 2rem;         /* 32px */
+  --ui-space-10: 2.5rem;      /* 40px */
+  --ui-space-12: 3rem;        /* 48px */
+  --ui-space-16: 4rem;        /* 64px */
+  --ui-space-20: 5rem;        /* 80px */
+  --ui-space-24: 6rem;        /* 96px */
+
+  /* Legacy spacing aliases */
+  --ui-space-xs: var(--ui-space-1);
+  --ui-space-sm: var(--ui-space-2);
+  --ui-space-md: var(--ui-space-3);
+  --ui-space-lg: var(--ui-space-4);
+  --ui-space-xl: var(--ui-space-6);
+  --ui-space-2xl: var(--ui-space-8);
+  --ui-space-3xl: var(--ui-space-12);
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     BORDER RADIUS
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  --ui-radius-none: 0;
+  --ui-radius-sm: 0.25rem;    /* 4px */
+  --ui-radius-md: 0.5rem;     /* 8px */
+  --ui-radius-lg: 0.75rem;    /* 12px */
+  --ui-radius-xl: 1rem;       /* 16px */
+  --ui-radius-2xl: 1.25rem;   /* 20px */
+  --ui-radius-3xl: 1.5rem;    /* 24px */
+  --ui-radius-full: 9999px;
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     TIMING & EASING
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  --ui-duration-instant: 50ms;
+  --ui-duration-fast: 150ms;
+  --ui-duration-normal: 250ms;
+  --ui-duration-slow: 400ms;
+  --ui-duration-slower: 600ms;
+
+  --ui-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ui-ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ui-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ui-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ui-ease-smooth: cubic-bezier(0.25, 0.1, 0.25, 1);
+
+  /* Transition presets */
+  --ui-transition-fast: var(--ui-duration-fast) var(--ui-ease-out);
+  --ui-transition-base: var(--ui-duration-normal) var(--ui-ease-out);
+  --ui-transition-slow: var(--ui-duration-slow) var(--ui-ease-in-out);
+  --ui-transition-bounce: var(--ui-duration-normal) var(--ui-ease-bounce);
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     SHADOWS
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  --ui-shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --ui-shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --ui-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --ui-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+  --ui-shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  --ui-shadow-2xl: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+  --ui-shadow-inner: inset 0 2px 4px 0 rgb(0 0 0 / 0.05);
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     ACCENT COLORS - Warm Copper/Amber
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  --ui-accent-50: #fef7ed;
+  --ui-accent-100: #fdecd3;
+  --ui-accent-200: #fad5a5;
+  --ui-accent-300: #f6b76d;
+  --ui-accent-400: #f19132;
+  --ui-accent-500: #ed7a14;
+  --ui-accent-600: #de5f0a;
+  --ui-accent-700: #b8460b;
+  --ui-accent-800: #933810;
+  --ui-accent-900: #782f11;
+
+  /* Primary accent (exposed as single variable) */
+  --ui-accent: var(--ui-accent-500);
+  --ui-accent-muted: var(--ui-accent-500) / 0.15;
+  --ui-accent-hover: var(--ui-accent-600);
+  --ui-accent-glow: var(--ui-accent-400) / 0.25;
+
+  /* ═══════════════════════════════════════════════════════════════════════════
+     SEMANTIC STATUS COLORS
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  /* Success - Sage Green */
+  --ui-success-50: #f0fdf4;
+  --ui-success-100: #dcfce7;
+  --ui-success-200: #bbf7d0;
+  --ui-success-300: #86efac;
+  --ui-success-400: #4ade80;
+  --ui-success-500: #22c55e;
+  --ui-success-600: #16a34a;
+  --ui-success: var(--ui-success-500);
+  --ui-success-muted: rgb(34 197 94 / 0.12);
+
+  /* Warning - Warm Amber */
+  --ui-warning-50: #fffbeb;
+  --ui-warning-100: #fef3c7;
+  --ui-warning-200: #fde68a;
+  --ui-warning-300: #fcd34d;
+  --ui-warning-400: #fbbf24;
+  --ui-warning-500: #f59e0b;
+  --ui-warning-600: #d97706;
+  --ui-warning: var(--ui-warning-500);
+  --ui-warning-muted: rgb(245 158 11 / 0.12);
+
+  /* Error - Soft Red */
+  --ui-error-50: #fef2f2;
+  --ui-error-100: #fee2e2;
+  --ui-error-200: #fecaca;
+  --ui-error-300: #fca5a5;
+  --ui-error-400: #f87171;
+  --ui-error-500: #ef4444;
+  --ui-error-600: #dc2626;
+  --ui-error: var(--ui-error-500);
+  --ui-error-muted: rgb(239 68 68 / 0.12);
+
+  /* Info - Cool Blue */
+  --ui-info-50: #eff6ff;
+  --ui-info-100: #dbeafe;
+  --ui-info-200: #bfdbfe;
+  --ui-info-300: #93c5fd;
+  --ui-info-400: #60a5fa;
+  --ui-info-500: #3b82f6;
+  --ui-info-600: #2563eb;
+  --ui-info: var(--ui-info-500);
+  --ui-info-muted: rgb(59 130 246 / 0.12);
+}
+
+/* =============================================================================
+   DARK THEME (Default) - Obsidian
+   ============================================================================= */
+
+:root,
+:root[data-theme='dark'] {
+  /* Backgrounds - Warm charcoal with subtle depth */
+  --ui-bg-base: #121214;
+  --ui-bg-elevated: #1a1a1d;
+  --ui-bg-surface: #232326;
+  --ui-bg-muted: #2a2a2e;
+  --ui-bg-hover: #323236;
+  --ui-bg-active: #3a3a3f;
+
+  /* Subtle gradient for depth */
+  --ui-bg-gradient: linear-gradient(180deg, #1a1a1d 0%, #121214 100%);
+  --ui-bg-radial: radial-gradient(ellipse at top, #232326 0%, #121214 70%);
+
+  /* Text hierarchy */
+  --ui-text-primary: #fafaf9;
+  --ui-text-secondary: #a8a8a3;
+  --ui-text-muted: #6b6b66;
+  --ui-text-disabled: #4a4a46;
+  --ui-text-inverse: #121214;
+
+  /* Borders */
+  --ui-border: rgba(255, 255, 255, 0.08);
+  --ui-border-subtle: rgba(255, 255, 255, 0.04);
+  --ui-border-strong: rgba(255, 255, 255, 0.12);
+  --ui-border-focus: var(--ui-accent-500);
+
+  /* Overlays */
+  --ui-overlay-light: rgba(255, 255, 255, 0.05);
+  --ui-overlay-medium: rgba(0, 0, 0, 0.4);
+  --ui-overlay-heavy: rgba(0, 0, 0, 0.8);
+
+  /* Shadows for dark mode */
+  --ui-shadow-color: 0 0 0;
+  --ui-shadow-glow: 0 0 40px rgba(237, 122, 20, 0.15);
+  --ui-shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
+
+  /* Grain texture overlay */
+  --ui-grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+}
+
+/* =============================================================================
+   LIGHT THEME - Parchment
+   ============================================================================= */
+
+:root[data-theme='light'] {
+  /* Backgrounds - Warm cream/parchment */
+  --ui-bg-base: #faf9f7;
+  --ui-bg-elevated: #ffffff;
+  --ui-bg-surface: #f5f4f1;
+  --ui-bg-muted: #eeede9;
+  --ui-bg-hover: #e8e7e3;
+  --ui-bg-active: #dddcd8;
+
+  /* Subtle gradient for depth */
+  --ui-bg-gradient: linear-gradient(180deg, #ffffff 0%, #faf9f7 100%);
+  --ui-bg-radial: radial-gradient(ellipse at top, #ffffff 0%, #f5f4f1 70%);
+
+  /* Text hierarchy */
+  --ui-text-primary: #1a1918;
+  --ui-text-secondary: #57534e;
+  --ui-text-muted: #8c8680;
+  --ui-text-disabled: #bdb8b2;
+  --ui-text-inverse: #fafaf9;
+
+  /* Borders */
+  --ui-border: rgba(0, 0, 0, 0.08);
+  --ui-border-subtle: rgba(0, 0, 0, 0.04);
+  --ui-border-strong: rgba(0, 0, 0, 0.12);
+  --ui-border-focus: var(--ui-accent-500);
+
+  /* Overlays */
+  --ui-overlay-light: rgba(0, 0, 0, 0.02);
+  --ui-overlay-medium: rgba(0, 0, 0, 0.3);
+  --ui-overlay-heavy: rgba(0, 0, 0, 0.6);
+
+  /* Shadows for light mode */
+  --ui-shadow-color: 0 0 0;
+  --ui-shadow-glow: 0 0 40px rgba(237, 122, 20, 0.1);
+  --ui-shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+}
+
+/* =============================================================================
+   ANIMATIONS
+   ============================================================================= */
+
+@keyframes ui-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes ui-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ui-fade-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ui-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes ui-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes ui-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes ui-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ui-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes ui-glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(237, 122, 20, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(237, 122, 20, 0.35);
+  }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

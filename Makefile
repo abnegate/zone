@@ -4,14 +4,14 @@
 	up-vpn up-monitoring up-all dev rebuild update \
 	shell-ollama shell-litellm shell-openwebui shell-manager shell-console \
 	shell-postgres shell-valkey db-shell db-migrate \
-	test-manager test-console test-console-coverage test-e2e test-e2e-ui \
+	test-server test-console test-console-coverage test-e2e test-e2e-ui \
 	lint-console format-console check-console \
 	list-models stats prune version env urls install \
-	generate-sql verify-sql \
+	sqlx-prepare \
 	build-runner test-runner setup-runner-coverage test-runner-coverage \
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
-	install-runner \
-	build-dev-cli install-dev-cli dev-format dev-format-check dev-lint dev-test dev-coverage dev-check
+	install-runner install-cli \
+	build-dev-cli install-dev-cli dev-format dev-format-check dev-lint dev-test dev-coverage dev-check \
 
 .DEFAULT_GOAL := help
 
@@ -139,7 +139,7 @@ db-shell: ## Open PostgreSQL shell
 
 db-migrate: ## Run database migrations
 	@echo "$(BLUE)Running database migrations...$(NC)"
-	@for migration in manager/migrations/*.sql; do \
+	@for migration in runner/zone_server/migrations/*.sql; do \
 		echo "$(GREEN)Applying $$migration...$(NC)"; \
 		docker exec -i postgres psql -U $${POSTGRES_USER:-zone} -d $${POSTGRES_DB:-zone} < "$$migration" 2>&1 | grep -v "already exists" || true; \
 	done
@@ -240,7 +240,7 @@ rebuild: ## Rebuild and restart all services
 	@echo "$(BLUE)Rebuilding services...$(NC)"
 	$(DOCKER_COMPOSE) up -d --build --force-recreate
 
-rebuild-manager: generate-sql ## Rebuild only manager and console services (auto-generates SQL first)
+rebuild-manager: ## Rebuild only manager and console services
 	@echo "$(BLUE)Rebuilding manager and console...$(NC)"
 	$(DOCKER_COMPOSE) up -d --build --force-recreate manager console
 
@@ -288,9 +288,9 @@ test: ## Run basic smoke tests for all services
 	@echo "Testing Console..."
 	@curl -sf http://localhost:3000/health >/dev/null 2>&1 && echo "$(GREEN)✓ Console$(NC)" || echo "$(RED)✗ Console$(NC)"
 
-test-manager: ## Run manager (Gleam) unit tests
-	@echo "$(BLUE)Running manager tests...$(NC)"
-	cd manager && gleam test
+test-server: ## Run zone_server (Rust) unit tests
+	@echo "$(BLUE)Running zone_server tests...$(NC)"
+	cd runner && cargo test --package zone_server --package zone_core --package zone_cli
 
 build-runner: ## Build the Rust tool runner binary
 	@echo "$(BLUE)Building Rust tool runner...$(NC)"
@@ -377,36 +377,26 @@ test-runner-coverage-text: ## Show coverage summary in terminal
 		exit 1; \
 	}
 
-install-runner: ## Install runner binary to manager priv/bin
-	@echo "$(BLUE)Installing runner to manager/priv/bin...$(NC)"
-	@mkdir -p manager/priv/bin
-	@cp runner/target/release/zone-runner manager/priv/bin/
-	@chmod +x manager/priv/bin/zone-runner
-	@echo "$(GREEN)Runner installed!$(NC)"
+install-runner: ## Install zone-runner binary to /usr/local/bin
+	@echo "$(BLUE)Installing zone-runner...$(NC)"
+	@sudo cp runner/target/release/zone-runner /usr/local/bin/
+	@echo "$(GREEN)zone-runner installed!$(NC)"
 
-generate-sql: ## Generate SQL module from .sql files using squirrel (requires running postgres)
-	@echo "$(BLUE)Generating SQL module with squirrel...$(NC)"
+install-cli: ## Install zone CLI to /usr/local/bin
+	@echo "$(BLUE)Building and installing zone CLI...$(NC)"
+	cd runner && cargo build --release --package zone_cli
+	@sudo cp runner/target/release/zone-cli /usr/local/bin/zone
+	@echo "$(GREEN)zone CLI installed! Run 'zone --help' to get started.$(NC)"
+
+sqlx-prepare: ## Prepare sqlx offline query data (requires running postgres)
+	@echo "$(BLUE)Preparing sqlx offline query data...$(NC)"
 	@if docker ps --format '{{.Names}}' | grep -q '^postgres$$'; then \
-		cd manager && DATABASE_URL="postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}" gleam run -m squirrel; \
-		echo "$(GREEN)SQL module generated successfully!$(NC)"; \
+		cd runner/zone_server && DATABASE_URL="postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}" cargo sqlx prepare; \
+		echo "$(GREEN)sqlx offline data prepared!$(NC)"; \
 	else \
 		echo "$(RED)Error: PostgreSQL container is not running. Start it with 'make up' first.$(NC)"; \
 		exit 1; \
 	fi
-
-verify-sql: ## Verify generated SQL module matches committed version
-	@echo "$(BLUE)Verifying SQL module is up to date...$(NC)"
-	@cd manager && \
-		cp src/database/queries/sql.gleam src/database/queries/sql.gleam.bak && \
-		DATABASE_URL="postgresql://$${POSTGRES_USER:-zone}:$${POSTGRES_PASSWORD:-zone}@localhost:5432/$${POSTGRES_DB:-zone}" gleam run -m squirrel && \
-		if diff -q src/database/queries/sql.gleam src/database/queries/sql.gleam.bak > /dev/null 2>&1; then \
-			echo "$(GREEN)✓ SQL module is up to date$(NC)"; \
-			rm src/database/queries/sql.gleam.bak; \
-		else \
-			echo "$(RED)✗ SQL module is out of date! Run 'make generate-sql' and commit the changes.$(NC)"; \
-			mv src/database/queries/sql.gleam.bak src/database/queries/sql.gleam; \
-			exit 1; \
-		fi
 
 test-console: ## Run console (React) unit tests
 	@echo "$(BLUE)Running console unit tests...$(NC)"
@@ -428,12 +418,9 @@ test-e2e-headed: ## Run Playwright tests in headed mode
 	@echo "$(BLUE)Running E2E tests in headed mode...$(NC)"
 	cd manager/frontend && npm run test:e2e:headed
 
-test-all: ## Run all tests (unit + E2E)
+test-all: ## Run all tests (requires 'make up' for server tests)
 	@echo "$(BLUE)Running all tests...$(NC)"
-	@$(MAKE) test-runner
-	@$(MAKE) test-manager
-	@$(MAKE) test-console
-	@$(MAKE) test-e2e
+	@$(MAKE) dev-test
 
 ##@ Code Quality
 

@@ -1,21 +1,20 @@
-import React, { useState, useCallback } from 'react';
+import { useCallback, useState } from 'react';
+import { Button, InfoBox, Modal, StatusLog, StepPills } from '../components';
 import {
-  Button,
-  Modal,
-  StatusLog,
-  StepPills,
-  InfoBox,
-} from '../components';
+  useConfigPersistence,
+  useInstallation,
+  useKeyboardNavigation,
+  useValidation,
+} from '../hooks';
 import {
-  DomainStep,
-  SecurityStep,
-  ModelsStep,
-  InterfaceStep,
-  SearchStep,
-  VPNStep,
   AdvancedStep,
+  DomainStep,
+  InterfaceStep,
+  ModelsStep,
+  SearchStep,
+  SecurityStep,
+  VPNStep,
 } from '../steps';
-import { useInstallation, useKeyboardNavigation, useValidation, useConfigPersistence } from '../hooks';
 import type { InstallerConfig } from '../types';
 import { STEPS } from '../types';
 import type { StepSchemaKey } from '../validation/schemas';
@@ -95,15 +94,8 @@ export default function InstallerForm() {
   const [config, setConfig] = useState<InstallerConfig>(DEFAULT_CONFIG);
   const [showModal, setShowModal] = useState(false);
 
-  const {
-    isInstalling,
-    progress,
-    statusLines,
-    isComplete,
-    error,
-    install,
-    reset,
-  } = useInstallation();
+  const { isInstalling, progress, statusLines, isComplete, error, install, reset } =
+    useInstallation();
 
   const { validateStep, getFieldError, clearErrors } = useValidation();
   useConfigPersistence(config, setConfig, DEFAULT_CONFIG);
@@ -111,7 +103,7 @@ export default function InstallerForm() {
   const totalSteps = STEPS.length;
 
   const handleChange = useCallback((key: keyof InstallerConfig, value: string) => {
-    setConfig(prev => ({ ...prev, [key]: value }));
+    setConfig((prev) => ({ ...prev, [key]: value }));
   }, []);
 
   const handleNext = useCallback(() => {
@@ -121,21 +113,24 @@ export default function InstallerForm() {
     }
     clearErrors();
     if (currentStep < totalSteps) {
-      setCurrentStep(prev => prev + 1);
+      setCurrentStep((prev) => prev + 1);
     }
   }, [currentStep, totalSteps, config, validateStep, clearErrors]);
 
   const handlePrevious = useCallback(() => {
     if (currentStep > 1) {
       clearErrors();
-      setCurrentStep(prev => prev - 1);
+      setCurrentStep((prev) => prev - 1);
     }
   }, [currentStep, clearErrors]);
 
-  const handleStepClick = useCallback((step: number) => {
-    clearErrors();
-    setCurrentStep(step);
-  }, [clearErrors]);
+  const handleStepClick = useCallback(
+    (step: number) => {
+      clearErrors();
+      setCurrentStep(step);
+    },
+    [clearErrors]
+  );
 
   const handleInstall = useCallback(() => {
     const stepId = STEPS[currentStep - 1].id as StepSchemaKey;
@@ -164,68 +159,70 @@ export default function InstallerForm() {
       case 1:
         return <DomainStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 2:
-        return <SecurityStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
+        return (
+          <SecurityStep config={config} onChange={handleChange} getFieldError={getFieldError} />
+        );
       case 3:
         return <ModelsStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 4:
-        return <InterfaceStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
+        return (
+          <InterfaceStep config={config} onChange={handleChange} getFieldError={getFieldError} />
+        );
       case 5:
         return <SearchStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 6:
         return <VPNStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
       case 7:
-        return <AdvancedStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
+        return (
+          <AdvancedStep config={config} onChange={handleChange} getFieldError={getFieldError} />
+        );
       default:
         return null;
     }
   };
 
   return (
-    <div className="container">
-      <header className="header">
-        <h1>Zone Configuration</h1>
-        <p>Set up your self-hosted AI stack</p>
-      </header>
+    <div className="installer-layout">
+      <aside className="installer-sidebar">
+        <header className="sidebar-header">
+          <h1>Zone</h1>
+          <p>Configuration</p>
+        </header>
+        <StepPills currentStep={currentStep} onStepClick={handleStepClick} />
+      </aside>
 
-      <StepPills currentStep={currentStep} onStepClick={handleStepClick} />
+      <main className="installer-main">
+        <div className="card">
+          {renderStep()}
 
-      <div className="card">
-        {renderStep()}
-
-        <div className="nav-buttons">
-          <Button
-            variant="secondary"
-            onClick={handlePrevious}
-            disabled={currentStep === 1}
-          >
-            Previous
-          </Button>
-
-          {currentStep < totalSteps ? (
-            <Button variant="primary" onClick={handleNext}>
-              Next
+          <div className="nav-buttons">
+            <Button variant="secondary" onClick={handlePrevious} disabled={currentStep === 1}>
+              Previous
             </Button>
-          ) : (
-            <Button variant="primary" onClick={handleInstall}>
-              Install
-            </Button>
-          )}
+
+            {currentStep < totalSteps ? (
+              <Button variant="primary" onClick={handleNext}>
+                Next
+              </Button>
+            ) : (
+              <Button variant="primary" onClick={handleInstall}>
+                Install
+              </Button>
+            )}
+          </div>
         </div>
-      </div>
+      </main>
 
       <Modal
         isOpen={showModal}
         onClose={isComplete || error ? handleCloseModal : undefined}
-        title={isInstalling ? "Installing Zone..." : "Installing Zone"}
+        title={isInstalling ? 'Installing Zone...' : 'Installing Zone'}
       >
         <StatusLog lines={statusLines} />
 
         <div className="modal-progress">
           <div className="progress-bar-track">
-            <div
-              className="progress-bar-fill"
-              style={{ width: `${progress}%` }}
-            />
+            <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
           </div>
         </div>
 
@@ -233,7 +230,17 @@ export default function InstallerForm() {
           <InfoBox variant="success">
             <strong>Installation Complete</strong>
             <p style={{ marginTop: 'var(--space-sm)', fontSize: '0.875rem' }}>
-              Run <code style={{ background: 'var(--bg-base)', padding: '0.25rem 0.5rem', borderRadius: '0.25rem' }}>make up</code> to start the stack.
+              Run{' '}
+              <code
+                style={{
+                  background: 'var(--bg-base)',
+                  padding: '0.25rem 0.5rem',
+                  borderRadius: '0.25rem',
+                }}
+              >
+                make up
+              </code>{' '}
+              to start the stack.
             </p>
           </InfoBox>
         )}

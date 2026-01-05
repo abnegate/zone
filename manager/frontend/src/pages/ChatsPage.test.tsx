@@ -1,8 +1,8 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
-import ChatsPage from './ChatsPage';
 import { client } from '../api/client';
 import type { Chat, ChatWithMessages, Message } from '../types';
+import ChatsPage from './ChatsPage';
 
 // Mock scrollIntoView
 Element.prototype.scrollIntoView = jest.fn();
@@ -62,10 +62,38 @@ const getDateString = (daysAgo: number, hours = 0): string => {
 };
 
 const mockChats: Chat[] = [
-  { id: 'chat-1', title: 'Chat 1', model_name: 'llama2', updated_at: getDateString(0), archived: false, created_at: '2024-01-01T00:00:00Z' },
-  { id: 'chat-2', title: 'Chat 2', model_name: 'mistral', updated_at: getDateString(1), archived: false, created_at: '2024-01-02T00:00:00Z' },
-  { id: 'chat-3', title: 'Chat 3', model_name: 'llama2', updated_at: getDateString(3), archived: false, created_at: '2024-01-03T00:00:00Z' },
-  { id: 'chat-4', title: 'Chat 4', model_name: 'mistral', updated_at: getDateString(10), archived: false, created_at: '2024-01-04T00:00:00Z' },
+  {
+    id: 'chat-1',
+    title: 'Chat 1',
+    model_name: 'llama2',
+    updated_at: getDateString(0),
+    archived: false,
+    created_at: '2024-01-01T00:00:00Z',
+  },
+  {
+    id: 'chat-2',
+    title: 'Chat 2',
+    model_name: 'mistral',
+    updated_at: getDateString(1),
+    archived: false,
+    created_at: '2024-01-02T00:00:00Z',
+  },
+  {
+    id: 'chat-3',
+    title: 'Chat 3',
+    model_name: 'llama2',
+    updated_at: getDateString(3),
+    archived: false,
+    created_at: '2024-01-03T00:00:00Z',
+  },
+  {
+    id: 'chat-4',
+    title: 'Chat 4',
+    model_name: 'mistral',
+    updated_at: getDateString(10),
+    archived: false,
+    created_at: '2024-01-04T00:00:00Z',
+  },
 ];
 
 const mockChatWithMessages: ChatWithMessages = {
@@ -76,8 +104,20 @@ const mockChatWithMessages: ChatWithMessages = {
   archived: false,
   created_at: '2024-01-01T00:00:00Z',
   messages: [
-    { id: 'msg-1', chat_id: 'chat-1', role: 'user', content: 'Hello', created_at: '2024-01-01T00:00:00Z' },
-    { id: 'msg-2', chat_id: 'chat-1', role: 'assistant', content: 'Hi there!', created_at: '2024-01-01T00:01:00Z' },
+    {
+      id: 'msg-1',
+      chat_id: 'chat-1',
+      role: 'user',
+      content: 'Hello',
+      created_at: '2024-01-01T00:00:00Z',
+    },
+    {
+      id: 'msg-2',
+      chat_id: 'chat-1',
+      role: 'assistant',
+      content: 'Hi there!',
+      created_at: '2024-01-01T00:01:00Z',
+    },
   ],
 };
 
@@ -99,7 +139,13 @@ const mockChatWithSystemMessage: ChatWithMessages = {
   archived: false,
   created_at: '2024-01-03T00:00:00Z',
   messages: [
-    { id: 'msg-3', chat_id: 'chat-3', role: 'system', content: 'System message', created_at: '2024-01-03T00:00:00Z' },
+    {
+      id: 'msg-3',
+      chat_id: 'chat-3',
+      role: 'system',
+      content: 'System message',
+      created_at: '2024-01-03T00:00:00Z',
+    },
   ],
 };
 
@@ -187,7 +233,6 @@ describe('ChatsPage', () => {
         expect(screen.getByText('No chats yet')).toBeInTheDocument();
       });
     });
-
   });
 
   describe('selecting chat', () => {
@@ -337,8 +382,9 @@ describe('ChatsPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: '+ New' }));
 
-      const backdrop = screen.getByLabelText('Close modal');
-      fireEvent.click(backdrop);
+      // Click the overlay (backdrop)
+      const overlay = document.querySelector('.ui-modal-overlay');
+      fireEvent.click(overlay!);
 
       await waitFor(() => {
         expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument();
@@ -354,8 +400,8 @@ describe('ChatsPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: '+ New' }));
 
-      const backdrop = screen.getByLabelText('Close modal');
-      fireEvent.keyDown(backdrop, { key: 'Escape' });
+      // Press Escape to close
+      fireEvent.keyDown(document, { key: 'Escape' });
 
       await waitFor(() => {
         expect(screen.queryByRole('heading', { name: 'New Chat' })).not.toBeInTheDocument();
@@ -547,7 +593,14 @@ describe('ChatsPage', () => {
 
   describe('archive/unarchive chat', () => {
     it('archives chat when archive button clicked', async () => {
-      const archivedChat: Chat = { id: 'chat-1', title: 'Chat 1', model_name: 'llama2', updated_at: '2024-01-01T00:00:00Z', archived: true, created_at: '2024-01-01T00:00:00Z' };
+      const archivedChat: Chat = {
+        id: 'chat-1',
+        title: 'Chat 1',
+        model_name: 'llama2',
+        updated_at: '2024-01-01T00:00:00Z',
+        archived: true,
+        created_at: '2024-01-01T00:00:00Z',
+      };
       mockClient.archiveChat.mockResolvedValueOnce(archivedChat);
 
       renderChatsPage();
@@ -584,12 +637,24 @@ describe('ChatsPage', () => {
 
     it('unarchives chat when in archived view', async () => {
       const archivedChats: Chat[] = [
-        { id: 'chat-archived', title: 'Archived Chat', model_name: 'llama2', updated_at: '2024-01-01T00:00:00Z', archived: true, created_at: '2024-01-01T00:00:00Z' },
+        {
+          id: 'chat-archived',
+          title: 'Archived Chat',
+          model_name: 'llama2',
+          updated_at: '2024-01-01T00:00:00Z',
+          archived: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
       ];
-      mockClient.getChats
-        .mockResolvedValueOnce(mockChats)
-        .mockResolvedValueOnce(archivedChats);
-      const unarchivedChat: Chat = { id: 'chat-archived', title: 'Archived Chat', model_name: 'llama2', updated_at: '2024-01-01T00:00:00Z', archived: false, created_at: '2024-01-01T00:00:00Z' };
+      mockClient.getChats.mockResolvedValueOnce(mockChats).mockResolvedValueOnce(archivedChats);
+      const unarchivedChat: Chat = {
+        id: 'chat-archived',
+        title: 'Archived Chat',
+        model_name: 'llama2',
+        updated_at: '2024-01-01T00:00:00Z',
+        archived: false,
+        created_at: '2024-01-01T00:00:00Z',
+      };
       mockClient.unarchiveChat.mockResolvedValueOnce(unarchivedChat);
 
       renderChatsPage();
@@ -614,11 +679,16 @@ describe('ChatsPage', () => {
 
     it('shows error when unarchive fails', async () => {
       const archivedChats: Chat[] = [
-        { id: 'chat-archived', title: 'Archived Chat', model_name: 'llama2', updated_at: '2024-01-01T00:00:00Z', archived: true, created_at: '2024-01-01T00:00:00Z' },
+        {
+          id: 'chat-archived',
+          title: 'Archived Chat',
+          model_name: 'llama2',
+          updated_at: '2024-01-01T00:00:00Z',
+          archived: true,
+          created_at: '2024-01-01T00:00:00Z',
+        },
       ];
-      mockClient.getChats
-        .mockResolvedValueOnce(mockChats)
-        .mockResolvedValueOnce(archivedChats);
+      mockClient.getChats.mockResolvedValueOnce(mockChats).mockResolvedValueOnce(archivedChats);
       mockClient.unarchiveChat.mockRejectedValueOnce(new Error('Unarchive failed'));
 
       renderChatsPage();
@@ -641,9 +711,7 @@ describe('ChatsPage', () => {
     });
 
     it('shows no archived chats message', async () => {
-      mockClient.getChats
-        .mockResolvedValueOnce(mockChats)
-        .mockResolvedValueOnce([]);
+      mockClient.getChats.mockResolvedValueOnce(mockChats).mockResolvedValueOnce([]);
 
       renderChatsPage();
 
@@ -659,7 +727,14 @@ describe('ChatsPage', () => {
     });
 
     it('clears active chat when archiving it', async () => {
-      const archivedChat: Chat = { id: 'chat-1', title: 'Chat 1', model_name: 'llama2', updated_at: '2024-01-01T00:00:00Z', archived: true, created_at: '2024-01-01T00:00:00Z' };
+      const archivedChat: Chat = {
+        id: 'chat-1',
+        title: 'Chat 1',
+        model_name: 'llama2',
+        updated_at: '2024-01-01T00:00:00Z',
+        archived: true,
+        created_at: '2024-01-01T00:00:00Z',
+      };
       mockClient.archiveChat.mockResolvedValueOnce(archivedChat);
 
       renderChatsPage();
@@ -697,7 +772,9 @@ describe('ChatsPage', () => {
       fireEvent.click(deleteButtons[0]);
 
       expect(screen.getByRole('heading', { name: 'Delete Chat' })).toBeInTheDocument();
-      expect(screen.getByText('Are you sure you want to delete this chat? This action cannot be undone.')).toBeInTheDocument();
+      expect(
+        screen.getByText('Are you sure you want to delete this chat? This action cannot be undone.')
+      ).toBeInTheDocument();
     });
 
     it('cancels delete on cancel button', async () => {
@@ -730,8 +807,9 @@ describe('ChatsPage', () => {
       const deleteButtons = screen.getAllByTitle('Delete');
       fireEvent.click(deleteButtons[0]);
 
-      const backdrops = screen.getAllByLabelText('Close modal');
-      fireEvent.click(backdrops[0]);
+      // Click the backdrop (overlay)
+      const overlay = document.querySelector('.ui-modal-overlay');
+      fireEvent.click(overlay!);
 
       await waitFor(() => {
         expect(screen.queryByRole('heading', { name: 'Delete Chat' })).not.toBeInTheDocument();
@@ -748,8 +826,8 @@ describe('ChatsPage', () => {
       const deleteButtons = screen.getAllByTitle('Delete');
       fireEvent.click(deleteButtons[0]);
 
-      const backdrops = screen.getAllByLabelText('Close modal');
-      fireEvent.keyDown(backdrops[0], { key: 'Escape' });
+      // Press Escape
+      fireEvent.keyDown(document, { key: 'Escape' });
 
       await waitFor(() => {
         expect(screen.queryByRole('heading', { name: 'Delete Chat' })).not.toBeInTheDocument();
@@ -768,10 +846,10 @@ describe('ChatsPage', () => {
       const deleteButtons = screen.getAllByTitle('Delete');
       fireEvent.click(deleteButtons[0]);
 
-      // Click the Delete button in the modal
-      const modalContent = document.querySelector('.modal-content');
-      const confirmDeleteBtn = modalContent?.querySelector('.btn-danger') as HTMLButtonElement;
-      fireEvent.click(confirmDeleteBtn);
+      // Click the Delete button in the modal using accessible query
+      const deleteModalButtons = screen.getAllByRole('button', { name: 'Delete' });
+      // The last Delete button should be the one in the modal
+      fireEvent.click(deleteModalButtons[deleteModalButtons.length - 1]);
 
       await waitFor(() => {
         expect(mockClient.deleteChat).toHaveBeenCalledWith('chat-1');
@@ -790,10 +868,9 @@ describe('ChatsPage', () => {
       const deleteButtons = screen.getAllByTitle('Delete');
       fireEvent.click(deleteButtons[0]);
 
-      // Click the Delete button in the modal
-      const modalContent = document.querySelector('.modal-content');
-      const confirmDeleteBtn = modalContent?.querySelector('.btn-danger') as HTMLButtonElement;
-      fireEvent.click(confirmDeleteBtn);
+      // Click the Delete button in the modal using accessible query
+      const deleteModalButtons = screen.getAllByRole('button', { name: 'Delete' });
+      fireEvent.click(deleteModalButtons[deleteModalButtons.length - 1]);
 
       await waitFor(() => {
         expect(screen.getByText('Delete failed')).toBeInTheDocument();
@@ -820,10 +897,9 @@ describe('ChatsPage', () => {
       const deleteButtons = screen.getAllByTitle('Delete');
       fireEvent.click(deleteButtons[0]);
 
-      // Click the Delete button in the modal
-      const modalContent = document.querySelector('.modal-content');
-      const confirmDeleteBtn = modalContent?.querySelector('.btn-danger') as HTMLButtonElement;
-      fireEvent.click(confirmDeleteBtn);
+      // Click the Delete button in the modal using accessible query
+      const deleteModalButtons = screen.getAllByRole('button', { name: 'Delete' });
+      fireEvent.click(deleteModalButtons[deleteModalButtons.length - 1]);
 
       await waitFor(() => {
         expect(mockClient.deleteChat).toHaveBeenCalledWith('chat-1');

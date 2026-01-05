@@ -58,7 +58,7 @@ async fn collect_messages(
 ) -> Vec<OutboundMessage> {
     let mut messages = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut got_terminal = false;
+    let got_terminal = false;
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -74,7 +74,6 @@ async fn collect_messages(
                 );
                 messages.push(msg);
                 if is_terminal {
-                    got_terminal = true;
                     // Continue collecting for a short time after terminal message
                     // to catch any remaining output
                     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -115,7 +114,11 @@ async fn test_echo_command() {
     let messages = collect_messages(&mut rx, Duration::from_secs(5)).await;
 
     // Should have RunStarted
-    assert!(messages.iter().any(|m| matches!(m, OutboundMessage::RunStarted { job_id, .. } if job_id == "echo-1")));
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, OutboundMessage::RunStarted { job_id, .. } if job_id == "echo-1"))
+    );
 
     // Should have stdout with "Hello World"
     let stdout_data: String = messages
@@ -128,7 +131,13 @@ async fn test_echo_command() {
     assert!(stdout_data.contains("Hello World"));
 
     // Should have RunExit with code 0
-    assert!(messages.iter().any(|m| matches!(m, OutboundMessage::RunExit { exit_code: Some(0), .. })));
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        OutboundMessage::RunExit {
+            exit_code: Some(0),
+            ..
+        }
+    )));
 }
 
 #[tokio::test]
@@ -195,7 +204,10 @@ async fn test_non_zero_exit_code() {
 
     assert!(messages.iter().any(|m| matches!(
         m,
-        OutboundMessage::RunExit { exit_code: Some(42), .. }
+        OutboundMessage::RunExit {
+            exit_code: Some(42),
+            ..
+        }
     )));
 }
 
@@ -208,7 +220,12 @@ async fn test_command_with_arguments() {
         job_id: "args-1".to_string(),
         workspace: PathBuf::from("/tmp"),
         command: "printf".to_string(),
-        args: vec!["%s-%s-%s".to_string(), "a".to_string(), "b".to_string(), "c".to_string()],
+        args: vec![
+            "%s-%s-%s".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+        ],
         env: HashMap::new(),
         timeout_ms: Some(5000),
         max_output_bytes: None,
@@ -330,7 +347,10 @@ async fn test_command_timeout() {
     // Should have a timeout error
     assert!(messages.iter().any(|m| matches!(
         m,
-        OutboundMessage::RunError { error_code: ErrorCode::Timeout, .. }
+        OutboundMessage::RunError {
+            error_code: ErrorCode::Timeout,
+            ..
+        }
     )));
 
     // Should have a warning log about timeout
@@ -367,7 +387,7 @@ async fn test_invalid_workspace() {
 #[tokio::test]
 async fn test_invalid_command() {
     let executor = CommandExecutor::new();
-    let (tx, mut rx) = mpsc::channel(100);
+    let (tx, _rx) = mpsc::channel(100);
 
     let request = InboundMessage::RunStart {
         job_id: "bad-cmd-1".to_string(),
@@ -401,7 +421,10 @@ async fn test_output_limit() {
         job_id: "limit-1".to_string(),
         workspace: PathBuf::from("/tmp"),
         command: "bash".to_string(),
-        args: vec!["-c".to_string(), "for i in $(seq 1 300); do echo \"This is line $i of output\"; done".to_string()],
+        args: vec![
+            "-c".to_string(),
+            "for i in $(seq 1 300); do echo \"This is line $i of output\"; done".to_string(),
+        ],
         env: HashMap::new(),
         timeout_ms: Some(5000),
         max_output_bytes: Some(500),
@@ -439,9 +462,11 @@ async fn test_output_limit() {
 
     // Check if we got a truncation warning (may or may not be present depending on timing)
     let has_truncation_warning = messages.iter().any(|m| match m {
-        OutboundMessage::RunLog { level: LogLevel::Warn, message, .. } => {
-            message.to_lowercase().contains("truncat")
-        }
+        OutboundMessage::RunLog {
+            level: LogLevel::Warn,
+            message,
+            ..
+        } => message.to_lowercase().contains("truncat"),
         _ => false,
     });
 
@@ -505,7 +530,9 @@ async fn test_registry_concurrent_jobs() {
             async move {
                 let job_id = format!("concurrent-job-{}", i);
                 registry_ref.register(job_id.clone()).unwrap();
-                registry_ref.update_state(&job_id, JobState::running(i as u32)).unwrap();
+                registry_ref
+                    .update_state(&job_id, JobState::running(i as u32))
+                    .unwrap();
                 job_id
             }
         })
@@ -617,9 +644,17 @@ async fn test_duration_tracking() {
     let duration_ms = duration.unwrap();
 
     // Should be at least 100ms (the sleep time)
-    assert!(duration_ms >= 100, "Duration should be at least 100ms, got {}ms", duration_ms);
+    assert!(
+        duration_ms >= 100,
+        "Duration should be at least 100ms, got {}ms",
+        duration_ms
+    );
     // But not too long (less than 5 seconds)
-    assert!(duration_ms < 5000, "Duration should be less than 5000ms, got {}ms", duration_ms);
+    assert!(
+        duration_ms < 5000,
+        "Duration should be less than 5000ms, got {}ms",
+        duration_ms
+    );
 }
 
 // =============================================================================
@@ -665,7 +700,15 @@ async fn test_many_quick_commands() {
             let messages = collect_messages(&mut rx, Duration::from_secs(5)).await;
 
             // Verify we got output
-            messages.iter().any(|m| matches!(m, OutboundMessage::RunExit { exit_code: Some(0), .. }))
+            messages.iter().any(|m| {
+                matches!(
+                    m,
+                    OutboundMessage::RunExit {
+                        exit_code: Some(0),
+                        ..
+                    }
+                )
+            })
         });
         handles.push(handle);
     }
@@ -696,12 +739,25 @@ async fn test_command_with_no_output() {
     let messages = collect_messages(&mut rx, Duration::from_secs(5)).await;
 
     // Should have RunStarted and RunExit
-    assert!(messages.iter().any(|m| matches!(m, OutboundMessage::RunStarted { .. })));
-    assert!(messages.iter().any(|m| matches!(m, OutboundMessage::RunExit { exit_code: Some(0), .. })));
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, OutboundMessage::RunStarted { .. }))
+    );
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        OutboundMessage::RunExit {
+            exit_code: Some(0),
+            ..
+        }
+    )));
 
     // Should have no stdout or stderr
     let has_output = messages.iter().any(|m| {
-        matches!(m, OutboundMessage::RunStdout { .. } | OutboundMessage::RunStderr { .. })
+        matches!(
+            m,
+            OutboundMessage::RunStdout { .. } | OutboundMessage::RunStderr { .. }
+        )
     });
     assert!(!has_output);
 }
@@ -716,7 +772,10 @@ async fn test_large_output() {
     let (tx, mut rx) = mpsc::channel(1000);
 
     // Generate 10KB of output
-    let request = create_bash_request("large-1", "for i in $(seq 1 1000); do echo 'This is a test line with some content'; done");
+    let request = create_bash_request(
+        "large-1",
+        "for i in $(seq 1 1000); do echo 'This is a test line with some content'; done",
+    );
     let _handle = executor.spawn(&request, tx).await.unwrap();
 
     let messages = collect_messages(&mut rx, Duration::from_secs(10)).await;
@@ -734,8 +793,18 @@ async fn test_large_output() {
 
     // Should have received substantial output (each line is ~40 chars + newline = ~41 bytes)
     // 1000 lines * 41 bytes = ~41KB
-    assert!(total_bytes > 30_000, "Expected at least 30KB of output, got {} bytes", total_bytes);
+    assert!(
+        total_bytes > 30_000,
+        "Expected at least 30KB of output, got {} bytes",
+        total_bytes
+    );
 
     // Should complete successfully
-    assert!(messages.iter().any(|m| matches!(m, OutboundMessage::RunExit { exit_code: Some(0), .. })));
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        OutboundMessage::RunExit {
+            exit_code: Some(0),
+            ..
+        }
+    )));
 }

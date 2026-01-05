@@ -1,8 +1,7 @@
-import { type FormEvent, useEffect, useState } from 'react';
 import DOMPurify from 'dompurify';
+import { type FormEvent, useEffect, useState } from 'react';
 import { client } from '../api/client';
-import VirtualBrowseList from '../components/VirtualBrowseList';
-import { useAuth } from '../context/AuthContext';
+import { Button, Modal, VirtualBrowseList } from '../components';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
@@ -31,7 +30,6 @@ function formatNumber(num: number): string {
 type Tab = 'installed' | 'browse';
 
 export default function ModelsPage() {
-  const { isAuthenticated } = useAuth();
   const { models, loading: modelsLoading, error: modelsError, refresh, deleteModel } = useModels();
   const browse = useBrowse();
   const pull = usePull();
@@ -167,20 +165,14 @@ export default function ModelsPage() {
                   onChange={(e) => setModelInput(e.target.value)}
                   disabled={pull.pulling}
                 />
-                <button
+                <Button
                   type="submit"
-                  className="btn btn-primary"
-                  disabled={pull.pulling || !modelInput.trim()}
+                  variant="primary"
+                  loading={pull.pulling}
+                  disabled={!modelInput.trim()}
                 >
-                  {pull.pulling ? (
-                    <>
-                      <span className="spinner" />
-                      Installing...
-                    </>
-                  ) : (
-                    'Install'
-                  )}
-                </button>
+                  {pull.pulling ? 'Installing...' : 'Install'}
+                </Button>
               </div>
             </form>
 
@@ -363,9 +355,9 @@ export default function ModelsPage() {
               value={browse.query}
               onChange={(e) => browse.setQuery(e.target.value)}
             />
-            <button type="submit" className="btn btn-secondary">
+            <Button type="submit" variant="secondary">
               Search
-            </button>
+            </Button>
           </form>
 
           {browse.loading ? (
@@ -388,48 +380,28 @@ export default function ModelsPage() {
       )}
 
       {/* Delete Confirmation Modal */}
-      {deleteConfirm && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setDeleteConfirm(null)}
-            onKeyDown={(e) => e.key === 'Escape' && setDeleteConfirm(null)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Delete Model</h3>
-            <p>
-              Are you sure you want to delete <strong>{deleteConfirm}</strong>?
-            </p>
-            <p className="help-text">This action cannot be undone.</p>
-            <div className="modal-actions">
-              <button
-                className="btn btn-secondary"
-                onClick={() => setDeleteConfirm(null)}
-                type="button"
-              >
-                Cancel
-              </button>
-              <button
-                className="btn btn-danger"
-                onClick={() => handleDelete(deleteConfirm)}
-                disabled={deleting !== null}
-                type="button"
-              >
-                {deleting === deleteConfirm ? (
-                  <>
-                    <span className="spinner" /> Deleting...
-                  </>
-                ) : (
-                  'Delete'
-                )}
-              </button>
-            </div>
-          </div>
+      <Modal
+        isOpen={deleteConfirm !== null}
+        onClose={() => setDeleteConfirm(null)}
+        title="Delete Model"
+      >
+        <p>
+          Are you sure you want to delete <strong>{deleteConfirm}</strong>?
+        </p>
+        <p className="help-text">This action cannot be undone.</p>
+        <div className="modal-actions">
+          <Button variant="secondary" onClick={() => setDeleteConfirm(null)}>
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            onClick={() => deleteConfirm && handleDelete(deleteConfirm)}
+            loading={deleting !== null}
+          >
+            {deleting === deleteConfirm ? 'Deleting...' : 'Delete'}
+          </Button>
         </div>
-      )}
+      </Modal>
 
       {/* Model Details Modal */}
       {detailsModel && (
@@ -488,16 +460,15 @@ export default function ModelsPage() {
                   )}
                 </div>
                 <div className="modal-actions">
-                  <button
-                    className="btn btn-danger"
+                  <Button
+                    variant="danger"
                     onClick={() => {
                       setDetailsModel(null);
                       setDeleteConfirm(detailsModel.name);
                     }}
-                    type="button"
                   >
                     Delete Model
-                  </button>
+                  </Button>
                 </div>
               </>
             ) : (
@@ -607,13 +578,9 @@ export default function ModelsPage() {
                 )}
 
                 <div className="modal-actions">
-                  <button
-                    className="btn btn-primary"
-                    onClick={() => handleInstall(detailsModel)}
-                    type="button"
-                  >
+                  <Button variant="primary" onClick={() => handleInstall(detailsModel)}>
                     Install Model
-                  </button>
+                  </Button>
                 </div>
               </>
             )}

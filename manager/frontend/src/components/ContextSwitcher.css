@@ -1,3 +1,8 @@
+/* =============================================================================
+   Context Switcher - Obsidian Design
+   Organization/Workspace selector
+   ============================================================================= */
+
 .context-switcher {
   position: relative;
   width: 100%;
@@ -5,9 +10,9 @@
 
 .context-switcher-loading,
 .context-switcher-empty {
-  padding: var(--space-2) var(--space-3);
-  color: var(--text-secondary);
-  font-size: 0.875rem;
+  padding: var(--ui-space-2) var(--ui-space-3);
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-sm);
 }
 
 .context-switcher-button {
@@ -15,60 +20,62 @@
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface-secondary);
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-md);
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-2-5) var(--ui-space-3);
+  background: var(--ui-bg-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
   cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s;
+  transition: all var(--ui-duration-fast) var(--ui-ease-out);
   text-align: left;
 }
 
 .context-switcher-button:hover {
-  background: var(--surface-hover);
-  border-color: var(--border-hover);
+  background: var(--ui-bg-hover);
+  border-color: var(--ui-border-strong);
 }
 
 .context-switcher-button:focus {
   outline: none;
-  border-color: var(--primary);
-  box-shadow: 0 0 0 2px var(--primary-light);
+  border-color: var(--ui-accent-500);
+  box-shadow: 0 0 0 3px rgba(237, 122, 20, 0.1);
 }
 
 .context-label {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--ui-space-1);
   min-width: 0;
   overflow: hidden;
 }
 
 .org-name {
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--ui-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: var(--ui-text-sm);
 }
 
 .separator {
-  color: var(--text-tertiary);
+  color: var(--ui-text-muted);
   flex-shrink: 0;
 }
 
 .ws-name {
-  color: var(--text-secondary);
+  color: var(--ui-text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: var(--ui-text-sm);
 }
 
 .chevron {
   width: 16px;
   height: 16px;
-  color: var(--text-secondary);
-  transition: transform 0.2s;
+  color: var(--ui-text-muted);
+  transition: transform var(--ui-duration-fast) var(--ui-ease-out);
   flex-shrink: 0;
 }
 
@@ -81,31 +88,32 @@
   top: 100%;
   left: 0;
   right: 0;
-  margin-top: var(--space-1);
-  background: var(--surface-primary);
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
+  margin-top: var(--ui-space-1);
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  box-shadow: var(--ui-shadow-lg);
   z-index: 100;
-  max-height: 300px;
+  max-height: 320px;
   overflow-y: auto;
+  animation: ui-fade-down var(--ui-duration-fast) var(--ui-ease-out);
 }
 
 .dropdown-section {
-  padding: var(--space-2);
+  padding: var(--ui-space-2);
 }
 
 .dropdown-section:not(:last-child) {
-  border-bottom: 1px solid var(--border-primary);
+  border-bottom: 1px solid var(--ui-border);
 }
 
 .dropdown-section h4 {
-  font-size: 0.6875rem;
+  font-size: var(--ui-text-xs);
   font-weight: 600;
-  color: var(--text-tertiary);
+  color: var(--ui-text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin: 0 0 var(--space-1) var(--space-1);
+  letter-spacing: var(--ui-tracking-wider);
+  margin: 0 0 var(--ui-space-1) var(--ui-space-1);
 }
 
 .dropdown-item {
@@ -113,29 +121,29 @@
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: var(--space-2);
+  padding: var(--ui-space-2-5) var(--ui-space-3);
   text-align: left;
   background: none;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--ui-radius-md);
   cursor: pointer;
-  color: var(--text-primary);
-  font-size: 0.875rem;
-  transition: background-color 0.15s;
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+  transition: all var(--ui-duration-fast) var(--ui-ease-out);
 }
 
 .dropdown-item:hover {
-  background: var(--surface-hover);
+  background: var(--ui-bg-hover);
 }
 
 .dropdown-item:focus {
   outline: none;
-  background: var(--surface-hover);
+  background: var(--ui-bg-hover);
 }
 
 .dropdown-item.active {
-  background: var(--primary-light);
-  color: var(--primary);
+  background: rgba(237, 122, 20, 0.08);
+  color: var(--ui-accent-500);
 }
 
 .dropdown-item .item-name {
@@ -150,5 +158,18 @@
   width: 16px;
   height: 16px;
   flex-shrink: 0;
-  margin-left: var(--space-2);
+  margin-left: var(--ui-space-2);
+  color: var(--ui-accent-500);
+}
+
+/* Animation for dropdown */
+@keyframes ui-fade-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

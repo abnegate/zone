@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_daemon_error_protocol() {
-        let io_err = io::Error::new(io::ErrorKind::Other, "test");
+        let io_err = io::Error::other("test");
         let protocol_err = ProtocolError::Io(io_err);
         let err = DaemonError::Protocol(protocol_err);
         assert_eq!(err.to_error_code(), ErrorCode::InvalidMessage);
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_daemon_error_io() {
-        let io_err = io::Error::new(io::ErrorKind::Other, "some io error");
+        let io_err = io::Error::other("some io error");
         let err = DaemonError::Io(io_err);
         assert_eq!(err.to_error_code(), ErrorCode::InternalError);
         assert!(err.to_string().contains("I/O error"));
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_daemon_error_from_protocol() {
-        let io_err = io::Error::new(io::ErrorKind::Other, "test");
+        let io_err = io::Error::other("test");
         let protocol_err = ProtocolError::Io(io_err);
         let err: DaemonError = protocol_err.into();
         match err {
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_daemon_error_from_io() {
-        let io_err = io::Error::new(io::ErrorKind::Other, "test");
+        let io_err = io::Error::other("test");
         let err: DaemonError = io_err.into();
         match err {
             DaemonError::Io(_) => {}

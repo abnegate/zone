@@ -1,0 +1,32 @@
+[package]
+name = "zone_core"
+description = "Core agent logic for Zone - shared between server and CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Session storage
+dirs = "5"
+
+# Streaming
+async-stream = "0.3"
+
+tool_runner = { path = "../tool_runner" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

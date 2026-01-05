@@ -1,4 +1,4 @@
-//! Protocol message types for communication between Gleam and the Rust runner.
+//! Protocol message types for communication between the backend and the Rust runner.
 //!
 //! All messages are serialized as newline-delimited JSON (NDJSON).
 
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// Protocol version for compatibility checking
 pub const PROTOCOL_VERSION: &str = "1.0";
 
-/// Messages sent from Gleam to the Runner
+/// Messages sent from the backend to the Runner
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum InboundMessage {
@@ -58,7 +58,7 @@ pub enum InboundMessage {
     Ping { id: String },
 }
 
-/// Messages sent from the Runner to Gleam
+/// Messages sent from the Runner to the backend
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum OutboundMessage {
@@ -243,7 +243,10 @@ mod tests {
         let msg: InboundMessage = serde_json::from_str(json).unwrap();
 
         match msg {
-            InboundMessage::Hello { protocol_version, capabilities } => {
+            InboundMessage::Hello {
+                protocol_version,
+                capabilities,
+            } => {
                 assert_eq!(protocol_version, "1.0");
                 assert!(capabilities.is_empty());
             }
@@ -258,7 +261,10 @@ mod tests {
         let msg: InboundMessage = serde_json::from_str(json).unwrap();
 
         match msg {
-            InboundMessage::Hello { protocol_version, capabilities } => {
+            InboundMessage::Hello {
+                protocol_version,
+                capabilities,
+            } => {
                 assert_eq!(protocol_version, "2.0");
                 assert!(capabilities.is_empty());
             }
@@ -404,7 +410,10 @@ mod tests {
                 assert_eq!(env.get("CI"), Some(&"true".to_string()));
                 assert_eq!(timeout_ms, Some(300000));
                 assert_eq!(max_output_bytes, Some(10485760));
-                assert_eq!(working_dir.unwrap().to_str().unwrap(), "/home/user/project/packages/app");
+                assert_eq!(
+                    working_dir.unwrap().to_str().unwrap(),
+                    "/home/user/project/packages/app"
+                );
             }
             _ => panic!("Wrong message type"),
         }
@@ -442,7 +451,10 @@ mod tests {
         let msg: InboundMessage = serde_json::from_str(json).unwrap();
         match msg {
             InboundMessage::RunStart { env, .. } => {
-                assert_eq!(env.get("PATH"), Some(&"/usr/bin:/usr/local/bin".to_string()));
+                assert_eq!(
+                    env.get("PATH"),
+                    Some(&"/usr/bin:/usr/local/bin".to_string())
+                );
                 assert_eq!(env.get("MSG"), Some(&"hello=world&foo=bar".to_string()));
             }
             _ => panic!("Wrong message type"),
@@ -563,7 +575,9 @@ mod tests {
 
     #[test]
     fn test_ping_roundtrip() {
-        let original = InboundMessage::Ping { id: "test-ping-123".to_string() };
+        let original = InboundMessage::Ping {
+            id: "test-ping-123".to_string(),
+        };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(original, decoded);
@@ -571,7 +585,9 @@ mod tests {
 
     #[test]
     fn test_pong_roundtrip() {
-        let original = OutboundMessage::Pong { id: "test-pong-456".to_string() };
+        let original = OutboundMessage::Pong {
+            id: "test-pong-456".to_string(),
+        };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: OutboundMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(original, decoded);
@@ -725,7 +741,7 @@ mod tests {
         let msg = OutboundMessage::RunExit {
             job_id: "job-killed".to_string(),
             exit_code: None,
-            signal: Some(9),  // SIGKILL
+            signal: Some(9), // SIGKILL
             duration_ms: 5000,
         };
 
@@ -768,7 +784,8 @@ mod tests {
 
     #[test]
     fn test_run_error_serialization() {
-        let msg = OutboundMessage::error("job-123", ErrorCode::Timeout, "Command timed out after 60s");
+        let msg =
+            OutboundMessage::error("job-123", ErrorCode::Timeout, "Command timed out after 60s");
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"RunError""#));
@@ -843,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_invalid_json() {
-        let json = r#"{"type": "Hello", "protocol_version": "#;  // truncated
+        let json = r#"{"type": "Hello", "protocol_version": "#; // truncated
         let result: Result<InboundMessage, _> = serde_json::from_str(json);
         assert!(result.is_err());
     }

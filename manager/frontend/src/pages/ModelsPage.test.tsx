@@ -1,8 +1,8 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
-import ModelsPage from './ModelsPage';
-import { AuthProvider } from '../context/AuthContext';
 import { client } from '../api/client';
+import { AuthProvider } from '../context/AuthContext';
+import ModelsPage from './ModelsPage';
 
 // Mock the hooks
 jest.mock('../hooks/useModels', () => ({
@@ -26,8 +26,22 @@ jest.mock('../api/client', () => ({
 
 // Mock VirtualBrowseList - pass the full model object to callbacks
 jest.mock('../components/VirtualBrowseList', () => {
-  return function MockVirtualBrowseList({ models, onItemClick, onInstall }: {
-    models: Array<{ id: string; name: string; description?: string; downloads?: number; likes?: number; tags?: string[]; author?: string; url?: string; install_name?: string }>;
+  return function MockVirtualBrowseList({
+    models,
+    onItemClick,
+    onInstall,
+  }: {
+    models: Array<{
+      id: string;
+      name: string;
+      description?: string;
+      downloads?: number;
+      likes?: number;
+      tags?: string[];
+      author?: string;
+      url?: string;
+      install_name?: string;
+    }>;
     onItemClick: (model: unknown) => void;
     onInstall: (model: unknown) => void;
   }) {
@@ -45,8 +59,8 @@ jest.mock('../components/VirtualBrowseList', () => {
   };
 });
 
-import { useModels } from '../hooks/useModels';
 import { useBrowse } from '../hooks/useBrowse';
+import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
 
 const mockUseModels = useModels as jest.Mock;
@@ -416,7 +430,9 @@ describe('ModelsPage', () => {
     it('shows installed model details', async () => {
       mockUseModels.mockReturnValue({
         ...defaultModelsHook,
-        models: [{ name: 'llama2', size: 3800000000, modified_at: '2024-01-01T00:00:00Z', digest: 'abc' }],
+        models: [
+          { name: 'llama2', size: 3800000000, modified_at: '2024-01-01T00:00:00Z', digest: 'abc' },
+        ],
       });
 
       renderModelsPage();
@@ -472,7 +488,16 @@ describe('ModelsPage', () => {
       mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
-        models: [{ id: 'test-model', name: 'Test Model', description: 'A test', downloads: 1000, tags: [], install_name: 'test-install' }],
+        models: [
+          {
+            id: 'test-model',
+            name: 'Test Model',
+            description: 'A test',
+            downloads: 1000,
+            tags: [],
+            install_name: 'test-install',
+          },
+        ],
       });
 
       renderModelsPage();
@@ -495,7 +520,15 @@ describe('ModelsPage', () => {
       mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
-        models: [{ id: 'test-model', name: 'test-model-name', description: 'A test', downloads: 1000, tags: [] }],
+        models: [
+          {
+            id: 'test-model',
+            name: 'test-model-name',
+            description: 'A test',
+            downloads: 1000,
+            tags: [],
+          },
+        ],
       });
 
       renderModelsPage();
@@ -519,16 +552,18 @@ describe('ModelsPage', () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
         source: 'ollama',
-        models: [{
-          id: 'llama3',
-          name: 'Llama 3',
-          description: 'A powerful model',
-          downloads: 1500000,
-          likes: 5000,
-          tags: ['llm', 'meta'],
-          author: 'Meta',
-          url: 'https://ollama.com/llama3',
-        }],
+        models: [
+          {
+            id: 'llama3',
+            name: 'Llama 3',
+            description: 'A powerful model',
+            downloads: 1500000,
+            likes: 5000,
+            tags: ['llm', 'meta'],
+            author: 'Meta',
+            url: 'https://ollama.com/llama3',
+          },
+        ],
       });
 
       renderModelsPage();
@@ -552,13 +587,15 @@ describe('ModelsPage', () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
         source: 'ollama',
-        models: [{
-          id: 'llama3',
-          name: 'Llama 3',
-          description: 'A powerful model',
-          downloads: 1000,
-          tags: [],
-        }],
+        models: [
+          {
+            id: 'llama3',
+            name: 'Llama 3',
+            description: 'A powerful model',
+            downloads: 1000,
+            tags: [],
+          },
+        ],
       });
 
       renderModelsPage();
@@ -579,13 +616,15 @@ describe('ModelsPage', () => {
     it('shows model tags in details', async () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
-        models: [{
-          id: 'model1',
-          name: 'Model 1',
-          description: 'Test',
-          downloads: 100,
-          tags: ['llm', 'chat'],
-        }],
+        models: [
+          {
+            id: 'model1',
+            name: 'Model 1',
+            description: 'Test',
+            downloads: 100,
+            tags: ['llm', 'chat'],
+          },
+        ],
       });
 
       renderModelsPage();
@@ -612,13 +651,15 @@ describe('ModelsPage', () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
         source: 'huggingface',
-        models: [{
-          id: 'hf/model1',
-          name: 'HF Model',
-          description: 'HuggingFace model',
-          downloads: 500,
-          tags: [],
-        }],
+        models: [
+          {
+            id: 'hf/model1',
+            name: 'HF Model',
+            description: 'HuggingFace model',
+            downloads: 500,
+            tags: [],
+          },
+        ],
       });
 
       renderModelsPage();
@@ -644,13 +685,15 @@ describe('ModelsPage', () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
         source: 'modelscope',
-        models: [{
-          id: 'ms-model',
-          name: 'ModelScope Model',
-          description: 'A model',
-          downloads: 100,
-          tags: [],
-        }],
+        models: [
+          {
+            id: 'ms-model',
+            name: 'ModelScope Model',
+            description: 'A model',
+            downloads: 100,
+            tags: [],
+          },
+        ],
       });
 
       renderModelsPage();
@@ -673,13 +716,15 @@ describe('ModelsPage', () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
         source: 'huggingface',
-        models: [{
-          id: 'hf/model1',
-          name: 'HF Model',
-          description: 'Test model',
-          downloads: 500,
-          tags: [],
-        }],
+        models: [
+          {
+            id: 'hf/model1',
+            name: 'HF Model',
+            description: 'Test model',
+            downloads: 500,
+            tags: [],
+          },
+        ],
       });
 
       renderModelsPage();
@@ -737,7 +782,9 @@ describe('ModelsPage', () => {
     it('shows model details on Enter key', async () => {
       mockUseModels.mockReturnValue({
         ...defaultModelsHook,
-        models: [{ name: 'llama2', size: 3800000000, modified_at: '2024-01-01T00:00:00Z', digest: 'abc' }],
+        models: [
+          { name: 'llama2', size: 3800000000, modified_at: '2024-01-01T00:00:00Z', digest: 'abc' },
+        ],
       });
 
       renderModelsPage();
@@ -766,8 +813,8 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Delete Model')).toBeInTheDocument();
       });
 
-      const backdrop = screen.getByLabelText('Close modal');
-      fireEvent.keyDown(backdrop, { key: 'Escape' });
+      // Press Escape to close modal
+      fireEvent.keyDown(document, { key: 'Escape' });
 
       await waitFor(() => {
         expect(screen.queryByText('Delete Model')).not.toBeInTheDocument();
@@ -788,8 +835,8 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
 
-      const backdrop = screen.getByLabelText('Close modal');
-      fireEvent.keyDown(backdrop, { key: 'Escape' });
+      // Press Escape to close modal
+      fireEvent.keyDown(document, { key: 'Escape' });
 
       await waitFor(() => {
         expect(screen.queryByText('Modified')).not.toBeInTheDocument();
@@ -822,13 +869,15 @@ describe('ModelsPage', () => {
     it('shows model family when available', async () => {
       mockUseModels.mockReturnValue({
         ...defaultModelsHook,
-        models: [{
-          name: 'llama2',
-          size: 3800000000,
-          modified_at: '2024-01-01T00:00:00Z',
-          digest: 'abc',
-          details: { family: 'llama' },
-        }],
+        models: [
+          {
+            name: 'llama2',
+            size: 3800000000,
+            modified_at: '2024-01-01T00:00:00Z',
+            digest: 'abc',
+            details: { family: 'llama' },
+          },
+        ],
       });
 
       renderModelsPage();

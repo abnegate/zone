@@ -275,8 +275,8 @@ services:
 
   console:
     build:
-      context: ./manager/frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: manager/frontend/Dockerfile
     container_name: console
     restart: unless-stopped
     depends_on:
@@ -571,8 +571,8 @@ services:
   # =============================================================================
   installer:
     build:
-      context: ./installer
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: installer/Dockerfile
     container_name: zone-installer
     restart: "no"
     profiles:

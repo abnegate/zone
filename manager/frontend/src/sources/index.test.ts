@@ -1,13 +1,13 @@
+import type { SourceCategory, SourceType } from '../types';
 import {
-  sourceRegistry,
-  getSourceById,
-  getSourcesByCategory,
   getEnabledSources,
   getSourceBadgeColor,
+  getSourceById,
   getSourceLabel,
+  getSourcesByCategory,
   initializeFormState,
+  sourceRegistry,
 } from './index';
-import type { SourceType, SourceCategory } from '../types';
 
 describe('Source Registry', () => {
   describe('sourceRegistry', () => {
@@ -99,7 +99,7 @@ describe('Source Registry', () => {
 
     it('does not include disabled sources', () => {
       const enabled = getEnabledSources();
-      const enabledIds = enabled.map(s => s.id);
+      const enabledIds = enabled.map((s) => s.id);
 
       // Discord and Slack are disabled
       expect(enabledIds).not.toContain('discord');

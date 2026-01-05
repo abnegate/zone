@@ -1,7 +1,7 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import TasksPage from './TasksPage';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { client } from '../api/client';
-import type { Task, Project, Source } from '../types';
+import type { Project, Source, Task } from '../types';
+import TasksPage from './TasksPage';
 
 // Mock client
 jest.mock('../api/client', () => ({
@@ -281,7 +281,9 @@ describe('TasksPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
 
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New Task' } });
-    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Task description' } });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Task description' },
+    });
 
     fireEvent.click(screen.getByRole('button', { name: 'Create Task' }));
 
@@ -420,7 +422,10 @@ describe('TasksPage', () => {
     });
 
     // Find the agentic checkbox and click it
-    const checkbox = screen.getByText(/Enable Agentic Mode/i).closest('label')?.querySelector('input');
+    const checkbox = screen
+      .getByText(/Enable Agentic Mode/i)
+      .closest('label')
+      ?.querySelector('input');
     expect(checkbox).not.toBeNull();
     fireEvent.click(checkbox!);
 
@@ -439,7 +444,10 @@ describe('TasksPage', () => {
       expect(screen.getByRole('heading', { name: 'Create New Task' })).toBeInTheDocument();
     });
 
-    const checkbox = screen.getByText(/Enable Agentic Mode/i).closest('label')?.querySelector('input');
+    const checkbox = screen
+      .getByText(/Enable Agentic Mode/i)
+      .closest('label')
+      ?.querySelector('input');
     fireEvent.click(checkbox!);
 
     expect(screen.getByText(/Project uses:/)).toBeInTheDocument();

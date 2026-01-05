@@ -92,7 +92,8 @@ describe('LoginPage', () => {
       await userEvent.type(screen.getByLabelText(/password/i), 'password123');
       await userEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
-      expect(screen.getByText(/please enter both email and password/i)).toBeInTheDocument();
+      // Zod validation shows "Invalid email address" for empty email
+      expect(screen.getByText(/invalid email/i)).toBeInTheDocument();
       expect(mockLogin).not.toHaveBeenCalled();
     });
 
@@ -102,7 +103,8 @@ describe('LoginPage', () => {
       await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
       await userEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
-      expect(screen.getByText(/please enter both email and password/i)).toBeInTheDocument();
+      // Zod validation shows "Password is required" for empty password
+      expect(screen.getByText(/password is required/i)).toBeInTheDocument();
       expect(mockLogin).not.toHaveBeenCalled();
     });
 
@@ -111,7 +113,8 @@ describe('LoginPage', () => {
 
       await userEvent.click(screen.getByRole('button', { name: /sign in/i }));
 
-      expect(screen.getByText(/please enter both email and password/i)).toBeInTheDocument();
+      // Zod validation shows errors for both fields
+      expect(screen.getByText(/invalid email/i)).toBeInTheDocument();
       expect(mockLogin).not.toHaveBeenCalled();
     });
 
@@ -223,7 +226,16 @@ describe('LoginPage', () => {
       mockUseAuth.mockReturnValue({
         isAuthenticated: true,
         isLoading: false,
-        user: { id: '1', email: 'test@test.com', display_name: null, is_active: true, is_admin: false, created_at: '', updated_at: '', last_login_at: null },
+        user: {
+          id: '1',
+          email: 'test@test.com',
+          display_name: null,
+          is_active: true,
+          is_admin: false,
+          created_at: '',
+          updated_at: '',
+          last_login_at: null,
+        },
         accessToken: 'token',
         refreshToken: 'refresh',
         roles: [],

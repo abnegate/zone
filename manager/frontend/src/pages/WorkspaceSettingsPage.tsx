@@ -1,5 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../api/client';
+import { Button } from '../components';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import type {
@@ -31,7 +32,7 @@ const radiusOptions: { value: BorderRadius; label: string }[] = [
 
 export default function WorkspaceSettingsPage() {
   const { isAuthenticated } = useAuth();
-  const { theme, workspaceTheme, setWorkspaceTheme } = useTheme();
+  const { workspaceTheme, setWorkspaceTheme } = useTheme();
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -95,6 +96,7 @@ export default function WorkspaceSettingsPage() {
       updated_at: workspaceTheme?.updated_at || '',
     };
     setWorkspaceTheme(previewTheme);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- Intentionally exclude created_at/updated_at to prevent infinite loops after save
   }, [
     primaryColorLight,
     secondaryColorLight,
@@ -107,8 +109,6 @@ export default function WorkspaceSettingsPage() {
     setWorkspaceTheme,
     workspaceTheme?.id,
     workspaceTheme?.workspace_id,
-    workspaceTheme?.created_at,
-    workspaceTheme?.updated_at,
   ]);
 
   const handleSave = async (e: FormEvent) => {
@@ -335,12 +335,12 @@ export default function WorkspaceSettingsPage() {
                 This is a preview of your theme settings. Changes are applied live.
               </p>
               <div className="preview-buttons">
-                <button type="button" className="btn btn-primary">
+                <Button type="button" variant="primary">
                   Primary Button
-                </button>
-                <button type="button" className="btn btn-secondary">
+                </Button>
+                <Button type="button" variant="secondary">
                   Secondary Button
-                </button>
+                </Button>
               </div>
               <div className="preview-card">
                 <strong>Sample Card</strong>
@@ -352,17 +352,12 @@ export default function WorkspaceSettingsPage() {
 
         {/* Actions */}
         <div className="settings-actions">
-          <button
-            type="button"
-            onClick={handleReset}
-            disabled={saving}
-            className="btn btn-secondary"
-          >
+          <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
             Reset to Defaults
-          </button>
-          <button type="submit" disabled={saving} className="btn btn-primary">
+          </Button>
+          <Button type="submit" loading={saving} variant="primary">
             {saving ? 'Saving...' : 'Save Changes'}
-          </button>
+          </Button>
         </div>
       </form>
     </div>

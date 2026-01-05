@@ -4,10 +4,9 @@ A web-based configuration wizard for the Zone AI Stack.
 
 ## Technology Stack
 
-- **Backend**: Gleam (functional language on the BEAM/Erlang VM)
-- **Web Framework**: Wisp + Mist (Gleam HTTP server)
-- **Frontend**: Vanilla HTML + JavaScript
-- **CSS**: Tailwind CSS (CDN)
+- **Backend**: Rust (Axum web framework)
+- **Frontend**: React with TypeScript
+- **CSS**: Tailwind CSS
 
 ## Features
 
@@ -17,39 +16,34 @@ A web-based configuration wizard for the Zone AI Stack.
 - Live installation progress
 - Mobile-responsive UI
 - OpenVPN & WireGuard support
-- Zero npm/build step required
-
-## Why Gleam?
-
-Gleam provides:
-- ✅ Type safety
-- ✅ Pattern matching
-- ✅ Excellent concurrency (BEAM VM)
-- ✅ Small binary size
-- ✅ Fast compilation
-- ✅ Functional programming paradigm
-- ✅ Great developer experience
 
 ## Development
 
 ### Prerequisites
-- Gleam 1.7.1+
-- Erlang 27+
+- Rust 1.85+
+- Node.js 20+
+- npm
 
 ### Build Locally
+
 ```bash
-cd installer
-gleam build
-gleam run
+# Build the Rust backend
+cd runner && cargo build --release --package zone_installer
+
+# Build the frontend
+cd installer/frontend && npm install && npm run build
 ```
 
 ### Build Docker Image
+
 ```bash
-docker build -t zone-installer .
-docker run -p 8000:8000 -v $PWD/..:/project zone-installer
+# Build from repo root
+docker build -f installer/Dockerfile .
+docker run -p 8000:8000 -v $PWD:/project zone-installer
 ```
 
 ### Using with Make
+
 ```bash
 make install  # From project root
 ```
@@ -57,10 +51,10 @@ make install  # From project root
 ## API Endpoints
 
 ### `GET /`
-Serves the installer UI (HTML)
+Serves the installer UI (React SPA)
 
-### `GET /static/{file}`
-Serves static assets (JavaScript)
+### `GET /api/health`
+Health check endpoint
 
 ### `POST /api/install`
 Handles installation request
@@ -87,26 +81,21 @@ Handles installation request
 
 ```
 installer/
-├── gleam.toml              # Gleam project configuration
-├── src/
-│   └── installer.gleam  # Main application
-├── templates/
-│   └── index.html          # Wizard UI
-├── static/
-│   └── installer.js        # Frontend logic
-├── Dockerfile              # Multi-stage Gleam build
-└── README.md               # This file
+├── frontend/              # React frontend
+│   ├── src/
+│   │   ├── components/    # UI components
+│   │   ├── pages/         # Page components
+│   │   └── steps/         # Wizard step components
+│   ├── public/            # Static assets
+│   └── package.json       # Frontend dependencies
+├── Dockerfile             # Multi-stage build
+└── README.md              # This file
+
+runner/
+└── zone_installer/        # Rust backend
+    └── src/
+        └── main.rs        # Installer server
 ```
-
-## Dependencies
-
-Defined in `gleam.toml`:
-- **gleam_stdlib** - Standard library
-- **gleam_http** - HTTP primitives
-- **gleam_json** - JSON encoding/decoding
-- **wisp** - Web framework
-- **mist** - HTTP server
-- **simplifile** - File system operations
 
 ## License
 

@@ -1,6 +1,6 @@
-import { renderHook, act } from '@testing-library/react';
-import { usePull } from './usePull';
+import { act, renderHook } from '@testing-library/react';
 import { client } from '../api/client';
+import { usePull } from './usePull';
 
 // Mock the client
 jest.mock('../api/client', () => ({
@@ -185,7 +185,9 @@ describe('usePull', () => {
 
     // Simulate progress message
     act(() => {
-      mockWs.onmessage?.({ data: JSON.stringify({ type: 'progress', percent: 50 }) } as MessageEvent);
+      mockWs.onmessage?.({
+        data: JSON.stringify({ type: 'progress', percent: 50 }),
+      } as MessageEvent);
     });
 
     expect(result.current.progress).toBe(50);
@@ -203,7 +205,13 @@ describe('usePull', () => {
 
     // Simulate step message
     act(() => {
-      mockWs.onmessage?.({ data: JSON.stringify({ type: 'step', status: 'downloading', message: 'Downloading model...' }) } as MessageEvent);
+      mockWs.onmessage?.({
+        data: JSON.stringify({
+          type: 'step',
+          status: 'downloading',
+          message: 'Downloading model...',
+        }),
+      } as MessageEvent);
     });
 
     expect(result.current.steps).toHaveLength(1);
@@ -226,12 +234,16 @@ describe('usePull', () => {
 
     // Add initial step
     act(() => {
-      mockWs.onmessage?.({ data: JSON.stringify({ type: 'step', status: 'downloading', message: 'Starting...' }) } as MessageEvent);
+      mockWs.onmessage?.({
+        data: JSON.stringify({ type: 'step', status: 'downloading', message: 'Starting...' }),
+      } as MessageEvent);
     });
 
     // Update same step
     act(() => {
-      mockWs.onmessage?.({ data: JSON.stringify({ type: 'step', status: 'downloading', message: 'Complete!' }) } as MessageEvent);
+      mockWs.onmessage?.({
+        data: JSON.stringify({ type: 'step', status: 'downloading', message: 'Complete!' }),
+      } as MessageEvent);
     });
 
     expect(result.current.steps).toHaveLength(1);
@@ -248,14 +260,18 @@ describe('usePull', () => {
 
     const { result } = renderHook(() => usePull());
 
-    let pullResult: boolean | undefined;
+    let _pullResult: boolean | undefined;
     act(() => {
-      result.current.pull('llama2').then(r => { pullResult = r; });
+      result.current.pull('llama2').then((r) => {
+        _pullResult = r;
+      });
     });
 
     // Simulate complete message
     act(() => {
-      mockWs.onmessage?.({ data: JSON.stringify({ type: 'complete', success: true, message: 'Done!' }) } as MessageEvent);
+      mockWs.onmessage?.({
+        data: JSON.stringify({ type: 'complete', success: true, message: 'Done!' }),
+      } as MessageEvent);
     });
 
     expect(result.current.pulling).toBe(false);
@@ -278,7 +294,10 @@ describe('usePull', () => {
       mockWs.onmessage?.({ data: JSON.stringify({ type: 'complete' }) } as MessageEvent);
     });
 
-    expect(result.current.result).toEqual({ success: true, message: 'Model installed successfully' });
+    expect(result.current.result).toEqual({
+      success: true,
+      message: 'Model installed successfully',
+    });
   });
 
   it('handles error message', async () => {
@@ -287,14 +306,18 @@ describe('usePull', () => {
 
     const { result } = renderHook(() => usePull());
 
-    let pullResult: boolean | undefined;
+    let _pullResult: boolean | undefined;
     act(() => {
-      result.current.pull('llama2').then(r => { pullResult = r; });
+      result.current.pull('llama2').then((r) => {
+        _pullResult = r;
+      });
     });
 
     // Simulate error message
     act(() => {
-      mockWs.onmessage?.({ data: JSON.stringify({ type: 'error', message: 'Download failed' }) } as MessageEvent);
+      mockWs.onmessage?.({
+        data: JSON.stringify({ type: 'error', message: 'Download failed' }),
+      } as MessageEvent);
     });
 
     expect(result.current.pulling).toBe(false);
@@ -326,9 +349,11 @@ describe('usePull', () => {
 
     const { result } = renderHook(() => usePull());
 
-    let pullResult: boolean | undefined;
+    let _pullResult: boolean | undefined;
     act(() => {
-      result.current.pull('llama2').then(r => { pullResult = r; });
+      result.current.pull('llama2').then((r) => {
+        _pullResult = r;
+      });
     });
 
     // Simulate WebSocket error

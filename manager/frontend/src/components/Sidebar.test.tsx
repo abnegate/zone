@@ -1,9 +1,9 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
-import Sidebar from './Sidebar';
 import { AuthProvider } from '../context/AuthContext';
 import { ThemeProvider } from '../context/ThemeContext';
 import { WorkspaceProvider } from '../context/WorkspaceContext';
+import Sidebar from './Sidebar';
 
 // Mock the client
 jest.mock('../api/client', () => ({

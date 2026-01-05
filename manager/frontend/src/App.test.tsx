@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render } from '@testing-library/react';
 import App from './App';
 
 // Mock all the contexts and providers
@@ -31,14 +31,18 @@ jest.mock('./components/ProtectedRoute', () => {
 // Mock pages
 jest.mock('./pages/LoginPage', () => () => <div data-testid="login-page">Login</div>);
 jest.mock('./pages/RegisterPage', () => () => <div data-testid="register-page">Register</div>);
-jest.mock('./pages/UnauthorizedPage', () => () => <div data-testid="unauthorized-page">Unauthorized</div>);
+jest.mock('./pages/UnauthorizedPage', () => () => (
+  <div data-testid="unauthorized-page">Unauthorized</div>
+));
 jest.mock('./pages/ModelsPage', () => () => <div data-testid="models-page">Models</div>);
 jest.mock('./pages/ChatsPage', () => () => <div data-testid="chats-page">Chats</div>);
 jest.mock('./pages/ProjectsPage', () => () => <div data-testid="projects-page">Projects</div>);
 jest.mock('./pages/TasksPage', () => () => <div data-testid="tasks-page">Tasks</div>);
 jest.mock('./pages/SourcesPage', () => () => <div data-testid="sources-page">Sources</div>);
 jest.mock('./pages/WikiPage', () => () => <div data-testid="wiki-page">Wiki</div>);
-jest.mock('./pages/WorkspaceSettingsPage', () => () => <div data-testid="settings-page">Settings</div>);
+jest.mock('./pages/WorkspaceSettingsPage', () => () => (
+  <div data-testid="settings-page">Settings</div>
+));
 
 describe('App', () => {
   it('renders without crashing', () => {

@@ -1,0 +1,43 @@
+[package]
+name = "zone_cli"
+description = "Zone CLI - AI coding agent for your terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zone"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
+anyhow = "1.0"
+
+# CLI
+clap = { workspace = true }
+dialoguer = { workspace = true }
+indicatif = { workspace = true }
+console = "0.15"
+rand = { workspace = true }
+
+# Config & storage
+keyring = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
+base64 = { workspace = true }
+
+# Internal
+zone_core = { path = "../zone_core" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
