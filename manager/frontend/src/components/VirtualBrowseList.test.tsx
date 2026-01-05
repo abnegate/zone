@@ -1,6 +1,6 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import VirtualBrowseList from './VirtualBrowseList';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { BrowseModel } from '../types';
+import VirtualBrowseList from './VirtualBrowseList';
 
 const mockModels: BrowseModel[] = [
   {

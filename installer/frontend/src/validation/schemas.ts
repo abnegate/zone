@@ -1,11 +1,13 @@
 import { z } from 'zod';
 
 // Hostname validation patterns
-const hostnameRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+const hostnameRegex =
+  /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
 
 // Domain step schema
 export const DomainSchema = z.object({
-  DOMAIN_HOST_WEBUI: z.string()
+  DOMAIN_HOST_WEBUI: z
+    .string()
     .min(1, 'Hostname is required')
     .refine(
       (val) => hostnameRegex.test(val),
@@ -42,16 +44,18 @@ export const InterfaceSchema = z.object({
 // Search step schema
 export const SearchSchema = z.object({
   SEARCH_ENABLE_WEB_SEARCH: z.enum(['true', 'false']),
-  SEARCH_RESULT_COUNT: z.string()
+  SEARCH_RESULT_COUNT: z
+    .string()
     .regex(/^\d+$/, 'Must be a number')
     .refine((val) => {
-      const num = parseInt(val, 10);
+      const num = Number.parseInt(val, 10);
       return num >= 1 && num <= 20;
     }, 'Must be between 1 and 20'),
-  SEARCH_CONCURRENT_REQUESTS: z.string()
+  SEARCH_CONCURRENT_REQUESTS: z
+    .string()
     .regex(/^\d+$/, 'Must be a number')
     .refine((val) => {
-      const num = parseInt(val, 10);
+      const num = Number.parseInt(val, 10);
       return num >= 1 && num <= 32;
     }, 'Must be between 1 and 32'),
   SEARCH_SEARXNG_INSTANCE_NAME: z.string().min(1, 'Instance name is required'),
@@ -71,52 +75,61 @@ export const VPNSchema = z.object({
 });
 
 // Advanced step schema
-export const AdvancedSchema = z.object({
-  MONITORING_ENABLED: z.enum(['true', 'false']),
-  MONITORING_GRAFANA_ADMIN_USER: z.string(),
-  MONITORING_GRAFANA_ADMIN_PASSWORD: z.string(),
-  MONITORING_RETENTION_TIME: z.string(),
-  ALERT_ENABLED: z.enum(['true', 'false']),
-  ALERT_EMAIL_RECIPIENTS: z.string(),
-  ALERT_SMTP_HOST: z.string(),
-  ALERT_SMTP_PORT: z.string(),
-  ALERT_SMTP_USER: z.string(),
-  ALERT_SMTP_PASSWORD: z.string(),
-  ALERT_SMTP_FROM_ADDRESS: z.string(),
-  ALERT_SMTP_FROM_NAME: z.string(),
-  ADVANCED_LITELLM_WORKERS: z.string()
-    .regex(/^[1-9]\d*$/, 'Must be a positive number'),
-  ADVANCED_LITELLM_REQUEST_TIMEOUT: z.string()
-    .regex(/^\d+$/, 'Must be a number'),
-  ADVANCED_TZ: z.string().min(1, 'Timezone is required'),
-  ADVANCED_ACME_EMAIL: z.string()
-    .min(1, 'Email is required')
-    .email('Invalid email address'),
-}).refine((data) => {
-  if (data.MONITORING_ENABLED === 'true') {
-    return data.MONITORING_GRAFANA_ADMIN_PASSWORD.length >= 8;
-  }
-  return true;
-}, {
-  message: 'Grafana password must be at least 8 characters when monitoring is enabled',
-  path: ['MONITORING_GRAFANA_ADMIN_PASSWORD'],
-}).refine((data) => {
-  if (data.ALERT_ENABLED === 'true') {
-    return data.ALERT_SMTP_HOST.length > 0;
-  }
-  return true;
-}, {
-  message: 'SMTP host is required when alerting is enabled',
-  path: ['ALERT_SMTP_HOST'],
-}).refine((data) => {
-  if (data.ALERT_ENABLED === 'true') {
-    return data.ALERT_EMAIL_RECIPIENTS.length > 0;
-  }
-  return true;
-}, {
-  message: 'At least one alert recipient is required when alerting is enabled',
-  path: ['ALERT_EMAIL_RECIPIENTS'],
-});
+export const AdvancedSchema = z
+  .object({
+    MONITORING_ENABLED: z.enum(['true', 'false']),
+    MONITORING_GRAFANA_ADMIN_USER: z.string(),
+    MONITORING_GRAFANA_ADMIN_PASSWORD: z.string(),
+    MONITORING_RETENTION_TIME: z.string(),
+    ALERT_ENABLED: z.enum(['true', 'false']),
+    ALERT_EMAIL_RECIPIENTS: z.string(),
+    ALERT_SMTP_HOST: z.string(),
+    ALERT_SMTP_PORT: z.string(),
+    ALERT_SMTP_USER: z.string(),
+    ALERT_SMTP_PASSWORD: z.string(),
+    ALERT_SMTP_FROM_ADDRESS: z.string(),
+    ALERT_SMTP_FROM_NAME: z.string(),
+    ADVANCED_LITELLM_WORKERS: z.string().regex(/^[1-9]\d*$/, 'Must be a positive number'),
+    ADVANCED_LITELLM_REQUEST_TIMEOUT: z.string().regex(/^\d+$/, 'Must be a number'),
+    ADVANCED_TZ: z.string().min(1, 'Timezone is required'),
+    ADVANCED_ACME_EMAIL: z.string().min(1, 'Email is required').email('Invalid email address'),
+  })
+  .refine(
+    (data) => {
+      if (data.MONITORING_ENABLED === 'true') {
+        return data.MONITORING_GRAFANA_ADMIN_PASSWORD.length >= 8;
+      }
+      return true;
+    },
+    {
+      message: 'Grafana password must be at least 8 characters when monitoring is enabled',
+      path: ['MONITORING_GRAFANA_ADMIN_PASSWORD'],
+    }
+  )
+  .refine(
+    (data) => {
+      if (data.ALERT_ENABLED === 'true') {
+        return data.ALERT_SMTP_HOST.length > 0;
+      }
+      return true;
+    },
+    {
+      message: 'SMTP host is required when alerting is enabled',
+      path: ['ALERT_SMTP_HOST'],
+    }
+  )
+  .refine(
+    (data) => {
+      if (data.ALERT_ENABLED === 'true') {
+        return data.ALERT_EMAIL_RECIPIENTS.length > 0;
+      }
+      return true;
+    },
+    {
+      message: 'At least one alert recipient is required when alerting is enabled',
+      path: ['ALERT_EMAIL_RECIPIENTS'],
+    }
+  );
 
 // Map step IDs to schemas
 export const StepSchemas = {

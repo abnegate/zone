@@ -1,4 +1,4 @@
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { useInstallation } from './useInstallation';
 
 const mockFetch = global.fetch as jest.Mock;
@@ -81,14 +81,17 @@ describe('useInstallation', () => {
 
   it('processes streaming response', async () => {
     const mockReader = {
-      read: jest.fn()
+      read: jest
+        .fn()
         .mockResolvedValueOnce({
           done: false,
           value: new TextEncoder().encode('{"status": "Step 1", "progress": 50}\n'),
         })
         .mockResolvedValueOnce({
           done: false,
-          value: new TextEncoder().encode('{"status": "✓ Done", "progress": 100, "complete": true}\n'),
+          value: new TextEncoder().encode(
+            '{"status": "✓ Done", "progress": 100, "complete": true}\n'
+          ),
         })
         .mockResolvedValueOnce({ done: true }),
     };

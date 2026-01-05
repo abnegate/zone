@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE sources\n        SET last_verified_at = NOW(),\n            last_error = $2,\n            updated_at = NOW()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c1ebeb51cab49a3b7883345486c5bb17ab971105c6c8d9bbfc18df3ff7255a68"
+}

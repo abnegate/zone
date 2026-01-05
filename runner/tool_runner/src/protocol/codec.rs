@@ -3,7 +3,7 @@
 //! Each message is a single JSON object followed by a newline character.
 
 use bytes::{Buf, BufMut, BytesMut};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -87,10 +87,11 @@ impl<T: DeserializeOwned> Decoder for NdjsonCodec<T> {
                 }
 
                 // Parse JSON
-                let msg: T = serde_json::from_slice(&line).map_err(|e| ProtocolError::JsonParse {
-                    source: e,
-                    line: String::from_utf8_lossy(&line).to_string(),
-                })?;
+                let msg: T =
+                    serde_json::from_slice(&line).map_err(|e| ProtocolError::JsonParse {
+                        source: e,
+                        line: String::from_utf8_lossy(&line).to_string(),
+                    })?;
 
                 Ok(Some(msg))
             }
@@ -248,9 +249,30 @@ mod tests {
         let mut codec: NdjsonCodec<OutboundMessage> = NdjsonCodec::new();
         let mut buf = BytesMut::new();
 
-        codec.encode(OutboundMessage::Pong { id: "1".to_string() }, &mut buf).unwrap();
-        codec.encode(OutboundMessage::Pong { id: "2".to_string() }, &mut buf).unwrap();
-        codec.encode(OutboundMessage::Pong { id: "3".to_string() }, &mut buf).unwrap();
+        codec
+            .encode(
+                OutboundMessage::Pong {
+                    id: "1".to_string(),
+                },
+                &mut buf,
+            )
+            .unwrap();
+        codec
+            .encode(
+                OutboundMessage::Pong {
+                    id: "2".to_string(),
+                },
+                &mut buf,
+            )
+            .unwrap();
+        codec
+            .encode(
+                OutboundMessage::Pong {
+                    id: "3".to_string(),
+                },
+                &mut buf,
+            )
+            .unwrap();
 
         let s = String::from_utf8(buf.to_vec()).unwrap();
         let lines: Vec<&str> = s.lines().collect();
@@ -263,19 +285,46 @@ mod tests {
 
         let messages = vec![
             OutboundMessage::hello_ack(),
-            OutboundMessage::RunStarted { job_id: "j1".to_string(), pid: 123 },
-            OutboundMessage::RunStdout { job_id: "j1".to_string(), data: "dGVzdA==".to_string(), sequence: 1 },
-            OutboundMessage::RunStderr { job_id: "j1".to_string(), data: "ZXJy".to_string(), sequence: 1 },
-            OutboundMessage::RunLog { job_id: "j1".to_string(), level: LogLevel::Info, message: "test".to_string(), details: None },
-            OutboundMessage::RunExit { job_id: "j1".to_string(), exit_code: Some(0), signal: None, duration_ms: 100 },
-            OutboundMessage::RunError { job_id: "j1".to_string(), error_code: ErrorCode::Timeout, message: "timeout".to_string() },
-            OutboundMessage::Pong { id: "p1".to_string() },
+            OutboundMessage::RunStarted {
+                job_id: "j1".to_string(),
+                pid: 123,
+            },
+            OutboundMessage::RunStdout {
+                job_id: "j1".to_string(),
+                data: "dGVzdA==".to_string(),
+                sequence: 1,
+            },
+            OutboundMessage::RunStderr {
+                job_id: "j1".to_string(),
+                data: "ZXJy".to_string(),
+                sequence: 1,
+            },
+            OutboundMessage::RunLog {
+                job_id: "j1".to_string(),
+                level: LogLevel::Info,
+                message: "test".to_string(),
+                details: None,
+            },
+            OutboundMessage::RunExit {
+                job_id: "j1".to_string(),
+                exit_code: Some(0),
+                signal: None,
+                duration_ms: 100,
+            },
+            OutboundMessage::RunError {
+                job_id: "j1".to_string(),
+                error_code: ErrorCode::Timeout,
+                message: "timeout".to_string(),
+            },
+            OutboundMessage::Pong {
+                id: "p1".to_string(),
+            },
         ];
 
         for msg in messages {
             let mut buf = BytesMut::new();
             assert!(codec.encode(msg, &mut buf).is_ok());
-            assert!(buf.len() > 0);
+            assert!(!buf.is_empty());
             assert!(buf.last() == Some(&b'\n'));
         }
     }
@@ -450,19 +499,46 @@ mod tests {
     fn test_roundtrip_all_message_types() {
         let messages = vec![
             OutboundMessage::hello_ack(),
-            OutboundMessage::RunStarted { job_id: "j1".to_string(), pid: 12345 },
-            OutboundMessage::RunStdout { job_id: "j1".to_string(), data: "SGVsbG8gV29ybGQ=".to_string(), sequence: 42 },
-            OutboundMessage::RunStderr { job_id: "j1".to_string(), data: "RXJyb3I=".to_string(), sequence: 1 },
+            OutboundMessage::RunStarted {
+                job_id: "j1".to_string(),
+                pid: 12345,
+            },
+            OutboundMessage::RunStdout {
+                job_id: "j1".to_string(),
+                data: "SGVsbG8gV29ybGQ=".to_string(),
+                sequence: 42,
+            },
+            OutboundMessage::RunStderr {
+                job_id: "j1".to_string(),
+                data: "RXJyb3I=".to_string(),
+                sequence: 1,
+            },
             OutboundMessage::RunLog {
                 job_id: "j1".to_string(),
                 level: LogLevel::Warn,
                 message: "Test warning".to_string(),
-                details: Some(serde_json::json!({"key": "value"}))
+                details: Some(serde_json::json!({"key": "value"})),
             },
-            OutboundMessage::RunExit { job_id: "j1".to_string(), exit_code: Some(1), signal: None, duration_ms: 5000 },
-            OutboundMessage::RunExit { job_id: "j2".to_string(), exit_code: None, signal: Some(9), duration_ms: 100 },
-            OutboundMessage::RunError { job_id: "j1".to_string(), error_code: ErrorCode::Cancelled, message: "Cancelled".to_string() },
-            OutboundMessage::Pong { id: "ping-123".to_string() },
+            OutboundMessage::RunExit {
+                job_id: "j1".to_string(),
+                exit_code: Some(1),
+                signal: None,
+                duration_ms: 5000,
+            },
+            OutboundMessage::RunExit {
+                job_id: "j2".to_string(),
+                exit_code: None,
+                signal: Some(9),
+                duration_ms: 100,
+            },
+            OutboundMessage::RunError {
+                job_id: "j1".to_string(),
+                error_code: ErrorCode::Cancelled,
+                message: "Cancelled".to_string(),
+            },
+            OutboundMessage::Pong {
+                id: "ping-123".to_string(),
+            },
         ];
 
         for original in messages {
@@ -542,7 +618,10 @@ mod tests {
 
         // Create a message with a large data field
         let large_data = "x".repeat(100_000);
-        let json = format!(r#"{{"type":"RunStdin","job_id":"j1","data":"{}"}}"#, large_data);
+        let json = format!(
+            r#"{{"type":"RunStdin","job_id":"j1","data":"{}"}}"#,
+            large_data
+        );
         let mut buf = BytesMut::from(format!("{}\n", json).as_bytes());
 
         let result = codec.decode(&mut buf);

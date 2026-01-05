@@ -8,7 +8,7 @@ import type {
   Source,
   UpdateProjectRequest,
 } from '../types';
-import { getErrors, CreateProjectRequestSchema, UpdateProjectRequestSchema } from '../validation';
+import { CreateProjectRequestSchema, UpdateProjectRequestSchema, getErrors } from '../validation';
 import './ProjectsPage.css';
 
 function formatDate(dateStr: string): string {

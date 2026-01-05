@@ -40,4 +40,6 @@ pub mod protocol;
 pub use error::{DaemonError, ExecutorError, JobError, ProtocolError};
 pub use executor::{CommandExecutor, ExecutorConfig, JobHandle};
 pub use job::{JobRegistry, JobState};
-pub use protocol::{Capability, ErrorCode, InboundMessage, LogLevel, NdjsonCodec, OutboundMessage, PROTOCOL_VERSION};
+pub use protocol::{
+    Capability, ErrorCode, InboundMessage, LogLevel, NdjsonCodec, OutboundMessage, PROTOCOL_VERSION,
+};

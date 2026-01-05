@@ -1,4 +1,4 @@
-import { withRetry, RetryError } from './retry';
+import { RetryError, withRetry } from './retry';
 
 describe('withRetry', () => {
   it('returns result on success', async () => {
@@ -11,9 +11,7 @@ describe('withRetry', () => {
   });
 
   it('retries on failure', async () => {
-    const fn = jest.fn()
-      .mockRejectedValueOnce(new Error('fail'))
-      .mockResolvedValueOnce('success');
+    const fn = jest.fn().mockRejectedValueOnce(new Error('fail')).mockResolvedValueOnce('success');
 
     const result = await withRetry(fn, { initialDelay: 1, maxAttempts: 3 });
 
@@ -24,16 +22,13 @@ describe('withRetry', () => {
   it('throws RetryError after max attempts', async () => {
     const fn = jest.fn().mockRejectedValue(new Error('always fails'));
 
-    await expect(withRetry(fn, { maxAttempts: 2, initialDelay: 1 }))
-      .rejects.toThrow(RetryError);
+    await expect(withRetry(fn, { maxAttempts: 2, initialDelay: 1 })).rejects.toThrow(RetryError);
 
     expect(fn).toHaveBeenCalledTimes(2);
   });
 
   it('calls onRetry callback', async () => {
-    const fn = jest.fn()
-      .mockRejectedValueOnce(new Error('fail'))
-      .mockResolvedValueOnce('success');
+    const fn = jest.fn().mockRejectedValueOnce(new Error('fail')).mockResolvedValueOnce('success');
     const onRetry = jest.fn();
 
     await withRetry(fn, { initialDelay: 1, onRetry });

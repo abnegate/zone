@@ -1,0 +1,24 @@
+# Netlify/Cloudflare Pages headers for optimal caching and compression
+
+# All files - enable compression
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  X-XSS-Protection: 1; mode=block
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# Static assets - aggressive caching (1 year)
+/static/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# HTML - no cache (always fresh)
+/*.html
+  Cache-Control: no-cache, no-store, must-revalidate
+
+# Service worker - no cache
+/service-worker.js
+  Cache-Control: no-cache, no-store, must-revalidate
+
+# Manifest - short cache
+/static/manifest.json
+  Cache-Control: public, max-age=86400

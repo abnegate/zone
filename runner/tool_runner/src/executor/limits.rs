@@ -140,7 +140,10 @@ mod tests {
     #[test]
     fn test_executor_config_defaults() {
         let config = ExecutorConfig::default();
-        assert_eq!(config.default_timeout, Duration::from_millis(DEFAULT_TIMEOUT_MS));
+        assert_eq!(
+            config.default_timeout,
+            Duration::from_millis(DEFAULT_TIMEOUT_MS)
+        );
         assert_eq!(config.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);
         assert_eq!(config.buffer_size, DEFAULT_BUFFER_SIZE);
     }

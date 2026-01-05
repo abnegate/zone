@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
 import type { CreateTaskRequest, Project, Source, Task, TaskProgressMessage } from '../types';
-import { getErrors, CreateTaskRequestSchema } from '../validation';
+import { CreateTaskRequestSchema, getErrors } from '../validation';
 import './TasksPage.css';
 
 // Phase display names for progress visualization
@@ -50,7 +50,6 @@ interface TaskExecutionViewProps {
 }
 
 function TaskExecutionView({ task, onClose }: TaskExecutionViewProps) {
-  const [_runId, setRunId] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [currentPhase, setCurrentPhase] = useState<string | null>(null);
   const [logs, setLogs] = useState<
@@ -69,7 +68,6 @@ function TaskExecutionView({ task, onClose }: TaskExecutionViewProps) {
       setProgress(0);
 
       const result = await client.startTask(task.id);
-      setRunId(result.run_id);
 
       // Connect to WebSocket for progress updates
       const ws = client.createTaskWebSocket(result.run_id);

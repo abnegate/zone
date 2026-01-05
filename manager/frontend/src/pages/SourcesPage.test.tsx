@@ -1,7 +1,7 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import SourcesPage from './SourcesPage';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { client } from '../api/client';
 import type { Source } from '../types';
+import SourcesPage from './SourcesPage';
 
 // Mock client
 jest.mock('../api/client', () => ({
@@ -80,7 +80,9 @@ describe('SourcesPage', () => {
     mockClient.getSources.mockResolvedValueOnce([]);
     render(<SourcesPage />);
     await waitFor(() => {
-      expect(screen.getByText('No sources configured. Add a source to get started!')).toBeInTheDocument();
+      expect(
+        screen.getByText('No sources configured. Add a source to get started!')
+      ).toBeInTheDocument();
     });
   });
 
@@ -216,7 +218,10 @@ describe('SourcesPage', () => {
   });
 
   it('shows verification error', async () => {
-    mockClient.verifySource.mockResolvedValueOnce({ success: false, message: 'Invalid credentials' });
+    mockClient.verifySource.mockResolvedValueOnce({
+      success: false,
+      message: 'Invalid credentials',
+    });
     mockClient.getSource.mockResolvedValueOnce(mockSources[0]);
 
     render(<SourcesPage />);
@@ -373,7 +378,7 @@ describe('SourcesPage', () => {
 
     expect(screen.getByRole('button', { name: 'Verifying...' })).toBeDisabled();
 
-    resolveVerify!({ success: true, message: 'OK' });
+    resolveVerify?.({ success: true, message: 'OK' });
 
     await waitFor(() => {
       expect(screen.getAllByRole('button', { name: 'Verify' }).length).toBeGreaterThan(0);
@@ -451,8 +456,8 @@ describe('SourcesPage', () => {
     // Helper to find source type card by name
     const findSourceTypeCard = (name: string) => {
       const sourceTypeCards = document.querySelectorAll('.source-type-card');
-      return Array.from(sourceTypeCards).find(card =>
-        card.querySelector('.source-type-name')?.textContent === name
+      return Array.from(sourceTypeCards).find(
+        (card) => card.querySelector('.source-type-name')?.textContent === name
       );
     };
 
@@ -471,7 +476,9 @@ describe('SourcesPage', () => {
 
       // Check toggle field is rendered
       expect(screen.getByText('Allow write operations')).toBeInTheDocument();
-      expect(screen.getByText('Enable agents to modify files in this directory')).toBeInTheDocument();
+      expect(
+        screen.getByText('Enable agents to modify files in this directory')
+      ).toBeInTheDocument();
 
       // Toggle is rendered as checkbox
       const toggleCheckbox = screen.getByRole('checkbox');

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { client } from '../api/client';
+import { Button } from '../components';
 import {
   type FormField,
   type FormRow,
@@ -10,7 +11,7 @@ import {
   sourceRegistry,
 } from '../sources';
 import type { CreateSourceRequest, Source, SourceType } from '../types';
-import { getErrors, CreateSourceRequestSchema } from '../validation';
+import { CreateSourceRequestSchema, getErrors } from '../validation';
 import './SourcesPage.css';
 
 function SourceTypeBadge({ type }: { type: SourceType }) {
@@ -368,19 +369,12 @@ function CreateSourceModal({ onClose, onCreated }: CreateSourceModalProps) {
           {error && <div className="form-error">{error}</div>}
 
           <div className="form-actions">
-            <button type="button" onClick={onClose} className="btn btn-secondary">
+            <Button type="button" onClick={onClose} variant="secondary">
               Cancel
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={loading}>
-              {loading ? (
-                <>
-                  <span className="btn-spinner" />
-                  Adding...
-                </>
-              ) : (
-                'Add Source'
-              )}
-            </button>
+            </Button>
+            <Button type="submit" variant="primary" loading={loading}>
+              {loading ? 'Adding...' : 'Add Source'}
+            </Button>
           </div>
         </form>
       </div>
@@ -459,9 +453,9 @@ export default function SourcesPage() {
           <h1>Sources</h1>
           <p className="subtitle">Connect repositories, calendars, email, and other data sources</p>
         </div>
-        <button type="button" className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
+        <Button variant="primary" onClick={() => setShowCreateModal(true)}>
           + Add Source
-        </button>
+        </Button>
       </header>
 
       {error && <div className="error-banner">{error}</div>}
@@ -522,28 +516,22 @@ export default function SourcesPage() {
               </div>
 
               <div className="source-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
+                <Button
+                  variant="secondary"
                   onClick={() => handleVerify(source.id)}
-                  disabled={verifying === source.id}
+                  loading={verifying === source.id}
                 >
                   {verifying === source.id ? 'Verifying...' : 'Verify'}
-                </button>
-                <button
-                  type="button"
-                  className={`btn ${source.is_active ? 'btn-warning' : 'btn-success'}`}
+                </Button>
+                <Button
+                  variant={source.is_active ? 'secondary' : 'primary'}
                   onClick={() => handleToggleActive(source)}
                 >
                   {source.is_active ? 'Disable' : 'Enable'}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  onClick={() => handleDelete(source.id)}
-                >
+                </Button>
+                <Button variant="danger" onClick={() => handleDelete(source.id)}>
                   Delete
-                </button>
+                </Button>
               </div>
             </div>
           ))}

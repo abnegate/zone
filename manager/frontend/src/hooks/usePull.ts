@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import type { PullProgress, Step } from '../types';
@@ -10,6 +10,12 @@ export function usePull() {
   const [steps, setSteps] = useState<Step[]>([]);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const pullingRef = useRef(pulling);
+
+  // Keep ref in sync with state to avoid stale closures
+  useEffect(() => {
+    pullingRef.current = pulling;
+  }, [pulling]);
 
   const pull = useCallback(
     (modelName: string): Promise<boolean> => {
@@ -27,11 +33,9 @@ export function usePull() {
         const ws = client.createPullWebSocket(modelName.trim());
         wsRef.current = ws;
 
-        let authenticated = false;
-
         ws.onopen = () => {
           // Send authentication token first
-          const authMsg = JSON.stringify({ token: client['accessToken'] || '' });
+          const authMsg = JSON.stringify({ token: client.accessToken || '' });
           ws.send(authMsg);
         };
 
@@ -41,7 +45,6 @@ export function usePull() {
 
             // Handle authentication response
             if (data.type === 'authenticated') {
-              authenticated = true;
               // Now send the pull request
               const msg = JSON.stringify({ model: modelName.trim() });
               ws.send(msg);
@@ -114,13 +117,13 @@ export function usePull() {
         };
 
         ws.onclose = () => {
-          if (pulling) {
+          if (pullingRef.current) {
             setPulling(false);
           }
         };
       });
     },
-    [isAuthenticated, pulling]
+    [isAuthenticated]
   );
 
   const reset = useCallback(() => {

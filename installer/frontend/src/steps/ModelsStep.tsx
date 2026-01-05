@@ -1,5 +1,5 @@
-import React from 'react';
-import { Select, InfoBox } from '../components';
+import type React from 'react';
+import { InfoBox, Select } from '../components';
 import type { InstallerConfig } from '../types';
 
 interface ModelsStepProps {
@@ -40,7 +40,9 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
         label="Fast Model (4-8GB RAM)"
         options={fastModelOptions}
         value={config.OLLAMA_MODEL_FAST}
-        onChange={e => onChange('OLLAMA_MODEL_FAST', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+          onChange('OLLAMA_MODEL_FAST', e.target.value)
+        }
         helpText="For general queries and quick responses"
       />
 
@@ -48,7 +50,9 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
         label="Reasoning Model (8-32GB RAM)"
         options={reasoningModelOptions}
         value={config.OLLAMA_MODEL_REASON}
-        onChange={e => onChange('OLLAMA_MODEL_REASON', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+          onChange('OLLAMA_MODEL_REASON', e.target.value)
+        }
         helpText="For complex analysis and detailed reasoning"
       />
 
@@ -56,7 +60,9 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
         label="Embedding Model (1-2GB RAM)"
         options={embeddingModelOptions}
         value={config.OLLAMA_MODEL_EMBED}
-        onChange={e => onChange('OLLAMA_MODEL_EMBED', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+          onChange('OLLAMA_MODEL_EMBED', e.target.value)
+        }
         helpText="For semantic routing and search"
       />
 

@@ -1,0 +1,20 @@
+{
+  "name": "zone",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "installer/frontend",
+    "manager/frontend"
+  ],
+  "scripts": {
+    "build:ui": "npm run build -w @zone/ui",
+    "watch:ui": "npm run watch -w @zone/ui",
+    "start:installer": "npm run start -w zone-installer",
+    "start:manager": "npm run start -w zone",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
+  }
+}

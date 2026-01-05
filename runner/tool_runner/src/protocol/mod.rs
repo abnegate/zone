@@ -1,7 +1,7 @@
 //! Protocol types and codec for runner communication.
 //!
 //! This module provides the message types and NDJSON codec used for
-//! communication between the Gleam backend and the Rust runner.
+//! communication between the backend and the Rust runner.
 
 mod codec;
 mod messages;

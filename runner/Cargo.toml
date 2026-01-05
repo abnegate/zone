@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["tool_runner", "zone_runner"]
+members = ["tool_runner", "zone_runner", "zone_core", "zone_server", "zone_cli", "zone_installer"]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,6 +23,29 @@ bytes = "1.11"
 base64 = "0.22"
 dashmap = "6.1"
 tokio-stream = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+async-trait = "0.1"
+
+# Server dependencies
+axum = { version = "0.8", features = ["ws", "macros"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "chrono"] }
+redis = { version = "0.27", features = ["tokio-comp"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+rand = "0.8"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# CLI dependencies
+keyring = "3"
+dirs = "5"
+toml = "0.8"
+dialoguer = "0.11"
+indicatif = "0.17"
 
 [workspace.dependencies.nix]
 version = "0.30"

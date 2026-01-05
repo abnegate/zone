@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { Checkbox, Select } from '../components';
 import type { InstallerConfig } from '../types';
 
@@ -31,7 +31,9 @@ export function InterfaceStep({ config, onChange, getFieldError }: InterfaceStep
         <Checkbox
           label="Enable built-in authentication"
           checked={config.WEBUI_AUTH === 'true'}
-          onChange={e => onChange('WEBUI_AUTH', e.target.checked ? 'true' : 'false')}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            onChange('WEBUI_AUTH', e.target.checked ? 'true' : 'false')
+          }
         />
         <p className="help-text" style={{ marginLeft: '2.25rem' }}>
           Uses Traefik basic auth by default
@@ -42,7 +44,9 @@ export function InterfaceStep({ config, onChange, getFieldError }: InterfaceStep
         <Checkbox
           label="Allow user signups"
           checked={config.WEBUI_ENABLE_SIGNUP === 'true'}
-          onChange={e => onChange('WEBUI_ENABLE_SIGNUP', e.target.checked ? 'true' : 'false')}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            onChange('WEBUI_ENABLE_SIGNUP', e.target.checked ? 'true' : 'false')
+          }
         />
       </div>
 
@@ -50,7 +54,9 @@ export function InterfaceStep({ config, onChange, getFieldError }: InterfaceStep
         label="Default Language"
         options={localeOptions}
         value={config.WEBUI_DEFAULT_LOCALE}
-        onChange={e => onChange('WEBUI_DEFAULT_LOCALE', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+          onChange('WEBUI_DEFAULT_LOCALE', e.target.value)
+        }
       />
     </div>
   );

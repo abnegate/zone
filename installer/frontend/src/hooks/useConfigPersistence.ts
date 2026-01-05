@@ -1,6 +1,6 @@
-import { useEffect, useCallback, useRef } from 'react';
-import { saveConfig, loadConfig, clearConfig } from '../utils/crypto';
+import { useCallback, useEffect, useRef } from 'react';
 import type { InstallerConfig } from '../types';
+import { clearConfig, loadConfig, saveConfig } from '../utils/crypto';
 
 export function useConfigPersistence(
   config: InstallerConfig,

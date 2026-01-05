@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, workspace_id, primary_color_light, secondary_color_light,\n               primary_color_dark, secondary_color_dark, font_family, font_size_base,\n               border_radius, created_at, updated_at\n        FROM workspace_themes\n        WHERE workspace_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workspace_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "primary_color_light",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "secondary_color_light",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "primary_color_dark",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "secondary_color_dark",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "font_family",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "font_size_base",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "border_radius",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "87bfa4cfe1898d14d7ed957c42087f519d5a03580813fc8843b85b284f1f65a3"
+}

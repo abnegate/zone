@@ -68,9 +68,7 @@ describe('Client', () => {
   describe('getModels', () => {
     it('fetches models successfully', async () => {
       const mockModels = {
-        models: [
-          { name: 'llama2', size: 3800000000, modified_at: '2024-01-01', digest: 'abc123' },
-        ],
+        models: [{ name: 'llama2', size: 3800000000, modified_at: '2024-01-01' }],
       };
 
       mockFetch.mockResolvedValueOnce({
@@ -148,7 +146,7 @@ describe('Client', () => {
 
   describe('browseModels', () => {
     it('browses models with default parameters', async () => {
-      const mockResponse = { models: [], has_more: false };
+      const mockResponse = { source: 'ollama', models: [], has_more: false };
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockResponse,
@@ -166,7 +164,7 @@ describe('Client', () => {
     it('includes query parameters', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ models: [], has_more: false }),
+        json: async () => ({ source: 'huggingface', models: [], has_more: false }),
       });
 
       await client.browseModels('huggingface', 'llama', 20, 10);
@@ -205,8 +203,25 @@ describe('Client', () => {
   });
 
   describe('Chats API', () => {
+    const mockChat = {
+      id: '1',
+      title: 'Test Chat',
+      model_name: 'llama2',
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      archived: false,
+    };
+
+    const mockMessage = {
+      id: '1',
+      chat_id: 'chat-1',
+      role: 'user' as const,
+      content: 'Hello',
+      created_at: '2024-01-01T00:00:00Z',
+    };
+
     it('getChats fetches all chats', async () => {
-      const mockChats = { chats: [{ id: '1', title: 'Test Chat' }] };
+      const mockChats = { chats: [mockChat] };
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockChats,
@@ -229,27 +244,27 @@ describe('Client', () => {
     });
 
     it('getChat fetches single chat', async () => {
-      const mockChat = { chat: { id: '1', title: 'Test' } };
+      const mockChatWithMessages = { chat: { ...mockChat, messages: [mockMessage] } };
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => mockChat,
+        json: async () => mockChatWithMessages,
       });
 
       const result = await client.getChat('1');
 
-      expect(result).toEqual(mockChat.chat);
+      expect(result).toEqual(mockChatWithMessages.chat);
     });
 
     it('createChat creates new chat', async () => {
-      const mockChat = { chat: { id: '1', title: 'New Chat' } };
+      const mockChatWithMessages = { chat: { ...mockChat, messages: [] } };
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => mockChat,
+        json: async () => mockChatWithMessages,
       });
 
       const result = await client.createChat({ model_name: 'llama2' });
 
-      expect(result).toEqual(mockChat.chat);
+      expect(result).toEqual(mockChatWithMessages.chat);
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/chats',
         expect.objectContaining({
@@ -260,9 +275,10 @@ describe('Client', () => {
     });
 
     it('updateChatTitle updates chat', async () => {
+      const updatedChat = { ...mockChat, title: 'Updated', messages: [] };
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ chat: { id: '1', title: 'Updated' } }),
+        json: async () => ({ chat: updatedChat }),
       });
 
       await client.updateChatTitle('1', 'Updated');
@@ -288,9 +304,10 @@ describe('Client', () => {
     });
 
     it('archiveChat archives chat', async () => {
+      const archivedChat = { ...mockChat, archived: true, messages: [] };
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ chat: { id: '1', archived: true } }),
+        json: async () => ({ chat: archivedChat }),
       });
 
       await client.archiveChat('1');
@@ -302,9 +319,10 @@ describe('Client', () => {
     });
 
     it('unarchiveChat unarchives chat', async () => {
+      const unarchivedChat = { ...mockChat, archived: false, messages: [] };
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ chat: { id: '1', archived: false } }),
+        json: async () => ({ chat: unarchivedChat }),
       });
 
       await client.unarchiveChat('1');
@@ -316,7 +334,7 @@ describe('Client', () => {
     });
 
     it('getMessages fetches messages', async () => {
-      const mockMessages = { messages: [{ id: '1', content: 'Hello' }] };
+      const mockMessages = { messages: [mockMessage] };
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockMessages,
@@ -330,7 +348,7 @@ describe('Client', () => {
     it('sendMessage sends a message', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ message: { id: '1', content: 'Hello' } }),
+        json: async () => ({ message: mockMessage }),
       });
 
       await client.sendMessage('chat-1', { content: 'Hello' });
@@ -357,10 +375,21 @@ describe('Client', () => {
   });
 
   describe('Projects API', () => {
+    const mockProject = {
+      id: '1',
+      name: 'Test',
+      description: null,
+      status: 'active' as const,
+      github_repo_url: null,
+      source_id: null,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
     it('getProjects fetches projects', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ projects: [{ id: '1', name: 'Test' }] }),
+        json: async () => ({ projects: [mockProject] }),
       });
 
       const result = await client.getProjects();
@@ -382,7 +411,7 @@ describe('Client', () => {
     it('getProject fetches single project', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ project: { id: '1', name: 'Test' } }),
+        json: async () => ({ project: mockProject }),
       });
 
       const result = await client.getProject('1');
@@ -393,7 +422,7 @@ describe('Client', () => {
     it('createProject creates project', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ project: { id: '1', name: 'New' } }),
+        json: async () => ({ project: { ...mockProject, name: 'New' } }),
       });
 
       await client.createProject({ name: 'New', description: 'Desc' });
@@ -407,7 +436,7 @@ describe('Client', () => {
     it('updateProject updates project', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ project: { id: '1', name: 'Updated' } }),
+        json: async () => ({ project: { ...mockProject, name: 'Updated' } }),
       });
 
       await client.updateProject('1', { name: 'Updated' });
@@ -432,7 +461,7 @@ describe('Client', () => {
     it('linkGitHub links GitHub repo', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ project: { id: '1', github_repo_url: 'https://github.com/test' } }),
+        json: async () => ({ project: { ...mockProject, github_repo_url: 'https://github.com/test' } }),
       });
 
       await client.linkGitHub('1', 'https://github.com/test');
@@ -446,7 +475,7 @@ describe('Client', () => {
     it('unlinkGitHub unlinks GitHub repo', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ project: { id: '1' } }),
+        json: async () => ({ project: mockProject }),
       });
 
       await client.unlinkGitHub('1');
@@ -459,10 +488,53 @@ describe('Client', () => {
   });
 
   describe('Tasks API', () => {
+    const mockTask = {
+      id: '1',
+      project_id: 'p1',
+      title: 'Task',
+      description: 'Do something',
+      acceptance_criteria: null,
+      status: 'created' as const,
+      priority: 0,
+      model_name: null,
+      dependencies: [],
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      started_at: null,
+      completed_at: null,
+      is_agentic: false,
+      github_repo_url: null,
+      source_id: null,
+      source_ids: [],
+      queued_at: null,
+      worker_id: null,
+    };
+
+    const mockTaskRun = {
+      id: 'run-1',
+      task_id: '1',
+      status: 'running' as const,
+      current_phase: null,
+      progress_percent: 0,
+      error_message: null,
+      started_at: '2024-01-01T00:00:00Z',
+      completed_at: null,
+    };
+
+    const mockTaskRunLog = {
+      id: 'log-1',
+      run_id: 'run-1',
+      phase: 'init',
+      agent_type: 'executor',
+      level: 'info' as const,
+      message: 'test',
+      created_at: '2024-01-01T00:00:00Z',
+    };
+
     it('getTasks fetches tasks', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ tasks: [{ id: '1', name: 'Task' }] }),
+        json: async () => ({ tasks: [mockTask] }),
       });
 
       const result = await client.getTasks();
@@ -486,7 +558,7 @@ describe('Client', () => {
     it('createTask creates task', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ task: { id: '1' } }),
+        json: async () => ({ task: mockTask }),
       });
 
       await client.createTask({ project_id: 'p1', title: 'Task', description: 'Do something' });
@@ -522,7 +594,7 @@ describe('Client', () => {
     it('getTaskRuns fetches runs', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ runs: [{ id: 'run-1' }] }),
+        json: async () => ({ runs: [mockTaskRun] }),
       });
 
       const result = await client.getTaskRuns('task-1');
@@ -533,7 +605,7 @@ describe('Client', () => {
     it('getTaskRunLogs fetches logs', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ logs: [{ id: 'log-1', message: 'test' }] }),
+        json: async () => ({ logs: [mockTaskRunLog] }),
       });
 
       const result = await client.getTaskRunLogs('task-1', 'run-1');
@@ -543,10 +615,32 @@ describe('Client', () => {
   });
 
   describe('Sources API', () => {
+    const mockSourceType = {
+      id: 'github' as const,
+      name: 'GitHub',
+      category: 'file' as const,
+      enabled: true,
+    };
+
+    const mockSource = {
+      id: '1',
+      name: 'Test',
+      source_type: 'github' as const,
+      category: 'file' as const,
+      config: { owner: 'test', repo: 'test' },
+      description: null,
+      url: 'https://github.com/test/test',
+      is_active: true,
+      last_verified_at: null,
+      last_error: null,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
     it('getSourceTypes fetches source types', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ types: [{ name: 'github' }] }),
+        json: async () => ({ types: [mockSourceType] }),
       });
 
       const result = await client.getSourceTypes();
@@ -557,7 +651,7 @@ describe('Client', () => {
     it('getSources fetches sources', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ sources: [{ id: '1' }] }),
+        json: async () => ({ sources: [mockSource] }),
       });
 
       const result = await client.getSources();
@@ -581,10 +675,14 @@ describe('Client', () => {
     it('createSource creates source', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ source: { id: '1' } }),
+        json: async () => ({ source: mockSource }),
       });
 
-      await client.createSource({ name: 'Test', source_type: 'github', config: { owner: 'test', repo: 'test' } });
+      await client.createSource({
+        name: 'Test',
+        source_type: 'github',
+        config: { owner: 'test', repo: 'test' },
+      });
 
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/sources',
@@ -595,7 +693,7 @@ describe('Client', () => {
     it('verifySource verifies source', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true }),
+        json: async () => ({ success: true, message: 'Verified' }),
       });
 
       const result = await client.verifySource('1');
@@ -605,10 +703,20 @@ describe('Client', () => {
   });
 
   describe('Organizations API', () => {
+    const mockOrganization = {
+      id: '1',
+      name: 'Org',
+      slug: 'org',
+      description: null,
+      is_active: true,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
     it('getOrganizations fetches organizations', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ organizations: [{ id: '1', name: 'Org' }] }),
+        json: async () => ({ organizations: [mockOrganization] }),
       });
 
       const result = await client.getOrganizations();
@@ -619,7 +727,7 @@ describe('Client', () => {
     it('createOrganization creates organization', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ organization: { id: '1' } }),
+        json: async () => ({ organization: mockOrganization }),
       });
 
       await client.createOrganization({ name: 'New Org', slug: 'new-org' });
@@ -633,7 +741,7 @@ describe('Client', () => {
     it('updateOrganization updates organization', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ organization: { id: '1' } }),
+        json: async () => ({ organization: { ...mockOrganization, name: 'Updated' } }),
       });
 
       await client.updateOrganization('1', { name: 'Updated' });
@@ -657,10 +765,21 @@ describe('Client', () => {
   });
 
   describe('Workspaces API', () => {
+    const mockWorkspace = {
+      id: '1',
+      organization_id: 'org-1',
+      name: 'Workspace',
+      slug: 'ws',
+      description: null,
+      is_active: true,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
     it('getWorkspaces fetches workspaces', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ workspaces: [{ id: '1' }] }),
+        json: async () => ({ workspaces: [mockWorkspace] }),
       });
 
       const result = await client.getWorkspaces('org-1');
@@ -675,7 +794,7 @@ describe('Client', () => {
     it('createWorkspace creates workspace', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ workspace: { id: '1' } }),
+        json: async () => ({ workspace: mockWorkspace }),
       });
 
       await client.createWorkspace('org-1', { name: 'New', slug: 'new' });
@@ -689,7 +808,7 @@ describe('Client', () => {
     it('updateWorkspace updates workspace', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ workspace: { id: '1' } }),
+        json: async () => ({ workspace: { ...mockWorkspace, name: 'Updated' } }),
       });
 
       await client.updateWorkspace('org-1', 'ws-1', { name: 'Updated' });
@@ -713,10 +832,24 @@ describe('Client', () => {
   });
 
   describe('Workspace Theme API', () => {
+    const mockTheme = {
+      id: 'theme-1',
+      workspace_id: 'ws-1',
+      primary_color_light: '#007bff',
+      secondary_color_light: '#6c757d',
+      primary_color_dark: '#0d6efd',
+      secondary_color_dark: '#adb5bd',
+      font_family: 'system' as const,
+      font_size_base: '16px',
+      border_radius: 'medium' as const,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    };
+
     it('getWorkspaceTheme fetches theme', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ theme: { primary_color_light: '#007bff' } }),
+        json: async () => ({ theme: mockTheme }),
       });
 
       const result = await client.getWorkspaceTheme('org-1', 'ws-1');
@@ -727,7 +860,7 @@ describe('Client', () => {
     it('updateWorkspaceTheme updates theme', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ theme: { primary_color_light: '#ff0000' } }),
+        json: async () => ({ theme: { ...mockTheme, primary_color_light: '#ff0000' } }),
       });
 
       await client.updateWorkspaceTheme('org-1', 'ws-1', { primary_color_light: '#ff0000' });
@@ -741,7 +874,7 @@ describe('Client', () => {
     it('resetWorkspaceTheme resets theme', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ theme: {} }),
+        json: async () => ({ theme: mockTheme }),
       });
 
       await client.resetWorkspaceTheme('org-1', 'ws-1');
@@ -763,7 +896,9 @@ describe('Client', () => {
     it('getModelInfo throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
 
-      await expect(client.getModelInfo('author/model')).rejects.toThrow('Failed to fetch model info: 404');
+      await expect(client.getModelInfo('author/model')).rejects.toThrow(
+        'Failed to fetch model info: 404'
+      );
     });
 
     it('getChats throws on failed request', async () => {
@@ -781,13 +916,17 @@ describe('Client', () => {
     it('createChat throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createChat({ model_name: 'llama2' })).rejects.toThrow('Failed to create chat: 400');
+      await expect(client.createChat({ model_name: 'llama2' })).rejects.toThrow(
+        'Failed to create chat: 400'
+      );
     });
 
     it('updateChatTitle throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-      await expect(client.updateChatTitle('1', 'New Title')).rejects.toThrow('Failed to update chat: 500');
+      await expect(client.updateChatTitle('1', 'New Title')).rejects.toThrow(
+        'Failed to update chat: 500'
+      );
     });
 
     it('deleteChat throws on failed request', async () => {
@@ -817,13 +956,17 @@ describe('Client', () => {
     it('sendMessage throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.sendMessage('chat-1', { content: 'Test' })).rejects.toThrow('Failed to send message: 400');
+      await expect(client.sendMessage('chat-1', { content: 'Test' })).rejects.toThrow(
+        'Failed to send message: 400'
+      );
     });
 
     it('deleteMessage throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
 
-      await expect(client.deleteMessage('chat-1', 'msg-1')).rejects.toThrow('Failed to delete message: 404');
+      await expect(client.deleteMessage('chat-1', 'msg-1')).rejects.toThrow(
+        'Failed to delete message: 404'
+      );
     });
 
     it('getProjects throws on failed request', async () => {
@@ -841,13 +984,17 @@ describe('Client', () => {
     it('createProject throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createProject({ name: 'Test', description: 'Desc' })).rejects.toThrow('Failed to create project: 400');
+      await expect(client.createProject({ name: 'Test', description: 'Desc' })).rejects.toThrow(
+        'Failed to create project: 400'
+      );
     });
 
     it('updateProject throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-      await expect(client.updateProject('1', { name: 'Updated' })).rejects.toThrow('Failed to update project: 500');
+      await expect(client.updateProject('1', { name: 'Updated' })).rejects.toThrow(
+        'Failed to update project: 500'
+      );
     });
 
     it('deleteProject throws on failed request', async () => {
@@ -859,7 +1006,9 @@ describe('Client', () => {
     it('linkGitHub throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.linkGitHub('1', 'https://github.com/test')).rejects.toThrow('Failed to link GitHub: 400');
+      await expect(client.linkGitHub('1', 'https://github.com/test')).rejects.toThrow(
+        'Failed to link GitHub: 400'
+      );
     });
 
     it('unlinkGitHub throws on failed request', async () => {
@@ -877,7 +1026,9 @@ describe('Client', () => {
     it('createTask throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createTask({ project_id: 'p1', title: 'Task', description: 'Do something' })).rejects.toThrow('Failed to create task: 400');
+      await expect(
+        client.createTask({ project_id: 'p1', title: 'Task', description: 'Do something' })
+      ).rejects.toThrow('Failed to create task: 400');
     });
 
     it('startTask throws on failed request', async () => {
@@ -901,7 +1052,9 @@ describe('Client', () => {
     it('getTaskRunLogs throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
 
-      await expect(client.getTaskRunLogs('task-1', 'run-1')).rejects.toThrow('Failed to fetch task run logs: 404');
+      await expect(client.getTaskRunLogs('task-1', 'run-1')).rejects.toThrow(
+        'Failed to fetch task run logs: 404'
+      );
     });
 
     it('getSourceTypes throws on failed request', async () => {
@@ -919,7 +1072,13 @@ describe('Client', () => {
     it('createSource throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createSource({ name: 'Test', source_type: 'github', config: { owner: 'test', repo: 'test' } })).rejects.toThrow('Failed to create source: 400');
+      await expect(
+        client.createSource({
+          name: 'Test',
+          source_type: 'github',
+          config: { owner: 'test', repo: 'test' },
+        })
+      ).rejects.toThrow('Failed to create source: 400');
     });
 
     it('verifySource throws on failed request', async () => {
@@ -937,61 +1096,81 @@ describe('Client', () => {
     it('createOrganization throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createOrganization({ name: 'Org', slug: 'org' })).rejects.toThrow('Failed to create organization: 400');
+      await expect(client.createOrganization({ name: 'Org', slug: 'org' })).rejects.toThrow(
+        'Failed to create organization: 400'
+      );
     });
 
     it('updateOrganization throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-      await expect(client.updateOrganization('1', { name: 'Updated' })).rejects.toThrow('Failed to update organization: 500');
+      await expect(client.updateOrganization('1', { name: 'Updated' })).rejects.toThrow(
+        'Failed to update organization: 500'
+      );
     });
 
     it('deleteOrganization throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
 
-      await expect(client.deleteOrganization('1')).rejects.toThrow('Failed to delete organization: 404');
+      await expect(client.deleteOrganization('1')).rejects.toThrow(
+        'Failed to delete organization: 404'
+      );
     });
 
     it('getWorkspaces throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-      await expect(client.getWorkspaces('org-1')).rejects.toThrow('Failed to fetch workspaces: 500');
+      await expect(client.getWorkspaces('org-1')).rejects.toThrow(
+        'Failed to fetch workspaces: 500'
+      );
     });
 
     it('createWorkspace throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.createWorkspace('org-1', { name: 'WS', slug: 'ws' })).rejects.toThrow('Failed to create workspace: 400');
+      await expect(client.createWorkspace('org-1', { name: 'WS', slug: 'ws' })).rejects.toThrow(
+        'Failed to create workspace: 400'
+      );
     });
 
     it('updateWorkspace throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-      await expect(client.updateWorkspace('org-1', 'ws-1', { name: 'Updated' })).rejects.toThrow('Failed to update workspace: 500');
+      await expect(client.updateWorkspace('org-1', 'ws-1', { name: 'Updated' })).rejects.toThrow(
+        'Failed to update workspace: 500'
+      );
     });
 
     it('deleteWorkspace throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
 
-      await expect(client.deleteWorkspace('org-1', 'ws-1')).rejects.toThrow('Failed to delete workspace: 404');
+      await expect(client.deleteWorkspace('org-1', 'ws-1')).rejects.toThrow(
+        'Failed to delete workspace: 404'
+      );
     });
 
     it('getWorkspaceTheme throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-      await expect(client.getWorkspaceTheme('org-1', 'ws-1')).rejects.toThrow('Failed to fetch workspace theme: 500');
+      await expect(client.getWorkspaceTheme('org-1', 'ws-1')).rejects.toThrow(
+        'Failed to fetch workspace theme: 500'
+      );
     });
 
     it('updateWorkspaceTheme throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 400 });
 
-      await expect(client.updateWorkspaceTheme('org-1', 'ws-1', {})).rejects.toThrow('Failed to update workspace theme: 400');
+      await expect(client.updateWorkspaceTheme('org-1', 'ws-1', {})).rejects.toThrow(
+        'Failed to update workspace theme: 400'
+      );
     });
 
     it('resetWorkspaceTheme throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-      await expect(client.resetWorkspaceTheme('org-1', 'ws-1')).rejects.toThrow('Failed to reset workspace theme: 500');
+      await expect(client.resetWorkspaceTheme('org-1', 'ws-1')).rejects.toThrow(
+        'Failed to reset workspace theme: 500'
+      );
     });
   });
 });

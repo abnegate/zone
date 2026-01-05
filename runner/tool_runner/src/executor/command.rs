@@ -4,11 +4,11 @@ use crate::error::ExecutorError;
 use crate::protocol::{InboundMessage, LogLevel, OutboundMessage};
 use base64::prelude::*;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::limits::{ExecutorConfig, OutputLimiter};
@@ -39,8 +39,8 @@ impl StdinHandle {
 /// Handle to a running job
 #[derive(Debug)]
 pub struct JobHandle {
-    /// The child process
-    pub child: Child,
+    /// Process ID
+    pub pid: u32,
 
     /// Process group for signaling
     pub process_group: ProcessGroup,
@@ -57,8 +57,8 @@ pub struct JobHandle {
 
 impl JobHandle {
     /// Get the process ID
-    pub fn pid(&self) -> Option<u32> {
-        self.child.id()
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// Cancel the job
@@ -179,7 +179,7 @@ impl CommandExecutor {
         unsafe {
             cmd.pre_exec(|| {
                 // Create new session and process group
-                nix::unistd::setsid().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                nix::unistd::setsid().map_err(std::io::Error::other)?;
                 Ok(())
             });
         }
@@ -188,10 +188,7 @@ impl CommandExecutor {
         let mut child = cmd.spawn().map_err(ExecutorError::SpawnFailed)?;
 
         let pid = child.id().ok_or_else(|| {
-            ExecutorError::SpawnFailed(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Process has no PID",
-            ))
+            ExecutorError::SpawnFailed(std::io::Error::other("Process has no PID"))
         })?;
 
         let process_group = ProcessGroup::new(pid);
@@ -267,7 +264,7 @@ impl CommandExecutor {
         let started_at = Instant::now();
 
         tokio::spawn(async move {
-            let result = tokio::select! {
+            tokio::select! {
                 // Wait for process to exit
                 exit_result = child.wait() => {
                     match exit_result {
@@ -328,12 +325,11 @@ impl CommandExecutor {
                         format!("Command cancelled after {}ms", duration_ms),
                     )).await;
                 }
-            };
-            result
+            }
         });
 
         Ok(JobHandle {
-            child: Command::new("true").spawn().unwrap(), // Placeholder - actual child moved to task
+            pid,
             process_group,
             stdin: stdin_handle,
             started_at,
@@ -445,10 +441,7 @@ mod tests {
     #[test]
     fn test_executor_new() {
         let executor = CommandExecutor::new();
-        assert_eq!(
-            executor.config().default_timeout,
-            Duration::from_secs(300)
-        );
+        assert_eq!(executor.config().default_timeout, Duration::from_secs(300));
     }
 
     #[test]
@@ -465,10 +458,7 @@ mod tests {
     #[test]
     fn test_executor_default() {
         let executor: CommandExecutor = Default::default();
-        assert_eq!(
-            executor.config().default_timeout,
-            Duration::from_secs(300)
-        );
+        assert_eq!(executor.config().default_timeout, Duration::from_secs(300));
     }
 
     #[test]
@@ -582,7 +572,7 @@ mod tests {
     #[test]
     fn test_output_kind_clone_copy() {
         let kind = OutputKind::Stdout;
-        let cloned = kind.clone();
+        let cloned = kind;
         let copied = kind;
 
         assert!(matches!(cloned, OutputKind::Stdout));
@@ -827,7 +817,9 @@ mod tests {
         let executor = CommandExecutor::new();
         let (tx, _rx) = mpsc::channel(100);
 
-        let request = InboundMessage::Ping { id: "1".to_string() };
+        let request = InboundMessage::Ping {
+            id: "1".to_string(),
+        };
 
         let result = executor.spawn(&request, tx).await;
         assert!(result.is_err());
@@ -907,7 +899,10 @@ mod tests {
             job_id: "limit-test".to_string(),
             workspace: PathBuf::from("/tmp"),
             command: "sh".to_string(),
-            args: vec!["-c".to_string(), "for i in $(seq 1 100); do echo line$i; done".to_string()],
+            args: vec![
+                "-c".to_string(),
+                "for i in $(seq 1 100); do echo line$i; done".to_string(),
+            ],
             env: HashMap::new(),
             timeout_ms: Some(5000),
             max_output_bytes: Some(100), // Small limit
@@ -927,6 +922,10 @@ mod tests {
         }
 
         // Output should be limited
-        assert!(total_output <= 200, "Output was not limited: {} bytes", total_output);
+        assert!(
+            total_output <= 200,
+            "Output was not limited: {} bytes",
+            total_output
+        );
     }
 }

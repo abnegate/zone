@@ -8,7 +8,7 @@ import '@testing-library/jest-dom';
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: jest.fn().mockImplementation((query: string) => ({
-    matches: query.includes('dark') ? false : true,
+    matches: !query.includes('dark'),
     media: query,
     onchange: null,
     addEventListener: jest.fn(),

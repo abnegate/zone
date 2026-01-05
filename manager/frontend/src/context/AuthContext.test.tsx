@@ -67,7 +67,16 @@ describe('AuthContext', () => {
     });
 
     it('restores auth state from localStorage', async () => {
-      const mockUser = { id: '1', email: 'test@test.com', display_name: 'Test', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null };
+      const mockUser = {
+        id: '1',
+        email: 'test@test.com',
+        display_name: 'Test',
+        is_admin: false,
+        is_active: true,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+        last_login_at: null,
+      };
       // Create a valid JWT with future expiry
       const payload = {
         sub: '1',
@@ -157,7 +166,16 @@ describe('AuthContext', () => {
         access_token: 'new-access-token',
         refresh_token: 'new-refresh-token',
         expires_in: 900,
-        user: { id: '1', email: 'user@test.com', display_name: 'User', is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
+        user: {
+          id: '1',
+          email: 'user@test.com',
+          display_name: 'User',
+          is_admin: false,
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['user'],
         permissions: ['chats:read', 'chats:create'],
       };
@@ -220,7 +238,16 @@ describe('AuthContext', () => {
         access_token: 'admin-access-token',
         refresh_token: 'admin-refresh-token',
         expires_in: 900,
-        user: { id: '1', email: 'admin@test.com', display_name: 'Admin', is_admin: true, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
+        user: {
+          id: '1',
+          email: 'admin@test.com',
+          display_name: 'Admin',
+          is_admin: true,
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['admin'],
         permissions: ['chats:read', 'chats:create', 'users:delete'],
       };
@@ -267,7 +294,16 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
+        user: {
+          id: '1',
+          email: 'test@test.com',
+          display_name: null,
+          is_admin: false,
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['user'],
         permissions: ['chats:read'],
       };
@@ -303,7 +339,16 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
+        user: {
+          id: '1',
+          email: 'test@test.com',
+          display_name: null,
+          is_admin: false,
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['user'],
         permissions: [],
       });
@@ -330,7 +375,16 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'test@test.com', display_name: null, is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
+        user: {
+          id: '1',
+          email: 'test@test.com',
+          display_name: null,
+          is_admin: false,
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['user'],
         permissions: ['chats:read', 'chats:create', 'projects:read'],
       });
@@ -411,7 +465,16 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'admin@test.com', display_name: null, is_admin: true, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
+        user: {
+          id: '1',
+          email: 'admin@test.com',
+          display_name: null,
+          is_admin: true,
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['admin', 'user'],
         permissions: [],
       });
@@ -431,7 +494,16 @@ describe('AuthContext', () => {
         access_token: 'token',
         refresh_token: 'refresh',
         expires_in: 900,
-        user: { id: '1', email: 'user@test.com', display_name: null, is_admin: false, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z', last_login_at: null },
+        user: {
+          id: '1',
+          email: 'user@test.com',
+          display_name: null,
+          is_admin: false,
+          is_active: true,
+          created_at: '2024-01-01T00:00:00Z',
+          updated_at: '2024-01-01T00:00:00Z',
+          last_login_at: null,
+        },
         roles: ['user'],
         permissions: [],
       });

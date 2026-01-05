@@ -1,0 +1,58 @@
+[package]
+name = "zone_server"
+description = "Zone API server - HTTP, WebSocket, and database layer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zone-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# HTTP framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+
+# Cache
+redis = { workspace = true }
+
+# Auth
+jsonwebtoken = { workspace = true }
+argon2 = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
+
+# WebSocket
+dashmap = "6.1"
+
+# HTTP client (for proxying to Ollama)
+reqwest = { workspace = true }
+
+# Metrics
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+# Internal
+zone_core = { path = "../zone_core" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+http-body-util = "0.1"

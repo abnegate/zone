@@ -1,5 +1,5 @@
-import React from 'react';
-import { Checkbox, Input, InfoBox } from '../components';
+import type React from 'react';
+import { Checkbox, InfoBox, Input } from '../components';
 import type { InstallerConfig } from '../types';
 
 interface SearchStepProps {
@@ -20,7 +20,9 @@ export function SearchStep({ config, onChange, getFieldError }: SearchStepProps)
         <Checkbox
           label="Enable web search in RAG pipeline"
           checked={config.SEARCH_ENABLE_WEB_SEARCH === 'true'}
-          onChange={e => onChange('SEARCH_ENABLE_WEB_SEARCH', e.target.checked ? 'true' : 'false')}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            onChange('SEARCH_ENABLE_WEB_SEARCH', e.target.checked ? 'true' : 'false')
+          }
         />
       </div>
 
@@ -28,7 +30,9 @@ export function SearchStep({ config, onChange, getFieldError }: SearchStepProps)
         label="Results per Query"
         type="number"
         value={config.SEARCH_RESULT_COUNT}
-        onChange={e => onChange('SEARCH_RESULT_COUNT', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('SEARCH_RESULT_COUNT', e.target.value)
+        }
         min={1}
         max={20}
         error={getFieldError('SEARCH_RESULT_COUNT')}
@@ -38,7 +42,9 @@ export function SearchStep({ config, onChange, getFieldError }: SearchStepProps)
         label="Concurrent Requests"
         type="number"
         value={config.SEARCH_CONCURRENT_REQUESTS}
-        onChange={e => onChange('SEARCH_CONCURRENT_REQUESTS', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('SEARCH_CONCURRENT_REQUESTS', e.target.value)
+        }
         min={1}
         max={32}
         error={getFieldError('SEARCH_CONCURRENT_REQUESTS')}
@@ -48,13 +54,13 @@ export function SearchStep({ config, onChange, getFieldError }: SearchStepProps)
         label="Search Instance Name"
         type="text"
         value={config.SEARCH_SEARXNG_INSTANCE_NAME}
-        onChange={e => onChange('SEARCH_SEARXNG_INSTANCE_NAME', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('SEARCH_SEARXNG_INSTANCE_NAME', e.target.value)
+        }
         error={getFieldError('SEARCH_SEARXNG_INSTANCE_NAME')}
       />
 
-      <InfoBox variant="info">
-        Web search requires VPN configuration in the next step.
-      </InfoBox>
+      <InfoBox variant="info">Web search requires VPN configuration in the next step.</InfoBox>
     </div>
   );
 }

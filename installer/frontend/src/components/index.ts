@@ -1,9 +1,15 @@
-export { Button } from './Button';
-export { Input } from './Input';
-export { Select } from './Select';
-export { Checkbox } from './Checkbox';
-export { InfoBox } from './InfoBox';
-export { Modal } from './Modal';
+// Re-export shared components from @zone/ui
+export { Button, Input, Select, Checkbox, InfoBox, Modal, ProgressBar } from '@zone/ui';
+export type {
+  ButtonProps,
+  InputProps,
+  SelectProps,
+  CheckboxProps,
+  InfoBoxProps,
+  ModalProps,
+  ProgressBarProps,
+} from '@zone/ui';
+
+// App-specific components
 export { StatusLog } from './StatusLog';
-export { ProgressBar } from './ProgressBar';
 export { StepPills } from './StepPills';

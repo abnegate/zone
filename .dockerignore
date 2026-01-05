@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+
+# Node modules (will be installed in container)
+**/node_modules
+
+# Build outputs (will be built in container)
+installer/frontend/build
+manager/frontend/build
+packages/ui/dist
+
+# Environment files
+.env
+.env.local
+.env.*.local
+**/.env.local
+**/.env.*.local
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage
+**/coverage
+
+# Playwright
+**/playwright-report
+**/test-results
+
+# Documentation (not needed in build)
+*.md
+!README.md
+
+# Development configs
+.editorconfig
+.prettierrc
+biome.json
+**/biome.json
+
+# Rust target (built in container)
+runner/target

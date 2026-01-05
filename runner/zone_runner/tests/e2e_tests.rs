@@ -150,7 +150,12 @@ fn test_handshake() {
     // Receive HelloAck
     let response = daemon.recv();
     assert_eq!(response["type"], "HelloAck");
-    assert!(response["protocol_version"].as_str().unwrap().starts_with("1."));
+    assert!(
+        response["protocol_version"]
+            .as_str()
+            .unwrap()
+            .starts_with("1.")
+    );
     assert!(response["runner_version"].is_string());
     assert!(response["capabilities"].is_array());
 
@@ -265,9 +270,16 @@ fn test_simple_command() {
     });
 
     // Verify we got the expected messages
-    let types: Vec<&str> = messages.iter().map(|m| m["type"].as_str().unwrap()).collect();
+    let types: Vec<&str> = messages
+        .iter()
+        .map(|m| m["type"].as_str().unwrap())
+        .collect();
 
-    assert!(types.contains(&"RunStarted"), "Missing RunStarted: {:?}", types);
+    assert!(
+        types.contains(&"RunStarted"),
+        "Missing RunStarted: {:?}",
+        types
+    );
     assert!(
         types.contains(&"RunExit") || types.contains(&"RunError"),
         "Missing terminal message: {:?}",
@@ -449,9 +461,7 @@ fn test_invalid_workspace() {
     };
     daemon.send(&run);
 
-    let messages = daemon.recv_until(Duration::from_secs(5), |msg| {
-        msg["type"] == "RunError"
-    });
+    let messages = daemon.recv_until(Duration::from_secs(5), |msg| msg["type"] == "RunError");
 
     let error_msg = messages.iter().find(|m| m["type"] == "RunError");
     assert!(error_msg.is_some(), "Expected RunError message");
@@ -484,9 +494,7 @@ fn test_invalid_command() {
     };
     daemon.send(&run);
 
-    let messages = daemon.recv_until(Duration::from_secs(5), |msg| {
-        msg["type"] == "RunError"
-    });
+    let messages = daemon.recv_until(Duration::from_secs(5), |msg| msg["type"] == "RunError");
 
     let error_msg = messages.iter().find(|m| m["type"] == "RunError");
     assert!(error_msg.is_some(), "Expected RunError message");
@@ -639,7 +647,10 @@ fn test_shutdown_with_running_job() {
     let status = daemon.shutdown();
 
     // Should still exit (after cancelling the job)
-    assert!(status.success(), "Daemon should handle shutdown with running job");
+    assert!(
+        status.success(),
+        "Daemon should handle shutdown with running job"
+    );
 }
 
 // ============================================================================
@@ -670,9 +681,7 @@ fn test_duration_in_exit() {
     };
     daemon.send(&run);
 
-    let messages = daemon.recv_until(Duration::from_secs(5), |msg| {
-        msg["type"] == "RunExit"
-    });
+    let messages = daemon.recv_until(Duration::from_secs(5), |msg| msg["type"] == "RunExit");
 
     let exit_msg = messages.iter().find(|m| m["type"] == "RunExit");
     assert!(exit_msg.is_some(), "No RunExit message");
@@ -714,9 +723,7 @@ fn test_pid_in_started() {
     };
     daemon.send(&run);
 
-    let messages = daemon.recv_until(Duration::from_secs(5), |msg| {
-        msg["type"] == "RunStarted"
-    });
+    let messages = daemon.recv_until(Duration::from_secs(5), |msg| msg["type"] == "RunStarted");
 
     let started_msg = messages.iter().find(|m| m["type"] == "RunStarted");
     assert!(started_msg.is_some(), "No RunStarted message");

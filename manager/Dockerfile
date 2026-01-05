@@ -1,94 +1,100 @@
 # =============================================================================
-# Manager Dockerfile
-# Multi-stage build with Rust tool runner
+# Zone Server Dockerfile
+# Multi-stage build for Rust backend
 #
-# Note: When building with the Rust runner, set build context to repo root:
+# Build context should be repo root:
 #   docker build -f manager/Dockerfile .
-# Otherwise, build from manager directory for Gleam-only build.
 # =============================================================================
 
 # =============================================================================
-# Stage 1: Build Rust tool runner (optional)
-# This stage is skipped if runner directory doesn't exist
+# Stage 1: Build Rust application
 # =============================================================================
-FROM rust:1.92-slim-bookworm AS rust-builder
+FROM rust:1.85-slim-bookworm AS builder
 
 WORKDIR /build
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Rust source - these files are optional
-# If building from manager context only, this will fail and that's ok
+# Copy Cargo workspace files first for better caching
 COPY runner/Cargo.toml runner/Cargo.lock ./runner/
-COPY runner/tool_runner ./runner/tool_runner/
-COPY runner/zone_runner ./runner/zone_runner/
 
-# Build release binary
+# Copy all crate manifests
+COPY runner/tool_runner/Cargo.toml ./runner/tool_runner/
+COPY runner/zone_runner/Cargo.toml ./runner/zone_runner/
+COPY runner/zone_core/Cargo.toml ./runner/zone_core/
+COPY runner/zone_server/Cargo.toml ./runner/zone_server/
+COPY runner/zone_cli/Cargo.toml ./runner/zone_cli/
+COPY runner/zone_installer/Cargo.toml ./runner/zone_installer/
+
+# Create stub files to satisfy cargo's dependency resolution
+RUN mkdir -p runner/tool_runner/src runner/zone_runner/src runner/zone_core/src \
+    runner/zone_server/src runner/zone_cli/src runner/zone_installer/src && \
+    echo "fn main() {}" > runner/tool_runner/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_runner/src/main.rs && \
+    echo "fn main() {}" > runner/zone_core/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_server/src/main.rs && \
+    echo "fn main() {}" > runner/zone_cli/src/main.rs && \
+    echo "fn main() {}" > runner/zone_installer/src/main.rs
+
+# Download dependencies (cached unless Cargo.toml changes)
 WORKDIR /build/runner
-RUN cargo build --release --package zone_runner
+RUN cargo fetch
+
+# Now copy actual source code
+COPY runner/tool_runner ./tool_runner/
+COPY runner/zone_runner ./zone_runner/
+COPY runner/zone_core ./zone_core/
+COPY runner/zone_server ./zone_server/
+COPY runner/zone_cli ./zone_cli/
+COPY runner/zone_installer ./zone_installer/
+
+# Copy migrations and sqlx offline data
+COPY runner/zone_server/migrations ./zone_server/migrations/
+COPY runner/zone_server/.sqlx ./zone_server/.sqlx/
+
+# Build release binaries
+ENV SQLX_OFFLINE=true
+RUN cargo build --release --package zone_server --package zone_runner
 
 # =============================================================================
-# Stage 2: Build Gleam application
+# Stage 2: Runtime
 # =============================================================================
-FROM ghcr.io/gleam-lang/gleam:v1.14.0-erlang AS gleam-builder
-
-WORKDIR /build
-
-# Optional: DATABASE_URL for regenerating SQL module during build
-ARG DATABASE_URL
-
-# Copy from manager directory (works with both contexts)
-COPY manager/gleam.toml manager/manifest.toml ./
-COPY manager/src src
-COPY manager/migrations migrations
-
-RUN gleam deps download
-
-# Generate SQL module if DATABASE_URL is provided
-RUN if [ -n "$DATABASE_URL" ]; then \
-        echo "Generating SQL module with squirrel..." && \
-        gleam run -m squirrel; \
-    else \
-        echo "Using committed sql.gleam (verified by CI)"; \
-    fi
-
-RUN gleam build
-
-# =============================================================================
-# Stage 3: Runtime
-# =============================================================================
-FROM ghcr.io/gleam-lang/gleam:v1.14.0-erlang AS runtime
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -r appuser && useradd -r -g appuser -s /bin/false appuser
+# Create non-root user
+RUN groupadd -r zone && useradd -r -g zone -s /bin/false zone
 
-WORKDIR /build
+WORKDIR /app
 
-# Copy Gleam build
-COPY --from=gleam-builder /build /build
+# Copy binaries from builder
+COPY --from=builder /build/runner/target/release/zone-server /app/zone-server
+COPY --from=builder /build/runner/target/release/zone-runner /app/zone-runner
 
-# Create priv/bin directory
-RUN mkdir -p /build/priv/bin
+# Copy migrations for runtime migration support
+COPY --from=builder /build/runner/zone_server/migrations /app/migrations
 
-# Copy Rust binary (this will fail silently if rust-builder stage was skipped)
-COPY --from=rust-builder /build/runner/target/release/zone-runner /build/priv/bin/zone-runner
+# Ensure binaries are executable
+RUN chmod +x /app/zone-server /app/zone-runner
 
-# Ensure binary is executable (ignore errors if file doesn't exist)
-RUN chmod +x /build/priv/bin/zone-runner 2>/dev/null || true
+# Change ownership
+RUN chown -R zone:zone /app
 
-RUN chown -R appuser:appuser /build
-
-USER appuser
+USER zone
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
-CMD ["gleam", "run"]
+CMD ["/app/zone-server"]

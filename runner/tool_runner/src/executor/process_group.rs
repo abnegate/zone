@@ -4,7 +4,7 @@
 //! allowing us to send signals to the entire process tree when cancelling.
 
 use crate::error::ExecutorError;
-use nix::sys::signal::{kill, Signal};
+use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -87,10 +87,7 @@ impl ProcessGroup {
     /// Returns true if any process in the group is still alive.
     pub fn is_alive(&self) -> bool {
         // Sending signal 0 checks if the process exists without actually sending a signal
-        match kill(Pid::from_raw(-self.pgid), None) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        kill(Pid::from_raw(-self.pgid), None).is_ok()
     }
 }
 

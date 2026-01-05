@@ -1,4 +1,4 @@
-import React from 'react';
+import type React from 'react';
 import { Input } from '../components';
 import type { InstallerConfig } from '../types';
 
@@ -20,7 +20,9 @@ export function DomainStep({ config, onChange, getFieldError }: DomainStepProps)
         label="Web Interface Hostname"
         type="text"
         value={config.DOMAIN_HOST_WEBUI}
-        onChange={e => onChange('DOMAIN_HOST_WEBUI', e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+          onChange('DOMAIN_HOST_WEBUI', e.target.value)
+        }
         placeholder="webui.localhost"
         helpText="Hostname for the chat interface"
         error={getFieldError('DOMAIN_HOST_WEBUI')}

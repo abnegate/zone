@@ -4,6 +4,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -77,57 +78,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const refreshTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const scheduleRefreshRef = useRef<((expiresIn: number) => void) | null>(null);
 
   // Update API client token whenever it changes
   useEffect(() => {
     client.setAccessToken(state.accessToken);
   }, [state.accessToken]);
-
-  // Schedule token refresh
-  const scheduleRefresh = useCallback((expiresIn: number) => {
-    if (refreshTimeoutRef.current) {
-      clearTimeout(refreshTimeoutRef.current);
-    }
-
-    // Refresh 60 seconds before expiry
-    const refreshTime = (expiresIn - 60) * 1000;
-    if (refreshTime > 0) {
-      refreshTimeoutRef.current = setTimeout(async () => {
-        const currentRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-        if (currentRefreshToken) {
-          try {
-            const response = await authApi.refreshToken(currentRefreshToken);
-            handleAuthResponse(response);
-          } catch {
-            handleLogout();
-          }
-        }
-      }, refreshTime);
-    }
-  }, []);
-
-  const handleAuthResponse = useCallback(
-    (response: AuthResponse) => {
-      const payload = decodeJwt(response.access_token);
-
-      localStorage.setItem(ACCESS_TOKEN_KEY, response.access_token);
-      localStorage.setItem(REFRESH_TOKEN_KEY, response.refresh_token);
-      localStorage.setItem(USER_KEY, JSON.stringify(response.user));
-
-      setState({
-        user: response.user,
-        roles: response.roles,
-        permissions: response.permissions,
-        accessToken: response.access_token,
-        refreshToken: response.refresh_token,
-        isAuthenticated: true,
-        isLoading: false,
-      });
-
-      scheduleRefresh(response.expires_in);
-    },
-    [scheduleRefresh]
-  );
 
   const handleLogout = useCallback(() => {
     if (refreshTimeoutRef.current) {
@@ -148,6 +104,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isLoading: false,
     });
   }, []);
+
+  const handleAuthResponse = useCallback((response: AuthResponse) => {
+    localStorage.setItem(ACCESS_TOKEN_KEY, response.access_token);
+    localStorage.setItem(REFRESH_TOKEN_KEY, response.refresh_token);
+    localStorage.setItem(USER_KEY, JSON.stringify(response.user));
+
+    setState({
+      user: response.user,
+      roles: response.roles,
+      permissions: response.permissions,
+      accessToken: response.access_token,
+      refreshToken: response.refresh_token,
+      isAuthenticated: true,
+      isLoading: false,
+    });
+
+    scheduleRefreshRef.current?.(response.expires_in);
+  }, []);
+
+  const scheduleRefresh = useCallback(
+    (expiresIn: number) => {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+      }
+
+      // Refresh 60 seconds before expiry
+      const refreshTime = (expiresIn - 60) * 1000;
+      if (refreshTime > 0) {
+        refreshTimeoutRef.current = setTimeout(async () => {
+          const currentRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+          if (currentRefreshToken) {
+            try {
+              const response = await authApi.refreshToken(currentRefreshToken);
+              handleAuthResponse(response);
+            } catch {
+              handleLogout();
+            }
+          }
+        }, refreshTime);
+      }
+    },
+    [handleAuthResponse, handleLogout]
+  );
+
+  // Store scheduleRefresh in ref synchronously before effects run
+  useLayoutEffect(() => {
+    scheduleRefreshRef.current = scheduleRefresh;
+  }, [scheduleRefresh]);
 
   // Verify/refresh token on mount
   useEffect(() => {

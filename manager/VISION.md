@@ -153,7 +153,7 @@ The Wiki enables models to maintain institutional knowledge and improve response
 │                                                              │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │   Frontend  │  │   Backend   │  │   Agent Executor    │  │
-│  │   (React)   │──│   (Gleam)   │──│   (Multi-Agent)     │  │
+│  │   (React)   │──│   (Rust)    │──│   (Multi-Agent)     │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 │         │               │                    │               │
 │         └───────────────┼────────────────────┘               │

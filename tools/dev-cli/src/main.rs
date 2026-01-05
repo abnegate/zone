@@ -88,44 +88,39 @@ enum Commands {
 enum Project {
     /// Installer frontend (React/TypeScript)
     InstallerFrontend,
-    /// Installer backend (Gleam)
-    InstallerBackend,
     /// Manager frontend (React/TypeScript)
     ManagerFrontend,
-    /// Manager backend (Gleam)
-    ManagerBackend,
-    /// Runner (Rust)
+    /// Runner (Rust - tool_runner, zone_core, zone_cli)
     Runner,
+    /// Server (Rust - zone_server, requires database)
+    Server,
 }
 
 impl Project {
     fn all() -> Vec<Project> {
         vec![
             Project::InstallerFrontend,
-            Project::InstallerBackend,
             Project::ManagerFrontend,
-            Project::ManagerBackend,
             Project::Runner,
+            Project::Server,
         ]
     }
 
     fn display_name(&self) -> &'static str {
         match self {
             Project::InstallerFrontend => "Installer Frontend",
-            Project::InstallerBackend => "Installer Backend",
             Project::ManagerFrontend => "Manager Frontend",
-            Project::ManagerBackend => "Manager Backend",
             Project::Runner => "Runner",
+            Project::Server => "Server",
         }
     }
 
     fn relative_path(&self) -> &'static str {
         match self {
             Project::InstallerFrontend => "installer/frontend",
-            Project::InstallerBackend => "installer",
             Project::ManagerFrontend => "manager/frontend",
-            Project::ManagerBackend => "manager",
             Project::Runner => "runner",
+            Project::Server => "runner",
         }
     }
 }
@@ -306,7 +301,7 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
 
         match project {
             Project::InstallerFrontend | Project::ManagerFrontend => {
-                // Check if biome is available (Manager frontend has it)
+                // Check if biome is available
                 let biome_config = working_dir.join("biome.json");
                 if biome_config.exists() {
                     let (cmd, args) = if check {
@@ -322,10 +317,9 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
                         working_dir,
                     });
                 } else {
-                    // Installer frontend doesn't have biome, use prettier if available or skip
+                    // Use prettier if available
                     let package_json = working_dir.join("package.json");
                     if package_json.exists() {
-                        // Check for prettier in package.json
                         if let Ok(content) = std::fs::read_to_string(&package_json) {
                             if content.contains("prettier") {
                                 let (cmd, args) = if check {
@@ -345,33 +339,22 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
                     }
                 }
             }
-            Project::InstallerBackend | Project::ManagerBackend => {
-                let (cmd, args) = if check {
-                    ("gleam", vec!["format", "--check", "src", "test"])
-                } else {
-                    ("gleam", vec!["format", "src", "test"])
-                };
-                tasks.push(TaskConfig {
-                    project: *project,
-                    name: format!("Format {}", project.display_name()),
-                    command: cmd.to_string(),
-                    args: args.into_iter().map(String::from).collect(),
-                    working_dir,
-                });
-            }
-            Project::Runner => {
-                let (cmd, args) = if check {
-                    ("cargo", vec!["fmt", "--all", "--", "--check"])
-                } else {
-                    ("cargo", vec!["fmt", "--all"])
-                };
-                tasks.push(TaskConfig {
-                    project: *project,
-                    name: format!("Format {}", project.display_name()),
-                    command: cmd.to_string(),
-                    args: args.into_iter().map(String::from).collect(),
-                    working_dir,
-                });
+            Project::Runner | Project::Server => {
+                // Only add format task once for Rust (both share same dir)
+                if *project == Project::Runner {
+                    let (cmd, args) = if check {
+                        ("cargo", vec!["fmt", "--all", "--", "--check"])
+                    } else {
+                        ("cargo", vec!["fmt", "--all"])
+                    };
+                    tasks.push(TaskConfig {
+                        project: *project,
+                        name: "Format Rust".to_string(),
+                        command: cmd.to_string(),
+                        args: args.into_iter().map(String::from).collect(),
+                        working_dir,
+                    });
+                }
             }
         }
     }
@@ -413,45 +396,38 @@ fn create_lint_tasks(root: &PathBuf, projects: &[Project], fix: bool) -> Vec<Tas
                     working_dir,
                 });
             }
-            Project::InstallerBackend | Project::ManagerBackend => {
-                // Gleam check for type errors
-                tasks.push(TaskConfig {
-                    project: *project,
-                    name: format!("Check {}", project.display_name()),
-                    command: "gleam".to_string(),
-                    args: vec!["check".to_string()],
-                    working_dir,
-                });
-            }
-            Project::Runner => {
-                let args = if fix {
-                    vec![
-                        "clippy",
-                        "--all-targets",
-                        "--all-features",
-                        "--fix",
-                        "--allow-dirty",
-                        "--",
-                        "-D",
-                        "warnings",
-                    ]
-                } else {
-                    vec![
-                        "clippy",
-                        "--all-targets",
-                        "--all-features",
-                        "--",
-                        "-D",
-                        "warnings",
-                    ]
-                };
-                tasks.push(TaskConfig {
-                    project: *project,
-                    name: format!("Lint {}", project.display_name()),
-                    command: "cargo".to_string(),
-                    args: args.into_iter().map(String::from).collect(),
-                    working_dir,
-                });
+            Project::Runner | Project::Server => {
+                // Only add clippy task once for Rust (both share same dir)
+                if *project == Project::Runner {
+                    let args = if fix {
+                        vec![
+                            "clippy",
+                            "--all-targets",
+                            "--all-features",
+                            "--fix",
+                            "--allow-dirty",
+                            "--",
+                            "-D",
+                            "warnings",
+                        ]
+                    } else {
+                        vec![
+                            "clippy",
+                            "--all-targets",
+                            "--all-features",
+                            "--",
+                            "-D",
+                            "warnings",
+                        ]
+                    };
+                    tasks.push(TaskConfig {
+                        project: *project,
+                        name: "Lint Rust".to_string(),
+                        command: "cargo".to_string(),
+                        args: args.into_iter().map(String::from).collect(),
+                        working_dir,
+                    });
+                }
             }
         }
     }
@@ -475,21 +451,31 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
                     working_dir,
                 });
             }
-            Project::InstallerBackend | Project::ManagerBackend => {
+            Project::Runner => {
+                // Test tool_runner, zone_core, zone_cli (no database needed)
                 tasks.push(TaskConfig {
                     project: *project,
-                    name: format!("Test {}", project.display_name()),
-                    command: "gleam".to_string(),
-                    args: vec!["test".to_string()],
+                    name: "Test Runner".to_string(),
+                    command: "cargo".to_string(),
+                    args: vec![
+                        "test".to_string(),
+                        "-p".to_string(), "tool_runner".to_string(),
+                        "-p".to_string(), "zone_core".to_string(),
+                        "-p".to_string(), "zone_cli".to_string(),
+                    ],
                     working_dir,
                 });
             }
-            Project::Runner => {
+            Project::Server => {
+                // Test zone_server (requires DATABASE_URL from env or .env)
                 tasks.push(TaskConfig {
                     project: *project,
-                    name: format!("Test {}", project.display_name()),
+                    name: "Test Server".to_string(),
                     command: "cargo".to_string(),
-                    args: vec!["test".to_string(), "--all-features".to_string()],
+                    args: vec![
+                        "test".to_string(),
+                        "-p".to_string(), "zone_server".to_string(),
+                    ],
                     working_dir,
                 });
             }
@@ -515,39 +501,20 @@ fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig
                     working_dir,
                 });
             }
-            Project::InstallerBackend | Project::ManagerBackend => {
-                // Gleam coverage via the custom script if available
-                let coverage_script = working_dir.join("scripts/test-coverage.sh");
-                if coverage_script.exists() {
+            Project::Runner | Project::Server => {
+                // Only add coverage task once for Rust
+                if *project == Project::Runner {
                     tasks.push(TaskConfig {
                         project: *project,
-                        name: format!("Coverage {}", project.display_name()),
-                        command: "bash".to_string(),
-                        args: vec!["scripts/test-coverage.sh".to_string()],
-                        working_dir,
-                    });
-                } else {
-                    // Just run tests if no coverage script
-                    tasks.push(TaskConfig {
-                        project: *project,
-                        name: format!("Test {}", project.display_name()),
-                        command: "gleam".to_string(),
-                        args: vec!["test".to_string()],
+                        name: "Coverage Rust".to_string(),
+                        command: "cargo".to_string(),
+                        args: vec![
+                            "llvm-cov".to_string(),
+                            "--html".to_string(),
+                        ],
                         working_dir,
                     });
                 }
-            }
-            Project::Runner => {
-                tasks.push(TaskConfig {
-                    project: *project,
-                    name: format!("Coverage {}", project.display_name()),
-                    command: "cargo".to_string(),
-                    args: vec![
-                        "llvm-cov".to_string(),
-                        "--html".to_string(),
-                    ],
-                    working_dir,
-                });
             }
         }
     }

@@ -1,5 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../api/client';
+import { Button, Modal, Select } from '../components';
 import { useAuth } from '../context/AuthContext';
 import { useModels } from '../hooks/useModels';
 import type { Chat, ChatWithMessages } from '../types';
@@ -53,7 +54,7 @@ export default function ChatsPage() {
     setLoading(true);
     setError(null);
     try {
-      const chatList = await client.getChats(showArchived ? true : false);
+      const chatList = await client.getChats(!!showArchived);
       setChats(chatList);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load chats');
@@ -151,13 +152,9 @@ export default function ChatsPage() {
       <div className="chats-sidebar">
         <div className="chats-sidebar-header">
           <h2>Chats</h2>
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={() => setShowNewChatModal(true)}
-            type="button"
-          >
+          <Button variant="primary" size="sm" onClick={() => setShowNewChatModal(true)}>
             + New
-          </button>
+          </Button>
         </div>
 
         <div className="chats-filter">
@@ -322,13 +319,14 @@ export default function ChatsPage() {
                 disabled={sending}
                 rows={1}
               />
-              <button
+              <Button
                 type="submit"
-                className="btn btn-primary"
-                disabled={sending || !messageInput.trim()}
+                variant="primary"
+                loading={sending}
+                disabled={!messageInput.trim()}
               >
-                {sending ? <span className="spinner" /> : 'Send'}
-              </button>
+                Send
+              </Button>
             </form>
           </>
         ) : (
@@ -347,97 +345,52 @@ export default function ChatsPage() {
             </div>
             <h3>Select a chat to start</h3>
             <p>Choose an existing conversation or create a new one</p>
-            <button
-              className="btn btn-primary"
-              onClick={() => setShowNewChatModal(true)}
-              type="button"
-            >
+            <Button variant="primary" onClick={() => setShowNewChatModal(true)}>
               Start New Chat
-            </button>
+            </Button>
           </div>
         )}
       </div>
 
       {/* New Chat Modal */}
-      {showNewChatModal && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowNewChatModal(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowNewChatModal(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
+      <Modal isOpen={showNewChatModal} onClose={() => setShowNewChatModal(false)} title="New Chat">
+        <form onSubmit={handleCreateChat}>
+          <Select
+            label="Select Model"
+            value={newChatModel}
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setNewChatModel(e.target.value)}
+            options={[
+              { value: '', label: 'Choose a model...' },
+              ...models.map((model) => ({ value: model.name, label: model.name })),
+            ]}
           />
-          <div className="modal-content">
-            <h3>New Chat</h3>
-            <form onSubmit={handleCreateChat}>
-              <div className="form-group">
-                <label htmlFor="model-select">Select Model</label>
-                <select
-                  id="model-select"
-                  value={newChatModel}
-                  onChange={(e) => setNewChatModel(e.target.value)}
-                  required
-                >
-                  <option value="">Choose a model...</option>
-                  {models.map((model) => (
-                    <option key={model.name} value={model.name}>
-                      {model.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setShowNewChatModal(false)}
-                >
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={!newChatModel}>
-                  Create Chat
-                </button>
-              </div>
-            </form>
+          <div className="modal-actions">
+            <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={!newChatModel}>
+              Create Chat
+            </Button>
           </div>
-        </div>
-      )}
+        </form>
+      </Modal>
 
       {/* Delete Confirmation Modal */}
-      {deleteConfirm && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setDeleteConfirm(null)}
-            onKeyDown={(e) => e.key === 'Escape' && setDeleteConfirm(null)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>Delete Chat</h3>
-            <p>Are you sure you want to delete this chat? This action cannot be undone.</p>
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setDeleteConfirm(null)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger"
-                onClick={() => handleDeleteChat(deleteConfirm)}
-              >
-                Delete
-              </button>
-            </div>
-          </div>
+      <Modal
+        isOpen={deleteConfirm !== null}
+        onClose={() => setDeleteConfirm(null)}
+        title="Delete Chat"
+      >
+        <p>Are you sure you want to delete this chat? This action cannot be undone.</p>
+        <div className="modal-actions">
+          <Button variant="secondary" onClick={() => setDeleteConfirm(null)}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={() => deleteConfirm && handleDeleteChat(deleteConfirm)}>
+            Delete
+          </Button>
         </div>
-      )}
+      </Modal>
     </div>
   );
 }

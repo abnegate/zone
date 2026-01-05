@@ -1,6 +1,6 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import { ThemeProvider, useTheme, FONT_MAP, RADIUS_MAP } from './ThemeContext';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { WorkspaceTheme } from '../types';
+import { FONT_MAP, RADIUS_MAP, ThemeProvider, useTheme } from './ThemeContext';
 
 // Test component to access context
 function TestComponent() {
@@ -177,15 +177,18 @@ describe('ThemeContext', () => {
     it('clears workspace theme', () => {
       localStorage.setItem('manager_theme', 'light');
       // Use a properly structured theme object
-      localStorage.setItem('manager_workspace_theme', JSON.stringify({
-        primary_color_light: '#007bff',
-        primary_color_dark: '#0056b3',
-        secondary_color_light: '#6c757d',
-        secondary_color_dark: '#545b62',
-        font_family: 'system',
-        font_size_base: '16px',
-        border_radius: 'medium',
-      }));
+      localStorage.setItem(
+        'manager_workspace_theme',
+        JSON.stringify({
+          primary_color_light: '#007bff',
+          primary_color_dark: '#0056b3',
+          secondary_color_light: '#6c757d',
+          secondary_color_dark: '#545b62',
+          font_family: 'system',
+          font_size_base: '16px',
+          border_radius: 'medium',
+        })
+      );
 
       render(
         <ThemeProvider>
