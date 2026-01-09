@@ -3,14 +3,14 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::{
     AuthUser, create_access_token, create_refresh_token, hash_password, verify_password,
 };
-use crate::db::{refresh_tokens, users};
+use crate::db::{refresh_tokens, sessions, users};
 use crate::state::AppState;
+use crate::utils::crypto::hash_token;
 
 /// Error response
 #[derive(Debug, Serialize)]
@@ -64,6 +64,7 @@ pub struct UserResponse {
     email: String,
     display_name: Option<String>,
     is_admin: bool,
+    email_verified: bool,
 }
 
 /// POST /api/auth/register
@@ -178,7 +179,8 @@ pub async fn register(
     };
 
     // Generate tokens
-    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms).await {
+    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms, None, None).await
+    {
         Ok(tokens) => tokens,
         Err(response) => return response.into_response(),
     };
@@ -192,9 +194,10 @@ pub async fn register(
             expires_in: state.config().jwt_access_lifetime,
             user: UserResponse {
                 id: user.id,
-                email: user.email,
+                email: user.email.clone(),
                 display_name: user.display_name,
                 is_admin: user.is_admin.unwrap_or(false),
+                email_verified: user.email_verified,
             },
         }),
     )
@@ -281,7 +284,8 @@ pub async fn login(
     };
 
     // Generate tokens
-    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms).await {
+    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms, None, None).await
+    {
         Ok(tokens) => tokens,
         Err(response) => return response.into_response(),
     };
@@ -296,6 +300,7 @@ pub async fn login(
             email: user.email,
             display_name: user.display_name,
             is_admin: user.is_admin.unwrap_or(false),
+            email_verified: user.email_verified,
         },
     })
     .into_response()
@@ -355,7 +360,8 @@ pub async fn refresh(
     };
 
     // Generate new tokens
-    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms).await {
+    let (access_token, refresh_token) = match generate_tokens(&state, &user_perms, None, None).await
+    {
         Ok(tokens) => tokens,
         Err(response) => return response.into_response(),
     };
@@ -370,6 +376,7 @@ pub async fn refresh(
             email: user_perms.user.email,
             display_name: user_perms.user.display_name,
             is_admin: user_perms.user.is_admin.unwrap_or(false),
+            email_verified: user_perms.user.email_verified,
         },
     })
     .into_response()
@@ -377,7 +384,7 @@ pub async fn refresh(
 
 /// POST /api/auth/logout
 pub async fn logout(State(state): State<AppState>, auth: AuthUser) -> impl IntoResponse {
-    // Revoke all refresh tokens for this user
+    // Revoke all refresh tokens and sessions for this user
     let user_id = match auth.0.user_id() {
         Ok(id) => id,
         Err(_) => {
@@ -393,6 +400,10 @@ pub async fn logout(State(state): State<AppState>, auth: AuthUser) -> impl IntoR
         tracing::warn!("Failed to revoke refresh tokens: {}", e);
     }
 
+    if let Err(e) = sessions::revoke_all_user_sessions(state.db(), user_id).await {
+        tracing::warn!("Failed to revoke sessions: {}", e);
+    }
+
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -400,6 +411,8 @@ pub async fn logout(State(state): State<AppState>, auth: AuthUser) -> impl IntoR
 async fn generate_tokens(
     state: &AppState,
     user: &users::UserWithPermissions,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
     let config = state.config();
 
@@ -444,8 +457,8 @@ async fn generate_tokens(
         user.user.id,
         &token_hash,
         expires_at.naive_utc(),
-        None,
-        None,
+        user_agent,
+        ip_address,
     )
     .await
     {
@@ -456,12 +469,337 @@ async fn generate_tokens(
         ));
     }
 
+    // Create session record to track this authentication
+    if let Err(e) = sessions::create_session(
+        state.db(),
+        user.user.id,
+        &token_hash,
+        ip_address,
+        user_agent,
+        None, // device_info can be parsed from user_agent if needed
+        expires_at.naive_utc(),
+    )
+    .await
+    {
+        tracing::error!("Failed to create session: {}", e);
+        // Don't fail auth if session creation fails, just log it
+    }
+
     Ok((access_token, refresh_token))
 }
 
-/// Hash a token for storage
-fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    hex::encode(hasher.finalize())
+// =============================================================================
+// Email Verification Endpoints
+// =============================================================================
+
+/// Request to verify an email address
+#[derive(Debug, Deserialize)]
+pub struct VerifyEmailRequest {
+    token: String,
+}
+
+/// Request to resend verification email
+#[derive(Debug, Deserialize)]
+pub struct ResendVerificationRequest {
+    email: String,
+}
+
+/// POST /api/auth/verify-email
+pub async fn verify_email(
+    State(state): State<AppState>,
+    Json(req): Json<VerifyEmailRequest>,
+) -> impl IntoResponse {
+    use crate::db::email_verification;
+
+    // Verify the token and get user_id
+    let user_id = match email_verification::verify_token(state.db(), &req.token).await {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new("Invalid or expired verification token")),
+            )
+                .into_response();
+        }
+    };
+
+    // Mark email as verified
+    if let Err(e) = email_verification::mark_email_verified(state.db(), user_id).await {
+        tracing::error!("Failed to mark email as verified: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("Internal server error")),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "Email verified successfully"
+        })),
+    )
+        .into_response()
+}
+
+/// POST /api/auth/resend-verification
+pub async fn resend_verification(
+    State(state): State<AppState>,
+    Json(req): Json<ResendVerificationRequest>,
+) -> impl IntoResponse {
+    use crate::db::email_verification;
+
+    // Get user by email
+    let user = match users::get_user_by_email(state.db(), &req.email).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            // Don't reveal whether email exists
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "message": "If the email exists, a verification email has been sent"
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Database error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
+    // Check if already verified - if so, don't send email but return success
+    // to avoid leaking verification status
+    if user.email_verified {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "message": "If the email exists, a verification email has been sent"
+            })),
+        )
+            .into_response();
+    }
+
+    // Create new verification token
+    let (token, _expires_at) =
+        match email_verification::create_verification_token(state.db(), user.id).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("Failed to create verification token: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        };
+
+    // Send verification email if email service is configured
+    if let Some(email_service) = state.email_service() {
+        // Build verification URL using configured base URL
+        let verification_url = format!("{}/verify?token={}", state.config().app_base_url, token);
+        let display_name = user.display_name.as_deref().unwrap_or(&user.email);
+
+        if let Err(e) = email_service
+            .send_verification_email(&user.email, display_name, &verification_url)
+            .await
+        {
+            tracing::error!("Failed to send verification email: {}", e);
+            // Don't fail the request - token is created, user can retry
+        } else {
+            tracing::info!("Verification email sent to user_id: {}", user.id);
+        }
+    } else {
+        tracing::debug!(
+            "Email service not configured, verification token created for user_id: {}",
+            user.id
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "If the email exists, a verification email has been sent"
+        })),
+    )
+        .into_response()
+}
+
+// =============================================================================
+// Password Reset Endpoints
+// =============================================================================
+
+/// Request to initiate password reset
+#[derive(Debug, Deserialize)]
+pub struct ForgotPasswordRequest {
+    email: String,
+}
+
+/// Request to reset password with token
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordRequest {
+    token: String,
+    new_password: String,
+}
+
+/// POST /api/auth/forgot-password
+pub async fn forgot_password(
+    State(state): State<AppState>,
+    Json(req): Json<ForgotPasswordRequest>,
+) -> impl IntoResponse {
+    use crate::db::password_reset;
+
+    // Get user by email
+    let user = match users::get_user_by_email(state.db(), &req.email).await {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            // Don't reveal whether email exists for security
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "message": "If the email exists, a password reset email has been sent"
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Database error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
+    // Create reset token
+    let (token, _expires_at) = match password_reset::create_reset_token(state.db(), user.id).await {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("Failed to create reset token: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
+    // Send password reset email if email service is configured
+    if let Some(email_service) = state.email_service() {
+        // Build reset URL using configured base URL
+        let reset_url = format!(
+            "{}/reset-password?token={}",
+            state.config().app_base_url,
+            token
+        );
+        let display_name = user.display_name.as_deref().unwrap_or(&user.email);
+
+        if let Err(e) = email_service
+            .send_password_reset_email(&user.email, display_name, &reset_url)
+            .await
+        {
+            tracing::error!("Failed to send password reset email: {}", e);
+            // Don't fail the request - token is created, user can retry
+        } else {
+            tracing::info!("Password reset email sent to user_id: {}", user.id);
+        }
+    } else {
+        tracing::debug!(
+            "Email service not configured, password reset token created for user_id: {}",
+            user.id
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "If the email exists, a password reset email has been sent"
+        })),
+    )
+        .into_response()
+}
+
+/// POST /api/auth/reset-password
+pub async fn reset_password(
+    State(state): State<AppState>,
+    Json(req): Json<ResetPasswordRequest>,
+) -> impl IntoResponse {
+    use crate::db::password_reset;
+
+    // Validate new password
+    if req.new_password.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new("Password must be at least 8 characters")),
+        )
+            .into_response();
+    }
+
+    // Verify and consume the reset token atomically to prevent race conditions
+    let user_id = match password_reset::verify_and_consume_reset_token(state.db(), &req.token).await
+    {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new("Invalid or expired reset token")),
+            )
+                .into_response();
+        }
+    };
+
+    // Hash the new password
+    let password_hash = match hash_password(&req.new_password) {
+        Ok(hash) => hash,
+        Err(e) => {
+            tracing::error!("Password hashing error: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+
+    // Update the password
+    if let Err(e) = sqlx::query!(
+        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+        password_hash,
+        user_id
+    )
+    .execute(state.db())
+    .await
+    {
+        tracing::error!("Failed to update password: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("Internal server error")),
+        )
+            .into_response();
+    }
+
+    // Revoke all existing refresh tokens and sessions for security
+    if let Err(e) = refresh_tokens::revoke_all_user_tokens(state.db(), user_id).await {
+        tracing::warn!(
+            "Failed to revoke refresh tokens after password reset: {}",
+            e
+        );
+    }
+
+    if let Err(e) = sessions::revoke_all_user_sessions(state.db(), user_id).await {
+        tracing::warn!("Failed to revoke sessions after password reset: {}", e);
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": "Password reset successfully"
+        })),
+    )
+        .into_response()
 }

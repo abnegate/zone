@@ -121,20 +121,23 @@ Select.displayName = "Select";
 import { forwardRef as forwardRef4 } from "react";
 import { jsx as jsx4, jsxs as jsxs4 } from "react/jsx-runtime";
 var Checkbox = forwardRef4(
-  ({ label, id, className = "", ...props }, ref) => {
+  ({ label, helpText, id, className = "", ...props }, ref) => {
     const checkboxId = id || label.toLowerCase().replace(/\s+/g, "-");
-    return /* @__PURE__ */ jsxs4("label", { className: `ui-checkbox ${className}`.trim(), htmlFor: checkboxId, children: [
-      /* @__PURE__ */ jsx4(
-        "input",
-        {
-          ref,
-          type: "checkbox",
-          id: checkboxId,
-          className: "ui-checkbox__input",
-          ...props
-        }
-      ),
-      /* @__PURE__ */ jsx4("span", { className: "ui-checkbox__label", children: label })
+    return /* @__PURE__ */ jsxs4("div", { className: "ui-form-field ui-form-field--checkbox", children: [
+      /* @__PURE__ */ jsxs4("label", { className: `ui-checkbox ${className}`.trim(), htmlFor: checkboxId, children: [
+        /* @__PURE__ */ jsx4(
+          "input",
+          {
+            ref,
+            type: "checkbox",
+            id: checkboxId,
+            className: "ui-checkbox__input",
+            ...props
+          }
+        ),
+        /* @__PURE__ */ jsx4("span", { className: "ui-checkbox__label", children: label })
+      ] }),
+      helpText && /* @__PURE__ */ jsx4("p", { className: "ui-form-field__help", children: helpText })
     ] });
   }
 );

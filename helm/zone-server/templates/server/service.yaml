@@ -1,0 +1,21 @@
+{{- if .Values.server.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "zone-server.fullname" . }}-server
+  labels:
+    {{- include "zone-server.server.labels" . | nindent 4 }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ .Values.server.service.port | quote }}
+    prometheus.io/path: "/metrics"
+spec:
+  type: {{ .Values.server.service.type }}
+  ports:
+    - port: {{ .Values.server.service.port }}
+      targetPort: {{ .Values.server.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "zone-server.server.selectorLabels" . | nindent 4 }}
+{{- end }}

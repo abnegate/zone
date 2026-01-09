@@ -1,0 +1,7 @@
+# Clippy configuration for Zone runner
+# https://doc.rust-lang.org/clippy/configuration.html
+
+# Allow functions with more than 7 arguments (default)
+# Many database and API functions legitimately need many parameters
+# The ai_settings functions have 16 parameters due to many optional fields
+too-many-arguments-threshold = 20

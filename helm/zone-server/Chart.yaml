@@ -1,0 +1,15 @@
+apiVersion: v2
+name: zone-server
+description: Production-ready Helm chart for Zone server and manager services
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - zone
+  - ai
+  - rust
+  - microservices
+home: https://github.com/yourusername/zone
+maintainers:
+  - name: Zone Team
+    email: team@zone.dev

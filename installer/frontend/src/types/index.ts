@@ -1,3 +1,5 @@
+export type AiProvider = 'self_hosted' | 'openai' | 'anthropic' | 'bedrock';
+
 export interface InstallerConfig {
   // Domain
   DOMAIN_HOST_WEBUI: string;
@@ -12,10 +14,21 @@ export interface InstallerConfig {
   SECURITY_HTTP_REDIRECT: string;
   SECURITY_GENERATE_CERTIFICATE: string;
 
-  // Models
-  OLLAMA_MODEL_FAST: string;
-  OLLAMA_MODEL_REASON: string;
-  OLLAMA_MODEL_EMBED: string;
+  // AI Provider
+  AI_PROVIDER: AiProvider;
+  AI_LITELLM_HOST: string;
+  AI_LITELLM_KEY: string;
+  AI_OPENAI_API_KEY: string;
+  AI_OPENAI_BASE_URL: string;
+  AI_ANTHROPIC_API_KEY: string;
+  AI_ANTHROPIC_BASE_URL: string;
+  AI_BEDROCK_REGION: string;
+  AI_BEDROCK_ACCESS_KEY: string;
+  AI_BEDROCK_SECRET_KEY: string;
+  AI_BEDROCK_USE_IAM_ROLE: string;
+  AI_MODEL_FAST: string;
+  AI_MODEL_REASONING: string;
+  AI_MODEL_EMBEDDING: string;
 
   // Interface
   WEBUI_AUTH: string;

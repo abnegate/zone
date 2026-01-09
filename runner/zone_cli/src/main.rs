@@ -8,6 +8,7 @@
 
 mod auth;
 mod config;
+mod lighthouse;
 mod run;
 mod setup;
 
@@ -92,6 +93,17 @@ enum Commands {
         /// Only validate configuration
         #[arg(long)]
         validate: bool,
+    },
+
+    /// Run Lighthouse performance audits on frontends
+    Lighthouse {
+        /// Target frontend: manager, installer, or all (default: all)
+        #[arg(short, long, default_value = "all")]
+        target: String,
+
+        /// Project root directory (default: current directory)
+        #[arg(short, long)]
+        path: Option<String>,
     },
 }
 
@@ -204,6 +216,38 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 // Interactive mode
                 setup.run_interactive().await?;
+            }
+        }
+        Commands::Lighthouse { target, path } => {
+            let project_root = path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+
+            let result = match target.to_lowercase().as_str() {
+                "manager" => lighthouse::run_lighthouse(
+                    &project_root,
+                    lighthouse::Frontend::Manager,
+                    cli.verbose,
+                ),
+                "installer" => lighthouse::run_lighthouse(
+                    &project_root,
+                    lighthouse::Frontend::Installer,
+                    cli.verbose,
+                ),
+                "all" => lighthouse::run_all(&project_root, cli.verbose),
+                _ => {
+                    eprintln!(
+                        "{} Invalid target: {}. Use 'manager', 'installer', or 'all'",
+                        style("✗").red(),
+                        target
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            if let Err(e) = result {
+                eprintln!("{} {}", style("Error:").red(), e);
+                std::process::exit(1);
             }
         }
     }

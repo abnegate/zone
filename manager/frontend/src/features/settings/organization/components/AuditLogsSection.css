@@ -1,0 +1,327 @@
+.audit-logs-section {
+  padding: 1.5rem 0;
+}
+
+.audit-logs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.5rem;
+  gap: 1rem;
+}
+
+.audit-logs-header .section-title {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.audit-logs-header .section-description {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.audit-logs-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-shrink: 0;
+}
+
+.audit-logs-loading,
+.audit-logs-error {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.audit-logs-error {
+  color: var(--error);
+}
+
+.audit-logs-error button {
+  margin-top: 1rem;
+}
+
+/* Filters */
+.audit-logs-filters {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+/* Table */
+.audit-logs-table-wrapper {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.audit-logs-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.audit-logs-table thead {
+  background: var(--surface-hover);
+  border-bottom: 2px solid var(--border);
+}
+
+.audit-logs-table th {
+  text-align: left;
+  padding: 1rem;
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+}
+
+.audit-log-row {
+  border-bottom: 1px solid var(--border);
+  transition: background-color 0.15s ease;
+}
+
+.audit-log-row:hover {
+  background: var(--surface-hover);
+}
+
+.audit-logs-table td {
+  padding: 1rem;
+  font-size: 0.875rem;
+  color: var(--text-primary);
+}
+
+.timestamp-cell span {
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  font-size: 0.8125rem;
+}
+
+.actor-cell .actor-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.actor-email {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.actor-id {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+}
+
+.action-badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+}
+
+.action-create {
+  background: rgba(34, 197, 94, 0.15);
+  color: #16a34a;
+}
+
+.action-update {
+  background: rgba(59, 130, 246, 0.15);
+  color: #2563eb;
+}
+
+.action-delete {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+}
+
+.action-success {
+  background: rgba(34, 197, 94, 0.15);
+  color: #16a34a;
+}
+
+.action-warning {
+  background: rgba(251, 146, 60, 0.15);
+  color: #ea580c;
+}
+
+.action-default {
+  background: rgba(148, 163, 184, 0.15);
+  color: #64748b;
+}
+
+.resource-type-cell {
+  text-transform: capitalize;
+  color: var(--text-secondary);
+}
+
+.resource-id-cell code {
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  font-size: 0.8125rem;
+  background: var(--surface-hover);
+  padding: 0.125rem 0.5rem;
+  border-radius: 4px;
+  color: var(--text-primary);
+}
+
+.expand-button {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--primary);
+  background: transparent;
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.expand-button:hover {
+  background: var(--primary);
+  color: white;
+}
+
+.metadata-row {
+  background: var(--surface-hover);
+}
+
+.metadata-content {
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.metadata-content h4 {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+}
+
+.metadata-content pre {
+  margin: 0;
+  padding: 1rem;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  color: var(--text-primary);
+}
+
+/* Empty State */
+.empty-state {
+  padding: 3rem 2rem;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.empty-state p {
+  margin: 0 0 1.5rem 0;
+  font-size: 1rem;
+}
+
+/* Load More */
+.load-more-section {
+  padding: 1.5rem;
+  text-align: center;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 0 0 8px 8px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .audit-logs-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .audit-logs-actions {
+    flex-direction: column;
+  }
+
+  .filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-actions {
+    flex-direction: column;
+  }
+
+  .audit-logs-table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+
+  .audit-logs-table thead {
+    display: none;
+  }
+
+  .audit-logs-table tbody,
+  .audit-logs-table tr {
+    display: block;
+  }
+
+  .audit-log-row {
+    margin-bottom: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+
+  .audit-logs-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-bottom: none;
+  }
+
+  .audit-logs-table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-right: 1rem;
+  }
+
+  .metadata-row {
+    border: none;
+    padding: 0;
+  }
+
+  .metadata-content {
+    border-top: none;
+    padding: 0;
+    padding-top: 1rem;
+  }
+}

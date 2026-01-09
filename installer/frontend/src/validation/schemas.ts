@@ -27,12 +27,94 @@ export const SecuritySchema = z.object({
   SECURITY_GENERATE_CERTIFICATE: z.enum(['true', 'false']),
 });
 
-// Models step schema
-export const ModelsSchema = z.object({
-  OLLAMA_MODEL_FAST: z.string().min(1, 'Fast model is required'),
-  OLLAMA_MODEL_REASON: z.string().min(1, 'Reasoning model is required'),
-  OLLAMA_MODEL_EMBED: z.string().min(1, 'Embedding model is required'),
-});
+// Models step schema with conditional validation based on provider
+export const ModelsSchema = z
+  .object({
+    AI_PROVIDER: z.enum(['self_hosted', 'openai', 'anthropic', 'bedrock']),
+    // Self-hosted settings
+    AI_LITELLM_HOST: z.string(),
+    AI_LITELLM_KEY: z.string(),
+    // OpenAI settings
+    AI_OPENAI_API_KEY: z.string(),
+    AI_OPENAI_BASE_URL: z.string(),
+    // Anthropic settings
+    AI_ANTHROPIC_API_KEY: z.string(),
+    AI_ANTHROPIC_BASE_URL: z.string(),
+    // Bedrock settings
+    AI_BEDROCK_REGION: z.string(),
+    AI_BEDROCK_ACCESS_KEY: z.string(),
+    AI_BEDROCK_SECRET_KEY: z.string(),
+    AI_BEDROCK_USE_IAM_ROLE: z.enum(['true', 'false']),
+    // Model selections
+    AI_MODEL_FAST: z.string().min(1, 'Fast model is required'),
+    AI_MODEL_REASONING: z.string().min(1, 'Reasoning model is required'),
+    AI_MODEL_EMBEDDING: z.string(),
+  })
+  .superRefine((data, ctx) => {
+    // Self-hosted validation
+    if (data.AI_PROVIDER === 'self_hosted') {
+      if (!data.AI_LITELLM_HOST) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'LiteLLM host is required',
+          path: ['AI_LITELLM_HOST'],
+        });
+      }
+    }
+    // OpenAI validation
+    if (data.AI_PROVIDER === 'openai') {
+      if (!data.AI_OPENAI_API_KEY) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'OpenAI API key is required',
+          path: ['AI_OPENAI_API_KEY'],
+        });
+      }
+    }
+    // Anthropic validation
+    if (data.AI_PROVIDER === 'anthropic') {
+      if (!data.AI_ANTHROPIC_API_KEY) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Anthropic API key is required',
+          path: ['AI_ANTHROPIC_API_KEY'],
+        });
+      }
+      if (!data.AI_MODEL_EMBEDDING) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Embedding model is required (use an external provider)',
+          path: ['AI_MODEL_EMBEDDING'],
+        });
+      }
+    }
+    // Bedrock validation
+    if (data.AI_PROVIDER === 'bedrock') {
+      if (!data.AI_BEDROCK_REGION) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'AWS region is required',
+          path: ['AI_BEDROCK_REGION'],
+        });
+      }
+      if (data.AI_BEDROCK_USE_IAM_ROLE !== 'true') {
+        if (!data.AI_BEDROCK_ACCESS_KEY) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'AWS access key is required when not using IAM role',
+            path: ['AI_BEDROCK_ACCESS_KEY'],
+          });
+        }
+        if (!data.AI_BEDROCK_SECRET_KEY) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'AWS secret key is required when not using IAM role',
+            path: ['AI_BEDROCK_SECRET_KEY'],
+          });
+        }
+      }
+    }
+  });
 
 // Interface step schema
 export const InterfaceSchema = z.object({

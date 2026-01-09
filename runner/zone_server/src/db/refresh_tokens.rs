@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::DbResult;
 
 /// Refresh token row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct RefreshTokenRow {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -28,36 +28,27 @@ pub async fn create_refresh_token(
     user_agent: Option<&str>,
     ip_address: Option<&str>,
 ) -> DbResult<RefreshTokenRow> {
-    let row = sqlx::query!(
+    let row: RefreshTokenRow = sqlx::query_as(
         r#"
         INSERT INTO refresh_tokens (user_id, token_hash, expires_at, user_agent, ip_address)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING id, user_id, token_hash, expires_at, created_at, revoked_at, user_agent, ip_address
-        "#,
-        user_id,
-        token_hash,
-        expires_at,
-        user_agent,
-        ip_address
+        "#
     )
+    .bind(user_id)
+    .bind(token_hash)
+    .bind(expires_at)
+    .bind(user_agent)
+    .bind(ip_address)
     .fetch_one(pool)
     .await?;
 
-    Ok(RefreshTokenRow {
-        id: row.id,
-        user_id: row.user_id,
-        token_hash: row.token_hash,
-        expires_at: row.expires_at,
-        created_at: row.created_at,
-        revoked_at: row.revoked_at,
-        user_agent: row.user_agent,
-        ip_address: row.ip_address,
-    })
+    Ok(row)
 }
 
 /// Validate a refresh token (returns user_id if valid)
 pub async fn validate_refresh_token(pool: &PgPool, token_hash: &str) -> DbResult<Option<Uuid>> {
-    let result = sqlx::query_scalar!(
+    let result: Option<Uuid> = sqlx::query_scalar(
         r#"
         SELECT user_id
         FROM refresh_tokens
@@ -65,8 +56,8 @@ pub async fn validate_refresh_token(pool: &PgPool, token_hash: &str) -> DbResult
           AND expires_at > NOW()
           AND revoked_at IS NULL
         "#,
-        token_hash
     )
+    .bind(token_hash)
     .fetch_optional(pool)
     .await?;
 
@@ -75,14 +66,14 @@ pub async fn validate_refresh_token(pool: &PgPool, token_hash: &str) -> DbResult
 
 /// Revoke a refresh token
 pub async fn revoke_refresh_token(pool: &PgPool, token_hash: &str) -> DbResult<bool> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         UPDATE refresh_tokens
         SET revoked_at = NOW()
         WHERE token_hash = $1 AND revoked_at IS NULL
         "#,
-        token_hash
     )
+    .bind(token_hash)
     .execute(pool)
     .await?;
 
@@ -91,14 +82,14 @@ pub async fn revoke_refresh_token(pool: &PgPool, token_hash: &str) -> DbResult<b
 
 /// Revoke all refresh tokens for a user
 pub async fn revoke_all_user_tokens(pool: &PgPool, user_id: Uuid) -> DbResult<u64> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         UPDATE refresh_tokens
         SET revoked_at = NOW()
         WHERE user_id = $1 AND revoked_at IS NULL
         "#,
-        user_id
     )
+    .bind(user_id)
     .execute(pool)
     .await?;
 
@@ -107,14 +98,14 @@ pub async fn revoke_all_user_tokens(pool: &PgPool, user_id: Uuid) -> DbResult<u6
 
 /// Count active tokens for a user
 pub async fn count_user_tokens(pool: &PgPool, user_id: Uuid) -> DbResult<i64> {
-    let result = sqlx::query_scalar!(
+    let result: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
         FROM refresh_tokens
         WHERE user_id = $1 AND expires_at > NOW() AND revoked_at IS NULL
         "#,
-        user_id
     )
+    .bind(user_id)
     .fetch_one(pool)
     .await?;
 
@@ -123,11 +114,11 @@ pub async fn count_user_tokens(pool: &PgPool, user_id: Uuid) -> DbResult<i64> {
 
 /// Cleanup expired tokens
 pub async fn cleanup_expired_tokens(pool: &PgPool) -> DbResult<u64> {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
         DELETE FROM refresh_tokens
         WHERE expires_at < NOW() OR revoked_at IS NOT NULL
-        "#
+        "#,
     )
     .execute(pool)
     .await?;

@@ -1,52 +1,93 @@
 import type {
+  AddOrgMemberRequest,
+  AddWorkspaceMemberRequest,
+  AiSettings,
+  AuditLog,
+  AuditLogFilters,
+  AuditLogsResponse,
   Chat,
+  ChatSearchOptions,
+  ChatSearchResponse,
+  ChatWithMessages,
   CreateChatRequest,
+  CreateInvitationRequest,
   CreateOrganizationRequest,
-  CreateProjectRequest,
-  CreateSourceRequest,
-  CreateTaskRequest,
   CreateWorkspaceRequest,
+  Invitation,
+  InvitationDetails,
+  InvitationsResponse,
+  Limits,
   Message,
   ModelSource,
+  OrgMembersResponse,
   Organization,
-  Project,
+  OrganizationMember,
+  Plan,
   SendMessageRequest,
-  Source,
-  SourceType,
-  Task,
-  TaskRun,
-  TaskRunLog,
+  SessionsResponse,
+  Subscription,
+  UpdateAiSettingsRequest,
+  UpdateOrgMemberRequest,
   UpdateOrganizationRequest,
-  UpdateProjectRequest,
-  UpdateSourceRequest,
-  UpdateTaskRequest,
+  UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceThemeRequest,
+  Usage,
   Workspace,
+  WorkspaceMember,
+  WorkspaceMembersResponse,
   WorkspaceTheme,
 } from '../types';
-import type { SourceTypesResponse, SourceVerifyResponse } from '../types';
+import type {
+  CreateKnowledgeRequest,
+  GatherContextRequest,
+  SearchOptions,
+} from '../features/knowledge/types';
+import type {
+  Project,
+  CreateProjectRequest,
+  UpdateProjectRequest,
+  SyncConfig,
+  CreateSyncConfigRequest,
+} from '../features/projects/types';
+import type {
+  Source,
+  SourceType,
+  CreateSourceRequest,
+  UpdateSourceRequest,
+} from '../features/sources/types';
+import type { SourceVerifyResponse, SourceTypesResponse } from '../features/sources/schemas';
+import { modelsApi } from './models';
+import { chatsApi } from './chats';
+import { projectsApi } from './projects';
+import { tasksApi } from './tasks';
+import { sourcesApi } from './sources';
+import { knowledgeApi } from './knowledge';
 import { parse } from '../validation';
 import {
-  BrowseResponseSchema,
-  ChatResponseSchema,
-  ChatsResponseSchema,
-  MessageResponseSchema,
-  MessagesResponseSchema,
-  ModelsResponseSchema,
+  AiSettingsResponseSchema,
+  AuditLogSchema,
+  AuditLogsResponseSchema,
+  ForgotPasswordResponseSchema,
+  InvitationDetailsSchema,
+  InvitationSchema,
+  InvitationsResponseSchema,
+  LimitsResponseSchema,
+  OrgMembersResponseSchema,
+  OrganizationMemberSchema,
   OrganizationResponseSchema,
   OrganizationsResponseSchema,
+  PlanResponseSchema,
+  PlansResponseSchema,
   ProjectResponseSchema,
-  ProjectsResponseSchema,
-  SourceResponseSchema,
-  SourceTypesResponseSchema,
-  SourceVerifyResponseSchema,
-  SourcesResponseSchema,
-  TaskResponseSchema,
-  TaskRunLogsResponseSchema,
-  TaskRunResponseSchema,
-  TaskRunsResponseSchema,
-  TasksResponseSchema,
+  ResendVerificationResponseSchema,
+  ResetPasswordResponseSchema,
+  SessionsResponseSchema,
+  SubscriptionResponseSchema,
+  UsageResponseSchema,
+  VerifyEmailResponseSchema,
+  WorkspaceMemberSchema,
+  WorkspaceMembersResponseSchema,
   WorkspaceResponseSchema,
   WorkspaceThemeResponseSchema,
   WorkspacesResponseSchema,
@@ -54,16 +95,30 @@ import {
 
 // In development, set REACT_APP_API_URL=http://localhost:8000
 // In production (served by backend), leave empty to use relative URLs
-const API_BASE = process.env.REACT_APP_API_URL || '';
+export const API_BASE = process.env.REACT_APP_API_URL || '';
 
 class Client {
   private accessToken: string | null = null;
 
   setAccessToken(token: string | null) {
     this.accessToken = token;
+    // Update chatsApi with token getter
+    chatsApi.setGetAccessToken(() => this.accessToken);
+    // Update projectsApi with token getter
+    projectsApi.setGetAccessToken(() => this.accessToken);
+    // Update tasksApi with token getter
+    tasksApi.setGetAccessToken(() => this.accessToken);
+    // Update sourcesApi with token getter
+    sourcesApi.setGetAccessToken(() => this.accessToken);
+    // Update knowledgeApi with token getter
+    knowledgeApi.setGetAccessToken(() => this.accessToken);
   }
 
-  private getHeaders(): HeadersInit {
+  getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
+  getHeaders(): HeadersInit {
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
     };
@@ -73,290 +128,108 @@ class Client {
     return headers;
   }
 
-  async getModels(): Promise<{
-    models: Array<{
-      name: string;
-      size: number;
-      modified_at: string;
-      details?: { description?: string; family?: string };
-    }>;
-  }> {
-    const response = await fetch(`${API_BASE}/api/models`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch models: ${response.status}`);
-    }
-    const text = await response.text();
-    if (!text) {
-      return { models: [] };
-    }
-    try {
-      const data = JSON.parse(text);
-      return parse(ModelsResponseSchema, data);
-    } catch (e) {
-      if (e instanceof SyntaxError) {
-        throw new Error('Invalid response from server');
-      }
-      throw e;
-    }
+  // Model methods now delegate to modelsApi
+  async getModels() {
+    return modelsApi.getModels();
   }
 
-  async deleteModel(name: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/models/${encodeURIComponent(name)}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete model: ${response.status}`);
-    }
+  async deleteModel(name: string) {
+    return modelsApi.deleteModel(name);
   }
 
-  async browseModels(
-    source: ModelSource,
-    query = '',
-    offset = 0,
-    limit = 20
-  ): Promise<{
-    source: ModelSource;
-    models: Array<{
-      id: string;
-      name: string;
-      description: string;
-      downloads: number;
-      tags: string[];
-    }>;
-    total?: number | null;
-    has_more: boolean;
-  }> {
-    const params = new URLSearchParams({
-      source,
-      q: query,
-      offset: offset.toString(),
-      limit: limit.toString(),
-    });
-    const response = await fetch(`${API_BASE}/api/models?${params}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to browse models: ${response.status}`);
-    }
-    const data = await response.json();
-    return parse(BrowseResponseSchema, data);
+  async browseModels(source: ModelSource, query = '', offset = 0, limit = 20) {
+    return modelsApi.browseModels(source, query, offset, limit);
   }
 
-  async getModelInfo(
-    modelId: string
-  ): Promise<{ content: string | null; gguf_size: number | null }> {
-    // modelId may contain slashes (e.g., "author/model"), don't encode them
-    const response = await fetch(`${API_BASE}/api/models/${modelId}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch model info: ${response.status}`);
-    }
-    const data = await response.json();
-    return { content: data.content, gguf_size: data.gguf_size };
+  async getModelInfo(modelId: string) {
+    return modelsApi.getModelInfo(modelId);
   }
 
-  createPullWebSocket(modelName: string): WebSocket {
-    let wsUrl: string;
-    if (API_BASE) {
-      // Development: use configured API URL
-      const wsBase = API_BASE.replace(/^http/, 'ws');
-      wsUrl = `${wsBase}/ws/pull?model=${encodeURIComponent(modelName)}`;
-    } else {
-      // Production: use current host
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${protocol}//${window.location.host}/ws/pull?model=${encodeURIComponent(modelName)}`;
-    }
-    return new WebSocket(wsUrl);
+  createPullWebSocket(modelName: string) {
+    return modelsApi.createPullWebSocket(modelName);
   }
 
   // =============================================================================
-  // Chats API
+  // Chats API (delegates to chatsApi)
   // =============================================================================
 
   async getChats(archived?: boolean): Promise<Chat[]> {
-    const params = archived !== undefined ? `?archived=${archived}` : '';
-    const response = await fetch(`${API_BASE}/api/chats${params}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch chats: ${response.status}`);
-    }
-    const data = parse(ChatsResponseSchema, await response.json());
-    return data.chats;
+    return chatsApi.getChats(archived);
   }
 
-  async getChat(id: string): Promise<Chat & { messages: Message[] }> {
-    const response = await fetch(`${API_BASE}/api/chats/${id}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch chat: ${response.status}`);
-    }
-    const data = parse(ChatResponseSchema, await response.json());
-    return data.chat;
+  async getChat(id: string): Promise<ChatWithMessages> {
+    return chatsApi.getChat(id);
   }
 
   async createChat(request: CreateChatRequest): Promise<Chat> {
-    const response = await fetch(`${API_BASE}/api/chats`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to create chat: ${response.status}`);
-    }
-    const data = parse(ChatResponseSchema, await response.json());
-    return data.chat;
+    return chatsApi.createChat(request);
   }
 
   async updateChatTitle(id: string, title: string): Promise<Chat> {
-    const response = await fetch(`${API_BASE}/api/chats/${id}`, {
-      method: 'PATCH',
-      headers: this.getHeaders(),
-      body: JSON.stringify({ title }),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to update chat: ${response.status}`);
-    }
-    const data = parse(ChatResponseSchema, await response.json());
-    return data.chat;
+    return chatsApi.updateChatTitle(id, title);
   }
 
   async deleteChat(id: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/chats/${id}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete chat: ${response.status}`);
-    }
+    return chatsApi.deleteChat(id);
   }
 
   async archiveChat(id: string): Promise<Chat> {
-    const response = await fetch(`${API_BASE}/api/chats/${id}/archive`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to archive chat: ${response.status}`);
-    }
-    const data = parse(ChatResponseSchema, await response.json());
-    return data.chat;
+    return chatsApi.archiveChat(id);
   }
 
   async unarchiveChat(id: string): Promise<Chat> {
-    const response = await fetch(`${API_BASE}/api/chats/${id}/unarchive`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to unarchive chat: ${response.status}`);
-    }
-    const data = parse(ChatResponseSchema, await response.json());
-    return data.chat;
+    return chatsApi.unarchiveChat(id);
   }
 
   async getMessages(chatId: string): Promise<Message[]> {
-    const response = await fetch(`${API_BASE}/api/chats/${chatId}/messages`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch messages: ${response.status}`);
-    }
-    const data = parse(MessagesResponseSchema, await response.json());
-    return data.messages;
+    return chatsApi.getMessages(chatId);
   }
 
   async sendMessage(chatId: string, request: SendMessageRequest): Promise<Message> {
-    const response = await fetch(`${API_BASE}/api/chats/${chatId}/messages`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to send message: ${response.status}`);
-    }
-    const data = parse(MessageResponseSchema, await response.json());
-    return data.message;
+    return chatsApi.sendMessage(chatId, request);
   }
 
   async deleteMessage(chatId: string, messageId: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/chats/${chatId}/messages/${messageId}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete message: ${response.status}`);
-    }
+    return chatsApi.deleteMessage(chatId, messageId);
+  }
+
+  async searchChatMessages(options: ChatSearchOptions): Promise<ChatSearchResponse> {
+    return chatsApi.searchChatMessages(options);
   }
 
   // =============================================================================
-  // Projects API
+  // Projects API (delegates to projectsApi)
   // =============================================================================
 
   async getProjects(status?: string): Promise<Project[]> {
-    const params = status ? `?status=${status}` : '';
-    const response = await fetch(`${API_BASE}/api/projects${params}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch projects: ${response.status}`);
-    }
-    const data = parse(ProjectsResponseSchema, await response.json());
-    return data.projects;
+    return projectsApi.getProjects(status);
   }
 
   async getProject(id: string): Promise<Project> {
-    const response = await fetch(`${API_BASE}/api/projects/${id}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch project: ${response.status}`);
-    }
-    const data = parse(ProjectResponseSchema, await response.json());
-    return data.project;
+    return projectsApi.getProject(id);
   }
 
   async createProject(request: CreateProjectRequest): Promise<Project> {
-    const response = await fetch(`${API_BASE}/api/projects`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to create project: ${response.status}`);
-    }
-    const data = parse(ProjectResponseSchema, await response.json());
-    return data.project;
+    return projectsApi.createProject(request);
   }
 
   async updateProject(id: string, request: UpdateProjectRequest): Promise<Project> {
-    const response = await fetch(`${API_BASE}/api/projects/${id}`, {
-      method: 'PATCH',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to update project: ${response.status}`);
-    }
-    const data = parse(ProjectResponseSchema, await response.json());
-    return data.project;
+    return projectsApi.updateProject(id, request);
   }
 
   async deleteProject(id: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/projects/${id}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete project: ${response.status}`);
-    }
+    return projectsApi.deleteProject(id);
   }
 
+  async linkSource(projectId: string, sourceId: string): Promise<Project> {
+    return projectsApi.linkSource(projectId, sourceId);
+  }
+
+  async unlinkSource(projectId: string): Promise<Project> {
+    return projectsApi.unlinkSource(projectId);
+  }
+
+  // Deprecated GitHub-specific methods (kept for backward compatibility)
   async linkGitHub(projectId: string, repoUrl: string): Promise<Project> {
     const response = await fetch(`${API_BASE}/api/projects/${projectId}/github`, {
       method: 'PUT',
@@ -383,251 +256,83 @@ class Client {
   }
 
   // =============================================================================
-  // Tasks API
+  // Tasks API (delegates to tasksApi)
   // =============================================================================
 
-  async getTasks(projectId?: string, status?: string): Promise<Task[]> {
-    const params = new URLSearchParams();
-    if (projectId) params.set('project_id', projectId);
-    if (status) params.set('status', status);
-    const query = params.toString() ? `?${params}` : '';
-
-    const response = await fetch(`${API_BASE}/api/tasks${query}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch tasks: ${response.status}`);
-    }
-    const data = parse(TasksResponseSchema, await response.json());
-    return data.tasks;
+  async getTasks(projectId?: string, status?: string) {
+    return tasksApi.getTasks(projectId, status);
   }
 
-  async getTask(id: string): Promise<Task> {
-    const response = await fetch(`${API_BASE}/api/tasks/${id}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch task: ${response.status}`);
-    }
-    const data = parse(TaskResponseSchema, await response.json());
-    return data.task;
+  async getTask(id: string) {
+    return tasksApi.getTask(id);
   }
 
-  async createTask(request: CreateTaskRequest): Promise<Task> {
-    const response = await fetch(`${API_BASE}/api/tasks`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to create task: ${response.status}`);
-    }
-    const data = parse(TaskResponseSchema, await response.json());
-    return data.task;
+  async createTask(request: import('../features/tasks/types').CreateTaskRequest) {
+    return tasksApi.createTask(request);
   }
 
-  async updateTask(id: string, request: UpdateTaskRequest): Promise<Task> {
-    const response = await fetch(`${API_BASE}/api/tasks/${id}`, {
-      method: 'PATCH',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to update task: ${response.status}`);
-    }
-    const data = parse(TaskResponseSchema, await response.json());
-    return data.task;
+  async updateTask(id: string, request: import('../features/tasks/types').UpdateTaskRequest) {
+    return tasksApi.updateTask(id, request);
   }
 
-  async deleteTask(id: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/tasks/${id}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete task: ${response.status}`);
-    }
+  async deleteTask(id: string) {
+    return tasksApi.deleteTask(id);
   }
 
-  async startTask(id: string): Promise<{ run_id: string }> {
-    const response = await fetch(`${API_BASE}/api/tasks/${id}/start`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to start task: ${response.status}`);
-    }
-    return response.json();
+  async startTask(id: string) {
+    return tasksApi.runTask(id);
   }
 
-  async stopTask(id: string): Promise<{ run_id: string }> {
-    const response = await fetch(`${API_BASE}/api/tasks/${id}/stop`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to stop task: ${response.status}`);
-    }
-    return response.json();
+  async stopTask(id: string) {
+    return tasksApi.cancelTaskRun(id);
   }
 
-  async getTaskRuns(taskId: string): Promise<TaskRun[]> {
-    const response = await fetch(`${API_BASE}/api/tasks/${taskId}/runs`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch task runs: ${response.status}`);
-    }
-    const data = parse(TaskRunsResponseSchema, await response.json());
-    return data.runs;
+  async getTaskRuns(taskId: string) {
+    return tasksApi.getTaskRuns(taskId);
   }
 
-  async getTaskRun(taskId: string, runId: string): Promise<TaskRun> {
-    const response = await fetch(`${API_BASE}/api/tasks/${taskId}/runs/${runId}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch task run: ${response.status}`);
-    }
-    const data = parse(TaskRunResponseSchema, await response.json());
-    return data.run;
+  async getTaskRun(taskId: string, runId: string) {
+    return tasksApi.getTaskRun(taskId, runId);
   }
 
-  async getTaskRunLogs(taskId: string, runId: string): Promise<TaskRunLog[]> {
-    const response = await fetch(`${API_BASE}/api/tasks/${taskId}/runs/${runId}/logs`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch task run logs: ${response.status}`);
-    }
-    const data = parse(TaskRunLogsResponseSchema, await response.json());
-    return data.logs;
+  async getTaskRunLogs(taskId: string, runId: string) {
+    return tasksApi.getTaskRunLogs(taskId, runId);
   }
 
-  createTaskWebSocket(runId: string): WebSocket {
-    let wsUrl: string;
-    if (API_BASE) {
-      const wsBase = API_BASE.replace(/^http/, 'ws');
-      wsUrl = `${wsBase}/ws/tasks/${runId}`;
-    } else {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${protocol}//${window.location.host}/ws/tasks/${runId}`;
-    }
-    return new WebSocket(wsUrl);
+  createTaskWebSocket(runId: string) {
+    return tasksApi.createTaskWebSocket(runId);
   }
 
   // =============================================================================
-  // Sources API
+  // Sources API (delegates to sourcesApi)
   // =============================================================================
 
   async getSourceTypes(): Promise<SourceTypesResponse['types']> {
-    const response = await fetch(`${API_BASE}/api/sources/types`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch source types: ${response.status}`);
-    }
-    const data = parse(SourceTypesResponseSchema, await response.json());
-    return data.types;
+    return sourcesApi.getSourceTypes();
   }
 
   async getSources(type?: SourceType, activeOnly = false): Promise<Source[]> {
-    const params = new URLSearchParams();
-    if (type) params.set('type', type);
-    if (activeOnly) params.set('active', 'true');
-    const query = params.toString() ? `?${params}` : '';
-
-    const response = await fetch(`${API_BASE}/api/sources${query}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch sources: ${response.status}`);
-    }
-    const data = parse(SourcesResponseSchema, await response.json());
-    return data.sources;
+    return sourcesApi.getSources(type, activeOnly);
   }
 
   async getSource(id: string): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/sources/${id}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch source: ${response.status}`);
-    }
-    const data = parse(SourceResponseSchema, await response.json());
-    return data.source;
+    return sourcesApi.getSource(id);
   }
 
   async createSource(request: CreateSourceRequest): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/sources`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to create source: ${response.status}`);
-    }
-    const data = parse(SourceResponseSchema, await response.json());
-    return data.source;
+    return sourcesApi.createSource(request);
   }
 
   async updateSource(id: string, request: UpdateSourceRequest): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/sources/${id}`, {
-      method: 'PATCH',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to update source: ${response.status}`);
-    }
-    const data = parse(SourceResponseSchema, await response.json());
-    return data.source;
+    return sourcesApi.updateSource(id, request);
   }
 
   async deleteSource(id: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/sources/${id}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to delete source: ${response.status}`);
-    }
+    return sourcesApi.deleteSource(id);
   }
 
   async verifySource(id: string): Promise<SourceVerifyResponse> {
-    const response = await fetch(`${API_BASE}/api/sources/${id}/verify`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to verify source: ${response.status}`);
-    }
-    return parse(SourceVerifyResponseSchema, await response.json());
-  }
-
-  async linkSource(projectId: string, sourceId: string): Promise<Project> {
-    const response = await fetch(`${API_BASE}/api/projects/${projectId}/source`, {
-      method: 'PUT',
-      headers: this.getHeaders(),
-      body: JSON.stringify({ source_id: sourceId }),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to link source: ${response.status}`);
-    }
-    const data = parse(ProjectResponseSchema, await response.json());
-    return data.project;
-  }
-
-  async unlinkSource(projectId: string): Promise<Project> {
-    const response = await fetch(`${API_BASE}/api/projects/${projectId}/source`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to unlink source: ${response.status}`);
-    }
-    const data = parse(ProjectResponseSchema, await response.json());
-    return data.project;
+    return sourcesApi.verifySource(id);
   }
 
   // =============================================================================
@@ -809,6 +514,621 @@ class Client {
     }
     const data = parse(WorkspaceThemeResponseSchema, await response.json());
     return data.theme;
+  }
+
+  // =============================================================================
+  // Organization AI Settings API
+  // =============================================================================
+
+  async getOrgAiSettings(orgId: string): Promise<AiSettings> {
+    const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch org AI settings: ${response.status}`);
+    }
+    return parse(AiSettingsResponseSchema, await response.json());
+  }
+
+  async updateOrgAiSettings(orgId: string, request: UpdateAiSettingsRequest): Promise<AiSettings> {
+    const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
+      method: 'PUT',
+      headers: this.getHeaders(),
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to update org AI settings: ${response.status}`);
+    }
+    return parse(AiSettingsResponseSchema, await response.json());
+  }
+
+  async resetOrgAiSettings(orgId: string): Promise<AiSettings> {
+    const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
+      method: 'DELETE',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to reset org AI settings: ${response.status}`);
+    }
+    return parse(AiSettingsResponseSchema, await response.json());
+  }
+
+  // =============================================================================
+  // Workspace AI Settings API
+  // =============================================================================
+
+  async getWorkspaceAiSettings(orgId: string, wsId: string): Promise<AiSettings> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/ai`,
+      { headers: this.getHeaders() }
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to fetch workspace AI settings: ${response.status}`);
+    }
+    return parse(AiSettingsResponseSchema, await response.json());
+  }
+
+  async updateWorkspaceAiSettings(
+    orgId: string,
+    wsId: string,
+    request: UpdateAiSettingsRequest
+  ): Promise<AiSettings> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/ai`,
+      {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to update workspace AI settings: ${response.status}`);
+    }
+    return parse(AiSettingsResponseSchema, await response.json());
+  }
+
+  async resetWorkspaceAiSettings(orgId: string, wsId: string): Promise<AiSettings> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/ai`,
+      {
+        method: 'DELETE',
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to reset workspace AI settings: ${response.status}`);
+    }
+    return parse(AiSettingsResponseSchema, await response.json());
+  }
+
+  async getEffectiveAiSettings(orgId: string, wsId: string): Promise<AiSettings> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/ai/effective`,
+      { headers: this.getHeaders() }
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to fetch effective AI settings: ${response.status}`);
+    }
+    return parse(AiSettingsResponseSchema, await response.json());
+  }
+
+  // =============================================================================
+  // Email Verification & Password Reset API
+  // =============================================================================
+
+  async verifyEmail(token: string): Promise<{ success: boolean; message: string }> {
+    const response = await fetch(`${API_BASE}/api/auth/verify-email`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ token }),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to verify email: ${response.status}`);
+    }
+    return parse(VerifyEmailResponseSchema, await response.json());
+  }
+
+  async resendVerification(email: string): Promise<{ success: boolean; message: string }> {
+    const response = await fetch(`${API_BASE}/api/auth/resend-verification`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify({ email }),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(
+        errorData.message || `Failed to resend verification email: ${response.status}`
+      );
+    }
+    return parse(ResendVerificationResponseSchema, await response.json());
+  }
+
+  async forgotPassword(email: string): Promise<{ success: boolean; message: string }> {
+    const response = await fetch(`${API_BASE}/api/auth/forgot-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email }),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to request password reset: ${response.status}`);
+    }
+    return parse(ForgotPasswordResponseSchema, await response.json());
+  }
+
+  async resetPassword(
+    token: string,
+    newPassword: string
+  ): Promise<{ success: boolean; message: string }> {
+    const response = await fetch(`${API_BASE}/api/auth/reset-password`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ token, new_password: newPassword }),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to reset password: ${response.status}`);
+    }
+    return parse(ResetPasswordResponseSchema, await response.json());
+  }
+
+  private async parseErrorResponse(response: Response): Promise<{ message?: string }> {
+    try {
+      const data = await response.json();
+      return { message: data.message || data.error || data.detail };
+    } catch {
+      return {};
+    }
+  }
+
+  // =============================================================================
+  // Session Management API
+  // =============================================================================
+
+  async getSessions(): Promise<SessionsResponse> {
+    const response = await fetch(`${API_BASE}/api/auth/sessions`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch sessions: ${response.status}`);
+    }
+    return parse(SessionsResponseSchema, await response.json());
+  }
+
+  async revokeSession(sessionId: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/api/auth/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to revoke session: ${response.status}`);
+    }
+  }
+
+  async revokeAllSessions(): Promise<void> {
+    const response = await fetch(`${API_BASE}/api/auth/sessions`, {
+      method: 'DELETE',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to revoke all sessions: ${response.status}`);
+    }
+  }
+
+  // =============================================================================
+  // Organization Member Management API
+  // =============================================================================
+
+  async getOrgMembers(orgId: string): Promise<OrgMembersResponse> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/members`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(
+        errorData.message || `Failed to fetch organization members: ${response.status}`
+      );
+    }
+    return parse(OrgMembersResponseSchema, await response.json());
+  }
+
+  async addOrgMember(orgId: string, request: AddOrgMemberRequest): Promise<OrganizationMember> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/members`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to add organization member: ${response.status}`);
+    }
+    return parse(OrganizationMemberSchema, await response.json());
+  }
+
+  async updateOrgMemberRole(
+    orgId: string,
+    userId: string,
+    request: UpdateOrgMemberRequest
+  ): Promise<OrganizationMember> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}`,
+      {
+        method: 'PATCH',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(
+        errorData.message || `Failed to update organization member role: ${response.status}`
+      );
+    }
+    return parse(OrganizationMemberSchema, await response.json());
+  }
+
+  async removeOrgMember(orgId: string, userId: string): Promise<void> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/members/${encodeURIComponent(userId)}`,
+      {
+        method: 'DELETE',
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(
+        errorData.message || `Failed to remove organization member: ${response.status}`
+      );
+    }
+  }
+
+  // =============================================================================
+  // Workspace Member Management API
+  // =============================================================================
+
+  async getWorkspaceMembers(workspaceId: string): Promise<WorkspaceMembersResponse> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/members`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch workspace members: ${response.status}`);
+    }
+    return parse(WorkspaceMembersResponseSchema, await response.json());
+  }
+
+  async addWorkspaceMember(
+    workspaceId: string,
+    request: AddWorkspaceMemberRequest
+  ): Promise<WorkspaceMember> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/members`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to add workspace member: ${response.status}`);
+    }
+    return parse(WorkspaceMemberSchema, await response.json());
+  }
+
+  async updateWorkspaceMemberRole(
+    workspaceId: string,
+    userId: string,
+    request: UpdateWorkspaceMemberRequest
+  ): Promise<WorkspaceMember> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+      {
+        method: 'PATCH',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(
+        errorData.message || `Failed to update workspace member role: ${response.status}`
+      );
+    }
+    return parse(WorkspaceMemberSchema, await response.json());
+  }
+
+  async removeWorkspaceMember(workspaceId: string, userId: string): Promise<void> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(userId)}`,
+      {
+        method: 'DELETE',
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to remove workspace member: ${response.status}`);
+    }
+  }
+
+  // =============================================================================
+  // Invitation Management API
+  // =============================================================================
+
+  async createInvitation(orgId: string, request: CreateInvitationRequest): Promise<Invitation> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/invitations`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to create invitation: ${response.status}`);
+    }
+    return parse(InvitationSchema, await response.json());
+  }
+
+  async getInvitations(orgId: string): Promise<InvitationsResponse> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/invitations`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch invitations: ${response.status}`);
+    }
+    return parse(InvitationsResponseSchema, await response.json());
+  }
+
+  async revokeInvitation(orgId: string, invitationId: string): Promise<void> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/invitations/${encodeURIComponent(invitationId)}`,
+      {
+        method: 'DELETE',
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to revoke invitation: ${response.status}`);
+    }
+  }
+
+  async getInvitationByToken(token: string): Promise<InvitationDetails> {
+    const response = await fetch(`${API_BASE}/api/invitations/${encodeURIComponent(token)}`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(
+        errorData.message || `Failed to fetch invitation details: ${response.status}`
+      );
+    }
+    return parse(InvitationDetailsSchema, await response.json());
+  }
+
+  async acceptInvitation(token: string): Promise<void> {
+    const response = await fetch(
+      `${API_BASE}/api/invitations/${encodeURIComponent(token)}/accept`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to accept invitation: ${response.status}`);
+    }
+  }
+
+  // =============================================================================
+  // Billing & Usage API
+  // =============================================================================
+
+  async getPlans(): Promise<Plan[]> {
+    const response = await fetch(`${API_BASE}/api/plans`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch plans: ${response.status}`);
+    }
+    const data = parse(PlansResponseSchema, await response.json());
+    return data.plans;
+  }
+
+  async getPlan(planId: string): Promise<Plan> {
+    const response = await fetch(`${API_BASE}/api/plans/${encodeURIComponent(planId)}`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch plan: ${response.status}`);
+    }
+    const data = parse(PlanResponseSchema, await response.json());
+    return data.plan;
+  }
+
+  async getSubscription(orgId: string): Promise<Subscription> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/subscription`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch subscription: ${response.status}`);
+    }
+    const data = parse(SubscriptionResponseSchema, await response.json());
+    return data.subscription;
+  }
+
+  async getUsage(orgId: string): Promise<Usage> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/usage`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch usage: ${response.status}`);
+    }
+    return parse(UsageResponseSchema, await response.json());
+  }
+
+  async getLimits(orgId: string): Promise<Limits> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/limits`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch limits: ${response.status}`);
+    }
+    return parse(LimitsResponseSchema, await response.json());
+  }
+
+  // =============================================================================
+  // Audit Logs API
+  // =============================================================================
+
+  async getAuditLogs(orgId: string, filters?: AuditLogFilters): Promise<AuditLogsResponse> {
+    const params = new URLSearchParams();
+    if (filters?.action) params.set('action', filters.action);
+    if (filters?.resource_type) params.set('resource_type', filters.resource_type);
+    if (filters?.resource_id) params.set('resource_id', filters.resource_id);
+    if (filters?.actor_id) params.set('actor_id', filters.actor_id);
+    if (filters?.start_date) params.set('start_date', filters.start_date);
+    if (filters?.end_date) params.set('end_date', filters.end_date);
+    if (filters?.limit !== undefined) params.set('limit', filters.limit.toString());
+    if (filters?.offset !== undefined) params.set('offset', filters.offset.toString());
+
+    const query = params.toString() ? `?${params}` : '';
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/audit-logs${query}`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch audit logs: ${response.status}`);
+    }
+    return parse(AuditLogsResponseSchema, await response.json());
+  }
+
+  async getAuditLog(orgId: string, logId: string): Promise<AuditLog> {
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/audit-logs/${encodeURIComponent(logId)}`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch audit log: ${response.status}`);
+    }
+    return parse(AuditLogSchema, await response.json());
+  }
+
+  async exportAuditLogs(orgId: string, filters?: AuditLogFilters): Promise<Blob> {
+    const params = new URLSearchParams();
+    if (filters?.action) params.set('action', filters.action);
+    if (filters?.resource_type) params.set('resource_type', filters.resource_type);
+    if (filters?.resource_id) params.set('resource_id', filters.resource_id);
+    if (filters?.actor_id) params.set('actor_id', filters.actor_id);
+    if (filters?.start_date) params.set('start_date', filters.start_date);
+    if (filters?.end_date) params.set('end_date', filters.end_date);
+
+    const query = params.toString() ? `?${params}` : '';
+    const response = await fetch(
+      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/audit-logs/export${query}`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to export audit logs: ${response.status}`);
+    }
+    return response.blob();
+  }
+
+  // =============================================================================
+  // Knowledge Base API (delegates to knowledgeApi)
+  // =============================================================================
+
+  async getKnowledge(workspaceId?: string) {
+    return knowledgeApi.getKnowledge(workspaceId);
+  }
+
+  async createKnowledge(request: CreateKnowledgeRequest) {
+    return knowledgeApi.createKnowledge(request);
+  }
+
+  async deleteKnowledge(id: string) {
+    return knowledgeApi.deleteKnowledge(id);
+  }
+
+  async refreshKnowledge(id: string) {
+    return knowledgeApi.refreshKnowledge(id);
+  }
+
+  // =============================================================================
+  // Context Search API (delegates to knowledgeApi)
+  // =============================================================================
+
+  async searchContext(options: SearchOptions) {
+    return knowledgeApi.searchContext(options);
+  }
+
+  async gatherContext(request: GatherContextRequest) {
+    return knowledgeApi.gatherContext(request);
+  }
+
+  createContextGatheringWebSocket(gatheringId: string) {
+    return knowledgeApi.createContextGatheringWebSocket(gatheringId);
+  }
+
+  // =============================================================================
+  // Sync Configuration API (delegates to projectsApi)
+  // =============================================================================
+
+  async getSyncConfigs(projectId: string): Promise<SyncConfig[]> {
+    return projectsApi.getSyncConfigs(projectId);
+  }
+
+  async createSyncConfig(projectId: string, request: CreateSyncConfigRequest): Promise<SyncConfig> {
+    return projectsApi.createSyncConfig(projectId, request);
+  }
+
+  async deleteSyncConfig(projectId: string, configId: string): Promise<void> {
+    return projectsApi.deleteSyncConfig(projectId, configId);
   }
 }
 

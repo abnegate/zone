@@ -1,0 +1,105 @@
+{{- if .Values.manager.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "zone-server.fullname" . }}-manager
+  labels:
+    {{- include "zone-server.manager.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.manager.autoscaling.enabled }}
+  replicas: {{ .Values.manager.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "zone-server.manager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "zone-server.manager.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "zone-server.serviceAccountName" . }}
+      {{- if .Values.global.securityContexts }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: manager
+          {{- if .Values.global.securityContexts }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- end }}
+          image: {{ include "zone-server.image" (dict
+            "repository" .Values.manager.image.repository
+            "tag"        .Values.manager.image.tag
+            "digest"     (.Values.manager.image.digest | default "")
+            "Values"     .Values
+          ) | quote }}
+          imagePullPolicy: {{ .Values.manager.image.pullPolicy | default .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.manager.service.targetPort }}
+              protocol: TCP
+          env:
+            {{- range $key, $value := .Values.manager.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            - name: API_URL
+              value: "http://{{ include "zone-server.fullname" . }}-server:{{ .Values.server.service.port }}"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.manager.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/nginx
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.affinity .Values.manager.podAntiAffinity }}
+      affinity:
+        {{- if .Values.affinity }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+        {{- end }}
+        {{- if .Values.manager.podAntiAffinity }}
+        podAntiAffinity:
+          {{- toYaml .Values.manager.podAntiAffinity | nindent 10 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.manager.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.manager.topologySpreadConstraints | nindent 8 }}
+      {{- end }}
+{{- end }}

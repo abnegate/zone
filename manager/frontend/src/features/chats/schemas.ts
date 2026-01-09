@@ -1,0 +1,80 @@
+import { z } from 'zod';
+
+// =============================================================================
+// Chat Schemas
+// =============================================================================
+
+export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
+
+export const MessageSchema = z.object({
+  id: z.string(),
+  chat_id: z.string(),
+  role: MessageRoleSchema,
+  content: z.string(),
+  created_at: z.string(),
+});
+
+export const ChatSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  model_name: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  archived: z.boolean(),
+});
+
+export const ChatWithMessagesSchema = ChatSchema.extend({
+  messages: z.array(MessageSchema),
+});
+
+export const CreateChatRequestSchema = z.object({
+  model_name: z.string().min(1, 'Model is required'),
+  first_message: z.string().optional(),
+});
+
+export const SendMessageRequestSchema = z.object({
+  content: z.string().min(1, 'Message cannot be empty'),
+});
+
+export const ChatsResponseSchema = z.object({
+  success: z.boolean().optional(),
+  error: z.string().optional(),
+  chats: z.array(ChatSchema),
+});
+
+export const ChatResponseSchema = z.object({
+  success: z.boolean().optional(),
+  error: z.string().optional(),
+  chat: ChatWithMessagesSchema,
+});
+
+export const MessagesResponseSchema = z.object({
+  success: z.boolean().optional(),
+  error: z.string().optional(),
+  messages: z.array(MessageSchema),
+});
+
+export const MessageResponseSchema = z.object({
+  success: z.boolean().optional(),
+  error: z.string().optional(),
+  message: MessageSchema,
+});
+
+// =============================================================================
+// Chat Search Schemas
+// =============================================================================
+
+export const ChatSearchResultSchema = z.object({
+  message_id: z.string(),
+  chat_id: z.string(),
+  chat_title: z.string(),
+  content: z.string(),
+  snippet: z.string(),
+  relevance_score: z.number(),
+  created_at: z.string(),
+});
+
+export const ChatSearchResponseSchema = z.object({
+  results: z.array(ChatSearchResultSchema),
+  total: z.number(),
+});

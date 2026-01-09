@@ -95,11 +95,14 @@ services:
     image: valkey/valkey:${DOCKER_VERSION_VALKEY:-8.1-alpine}
     container_name: valkey
     restart: unless-stopped
+    ports:
+      - "6379:6379"
     volumes:
       - valkey_data:/data
     command: valkey-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     networks:
       - internal
+      - edge
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
@@ -240,6 +243,7 @@ services:
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_MANAGER_API_KEY=${SECURITY_MANAGER_API_KEY}
       - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - POSTGRES_HOST=postgres
       - POSTGRES_DB=${MANAGER_POSTGRES_DB:-manager}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -593,7 +597,7 @@ networks:
       com.docker.network.bridge.name: zone_dmz
     ipam:
       config:
-        - subnet: 172.20.0.0/24
+        - subnet: 172.31.0.0/24
 
   internal:
     name: zone_internal
@@ -603,7 +607,7 @@ networks:
       com.docker.network.bridge.name: zone_internal
     ipam:
       config:
-        - subnet: 172.19.0.0/24
+        - subnet: 172.30.0.0/24
 
 volumes:
   traefik_letsencrypt:

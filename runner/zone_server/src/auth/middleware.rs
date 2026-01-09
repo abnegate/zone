@@ -154,3 +154,173 @@ pub fn require_admin(claims: &Claims) -> Result<(), AuthError> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    fn create_test_claims(is_admin: bool, roles: Vec<&str>, permissions: Vec<&str>) -> Claims {
+        Claims {
+            sub: "test-user-id".to_string(),
+            email: "test@example.com".to_string(),
+            is_admin,
+            roles: roles.into_iter().map(|s| s.to_string()).collect(),
+            permissions: permissions.into_iter().map(|s| s.to_string()).collect(),
+            exp: chrono::Utc::now().timestamp() + 3600,
+            iat: chrono::Utc::now().timestamp(),
+            jti: "test-jti".to_string(),
+        }
+    }
+
+    // Tests for AuthError
+    #[test]
+    fn test_auth_error_debug() {
+        let error = AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Test error".to_string(),
+        };
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("AuthError"));
+        assert!(debug_str.contains("Test error"));
+    }
+
+    #[test]
+    fn test_auth_error_into_response() {
+        let error = AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Unauthorized".to_string(),
+        };
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_auth_error_forbidden() {
+        let error = AuthError {
+            status: StatusCode::FORBIDDEN,
+            message: "Forbidden".to_string(),
+        };
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // Tests for require_permission
+    #[test]
+    fn test_require_permission_has_permission() {
+        let claims = create_test_claims(false, vec![], vec!["read:users"]);
+        let result = require_permission(&claims, "read:users");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_require_permission_missing_permission() {
+        let claims = create_test_claims(false, vec![], vec!["read:users"]);
+        let result = require_permission(&claims, "write:users");
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert!(error.message.contains("Missing required permission"));
+        assert!(error.message.contains("write:users"));
+    }
+
+    #[test]
+    fn test_require_permission_admin_has_all() {
+        let claims = create_test_claims(true, vec![], vec![]);
+        let result = require_permission(&claims, "any:permission");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_require_permission_empty_permissions() {
+        let claims = create_test_claims(false, vec![], vec![]);
+        let result = require_permission(&claims, "read:users");
+        assert!(result.is_err());
+    }
+
+    // Tests for require_role
+    #[test]
+    fn test_require_role_has_role() {
+        let claims = create_test_claims(false, vec!["editor"], vec![]);
+        let result = require_role(&claims, "editor");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_require_role_missing_role() {
+        let claims = create_test_claims(false, vec!["viewer"], vec![]);
+        let result = require_role(&claims, "editor");
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert!(error.message.contains("Missing required role"));
+        assert!(error.message.contains("editor"));
+    }
+
+    #[test]
+    fn test_require_role_admin_has_all() {
+        let claims = create_test_claims(true, vec![], vec![]);
+        let result = require_role(&claims, "any_role");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_require_role_empty_roles() {
+        let claims = create_test_claims(false, vec![], vec![]);
+        let result = require_role(&claims, "viewer");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_require_role_multiple_roles() {
+        let claims = create_test_claims(false, vec!["viewer", "editor", "admin"], vec![]);
+        assert!(require_role(&claims, "viewer").is_ok());
+        assert!(require_role(&claims, "editor").is_ok());
+        assert!(require_role(&claims, "admin").is_ok());
+        assert!(require_role(&claims, "owner").is_err());
+    }
+
+    // Tests for require_admin
+    #[test]
+    fn test_require_admin_is_admin() {
+        let claims = create_test_claims(true, vec![], vec![]);
+        let result = require_admin(&claims);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_require_admin_not_admin() {
+        let claims = create_test_claims(false, vec![], vec![]);
+        let result = require_admin(&claims);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert!(error.message.contains("Admin access required"));
+    }
+
+    #[test]
+    fn test_require_admin_with_roles_not_admin() {
+        let claims = create_test_claims(false, vec!["admin"], vec![]);
+        // Having an "admin" role doesn't make is_admin true
+        let result = require_admin(&claims);
+        assert!(result.is_err());
+    }
+
+    // Tests for AuthUser
+    #[test]
+    fn test_auth_user_debug() {
+        let claims = create_test_claims(false, vec![], vec![]);
+        let auth_user = AuthUser(claims.clone());
+        let debug_str = format!("{:?}", auth_user);
+        assert!(debug_str.contains("AuthUser"));
+    }
+
+    #[test]
+    fn test_auth_user_clone() {
+        let claims = create_test_claims(false, vec!["viewer"], vec!["read:users"]);
+        let auth_user = AuthUser(claims);
+        let cloned = auth_user.clone();
+        assert_eq!(cloned.0.email, auth_user.0.email);
+        assert_eq!(cloned.0.roles, auth_user.0.roles);
+    }
+}

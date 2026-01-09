@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <link rel="icon" href="/static/favicon.ico" />
+    <link rel="icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#121214" />
     <meta name="description" content="Zone Dashboard - AI Infrastructure Management" />
@@ -29,12 +29,12 @@
     <meta name="apple-mobile-web-app-title" content="Zone" />
 
     <!-- Apple touch icons -->
-    <link rel="apple-touch-icon" href="/static/logo192.png" />
-    <link rel="apple-touch-icon" sizes="192x192" href="/static/logo192.png" />
-    <link rel="apple-touch-icon" sizes="512x512" href="/static/logo512.png" />
+    <link rel="apple-touch-icon" href="/logo192.png" />
+    <link rel="apple-touch-icon" sizes="192x192" href="/logo192.png" />
+    <link rel="apple-touch-icon" sizes="512x512" href="/logo512.png" />
 
     <!-- Manifest for PWA -->
-    <link rel="manifest" href="/static/manifest.json" />
+    <link rel="manifest" href="/manifest.json" />
 
     <!-- DNS prefetch for API endpoints (adjust domain as needed) -->
     <link rel="dns-prefetch" href="//api.zone.local" />
@@ -51,14 +51,14 @@
         margin: 0;
       }
       /* Initial loading state */
-      #root:empty {
+      .initial-loader {
         display: flex;
         align-items: center;
         justify-content: center;
         min-height: 100vh;
       }
-      #root:empty::after {
-        content: '';
+      .loader-spinner {
+        display: block;
         width: 40px;
         height: 40px;
         border: 3px solid #232326;
@@ -67,10 +67,12 @@
         animation: spin 0.8s linear infinite;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
+      .loader-title { font-family: 'Fraunces', serif; font-size: 48px; margin: 0 0 24px 0; color: #ed7a14; }
+      .loader-text { margin-top: 16px; font-size: 14px; color: #71717a; }
     </style>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
+    <div id="root"><div class="initial-loader" aria-label="Loading"><h1 class="loader-title">Zone</h1><span class="loader-spinner"></span><p class="loader-text">Loading...</p></div></div>
   </body>
 </html>

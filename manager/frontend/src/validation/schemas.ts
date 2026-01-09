@@ -1,49 +1,59 @@
 import { z } from 'zod';
+import type {
+  ChatSchema,
+  MessageSchema,
+  ChatsResponseSchema,
+  ChatResponseSchema,
+  MessagesResponseSchema,
+  MessageResponseSchema,
+} from '../features/chats/schemas';
+import {
+  type UserSchema,
+  type AuthResponseSchema,
+  type LoginRequestSchema,
+  type RegisterRequestSchema,
+  type JwtPayloadSchema,
+  OrgRoleSchema,
+  WorkspaceRoleSchema,
+} from '../features/auth/schemas';
+import type {
+  SourceSchema,
+  SourcesResponseSchema,
+  SourceResponseSchema,
+  SourceTypesResponseSchema,
+  SourceVerifyResponseSchema,
+} from '../features/sources/schemas';
+import type {
+  TaskSchema,
+  TaskRunSchema,
+  TasksResponseSchema,
+  TaskResponseSchema,
+  TaskRunsResponseSchema,
+  TaskRunResponseSchema,
+  TaskRunLogsResponseSchema,
+} from '../features/tasks/schemas';
 
 // =============================================================================
-// Auth Schemas
+// Auth Schemas - now re-exported from features/auth
 // =============================================================================
 
-export const UserSchema = z.object({
-  id: z.string(),
-  email: z.string().email(),
-  display_name: z.string().nullable(),
-  is_active: z.boolean(),
-  is_admin: z.boolean(),
-  created_at: z.string(),
-  updated_at: z.string(),
-  last_login_at: z.string().nullable(),
-});
-
-export const AuthResponseSchema = z.object({
-  access_token: z.string(),
-  refresh_token: z.string(),
-  expires_in: z.number(),
-  user: UserSchema,
-  roles: z.array(z.string()),
-  permissions: z.array(z.string()),
-});
-
-export const LoginRequestSchema = z.object({
-  email: z.string().email('Invalid email address'),
-  password: z.string().min(1, 'Password is required'),
-});
-
-export const RegisterRequestSchema = z.object({
-  email: z.string().email('Invalid email address'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  display_name: z.string().optional(),
-});
-
-export const JwtPayloadSchema = z.object({
-  sub: z.string(),
-  email: z.string().email(),
-  roles: z.array(z.string()),
-  permissions: z.array(z.string()),
-  iat: z.number(),
-  exp: z.number(),
-  jti: z.string(),
-});
+export {
+  UserSchema,
+  AuthResponseSchema,
+  LoginRequestSchema,
+  RegisterRequestSchema,
+  ForgotPasswordSchema,
+  ResetPasswordSchema,
+  VerifyEmailRequestSchema,
+  ResendVerificationRequestSchema,
+  VerifyEmailResponseSchema,
+  ResendVerificationResponseSchema,
+  ForgotPasswordResponseSchema,
+  ResetPasswordResponseSchema,
+  JwtPayloadSchema,
+  OrgRoleSchema,
+  WorkspaceRoleSchema,
+} from '../features/auth/schemas';
 
 // =============================================================================
 // Organization Schemas
@@ -104,184 +114,41 @@ export const UpdateWorkspaceRequestSchema = z.object({
 // Model Schemas
 // =============================================================================
 
-export const InstalledModelSchema = z.object({
-  name: z.string(),
-  size: z.number(),
-  modified_at: z.string(),
-  details: z
-    .object({
-      description: z.string().optional(),
-      family: z.string().optional(),
-    })
-    .optional(),
-});
-
-export const BrowseModelSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  description: z.string(),
-  downloads: z.number(),
-  tags: z.array(z.string()),
-  install_name: z.string().nullable().optional(),
-  author: z.string().nullable().optional(),
-  likes: z.number().nullable().optional(),
-  last_modified: z.string().nullable().optional(),
-  url: z.string().nullable().optional(),
-});
-
-export const ModelSourceSchema = z.enum(['ollama', 'huggingface', 'modelscope']);
-
-export const ModelsResponseSchema = z.object({
-  models: z.array(InstalledModelSchema),
-});
-
-export const BrowseResponseSchema = z.object({
-  source: ModelSourceSchema,
-  models: z.array(BrowseModelSchema),
-  total: z.number().nullable().optional(),
-  has_more: z.boolean(),
-});
-
-export const PullProgressSchema = z.object({
-  type: z.enum(['progress', 'step', 'complete', 'error', 'authenticated']),
-  status: z.string().optional(),
-  percent: z.number().optional(),
-  completed: z.number().optional(),
-  total: z.number().optional(),
-  message: z.string().optional(),
-  success: z.boolean().optional(),
-});
+export {
+  InstalledModelSchema,
+  BrowseModelSchema,
+  ModelSourceSchema,
+  ModelsResponseSchema,
+  BrowseResponseSchema,
+  PullProgressSchema,
+} from '../features/models/schemas';
 
 // =============================================================================
 // Chat Schemas
 // =============================================================================
 
-export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
-
-export const MessageSchema = z.object({
-  id: z.string(),
-  chat_id: z.string(),
-  role: MessageRoleSchema,
-  content: z.string(),
-  created_at: z.string(),
-});
-
-export const ChatSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  model_name: z.string(),
-  created_at: z.string(),
-  updated_at: z.string(),
-  archived: z.boolean(),
-});
-
-export const ChatWithMessagesSchema = ChatSchema.extend({
-  messages: z.array(MessageSchema),
-});
-
-export const CreateChatRequestSchema = z.object({
-  model_name: z.string().min(1, 'Model is required'),
-  first_message: z.string().optional(),
-});
-
-export const SendMessageRequestSchema = z.object({
-  content: z.string().min(1, 'Message cannot be empty'),
-});
-
-export const ChatsResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  chats: z.array(ChatSchema),
-});
-
-export const ChatResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  chat: ChatWithMessagesSchema,
-});
-
-export const MessagesResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  messages: z.array(MessageSchema),
-});
-
-export const MessageResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  message: MessageSchema,
-});
+export {
+  MessageRoleSchema,
+  MessageSchema,
+  ChatSchema,
+  ChatWithMessagesSchema,
+  CreateChatRequestSchema,
+  SendMessageRequestSchema,
+  ChatsResponseSchema,
+  ChatResponseSchema,
+  MessagesResponseSchema,
+  MessageResponseSchema,
+  ChatSearchResultSchema,
+  ChatSearchResponseSchema,
+} from '../features/chats/schemas';
 
 // =============================================================================
-// Source Config Schemas
+// Source Schemas - re-exported from features/sources
 // =============================================================================
 
-export const SourceCategorySchema = z.enum(['file', 'calendar', 'mail', 'chat', 'web', 'text']);
-export const SourceTypeSchema = z.enum([
-  'github',
-  'gitlab',
-  'filesystem',
-  'ical',
-  'imap',
-  'discord',
-  'slack',
-  'web',
-  'text',
-]);
-
-export const GitHubConfigSchema = z.object({
-  owner: z.string().min(1, 'Owner is required'),
-  repo: z.string().min(1, 'Repository is required'),
-  branch: z.string().optional(),
-  base_path: z.string().optional(),
-});
-
-export const GitLabConfigSchema = z.object({
-  project_id: z.string().min(1, 'Project ID is required'),
-  host: z.string().optional(),
-  branch: z.string().optional(),
-  base_path: z.string().optional(),
-});
-
-export const FilesystemConfigSchema = z.object({
-  base_path: z.string().min(1, 'Base path is required'),
-  allow_writes: z.boolean().optional(),
-});
-
-export const ICalConfigSchema = z.object({
-  url: z.string().url('Invalid URL'),
-  refresh_interval: z.number().optional(),
-});
-
-export const IMAPConfigSchema = z.object({
-  host: z.string().min(1, 'Host is required'),
-  port: z.number().optional(),
-  username: z.string().min(1, 'Username is required'),
-  use_ssl: z.boolean().optional(),
-  folder: z.string().optional(),
-});
-
-export const DiscordConfigSchema = z.object({
-  server_id: z.string().min(1, 'Server ID is required'),
-  channel_ids: z.array(z.string()).optional(),
-});
-
-export const SlackConfigSchema = z.object({
-  workspace_id: z.string().min(1, 'Workspace ID is required'),
-  channel_ids: z.array(z.string()).optional(),
-});
-
-export const WebConfigSchema = z.object({
-  url: z.string().url('Invalid URL'),
-  headers: z.record(z.string()).optional(),
-});
-
-export const TextConfigSchema = z.object({
-  content: z.string().min(1, 'Content is required'),
-  label: z.string().optional(),
-});
-
-export const SourceConfigSchema = z.union([
+export {
+  SourceCategorySchema,
+  SourceTypeSchema,
   GitHubConfigSchema,
   GitLabConfigSchema,
   FilesystemConfigSchema,
@@ -291,242 +158,66 @@ export const SourceConfigSchema = z.union([
   SlackConfigSchema,
   WebConfigSchema,
   TextConfigSchema,
-]);
-
-export const SourceSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  source_type: SourceTypeSchema,
-  category: SourceCategorySchema,
-  config: SourceConfigSchema,
-  description: z.string().nullable(),
-  url: z.string(),
-  is_active: z.boolean(),
-  last_verified_at: z.string().nullable(),
-  last_error: z.string().nullable(),
-  created_at: z.string(),
-  updated_at: z.string(),
-});
-
-export const CreateSourceRequestSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  source_type: SourceTypeSchema,
-  config: SourceConfigSchema,
-  credentials: z.string().optional(),
-  description: z.string().optional(),
-});
-
-export const UpdateSourceRequestSchema = z.object({
-  name: z.string().min(1).optional(),
-  config: SourceConfigSchema.optional(),
-  credentials: z.string().optional(),
-  description: z.string().optional(),
-  is_active: z.boolean().optional(),
-});
-
-export const SourcesResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  sources: z.array(SourceSchema),
-});
-
-export const SourceResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  source: SourceSchema,
-});
-
-export const SourceVerifyResponseSchema = z.object({
-  success: z.boolean(),
-  message: z.string(),
-  item_count: z.number().optional(),
-});
-
-export const SourceTypeInfoSchema = z.object({
-  id: SourceTypeSchema,
-  name: z.string(),
-  category: SourceCategorySchema,
-  enabled: z.boolean(),
-});
-
-export const SourceTypesResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  types: z.array(SourceTypeInfoSchema),
-});
+  SourceConfigSchema,
+  SourceSchema,
+  CreateSourceRequestSchema,
+  UpdateSourceRequestSchema,
+  SourcesResponseSchema,
+  SourceResponseSchema,
+  SourceVerifyResponseSchema,
+  SourceTypeInfoSchema,
+  SourceTypesResponseSchema,
+  FileMetadataSchema,
+  CalendarMetadataSchema,
+  MailMetadataSchema,
+  ChatMetadataSchema,
+  WebMetadataSchema,
+  TextMetadataSchema,
+  ContentMetadataSchema,
+  ContentItemSchema,
+  ContentResponseSchema,
+} from '../features/sources/schemas';
 
 // =============================================================================
 // Project Schemas
 // =============================================================================
 
-export const ProjectStatusSchema = z.enum(['active', 'on_hold', 'cancelled']);
-
-export const ProjectSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  description: z.string().nullable(),
-  status: ProjectStatusSchema,
-  github_repo_url: z.string().nullable(),
-  source_id: z.string().nullable(),
-  created_at: z.string(),
-  updated_at: z.string(),
-});
-
-export const CreateProjectRequestSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  description: z.string().optional(),
-  status: ProjectStatusSchema.optional(),
-  github_repo_url: z.string().optional(),
-  source_id: z.string().optional(),
-});
-
-export const UpdateProjectRequestSchema = z.object({
-  name: z.string().min(1).optional(),
-  description: z.string().optional(),
-  status: ProjectStatusSchema.optional(),
-  github_repo_url: z.string().optional(),
-  source_id: z.string().optional(),
-});
-
-export const ProjectsResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  projects: z.array(ProjectSchema),
-});
-
-export const ProjectResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  project: ProjectSchema,
-});
+export {
+  ProjectStatusSchema,
+  ProjectSchema,
+  CreateProjectRequestSchema,
+  UpdateProjectRequestSchema,
+  ProjectsResponseSchema,
+  ProjectResponseSchema,
+  SyncProviderSchema,
+  SyncDirectionSchema,
+  SyncConfigSchema,
+  CreateSyncConfigRequestSchema,
+  SyncConfigsResponseSchema,
+  SyncConfigResponseSchema,
+} from '../features/projects/schemas';
 
 // =============================================================================
-// Task Schemas
+// Task Schemas - now re-exported from features/tasks
 // =============================================================================
 
-export const TaskStatusSchema = z.enum([
-  'created',
-  'queued',
-  'in_progress',
-  'blocked',
-  'review',
-  'complete',
-]);
-export const RunStatusSchema = z.enum(['running', 'completed', 'failed', 'cancelled']);
-export const LogLevelSchema = z.enum(['debug', 'info', 'warning', 'error']);
-
-export const TaskSchema = z.object({
-  id: z.string(),
-  project_id: z.string(),
-  title: z.string(),
-  description: z.string(),
-  acceptance_criteria: z.string().nullable(),
-  status: TaskStatusSchema,
-  priority: z.number(),
-  model_name: z.string().nullable(),
-  dependencies: z.array(z.string()),
-  created_at: z.string(),
-  updated_at: z.string(),
-  started_at: z.string().nullable(),
-  completed_at: z.string().nullable(),
-  is_agentic: z.boolean(),
-  github_repo_url: z.string().nullable(),
-  source_id: z.string().nullable(),
-  source_ids: z.array(z.string()),
-  queued_at: z.string().nullable(),
-  worker_id: z.string().nullable(),
-});
-
-export const TaskRunSchema = z.object({
-  id: z.string(),
-  task_id: z.string(),
-  status: RunStatusSchema,
-  current_phase: z.string().nullable(),
-  progress_percent: z.number(),
-  error_message: z.string().nullable(),
-  started_at: z.string(),
-  completed_at: z.string().nullable(),
-});
-
-export const TaskRunLogSchema = z.object({
-  id: z.string(),
-  run_id: z.string(),
-  phase: z.string(),
-  agent_type: z.string(),
-  level: LogLevelSchema,
-  message: z.string(),
-  created_at: z.string(),
-});
-
-export const CreateTaskRequestSchema = z.object({
-  project_id: z.string().min(1, 'Project is required'),
-  title: z.string().min(1, 'Title is required'),
-  description: z.string().min(1, 'Description is required'),
-  acceptance_criteria: z.string().optional(),
-  priority: z.number().optional(),
-  model_name: z.string().optional(),
-  dependencies: z.array(z.string()).optional(),
-  is_agentic: z.boolean().optional(),
-  github_repo_url: z.string().optional(),
-  source_id: z.string().optional(),
-  source_ids: z.array(z.string()).optional(),
-});
-
-export const UpdateTaskRequestSchema = z.object({
-  title: z.string().min(1).optional(),
-  description: z.string().min(1).optional(),
-  acceptance_criteria: z.string().optional(),
-  status: TaskStatusSchema.optional(),
-  priority: z.number().optional(),
-  model_name: z.string().optional(),
-  dependencies: z.array(z.string()).optional(),
-  is_agentic: z.boolean().optional(),
-  github_repo_url: z.string().optional(),
-  source_id: z.string().optional(),
-  source_ids: z.array(z.string()).optional(),
-});
-
-export const TasksResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  tasks: z.array(TaskSchema),
-});
-
-export const TaskResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  task: TaskSchema,
-});
-
-export const TaskRunsResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  runs: z.array(TaskRunSchema),
-});
-
-export const TaskRunResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  run: TaskRunSchema,
-});
-
-export const TaskRunLogsResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  logs: z.array(TaskRunLogSchema),
-});
-
-export const TaskProgressMessageSchema = z.object({
-  type: z.enum(['phase_started', 'phase_completed', 'log', 'complete', 'error']),
-  run_id: z.string(),
-  phase: z.string().optional(),
-  progress_percent: z.number().optional(),
-  message: z.string().optional(),
-  agent_type: z.string().optional(),
-  log_level: z.string().optional(),
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-});
+export {
+  TaskStatusSchema,
+  RunStatusSchema,
+  LogLevelSchema,
+  PrStatusSchema,
+  TaskSchema,
+  TaskRunSchema,
+  TaskRunLogSchema,
+  CreateTaskRequestSchema,
+  UpdateTaskRequestSchema,
+  TasksResponseSchema,
+  TaskResponseSchema,
+  TaskRunsResponseSchema,
+  TaskRunResponseSchema,
+  TaskRunLogsResponseSchema,
+  TaskProgressMessageSchema,
+} from '../features/tasks/schemas';
 
 // =============================================================================
 // Workspace Theme Schemas
@@ -608,87 +299,7 @@ export const WorkspaceResponseSchema = z.object({
 
 // =============================================================================
 // Content Schemas
-// =============================================================================
-
-export const FileMetadataSchema = z.object({
-  type: z.literal('file'),
-  path: z.string(),
-  size: z.number(),
-  sha: z.string().nullable(),
-  is_directory: z.boolean(),
-});
-
-export const CalendarMetadataSchema = z.object({
-  type: z.literal('calendar'),
-  start_time: z.string(),
-  end_time: z.string(),
-  location: z.string().nullable(),
-  attendees: z.array(z.string()),
-  recurrence: z.string().nullable(),
-  all_day: z.boolean(),
-});
-
-export const MailMetadataSchema = z.object({
-  type: z.literal('mail'),
-  from: z.string(),
-  to: z.array(z.string()),
-  cc: z.array(z.string()),
-  subject: z.string(),
-  thread_id: z.string().nullable(),
-  attachments: z.array(z.string()),
-  is_read: z.boolean(),
-});
-
-export const ChatMetadataSchema = z.object({
-  type: z.literal('chat'),
-  channel_id: z.string(),
-  channel_name: z.string().nullable(),
-  author_id: z.string(),
-  author_name: z.string(),
-  thread_id: z.string().nullable(),
-  reactions: z.array(z.string()),
-});
-
-export const WebMetadataSchema = z.object({
-  type: z.literal('web'),
-  status_code: z.number(),
-  headers: z.record(z.string()),
-  fetched_at: z.string(),
-});
-
-export const TextMetadataSchema = z.object({
-  type: z.literal('text'),
-  label: z.string().nullable(),
-});
-
-export const ContentMetadataSchema = z.discriminatedUnion('type', [
-  FileMetadataSchema,
-  CalendarMetadataSchema,
-  MailMetadataSchema,
-  ChatMetadataSchema,
-  WebMetadataSchema,
-  TextMetadataSchema,
-]);
-
-export const ContentItemSchema = z.object({
-  id: z.string(),
-  source_id: z.string(),
-  category: SourceCategorySchema,
-  title: z.string(),
-  content: z.string(),
-  content_type: z.string(),
-  timestamp: z.string().nullable(),
-  url: z.string().nullable(),
-  metadata: ContentMetadataSchema,
-});
-
-export const ContentResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  items: z.array(ContentItemSchema),
-  total: z.number(),
-  has_more: z.boolean(),
-});
+// (Content schemas re-exported from features/sources above)
 
 // =============================================================================
 // Type Exports (inferred from schemas)
@@ -704,7 +315,6 @@ export type WorkspaceZ = z.infer<typeof WorkspaceSchema>;
 export type ChatZ = z.infer<typeof ChatSchema>;
 export type MessageZ = z.infer<typeof MessageSchema>;
 export type SourceZ = z.infer<typeof SourceSchema>;
-export type ProjectZ = z.infer<typeof ProjectSchema>;
 export type TaskZ = z.infer<typeof TaskSchema>;
 export type TaskRunZ = z.infer<typeof TaskRunSchema>;
 export type WorkspaceThemeZ = z.infer<typeof WorkspaceThemeSchema>;
@@ -714,8 +324,6 @@ export type ChatsResponse = z.infer<typeof ChatsResponseSchema>;
 export type ChatResponse = z.infer<typeof ChatResponseSchema>;
 export type MessagesResponse = z.infer<typeof MessagesResponseSchema>;
 export type MessageResponse = z.infer<typeof MessageResponseSchema>;
-export type ProjectsResponse = z.infer<typeof ProjectsResponseSchema>;
-export type ProjectResponse = z.infer<typeof ProjectResponseSchema>;
 export type SourcesResponse = z.infer<typeof SourcesResponseSchema>;
 export type SourceResponse = z.infer<typeof SourceResponseSchema>;
 export type SourceTypesResponse = z.infer<typeof SourceTypesResponseSchema>;
@@ -730,3 +338,317 @@ export type WorkspacesResponse = z.infer<typeof WorkspacesResponseSchema>;
 export type WorkspaceResponse = z.infer<typeof WorkspaceResponseSchema>;
 export type WorkspaceThemeResponse = z.infer<typeof WorkspaceThemeResponseSchema>;
 export type SourceVerifyResponse = z.infer<typeof SourceVerifyResponseSchema>;
+
+// =============================================================================
+// AI Settings Schemas
+// =============================================================================
+
+export const AiProviderSchema = z.enum(['self_hosted', 'openai', 'anthropic', 'bedrock']);
+
+export const AiSettingsSchema = z.object({
+  provider: AiProviderSchema,
+  has_litellm_key: z.boolean(),
+  litellm_host: z.string().nullable(),
+  has_openai_api_key: z.boolean(),
+  openai_base_url: z.string().nullable(),
+  has_anthropic_api_key: z.boolean(),
+  anthropic_base_url: z.string().nullable(),
+  bedrock_region: z.string().nullable(),
+  bedrock_use_iam_role: z.boolean(),
+  has_bedrock_credentials: z.boolean(),
+  model_fast: z.string().nullable(),
+  model_reasoning: z.string().nullable(),
+  model_embedding: z.string().nullable(),
+});
+
+export const UpdateAiSettingsRequestSchema = z.object({
+  provider: AiProviderSchema.optional(),
+  litellm_host: z.string().optional(),
+  litellm_key: z.string().optional(),
+  openai_api_key: z.string().optional(),
+  openai_base_url: z.string().optional(),
+  anthropic_api_key: z.string().optional(),
+  anthropic_base_url: z.string().optional(),
+  bedrock_region: z.string().optional(),
+  bedrock_access_key: z.string().optional(),
+  bedrock_secret_key: z.string().optional(),
+  bedrock_use_iam_role: z.boolean().optional(),
+  model_fast: z.string().optional(),
+  model_reasoning: z.string().optional(),
+  model_embedding: z.string().optional(),
+});
+
+export const AiSettingsResponseSchema = z.object({
+  success: z.boolean().optional(),
+  error: z.string().optional(),
+  provider: AiProviderSchema,
+  has_litellm_key: z.boolean(),
+  litellm_host: z.string().nullable(),
+  has_openai_api_key: z.boolean(),
+  openai_base_url: z.string().nullable(),
+  has_anthropic_api_key: z.boolean(),
+  anthropic_base_url: z.string().nullable(),
+  bedrock_region: z.string().nullable(),
+  bedrock_use_iam_role: z.boolean(),
+  has_bedrock_credentials: z.boolean(),
+  model_fast: z.string().nullable(),
+  model_reasoning: z.string().nullable(),
+  model_embedding: z.string().nullable(),
+});
+
+export type AiSettingsZ = z.infer<typeof AiSettingsSchema>;
+export type AiSettingsResponse = z.infer<typeof AiSettingsResponseSchema>;
+
+// =============================================================================
+// Session Schemas
+// =============================================================================
+
+export { SessionSchema, SessionsResponseSchema } from '../features/auth/schemas';
+export type { SessionZ, SessionsResponse } from '../features/auth/schemas';
+
+// =============================================================================
+// Organization Member Schemas
+
+export type { OrgRoleZ } from '../features/auth/schemas';
+
+export const OrganizationMemberSchema = z.object({
+  id: z.string().min(1),
+  user_id: z.string().min(1),
+  organization_id: z.string().min(1),
+  role: OrgRoleSchema,
+  email: z.string().email(),
+  display_name: z.string().nullable(),
+  joined_at: z.string().datetime(),
+});
+
+export const AddOrgMemberRequestSchema = z.object({
+  email: z.string().email('Invalid email address'),
+  role: OrgRoleSchema,
+});
+
+export const UpdateOrgMemberRequestSchema = z.object({
+  role: OrgRoleSchema,
+});
+
+export const OrgMembersResponseSchema = z.object({
+  members: z.array(OrganizationMemberSchema),
+});
+
+export type OrganizationMemberZ = z.infer<typeof OrganizationMemberSchema>;
+export type OrgMembersResponse = z.infer<typeof OrgMembersResponseSchema>;
+
+// =============================================================================
+// Workspace Member Schemas
+
+export type { WorkspaceRoleZ } from '../features/auth/schemas';
+
+export const WorkspaceMemberSchema = z.object({
+  id: z.string().min(1),
+  user_id: z.string().min(1),
+  workspace_id: z.string().min(1),
+  role: WorkspaceRoleSchema,
+  email: z.string().email(),
+  display_name: z.string().nullable(),
+  joined_at: z.string().datetime(),
+});
+
+export const AddWorkspaceMemberRequestSchema = z.object({
+  user_id: z.string().min(1, 'User is required'),
+  role: WorkspaceRoleSchema,
+});
+
+export const UpdateWorkspaceMemberRequestSchema = z.object({
+  role: WorkspaceRoleSchema,
+});
+
+export const WorkspaceMembersResponseSchema = z.object({
+  members: z.array(WorkspaceMemberSchema),
+});
+
+export type WorkspaceMemberZ = z.infer<typeof WorkspaceMemberSchema>;
+export type WorkspaceMembersResponse = z.infer<typeof WorkspaceMembersResponseSchema>;
+
+// =============================================================================
+// Invitation Schemas - now re-exported from features/settings
+
+export {
+  InvitationSchema,
+  CreateInvitationRequestSchema,
+  InvitationsResponseSchema,
+} from '../features/settings/organization/schemas';
+export type {
+  InvitationZ,
+  InvitationsResponse,
+} from '../features/settings/organization/schemas';
+export { InvitationDetailsSchema } from '../features/auth/schemas';
+export type { InvitationDetailsZ } from '../features/auth/schemas';
+
+// =============================================================================
+// Billing & Usage Schemas
+// =============================================================================
+
+export const SubscriptionStatusSchema = z.enum(['active', 'canceled', 'past_due', 'trialing']);
+
+export const PlanLimitsSchema = z.object({
+  max_users: z.number().nullable(),
+  max_workspaces: z.number().nullable(),
+  max_projects: z.number().nullable(),
+  max_storage_gb: z.number().nullable(),
+  max_api_calls_monthly: z.number().nullable(),
+});
+
+export const PlanSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  description: z.string().nullable(),
+  price_monthly: z.number(),
+  price_yearly: z.number(),
+  features: z.array(z.string()),
+  limits: PlanLimitsSchema,
+  is_public: z.boolean(),
+});
+
+export const SubscriptionSchema = z.object({
+  id: z.string().min(1),
+  organization_id: z.string().min(1),
+  plan_id: z.string().min(1),
+  plan_name: z.string(),
+  status: SubscriptionStatusSchema,
+  current_period_start: z.string().datetime(),
+  current_period_end: z.string().datetime(),
+  cancel_at_period_end: z.boolean(),
+});
+
+export const UsageSchema = z.object({
+  users: z.number().min(0),
+  workspaces: z.number().min(0),
+  projects: z.number().min(0),
+  storage_gb: z.number().min(0),
+  api_calls: z.number().min(0),
+  period_start: z.string().datetime(),
+  period_end: z.string().datetime(),
+});
+
+export const LimitsSchema = z.object({
+  max_users: z.number().nullable(),
+  max_workspaces: z.number().nullable(),
+  max_projects: z.number().nullable(),
+  max_storage_gb: z.number().nullable(),
+  max_api_calls_monthly: z.number().nullable(),
+});
+
+export const PlansResponseSchema = z.object({
+  plans: z.array(PlanSchema),
+});
+
+export const PlanResponseSchema = z.object({
+  plan: PlanSchema,
+});
+
+export const SubscriptionResponseSchema = z.object({
+  subscription: SubscriptionSchema,
+});
+
+export const UsageResponseSchema = UsageSchema;
+
+export const LimitsResponseSchema = LimitsSchema;
+
+export type PlanZ = z.infer<typeof PlanSchema>;
+export type SubscriptionZ = z.infer<typeof SubscriptionSchema>;
+export type UsageZ = z.infer<typeof UsageSchema>;
+export type LimitsZ = z.infer<typeof LimitsSchema>;
+export type PlansResponse = z.infer<typeof PlansResponseSchema>;
+export type PlanResponse = z.infer<typeof PlanResponseSchema>;
+export type SubscriptionResponse = z.infer<typeof SubscriptionResponseSchema>;
+export type UsageResponse = z.infer<typeof UsageResponseSchema>;
+export type LimitsResponse = z.infer<typeof LimitsResponseSchema>;
+
+// =============================================================================
+// Audit Log Schemas
+// =============================================================================
+
+export const AuditActionSchema = z.enum([
+  'create',
+  'update',
+  'delete',
+  'login',
+  'logout',
+  'invite',
+  'accept',
+  'revoke',
+]);
+export const AuditResourceTypeSchema = z.enum([
+  'user',
+  'organization',
+  'workspace',
+  'project',
+  'task',
+  'source',
+  'chat',
+  'invitation',
+  'member',
+]);
+
+export const AuditLogSchema = z.object({
+  id: z.string().min(1),
+  organization_id: z.string().min(1),
+  actor_id: z.string().min(1),
+  actor_email: z.string().email(),
+  action: AuditActionSchema,
+  resource_type: AuditResourceTypeSchema,
+  resource_id: z.string().min(1),
+  metadata: z.record(z.unknown()),
+  created_at: z.string().datetime(),
+});
+
+export const AuditLogFiltersSchema = z.object({
+  action: AuditActionSchema.optional(),
+  resource_type: AuditResourceTypeSchema.optional(),
+  resource_id: z.string().optional(),
+  actor_id: z.string().optional(),
+  start_date: z.string().optional(),
+  end_date: z.string().optional(),
+  limit: z.number().min(1).max(100).optional(),
+  offset: z.number().min(0).optional(),
+});
+
+export const AuditLogsResponseSchema = z.object({
+  logs: z.array(AuditLogSchema),
+  total: z.number().min(0),
+});
+
+export type AuditActionZ = z.infer<typeof AuditActionSchema>;
+export type AuditResourceTypeZ = z.infer<typeof AuditResourceTypeSchema>;
+export type AuditLogZ = z.infer<typeof AuditLogSchema>;
+export type AuditLogsResponse = z.infer<typeof AuditLogsResponseSchema>;
+
+// =============================================================================
+// Knowledge Base & Context Search Schemas - re-exported from features/knowledge
+// =============================================================================
+
+export {
+  KnowledgeTypeSchema,
+  KnowledgeEntrySchema,
+  CreateKnowledgeRequestSchema,
+  KnowledgeResponseSchema,
+  SearchModeSchema,
+  SearchResultSchema,
+  SearchOptionsSchema,
+  SearchResponseSchema,
+  GatherContextRequestSchema,
+  GatheringStatusSchema,
+  GatheringProgressSchema,
+} from '../features/knowledge/schemas';
+
+export type {
+  KnowledgeTypeZ,
+  KnowledgeEntryZ,
+  CreateKnowledgeRequestZ,
+  KnowledgeResponse,
+  SearchModeZ,
+  SearchResultZ,
+  SearchOptionsZ,
+  SearchResponse,
+  GatherContextRequestZ,
+  GatheringProgressZ,
+} from '../features/knowledge/schemas';

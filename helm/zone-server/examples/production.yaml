@@ -1,0 +1,140 @@
+# Production deployment example for Zone
+# This configuration is suitable for production workloads with high availability
+
+environment: production
+
+global:
+  externalDatabase: true  # Using managed PostgreSQL service
+  imagePullSecrets:
+    - name: docker-registry-secret
+  securityContexts: true
+
+# Common environment variables
+commonEnv:
+  DB_HOST: "postgres.production.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "zone_production"
+  DB_USER: "zone_app"
+  RUST_LOG: "warn,zone_server=info"
+
+# Production secrets - replace with your actual values or use external secrets
+secrets:
+  dbPassword: "REPLACE_WITH_SECURE_PASSWORD"
+  jwtSecret: "REPLACE_WITH_JWT_SECRET"
+  encryptionKey: "REPLACE_WITH_ENCRYPTION_KEY"
+  stripeSecretKey: "REPLACE_WITH_STRIPE_KEY"
+  smtpPassword: "REPLACE_WITH_SMTP_PASSWORD"
+
+# Server configuration
+server:
+  enabled: true
+  replicaCount: 3
+
+  image:
+    repository: gcr.io/my-project/zone-server
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8080
+
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 1000m
+      memory: 1Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilization: 70
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+# Manager configuration
+manager:
+  enabled: true
+  replicaCount: 3
+
+  image:
+    repository: gcr.io/my-project/zone-manager
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 3000
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilization: 70
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+# Ingress configuration with TLS
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+  hosts:
+    - host: zone.example.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          service: server
+        - path: /
+          pathType: Prefix
+          service: manager
+  tls:
+    - secretName: zone-tls
+      hosts:
+        - zone.example.com
+
+# Migration job
+migration:
+  enabled: true
+  backoffLimit: 1  # Allow one retry in production
+  activeDeadlineSeconds: 900  # 15 minutes
+  ttlSecondsAfterFinished: 86400  # Keep for 24 hours
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+# Node affinity for production workloads
+nodeSelector:
+  workload-type: production
+
+# Tolerations for dedicated nodes
+tolerations:
+  - key: "production"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"

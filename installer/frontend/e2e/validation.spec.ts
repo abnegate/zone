@@ -11,7 +11,7 @@ test.describe('Form Validation', () => {
     await page.click('text=Next');
 
     // Should stay on domain step with error
-    await expect(page.locator('.field-error')).toBeVisible();
+    await expect(page.locator('.ui-form-field__error')).toBeVisible();
     await expect(page.locator('h2')).toContainText('Domain Configuration');
   });
 
@@ -25,19 +25,19 @@ test.describe('Form Validation', () => {
 
   test('shows error for short security keys', async ({ page }) => {
     // Go to security step via step pill
-    await page.click('.step-pill:nth-child(2)');
+    await page.click('.stepper-item:nth-child(2) .stepper-button');
 
     const masterKeyInput = page.locator('input#litellm-master-key');
     await masterKeyInput.fill('short');
     await page.click('text=Next');
 
-    await expect(page.locator('.field-error').first()).toBeVisible();
+    await expect(page.locator('.ui-form-field__error').first()).toBeVisible();
     await expect(page.locator('h2')).toContainText('Security');
   });
 
   test('validates email format in advanced step', async ({ page }) => {
     // Navigate to advanced step via step pill
-    await page.click('.step-pill:nth-child(7)');
+    await page.click('.stepper-item:nth-child(7) .stepper-button');
 
     const emailInput = page.getByLabel("ACME Email (for Let's Encrypt)");
     await emailInput.clear();

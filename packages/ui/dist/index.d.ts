@@ -31,6 +31,7 @@ declare const Select: React.ForwardRefExoticComponent<SelectProps & React.RefAtt
 
 interface CheckboxProps extends Omit<React.ComponentPropsWithoutRef<'input'>, 'type'> {
     label: string;
+    helpText?: string;
 }
 declare const Checkbox: React.ForwardRefExoticComponent<CheckboxProps & React.RefAttributes<HTMLInputElement>>;
 

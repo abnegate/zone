@@ -2,6 +2,7 @@
 
 use chrono::NaiveDateTime;
 use sqlx::PgPool;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use super::DbResult;
@@ -284,6 +285,19 @@ pub async fn list_messages(pool: &PgPool, chat_id: Uuid) -> DbResult<Vec<Message
 }
 
 /// Create a new message
+///
+/// # Background Embedding Generation
+///
+/// Message embeddings should be generated asynchronously via a background task
+/// to avoid blocking the message creation flow. The embedding can be stored using
+/// `message_embeddings::store_message_embedding()`.
+///
+/// This allows messages to be saved immediately while the embedding is computed
+/// in the background, providing a better user experience and enabling the system
+/// to handle embedding failures gracefully without affecting message creation.
+///
+/// Future implementations may use a job queue (e.g., tokio task, dedicated worker,
+/// or queue system like BullMQ) to handle embedding generation at scale.
 pub async fn create_message(
     pool: &PgPool,
     chat_id: Uuid,
@@ -318,6 +332,92 @@ pub async fn create_message(
         metadata: row.metadata,
         created_at: row.created_at,
     })
+}
+
+/// Create a message with background embedding generation
+///
+/// This is a wrapper around `create_message` that also triggers
+/// background embedding generation for the message content.
+///
+/// # Arguments
+/// * `pool` - Database connection pool
+/// * `chat_id` - ID of the chat
+/// * `role` - Role of the message (user, assistant, system)
+/// * `content` - Message content
+/// * `metadata` - Optional metadata JSON
+/// * `embedding_service` - Optional embedding service for generating embeddings
+///
+/// # Returns
+/// The created message row
+///
+/// # Note
+/// The embedding generation happens asynchronously in the background.
+/// Any embedding errors are logged but do not fail the message creation.
+pub async fn create_message_with_embedding(
+    pool: &PgPool,
+    chat_id: Uuid,
+    role: &str,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+    embedding_service: Option<Arc<dyn zone_context::embeddings::EmbeddingService>>,
+) -> DbResult<MessageRow> {
+    // Create the message first
+    let message = create_message(pool, chat_id, role, content, metadata).await?;
+
+    // Trigger background embedding generation if service is available
+    if let Some(service) = embedding_service {
+        let pool_clone = pool.clone();
+        let message_id = message.id;
+        let content_owned = content.to_string();
+
+        // Spawn background task for embedding generation with timeout
+        tokio::spawn(async move {
+            use std::time::Duration;
+
+            // Add 30-second timeout to prevent hanging indefinitely
+            match tokio::time::timeout(Duration::from_secs(30), service.embed(&content_owned)).await
+            {
+                Ok(Ok(embedding)) => {
+                    let model = service.model();
+                    if let Err(e) = super::message_embeddings::store_message_embedding(
+                        &pool_clone,
+                        message_id,
+                        chat_id,
+                        &embedding,
+                        model,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            "Failed to store message embedding for message_id={}: {}",
+                            message_id,
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "Generated and stored embedding for message_id={}",
+                            message_id
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "Failed to generate embedding for message_id={}: {}",
+                        message_id,
+                        e
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "Embedding timeout for message_id={} (exceeded 30s)",
+                        message_id
+                    );
+                }
+            }
+        });
+    }
+
+    Ok(message)
 }
 
 /// Delete a message

@@ -14,6 +14,7 @@ pub struct UserRow {
     pub display_name: Option<String>,
     pub is_active: Option<bool>,
     pub is_admin: Option<bool>,
+    pub email_verified: bool,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub last_login_at: Option<NaiveDateTime>,
@@ -27,6 +28,7 @@ pub struct UserWithPasswordRow {
     pub display_name: Option<String>,
     pub is_active: Option<bool>,
     pub is_admin: Option<bool>,
+    pub email_verified: bool,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub last_login_at: Option<NaiveDateTime>,
@@ -62,7 +64,7 @@ pub async fn create_user(
         r#"
         INSERT INTO users (email, password_hash, display_name, is_admin)
         VALUES ($1, $2, $3, $4)
-        RETURNING id, email, display_name, is_active, is_admin,
+        RETURNING id, email, display_name, is_active, is_admin, email_verified,
                   created_at, updated_at, last_login_at
         "#,
         email,
@@ -79,6 +81,7 @@ pub async fn create_user(
         display_name: row.display_name,
         is_active: row.is_active,
         is_admin: row.is_admin,
+        email_verified: row.email_verified,
         created_at: row.created_at,
         updated_at: row.updated_at,
         last_login_at: row.last_login_at,
@@ -92,7 +95,7 @@ pub async fn get_user_by_email(
 ) -> DbResult<Option<UserWithPasswordRow>> {
     let row = sqlx::query!(
         r#"
-        SELECT id, email, display_name, is_active, is_admin,
+        SELECT id, email, display_name, is_active, is_admin, email_verified,
                created_at, updated_at, last_login_at, password_hash
         FROM users
         WHERE email = $1
@@ -108,6 +111,7 @@ pub async fn get_user_by_email(
         display_name: r.display_name,
         is_active: r.is_active,
         is_admin: r.is_admin,
+        email_verified: r.email_verified,
         created_at: r.created_at,
         updated_at: r.updated_at,
         last_login_at: r.last_login_at,
@@ -119,7 +123,7 @@ pub async fn get_user_by_email(
 pub async fn get_user_by_id(pool: &PgPool, id: Uuid) -> DbResult<Option<UserRow>> {
     let row = sqlx::query!(
         r#"
-        SELECT id, email, display_name, is_active, is_admin,
+        SELECT id, email, display_name, is_active, is_admin, email_verified,
                created_at, updated_at, last_login_at
         FROM users
         WHERE id = $1
@@ -135,6 +139,7 @@ pub async fn get_user_by_id(pool: &PgPool, id: Uuid) -> DbResult<Option<UserRow>
         display_name: r.display_name,
         is_active: r.is_active,
         is_admin: r.is_admin,
+        email_verified: r.email_verified,
         created_at: r.created_at,
         updated_at: r.updated_at,
         last_login_at: r.last_login_at,
@@ -215,6 +220,32 @@ pub async fn assign_user_role(pool: &PgPool, user_id: Uuid, role_name: &str) -> 
     )
     .execute(pool)
     .await?;
+
+    Ok(())
+}
+
+/// Set user active status
+pub async fn set_user_active(pool: &PgPool, user_id: Uuid, is_active: bool) -> DbResult<()> {
+    sqlx::query!(
+        r#"
+        UPDATE users
+        SET is_active = $1, updated_at = NOW()
+        WHERE id = $2
+        "#,
+        is_active,
+        user_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Delete a user (for testing)
+pub async fn delete_user(pool: &PgPool, user_id: Uuid) -> DbResult<()> {
+    sqlx::query!("DELETE FROM users WHERE id = $1", user_id)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }

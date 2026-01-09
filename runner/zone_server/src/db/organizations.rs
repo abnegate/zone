@@ -99,6 +99,37 @@ pub async fn create_organization(
     })
 }
 
+/// Create a new organization (transaction version)
+pub async fn create_organization_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    name: &str,
+    slug: &str,
+    description: Option<&str>,
+) -> DbResult<OrganizationRow> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO organizations (name, slug, description)
+        VALUES ($1, $2, $3)
+        RETURNING id, name, slug, description, is_active, created_at, updated_at
+        "#,
+        name,
+        slug,
+        description
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+
+    Ok(OrganizationRow {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        description: row.description,
+        is_active: row.is_active,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
 /// Update an organization
 pub async fn update_organization(
     pool: &PgPool,

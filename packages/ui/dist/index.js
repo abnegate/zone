@@ -153,20 +153,23 @@ Select.displayName = "Select";
 var import_react4 = require("react");
 var import_jsx_runtime4 = require("react/jsx-runtime");
 var Checkbox = (0, import_react4.forwardRef)(
-  ({ label, id, className = "", ...props }, ref) => {
+  ({ label, helpText, id, className = "", ...props }, ref) => {
     const checkboxId = id || label.toLowerCase().replace(/\s+/g, "-");
-    return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("label", { className: `ui-checkbox ${className}`.trim(), htmlFor: checkboxId, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
-        "input",
-        {
-          ref,
-          type: "checkbox",
-          id: checkboxId,
-          className: "ui-checkbox__input",
-          ...props
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "ui-checkbox__label", children: label })
+    return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "ui-form-field ui-form-field--checkbox", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("label", { className: `ui-checkbox ${className}`.trim(), htmlFor: checkboxId, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+          "input",
+          {
+            ref,
+            type: "checkbox",
+            id: checkboxId,
+            className: "ui-checkbox__input",
+            ...props
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { className: "ui-checkbox__label", children: label })
+      ] }),
+      helpText && /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { className: "ui-form-field__help", children: helpText })
     ] });
   }
 );

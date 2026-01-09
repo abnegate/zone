@@ -23,6 +23,14 @@ pub struct Config {
     pub litellm_host: String,
     /// LiteLLM API key
     pub litellm_key: String,
+    /// Encryption key for source credentials (must be at least 32 characters)
+    pub encryption_key: String,
+    /// CORS allowed origins (comma-separated, default: *)
+    pub cors_origins: Vec<String>,
+    /// CORS allow credentials (default: false)
+    pub cors_allow_credentials: bool,
+    /// Application base URL for email links (default: http://localhost:3000)
+    pub app_base_url: String,
 }
 
 impl Config {
@@ -41,6 +49,11 @@ impl Config {
         chrono::Duration::seconds(self.jwt_refresh_lifetime as i64)
     }
 
+    /// Get the encryption key
+    pub fn encryption_key(&self) -> &str {
+        &self.encryption_key
+    }
+
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
@@ -49,6 +62,33 @@ impl Config {
                 "JWT_SECRET must be at least 32 characters",
             ));
         }
+
+        let encryption_key =
+            env::var("ENCRYPTION_KEY").map_err(|_| ConfigError::Missing("ENCRYPTION_KEY"))?;
+        if encryption_key.len() < 32 {
+            return Err(ConfigError::Invalid(
+                "ENCRYPTION_KEY must be at least 32 characters",
+            ));
+        }
+
+        // Parse CORS origins
+        let cors_origins = env::var("CORS_ORIGINS")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|origin| origin.trim().to_string())
+                    .filter(|origin| !origin.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["*".to_string()]); // Default to permissive
+
+        let cors_allow_credentials = env::var("CORS_ALLOW_CREDENTIALS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(false);
+
+        let app_base_url =
+            env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
         Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
@@ -72,6 +112,10 @@ impl Config {
                 .map_err(|_| ConfigError::Missing("LITELLM_HOST"))?,
             litellm_key: env::var("LITELLM_KEY")
                 .map_err(|_| ConfigError::Missing("LITELLM_KEY"))?,
+            encryption_key,
+            cors_origins,
+            cors_allow_credentials,
+            app_base_url,
         })
     }
 }
@@ -89,6 +133,10 @@ impl std::fmt::Debug for Config {
             .field("jwt_refresh_lifetime", &self.jwt_refresh_lifetime)
             .field("litellm_host", &self.litellm_host)
             .field("litellm_key", &"[REDACTED]")
+            .field("encryption_key", &"[REDACTED]")
+            .field("cors_origins", &self.cors_origins)
+            .field("cors_allow_credentials", &self.cors_allow_credentials)
+            .field("app_base_url", &self.app_base_url)
             .finish()
     }
 }
@@ -110,36 +158,37 @@ mod tests {
     // are unsafe in Rust 2024 edition. Config::from_env() would be tested in
     // integration tests with proper environment setup.
 
-    #[test]
-    fn test_config_jwt_secret_getter() {
-        let config = Config {
+    fn create_test_config() -> Config {
+        Config {
             host: "localhost".to_string(),
             port: 8000,
             database_url: "postgres://localhost/test".to_string(),
             redis_url: "redis://localhost:6379".to_string(),
-            jwt_secret: "my-secret-key".to_string(),
+            jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
             jwt_access_lifetime: 900,
             jwt_refresh_lifetime: 604800,
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
-        };
+            encryption_key: "12345678901234567890123456789012".to_string(),
+            cors_origins: vec!["*".to_string()],
+            cors_allow_credentials: false,
+            app_base_url: "http://localhost:3000".to_string(),
+        }
+    }
 
-        assert_eq!(config.jwt_secret(), "my-secret-key");
+    #[test]
+    fn test_config_jwt_secret_getter() {
+        let config = create_test_config();
+        assert_eq!(
+            config.jwt_secret(),
+            "test-secret-key-with-at-least-32-chars"
+        );
     }
 
     #[test]
     fn test_config_access_token_lifetime() {
-        let config = Config {
-            host: "localhost".to_string(),
-            port: 8000,
-            database_url: "postgres://localhost/test".to_string(),
-            redis_url: "redis://localhost:6379".to_string(),
-            jwt_secret: "my-secret-key".to_string(),
-            jwt_access_lifetime: 1800,
-            jwt_refresh_lifetime: 604800,
-            litellm_host: "http://localhost:4000".to_string(),
-            litellm_key: "test-key".to_string(),
-        };
+        let mut config = create_test_config();
+        config.jwt_access_lifetime = 1800;
 
         let lifetime = config.access_token_lifetime();
         assert_eq!(lifetime.num_seconds(), 1800);
@@ -147,17 +196,8 @@ mod tests {
 
     #[test]
     fn test_config_refresh_token_lifetime() {
-        let config = Config {
-            host: "localhost".to_string(),
-            port: 8000,
-            database_url: "postgres://localhost/test".to_string(),
-            redis_url: "redis://localhost:6379".to_string(),
-            jwt_secret: "my-secret-key".to_string(),
-            jwt_access_lifetime: 900,
-            jwt_refresh_lifetime: 86400,
-            litellm_host: "http://localhost:4000".to_string(),
-            litellm_key: "test-key".to_string(),
-        };
+        let mut config = create_test_config();
+        config.jwt_refresh_lifetime = 86400;
 
         let lifetime = config.refresh_token_lifetime();
         assert_eq!(lifetime.num_seconds(), 86400);
@@ -177,17 +217,7 @@ mod tests {
 
     #[test]
     fn test_config_clone() {
-        let config = Config {
-            host: "localhost".to_string(),
-            port: 8000,
-            database_url: "postgres://localhost/test".to_string(),
-            redis_url: "redis://localhost:6379".to_string(),
-            jwt_secret: "my-secret-key".to_string(),
-            jwt_access_lifetime: 900,
-            jwt_refresh_lifetime: 604800,
-            litellm_host: "http://localhost:4000".to_string(),
-            litellm_key: "test-key".to_string(),
-        };
+        let config = create_test_config();
 
         let cloned = config.clone();
         assert_eq!(config.host, cloned.host);
@@ -198,17 +228,11 @@ mod tests {
 
     #[test]
     fn test_config_debug_redacts_secrets() {
-        let config = Config {
-            host: "localhost".to_string(),
-            port: 8000,
-            database_url: "postgres://user:password@localhost/test".to_string(),
-            redis_url: "redis://:secret@localhost:6379".to_string(),
-            jwt_secret: "my-super-secret-key".to_string(),
-            jwt_access_lifetime: 900,
-            jwt_refresh_lifetime: 604800,
-            litellm_host: "http://localhost:4000".to_string(),
-            litellm_key: "sk-secret-api-key".to_string(),
-        };
+        let mut config = create_test_config();
+        config.database_url = "postgres://user:password@localhost/test".to_string();
+        config.redis_url = "redis://:secret@localhost:6379".to_string();
+        config.jwt_secret = "my-super-secret-key".to_string();
+        config.litellm_key = "sk-secret-api-key".to_string();
 
         let debug_str = format!("{:?}", config);
 
@@ -229,17 +253,7 @@ mod tests {
 
     #[test]
     fn test_config_default_port() {
-        let config = Config {
-            host: "0.0.0.0".to_string(),
-            port: 8000,
-            database_url: "test".to_string(),
-            redis_url: "test".to_string(),
-            jwt_secret: "test".to_string(),
-            jwt_access_lifetime: 900,
-            jwt_refresh_lifetime: 604800,
-            litellm_host: "test".to_string(),
-            litellm_key: "test".to_string(),
-        };
+        let config = create_test_config();
 
         // Default port is 8000
         assert_eq!(config.port, 8000);
@@ -249,17 +263,7 @@ mod tests {
     fn test_config_default_lifetimes() {
         // Default access token lifetime is 900 seconds (15 minutes)
         // Default refresh token lifetime is 604800 seconds (7 days)
-        let config = Config {
-            host: "localhost".to_string(),
-            port: 8000,
-            database_url: "test".to_string(),
-            redis_url: "test".to_string(),
-            jwt_secret: "test".to_string(),
-            jwt_access_lifetime: 900,
-            jwt_refresh_lifetime: 604800,
-            litellm_host: "test".to_string(),
-            litellm_key: "test".to_string(),
-        };
+        let config = create_test_config();
 
         assert_eq!(config.jwt_access_lifetime, 900);
         assert_eq!(config.jwt_refresh_lifetime, 604800);
@@ -267,17 +271,9 @@ mod tests {
 
     #[test]
     fn test_config_lifetime_methods() {
-        let config = Config {
-            host: "localhost".to_string(),
-            port: 8000,
-            database_url: "test".to_string(),
-            redis_url: "test".to_string(),
-            jwt_secret: "test".to_string(),
-            jwt_access_lifetime: 3600,   // 1 hour
-            jwt_refresh_lifetime: 86400, // 1 day
-            litellm_host: "test".to_string(),
-            litellm_key: "test".to_string(),
-        };
+        let mut config = create_test_config();
+        config.jwt_access_lifetime = 3600; // 1 hour
+        config.jwt_refresh_lifetime = 86400; // 1 day
 
         let access_duration = config.access_token_lifetime();
         let refresh_duration = config.refresh_token_lifetime();
@@ -288,17 +284,16 @@ mod tests {
 
     #[test]
     fn test_config_all_fields() {
-        let config = Config {
-            host: "127.0.0.1".to_string(),
-            port: 3000,
-            database_url: "postgres://user:pass@localhost/db".to_string(),
-            redis_url: "redis://:password@localhost:6379/0".to_string(),
-            jwt_secret: "super-secret-key-for-jwt-signing".to_string(),
-            jwt_access_lifetime: 1800,
-            jwt_refresh_lifetime: 86400,
-            litellm_host: "http://litellm.local:4000".to_string(),
-            litellm_key: "sk-litellm-key".to_string(),
-        };
+        let mut config = create_test_config();
+        config.host = "127.0.0.1".to_string();
+        config.port = 3000;
+        config.database_url = "postgres://user:pass@localhost/db".to_string();
+        config.redis_url = "redis://:password@localhost:6379/0".to_string();
+        config.jwt_secret = "super-secret-key-for-jwt-signing".to_string();
+        config.jwt_access_lifetime = 1800;
+        config.jwt_refresh_lifetime = 86400;
+        config.litellm_host = "http://litellm.local:4000".to_string();
+        config.litellm_key = "sk-litellm-key".to_string();
 
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 3000);

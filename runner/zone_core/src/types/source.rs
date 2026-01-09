@@ -49,6 +49,23 @@ pub enum SourceCategory {
     Text,
 }
 
+impl std::str::FromStr for SourceCategory {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "file" => Ok(SourceCategory::File),
+            "calendar" => Ok(SourceCategory::Calendar),
+            "mail" => Ok(SourceCategory::Mail),
+            "document" => Ok(SourceCategory::Document),
+            "communication" => Ok(SourceCategory::Communication),
+            "web" => Ok(SourceCategory::Web),
+            "text" => Ok(SourceCategory::Text),
+            _ => Err(format!("Unknown category: {}", s)),
+        }
+    }
+}
+
 impl SourceType {
     /// Get the category for this source type
     pub fn category(&self) -> SourceCategory {

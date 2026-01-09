@@ -2,14 +2,14 @@ use anyhow::Result;
 use chrono::Local;
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use owo_colors::OwoColorize;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
@@ -82,6 +82,22 @@ enum Commands {
         #[arg(long, short, value_enum)]
         project: Option<Vec<Project>>,
     },
+    /// Run Lighthouse performance audits on frontends
+    Lighthouse {
+        /// Target frontend: installer, manager, or all
+        #[arg(long, short, value_enum, default_value = "all")]
+        target: LighthouseTarget,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum LighthouseTarget {
+    /// Installer frontend
+    Installer,
+    /// Manager frontend
+    Manager,
+    /// Both frontends
+    All,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -200,12 +216,27 @@ enum TaskMessage {
     Failed(usize, String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FocusedPane {
+    Tasks,
+    Output,
+}
+
 struct App {
     tasks: Vec<Arc<Mutex<TaskState>>>,
     selected_task: usize,
     should_quit: bool,
     all_done: bool,
     start_time: Instant,
+    /// Width of the task pane as a percentage (10-90)
+    task_pane_width: u16,
+    /// Which pane is currently focused
+    focused_pane: FocusedPane,
+    /// Scroll offset for the output pane
+    output_scroll: usize,
+    /// Cached layout areas for mouse hit detection
+    tasks_area: Rect,
+    output_area: Rect,
 }
 
 impl App {
@@ -221,7 +252,17 @@ impl App {
             should_quit: false,
             all_done: false,
             start_time: Instant::now(),
+            task_pane_width: 40,
+            focused_pane: FocusedPane::Tasks,
+            output_scroll: 0,
+            tasks_area: Rect::default(),
+            output_area: Rect::default(),
         }
+    }
+
+    /// Reset output scroll when selecting a new task
+    fn reset_output_scroll(&mut self) {
+        self.output_scroll = 0;
     }
 
     fn completed_count(&self) -> usize {
@@ -304,15 +345,17 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
                 // Check if biome is available
                 let biome_config = working_dir.join("biome.json");
                 if biome_config.exists() {
-                    let (cmd, args) = if check {
-                        ("npx", vec!["biome", "format", "--check", "src"])
+                    // biome format without --write checks formatting (exits non-zero if changes needed)
+                    // biome format --write applies the formatting changes
+                    let args = if check {
+                        vec!["biome", "format", "src"]
                     } else {
-                        ("npx", vec!["biome", "format", "--write", "src"])
+                        vec!["biome", "format", "--write", "src"]
                     };
                     tasks.push(TaskConfig {
                         project: *project,
                         name: format!("Format {}", project.display_name()),
-                        command: cmd.to_string(),
+                        command: "npx".to_string(),
                         args: args.into_iter().map(String::from).collect(),
                         working_dir,
                     });
@@ -522,6 +565,35 @@ fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig
     tasks
 }
 
+fn create_lighthouse_tasks(root: &PathBuf, target: LighthouseTarget) -> Vec<TaskConfig> {
+    let mut tasks = Vec::new();
+
+    let targets = match target {
+        LighthouseTarget::Installer => vec![Project::InstallerFrontend],
+        LighthouseTarget::Manager => vec![Project::ManagerFrontend],
+        LighthouseTarget::All => vec![Project::InstallerFrontend, Project::ManagerFrontend],
+    };
+
+    for project in targets {
+        let working_dir = root.join(project.relative_path());
+
+        // Combined task: install deps, build, then run Lighthouse CI
+        // Using bash to chain commands so they run sequentially
+        tasks.push(TaskConfig {
+            project,
+            name: format!("Lighthouse {}", project.display_name()),
+            command: "bash".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "npm ci && npm run build && npx @lhci/cli autorun".to_string(),
+            ],
+            working_dir,
+        });
+    }
+
+    tasks
+}
+
 async fn run_task(
     task_idx: usize,
     task: Arc<Mutex<TaskState>>,
@@ -684,7 +756,7 @@ async fn run_task(
     }
 }
 
-fn draw_ui(frame: &mut Frame, app: &App) {
+fn draw_ui(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -745,11 +817,18 @@ fn draw_ui(frame: &mut Frame, app: &App) {
         .label(progress_label);
     frame.render_widget(gauge, chunks[1]);
 
-    // Split the main area into task list and output
+    // Split the main area into task list and output (resizable)
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([
+            Constraint::Percentage(app.task_pane_width),
+            Constraint::Percentage(100 - app.task_pane_width),
+        ])
         .split(chunks[2]);
+
+    // Save areas for mouse hit detection
+    app.tasks_area = main_chunks[0];
+    app.output_area = main_chunks[1];
 
     // Task list
     let items: Vec<ListItem> = app
@@ -796,74 +875,132 @@ fn draw_ui(frame: &mut Frame, app: &App) {
         })
         .collect();
 
+    let tasks_title = if app.focused_pane == FocusedPane::Tasks {
+        "Tasks [focused]"
+    } else {
+        "Tasks"
+    };
+    let tasks_border_style = if app.focused_pane == FocusedPane::Tasks {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Tasks"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(tasks_title)
+                .border_style(tasks_border_style),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
     frame.render_widget(list, main_chunks[0]);
 
-    // Output panel
-    let selected_output: Vec<Line> = if app.selected_task < app.tasks.len() {
-        let state = app.tasks[app.selected_task].lock().unwrap();
-        let cmd_line = format!(
-            "$ {} {}",
-            state.config.command,
-            state.config.args.join(" ")
-        );
-        let dir_line = format!("Directory: {:?}", state.config.working_dir);
+    // Output panel - calculate available height for scrolling
+    let output_area_height = main_chunks[1].height.saturating_sub(2) as usize; // subtract borders
 
-        // Clone output to avoid lifetime issues
-        let output_clone: Vec<String> = state.output.clone();
-        drop(state); // Explicitly drop the guard
+    let (selected_output, total_lines, scroll_offset): (Vec<Line>, usize, usize) =
+        if app.selected_task < app.tasks.len() {
+            let state = app.tasks[app.selected_task].lock().unwrap();
+            let cmd_line = format!(
+                "$ {} {}",
+                state.config.command,
+                state.config.args.join(" ")
+            );
+            let dir_line = format!("Directory: {:?}", state.config.working_dir);
 
-        let mut lines = vec![
-            Line::from(Span::styled(cmd_line, Style::default().fg(Color::Cyan))),
-            Line::from(Span::styled(dir_line, Style::default().fg(Color::DarkGray))),
-            Line::from(""),
-        ];
+            // Clone output to avoid lifetime issues
+            let output_clone: Vec<String> = state.output.clone();
+            drop(state); // Explicitly drop the guard
 
-        let output_start = if output_clone.len() > 50 {
-            output_clone.len().saturating_sub(50)
+            let mut lines = vec![
+                Line::from(Span::styled(cmd_line, Style::default().fg(Color::Cyan))),
+                Line::from(Span::styled(dir_line, Style::default().fg(Color::DarkGray))),
+                Line::from(""),
+            ];
+
+            // Add all output lines with color coding
+            for line in &output_clone {
+                let color =
+                    if line.contains("error") || line.contains("Error") || line.contains("FAILED") {
+                        Color::Red
+                    } else if line.contains("warning") || line.contains("Warning") {
+                        Color::Yellow
+                    } else if line.contains("passed") || line.contains("success") || line.contains("ok")
+                    {
+                        Color::Green
+                    } else {
+                        Color::Gray
+                    };
+                lines.push(Line::from(Span::styled(line.clone(), Style::default().fg(color))));
+            }
+
+            let total = lines.len();
+            // Clamp scroll offset to valid range
+            let max_scroll = total.saturating_sub(output_area_height);
+            let scroll = app.output_scroll.min(max_scroll);
+
+            (lines, total, scroll)
         } else {
-            0
+            (vec![Line::from("No task selected")], 1, 0)
         };
 
-        for line in output_clone.iter().skip(output_start) {
-            let color = if line.contains("error") || line.contains("Error") || line.contains("FAILED") {
-                Color::Red
-            } else if line.contains("warning") || line.contains("Warning") {
-                Color::Yellow
-            } else if line.contains("passed") || line.contains("success") || line.contains("ok") {
-                Color::Green
-            } else {
-                Color::Gray
-            };
-            lines.push(Line::from(Span::styled(line.clone(), Style::default().fg(color))));
+    // Build output title with scroll info
+    let output_title = if app.focused_pane == FocusedPane::Output {
+        if total_lines > output_area_height {
+            format!(
+                "Output [focused] ({}-{}/{})",
+                scroll_offset + 1,
+                (scroll_offset + output_area_height).min(total_lines),
+                total_lines
+            )
+        } else {
+            "Output [focused]".to_string()
         }
-
-        lines
+    } else if total_lines > output_area_height {
+        format!(
+            "Output ({}-{}/{})",
+            scroll_offset + 1,
+            (scroll_offset + output_area_height).min(total_lines),
+            total_lines
+        )
     } else {
-        vec![Line::from("No task selected")]
+        "Output".to_string()
+    };
+
+    let output_border_style = if app.focused_pane == FocusedPane::Output {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
     };
 
     let output = Paragraph::new(selected_output)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Output (last 50 lines)"),
+                .title(output_title)
+                .border_style(output_border_style),
         )
+        .scroll((scroll_offset as u16, 0))
         .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(output, main_chunks[1]);
 
-    // Footer
-    let footer_text = if app.all_done {
+    // Footer with context-sensitive help
+    let base_help = "q:quit  Tab:switch pane  []:resize";
+    let nav_help = if app.focused_pane == FocusedPane::Tasks {
+        "↑↓/jk:select task"
+    } else {
+        "↑↓/jk:scroll  PgUp/PgDn  g/G:top/bottom"
+    };
+    let status = if app.all_done {
         if app.failed_count() > 0 {
-            " Press 'q' to quit | ↑↓ to navigate tasks | Some tasks failed! "
+            "Some tasks failed!"
         } else {
-            " Press 'q' to quit | ↑↓ to navigate tasks | All tasks completed! "
+            "All tasks completed!"
         }
     } else {
-        " Press 'q' to quit | ↑↓ to navigate tasks | Running... "
+        "Running..."
     };
+    let footer_text = format!(" {} | {} | {} ", base_help, nav_help, status);
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));
@@ -874,6 +1011,7 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
     // Setup terminal
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -900,7 +1038,7 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
 
     loop {
         // Draw UI
-        terminal.draw(|f| draw_ui(f, &app))?;
+        terminal.draw(|f| draw_ui(f, &mut app))?;
 
         // Handle messages from tasks
         while let Ok(msg) = rx.try_recv() {
@@ -938,27 +1076,144 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
         // Check if all done
         app.all_done = app.completed_count() == app.tasks.len();
 
-        // Handle input
+        // Handle input (keyboard and mouse)
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') => {
-                            app.should_quit = true;
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Char('q') => {
+                                app.should_quit = true;
+                            }
+                            // Tab switches focus between panes
+                            KeyCode::Tab => {
+                                app.focused_pane = match app.focused_pane {
+                                    FocusedPane::Tasks => FocusedPane::Output,
+                                    FocusedPane::Output => FocusedPane::Tasks,
+                                };
+                            }
+                            // Resize pane width with [ and ]
+                            KeyCode::Char('[') => {
+                                app.task_pane_width = app.task_pane_width.saturating_sub(5).max(15);
+                            }
+                            KeyCode::Char(']') => {
+                                app.task_pane_width = (app.task_pane_width + 5).min(85);
+                            }
+                            // Up/Down navigation depends on focused pane
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                match app.focused_pane {
+                                    FocusedPane::Tasks => {
+                                        if app.selected_task > 0 {
+                                            app.selected_task -= 1;
+                                            app.reset_output_scroll();
+                                        }
+                                    }
+                                    FocusedPane::Output => {
+                                        app.output_scroll = app.output_scroll.saturating_sub(1);
+                                    }
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                match app.focused_pane {
+                                    FocusedPane::Tasks => {
+                                        if app.selected_task < app.tasks.len().saturating_sub(1) {
+                                            app.selected_task += 1;
+                                            app.reset_output_scroll();
+                                        }
+                                    }
+                                    FocusedPane::Output => {
+                                        app.output_scroll = app.output_scroll.saturating_add(1);
+                                    }
+                                }
+                            }
+                            // Page up/down for faster scrolling in output pane
+                            KeyCode::PageUp => {
+                                if app.focused_pane == FocusedPane::Output {
+                                    app.output_scroll = app.output_scroll.saturating_sub(10);
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                if app.focused_pane == FocusedPane::Output {
+                                    app.output_scroll = app.output_scroll.saturating_add(10);
+                                }
+                            }
+                            // Home/End for jumping to start/end of output
+                            KeyCode::Home => {
+                                if app.focused_pane == FocusedPane::Output {
+                                    app.output_scroll = 0;
+                                }
+                            }
+                            KeyCode::End => {
+                                if app.focused_pane == FocusedPane::Output {
+                                    app.output_scroll = usize::MAX; // Will be clamped in draw_ui
+                                }
+                            }
+                            // 'g' to scroll to top, 'G' to scroll to bottom (vim-style)
+                            KeyCode::Char('g') => {
+                                if app.focused_pane == FocusedPane::Output {
+                                    app.output_scroll = 0;
+                                }
+                            }
+                            KeyCode::Char('G') => {
+                                if app.focused_pane == FocusedPane::Output {
+                                    app.output_scroll = usize::MAX;
+                                }
+                            }
+                            _ => {}
                         }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if app.selected_task > 0 {
-                                app.selected_task -= 1;
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    let x = mouse.column;
+                    let y = mouse.row;
+
+                    // Check if click is in tasks area
+                    let in_tasks = x >= app.tasks_area.x
+                        && x < app.tasks_area.x + app.tasks_area.width
+                        && y >= app.tasks_area.y
+                        && y < app.tasks_area.y + app.tasks_area.height;
+
+                    // Check if click is in output area
+                    let in_output = x >= app.output_area.x
+                        && x < app.output_area.x + app.output_area.width
+                        && y >= app.output_area.y
+                        && y < app.output_area.y + app.output_area.height;
+
+                    match mouse.kind {
+                        MouseEventKind::Down(_) => {
+                            if in_tasks {
+                                app.focused_pane = FocusedPane::Tasks;
+                                // Calculate which task was clicked (accounting for border)
+                                let task_y = y.saturating_sub(app.tasks_area.y + 1);
+                                let task_idx = task_y as usize;
+                                if task_idx < app.tasks.len() && app.selected_task != task_idx {
+                                    app.selected_task = task_idx;
+                                    app.reset_output_scroll();
+                                }
+                            } else if in_output {
+                                app.focused_pane = FocusedPane::Output;
                             }
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if app.selected_task < app.tasks.len().saturating_sub(1) {
+                        MouseEventKind::ScrollUp => {
+                            if in_output {
+                                app.output_scroll = app.output_scroll.saturating_sub(3);
+                            } else if in_tasks && app.selected_task > 0 {
+                                app.selected_task -= 1;
+                                app.reset_output_scroll();
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if in_output {
+                                app.output_scroll = app.output_scroll.saturating_add(3);
+                            } else if in_tasks && app.selected_task < app.tasks.len().saturating_sub(1) {
                                 app.selected_task += 1;
+                                app.reset_output_scroll();
                             }
                         }
                         _ => {}
                     }
                 }
+                _ => {}
             }
         }
 
@@ -968,6 +1223,7 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
     }
 
     // Cleanup
+    stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
@@ -1128,6 +1384,7 @@ async fn main() -> Result<()> {
             all_tasks.extend(create_test_tasks(&root, &projects));
             all_tasks
         }
+        Commands::Lighthouse { target } => create_lighthouse_tasks(&root, *target),
     };
 
     if tasks.is_empty() {
