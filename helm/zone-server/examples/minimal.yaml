@@ -1,0 +1,36 @@
+# Minimal deployment example for Zone
+# This configuration uses absolute minimum resources for testing
+
+environment: testing
+
+global:
+  externalDatabase: true
+  securityContexts: true
+
+# Only override what's necessary
+secrets:
+  dbPassword: "testpassword"
+  jwtSecret: "test-jwt-secret"
+  encryptionKey: "test-encryption-key-32-chars!!"
+
+server:
+  enabled: true
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  podDisruptionBudget:
+    enabled: false
+
+manager:
+  enabled: true
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  podDisruptionBudget:
+    enabled: false
+
+ingress:
+  enabled: false
+
+migration:
+  enabled: true

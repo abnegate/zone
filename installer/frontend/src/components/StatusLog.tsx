@@ -12,6 +12,7 @@ interface StatusLogProps {
 export function StatusLog({ lines }: StatusLogProps) {
   const logRef = useRef<HTMLDivElement>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: lines triggers auto-scroll when new logs arrive
   useEffect(() => {
     if (logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
@@ -21,7 +22,11 @@ export function StatusLog({ lines }: StatusLogProps) {
   return (
     <div className="status-log" ref={logRef}>
       {lines.map((line, index) => (
-        <div key={index} className={`status-line ${line.type || ''}`}>
+        // Using index + message as key since log lines are append-only and have no unique IDs
+        <div
+          key={`${index}-${line.message.slice(0, 20)}`}
+          className={`status-line ${line.type || ''}`}
+        >
           {line.message}
         </div>
       ))}

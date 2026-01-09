@@ -14,6 +14,12 @@ export const SENSITIVE_FIELDS: (keyof InstallerConfig)[] = [
   'VPN_WIREGUARD_PRIVATE_KEY',
   'MONITORING_GRAFANA_ADMIN_PASSWORD',
   'ALERT_SMTP_PASSWORD',
+  // AI Provider credentials
+  'AI_LITELLM_KEY',
+  'AI_OPENAI_API_KEY',
+  'AI_ANTHROPIC_API_KEY',
+  'AI_BEDROCK_ACCESS_KEY',
+  'AI_BEDROCK_SECRET_KEY',
 ];
 
 async function getOrCreateKey(): Promise<CryptoKey> {

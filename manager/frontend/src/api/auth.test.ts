@@ -18,6 +18,7 @@ describe('auth API', () => {
         user: {
           id: '1',
           email: 'test@test.com',
+          email_verified: true,
           display_name: null,
           is_active: true,
           is_admin: false,
@@ -76,6 +77,7 @@ describe('auth API', () => {
         user: {
           id: '1',
           email: 'new@test.com',
+          email_verified: false,
           display_name: null,
           is_active: true,
           is_admin: false,
@@ -146,6 +148,7 @@ describe('auth API', () => {
         user: {
           id: '1',
           email: 'test@test.com',
+          email_verified: true,
           display_name: null,
           is_active: true,
           is_admin: false,

@@ -30,6 +30,7 @@ export function StepPills({ currentStep, onStepClick }: StepPillsProps) {
         return (
           <div key={step.id} className={className}>
             <button
+              type="button"
               className="stepper-button"
               onClick={() => onStepClick(step.number)}
               aria-current={isActive ? 'step' : undefined}
@@ -45,6 +46,8 @@ export function StepPills({ currentStep, onStepClick }: StepPillsProps) {
                     strokeWidth="2.5"
                     strokeLinecap="round"
                     strokeLinejoin="round"
+                    aria-label="Step completed"
+                    role="img"
                   >
                     <polyline points="20 6 9 17 4 12" />
                   </svg>

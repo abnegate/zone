@@ -18,7 +18,7 @@ export function register(config?: Config): void {
     }
 
     window.addEventListener('load', () => {
-      const swUrl = '/static/service-worker.js';
+      const swUrl = '/service-worker.js';
 
       if (isLocalhost) {
         // Running on localhost - check if service worker exists

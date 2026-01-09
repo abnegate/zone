@@ -11,10 +11,24 @@ export type {
   ProgressBarProps,
 } from '@zone/ui';
 
-// App-specific components
-export { default as ContextSwitcher } from './ContextSwitcher';
-export { default as Layout } from './Layout';
-export { default as PermissionGate } from './PermissionGate';
-export { default as ProtectedRoute } from './ProtectedRoute';
-export { default as Sidebar } from './Sidebar';
-export { default as VirtualBrowseList } from './VirtualBrowseList';
+// Re-export shared components
+export {
+  ContextSwitcher,
+  Layout,
+  PermissionGate,
+  ProtectedRoute,
+  Sidebar,
+} from '../shared/components';
+
+// App-specific components - now re-exported from features/settings
+export {
+  AuditLogsSection,
+  BillingSection,
+  InvitationsSection,
+  OrgMembersSection,
+} from '../features/settings/organization/components';
+export { WorkspaceMembersSection } from '../features/settings/workspace/components';
+
+// Backward compatibility re-exports
+export { VirtualBrowseList } from '../features/models/components';
+export { ResendVerificationButton, VerificationPendingBanner } from '../features/auth';

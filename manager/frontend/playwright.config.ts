@@ -1,5 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// Allow configurable port for running alongside other services
+const port = process.env.PORT || '3000';
+const baseURL = `http://localhost:${port}`;
+
 // Allow running specific browser via environment variable (for CI matrix)
 const browserProject = process.env.BROWSER;
 const collectCoverage = process.env.COLLECT_COVERAGE === 'true';
@@ -40,7 +44,7 @@ const coverageReporter: Parameters<typeof defineConfig>[0]['reporter'] = [
         entryFilter: (entry: { url: string }) => {
           // Only collect coverage for our app's source files
           return (
-            entry.url.includes('localhost:3000') &&
+            entry.url.includes(`localhost:${port}`) &&
             entry.url.includes('/static/js/') &&
             !entry.url.includes('node_modules')
           );
@@ -72,7 +76,7 @@ export default defineConfig({
   workers: collectCoverage ? 1 : process.env.CI ? 1 : undefined,
   reporter: collectCoverage ? coverageReporter : defaultReporters,
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
@@ -80,8 +84,8 @@ export default defineConfig({
     ? [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]
     : projects,
   webServer: {
-    command: 'npm start',
-    url: 'http://localhost:3000',
+    command: `PORT=${port} npm start`,
+    url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 120000,
   },

@@ -1,0 +1,194 @@
+import { API_BASE } from './client';
+import { parse } from '../validation';
+import type {
+  Task,
+  TaskRun,
+  TaskRunLog,
+  CreateTaskRequest,
+  UpdateTaskRequest,
+} from '../features/tasks/types';
+import {
+  TasksResponseSchema,
+  TaskResponseSchema,
+  TaskRunsResponseSchema,
+  TaskRunResponseSchema,
+  TaskRunLogsResponseSchema,
+  RunTaskResponseSchema,
+} from '../features/tasks/schemas';
+
+// Helper to parse error responses
+async function parseErrorResponse(response: Response): Promise<{ message?: string }> {
+  try {
+    const data = await response.json();
+    return { message: data.message || data.error || data.detail };
+  } catch {
+    return {};
+  }
+}
+
+class TasksApi {
+  private getAccessToken: (() => string | null) | null = null;
+
+  setGetAccessToken(fn: () => string | null) {
+    this.getAccessToken = fn;
+  }
+
+  private getHeaders(): HeadersInit {
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+    };
+    const token = this.getAccessToken?.();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    return headers;
+  }
+
+  async getTasks(projectId?: string, status?: string): Promise<Task[]> {
+    const params = new URLSearchParams();
+    if (projectId) params.set('project_id', projectId);
+    if (status) params.set('status', status);
+    const query = params.toString() ? `?${params}` : '';
+
+    const response = await fetch(`${API_BASE}/api/tasks${query}`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch tasks: ${response.status}`);
+    }
+    const data = parse(TasksResponseSchema, await response.json());
+    return data.tasks;
+  }
+
+  async getTask(id: string): Promise<Task> {
+    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch task: ${response.status}`);
+    }
+    const data = parse(TaskResponseSchema, await response.json());
+    return data.task;
+  }
+
+  async createTask(request: CreateTaskRequest): Promise<Task> {
+    const response = await fetch(`${API_BASE}/api/tasks`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to create task: ${response.status}`);
+    }
+    const data = parse(TaskResponseSchema, await response.json());
+    return data.task;
+  }
+
+  async updateTask(id: string, request: UpdateTaskRequest): Promise<Task> {
+    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: this.getHeaders(),
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to update task: ${response.status}`);
+    }
+    const data = parse(TaskResponseSchema, await response.json());
+    return data.task;
+  }
+
+  async deleteTask(id: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to delete task: ${response.status}`);
+    }
+  }
+
+  async runTask(id: string): Promise<{ run_id: string }> {
+    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}/start`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to run task: ${response.status}`);
+    }
+    const data = parse(RunTaskResponseSchema, await response.json());
+    return data;
+  }
+
+  async cancelTaskRun(id: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}/stop`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to cancel task run: ${response.status}`);
+    }
+  }
+
+  async getTaskRuns(taskId: string): Promise<TaskRun[]> {
+    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(taskId)}/runs`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch task runs: ${response.status}`);
+    }
+    const data = parse(TaskRunsResponseSchema, await response.json());
+    return data.runs;
+  }
+
+  async getTaskRun(taskId: string, runId: string): Promise<TaskRun> {
+    const response = await fetch(
+      `${API_BASE}/api/tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch task run: ${response.status}`);
+    }
+    const data = parse(TaskRunResponseSchema, await response.json());
+    return data.run;
+  }
+
+  async getTaskRunLogs(taskId: string, runId: string): Promise<TaskRunLog[]> {
+    const response = await fetch(
+      `${API_BASE}/api/tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}/logs`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to fetch task run logs: ${response.status}`);
+    }
+    const data = parse(TaskRunLogsResponseSchema, await response.json());
+    return data.logs;
+  }
+
+  createTaskWebSocket(runId: string): WebSocket {
+    let wsUrl: string;
+    if (API_BASE) {
+      const wsBase = API_BASE.replace(/^http/, 'ws');
+      wsUrl = `${wsBase}/ws/tasks/${encodeURIComponent(runId)}`;
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.host}/ws/tasks/${encodeURIComponent(runId)}`;
+    }
+    return new WebSocket(wsUrl);
+  }
+}
+
+export const tasksApi = new TasksApi();

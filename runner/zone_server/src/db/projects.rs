@@ -21,17 +21,22 @@ pub struct ProjectRow {
     pub updated_at: Option<NaiveDateTime>,
 }
 
-/// List projects with optional status filter
-pub async fn list_projects(pool: &PgPool, status: Option<&str>) -> DbResult<Vec<ProjectRow>> {
+/// List projects with workspace and optional status filter
+pub async fn list_projects(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    status: Option<&str>,
+) -> DbResult<Vec<ProjectRow>> {
     if let Some(status) = status {
         let rows = sqlx::query!(
             r#"
             SELECT id, workspace_id, source_id, name, description, status,
                    github_repo_url, github_access_token, created_at, updated_at
             FROM projects
-            WHERE status = $1
+            WHERE workspace_id = $1 AND status = $2
             ORDER BY created_at DESC
             "#,
+            workspace_id,
             status
         )
         .fetch_all(pool)
@@ -58,8 +63,10 @@ pub async fn list_projects(pool: &PgPool, status: Option<&str>) -> DbResult<Vec<
             SELECT id, workspace_id, source_id, name, description, status,
                    github_repo_url, github_access_token, created_at, updated_at
             FROM projects
+            WHERE workspace_id = $1
             ORDER BY created_at DESC
-            "#
+            "#,
+            workspace_id
         )
         .fetch_all(pool)
         .await?;

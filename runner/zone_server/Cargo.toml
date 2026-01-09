@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "zone_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zone-server"
 path = "src/main.rs"
@@ -39,12 +43,26 @@ jsonwebtoken = { workspace = true }
 argon2 = { workspace = true }
 sha2 = "0.10"
 hex = "0.4"
+rand = "0.8"
+hmac = "0.12"
+subtle = "2.5"
+
+# Encryption
+aes-gcm = "0.10"
+base64 = "0.22"
+
+# Email
+lettre = { version = "0.11", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
 
 # WebSocket
-dashmap = "6.1"
+dashmap = { workspace = true }
+once_cell = { workspace = true }
 
 # HTTP client (for proxying to Ollama)
 reqwest = { workspace = true }
+
+# HTML parsing for web content extraction
+scraper = "0.22"
 
 # Metrics
 metrics = { workspace = true }
@@ -52,7 +70,13 @@ metrics-exporter-prometheus = { workspace = true }
 
 # Internal
 zone_core = { path = "../zone_core" }
+zone_context = { path = "../zone_context" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 http-body-util = "0.1"
+tower = { workspace = true, features = ["util"] }
+bytes = { workspace = true }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+zone_context = { path = "../zone_context", features = ["test-utils"] }

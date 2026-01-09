@@ -33,10 +33,21 @@ const DEFAULT_CONFIG: InstallerConfig = {
   SECURITY_HTTP_REDIRECT: 'false',
   SECURITY_GENERATE_CERTIFICATE: 'false',
 
-  // Models
-  OLLAMA_MODEL_FAST: 'llama3.1:8b',
-  OLLAMA_MODEL_REASON: 'deepseek-r1:32b',
-  OLLAMA_MODEL_EMBED: 'nomic-embed-text',
+  // AI Provider
+  AI_PROVIDER: 'self_hosted',
+  AI_LITELLM_HOST: 'http://ollama:11434',
+  AI_LITELLM_KEY: '',
+  AI_OPENAI_API_KEY: '',
+  AI_OPENAI_BASE_URL: '',
+  AI_ANTHROPIC_API_KEY: '',
+  AI_ANTHROPIC_BASE_URL: '',
+  AI_BEDROCK_REGION: 'us-east-1',
+  AI_BEDROCK_ACCESS_KEY: '',
+  AI_BEDROCK_SECRET_KEY: '',
+  AI_BEDROCK_USE_IAM_ROLE: 'false',
+  AI_MODEL_FAST: 'llama3.1:8b',
+  AI_MODEL_REASONING: 'deepseek-r1:32b',
+  AI_MODEL_EMBEDDING: 'nomic-embed-text',
 
   // Interface
   WEBUI_AUTH: 'true',

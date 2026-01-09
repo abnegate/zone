@@ -29,6 +29,11 @@ pub struct TaskRow {
     pub completed_at: Option<NaiveDateTime>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
+    // PR-related fields
+    pub pr_url: Option<String>,
+    pub branch_name: Option<String>,
+    pub pr_status: Option<String>,
+    pub pr_created_at: Option<NaiveDateTime>,
 }
 
 /// Task run row from database
@@ -82,6 +87,10 @@ macro_rules! map_task_row {
             completed_at: $r.completed_at,
             created_at: $r.created_at,
             updated_at: $r.updated_at,
+            pr_url: $r.pr_url,
+            branch_name: $r.branch_name,
+            pr_status: $r.pr_status,
+            pr_created_at: $r.pr_created_at,
         }
     };
 }
@@ -98,7 +107,8 @@ pub async fn list_tasks(
                 r#"
                 SELECT id, project_id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at
+                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                       pr_url, branch_name, pr_status, pr_created_at
                 FROM tasks
                 WHERE project_id = $1 AND status = $2
                 ORDER BY created_at DESC
@@ -115,7 +125,8 @@ pub async fn list_tasks(
                 r#"
                 SELECT id, project_id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at
+                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                       pr_url, branch_name, pr_status, pr_created_at
                 FROM tasks
                 WHERE project_id = $1
                 ORDER BY created_at DESC
@@ -131,7 +142,8 @@ pub async fn list_tasks(
                 r#"
                 SELECT id, project_id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at
+                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                       pr_url, branch_name, pr_status, pr_created_at
                 FROM tasks
                 WHERE status = $1
                 ORDER BY created_at DESC
@@ -147,7 +159,8 @@ pub async fn list_tasks(
                 r#"
                 SELECT id, project_id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at
+                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                       pr_url, branch_name, pr_status, pr_created_at
                 FROM tasks
                 ORDER BY created_at DESC
                 "#
@@ -165,7 +178,8 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
         r#"
         SELECT id, project_id, title, description, acceptance_criteria, status, priority,
                model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-               workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at
+               workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+               pr_url, branch_name, pr_status, pr_created_at
         FROM tasks
         WHERE id = $1
         "#,
@@ -174,28 +188,7 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| TaskRow {
-        id: r.id,
-        project_id: r.project_id,
-        title: r.title,
-        description: r.description,
-        acceptance_criteria: r.acceptance_criteria,
-        status: r.status,
-        priority: r.priority,
-        model_name: r.model_name,
-        dependencies: r.dependencies,
-        is_agentic: r.is_agentic,
-        github_repo_url: r.github_repo_url,
-        source_id: r.source_id,
-        source_ids: r.source_ids,
-        workspace_id: r.workspace_id,
-        worker_id: r.worker_id,
-        queued_at: r.queued_at,
-        started_at: r.started_at,
-        completed_at: r.completed_at,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    Ok(row.map(|r| map_task_row!(r)))
 }
 
 /// Create a new task
@@ -214,7 +207,8 @@ pub async fn create_task(
         VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at
+                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                  pr_url, branch_name, pr_status, pr_created_at
         "#,
         project_id,
         title,
@@ -226,28 +220,7 @@ pub async fn create_task(
     .fetch_one(pool)
     .await?;
 
-    Ok(TaskRow {
-        id: row.id,
-        project_id: row.project_id,
-        title: row.title,
-        description: row.description,
-        acceptance_criteria: row.acceptance_criteria,
-        status: row.status,
-        priority: row.priority,
-        model_name: row.model_name,
-        dependencies: row.dependencies,
-        is_agentic: row.is_agentic,
-        github_repo_url: row.github_repo_url,
-        source_id: row.source_id,
-        source_ids: row.source_ids,
-        workspace_id: row.workspace_id,
-        worker_id: row.worker_id,
-        queued_at: row.queued_at,
-        started_at: row.started_at,
-        completed_at: row.completed_at,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    })
+    Ok(map_task_row!(row))
 }
 
 /// Update a task
@@ -272,7 +245,8 @@ pub async fn update_task(
         WHERE id = $1
         RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at
+                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                  pr_url, branch_name, pr_status, pr_created_at
         "#,
         id,
         title,
@@ -284,28 +258,7 @@ pub async fn update_task(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| TaskRow {
-        id: r.id,
-        project_id: r.project_id,
-        title: r.title,
-        description: r.description,
-        acceptance_criteria: r.acceptance_criteria,
-        status: r.status,
-        priority: r.priority,
-        model_name: r.model_name,
-        dependencies: r.dependencies,
-        is_agentic: r.is_agentic,
-        github_repo_url: r.github_repo_url,
-        source_id: r.source_id,
-        source_ids: r.source_ids,
-        workspace_id: r.workspace_id,
-        worker_id: r.worker_id,
-        queued_at: r.queued_at,
-        started_at: r.started_at,
-        completed_at: r.completed_at,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    Ok(row.map(|r| map_task_row!(r)))
 }
 
 /// Delete a task
@@ -328,35 +281,15 @@ pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
         WHERE id = $1
         RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at
+                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                  pr_url, branch_name, pr_status, pr_created_at
         "#,
         id
     )
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| TaskRow {
-        id: r.id,
-        project_id: r.project_id,
-        title: r.title,
-        description: r.description,
-        acceptance_criteria: r.acceptance_criteria,
-        status: r.status,
-        priority: r.priority,
-        model_name: r.model_name,
-        dependencies: r.dependencies,
-        is_agentic: r.is_agentic,
-        github_repo_url: r.github_repo_url,
-        source_id: r.source_id,
-        source_ids: r.source_ids,
-        workspace_id: r.workspace_id,
-        worker_id: r.worker_id,
-        queued_at: r.queued_at,
-        started_at: r.started_at,
-        completed_at: r.completed_at,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    Ok(row.map(|r| map_task_row!(r)))
 }
 
 /// Create a new task run
@@ -586,4 +519,64 @@ pub async fn get_task_run_logs(pool: &PgPool, task_run_id: Uuid) -> DbResult<Vec
             created_at: r.created_at,
         })
         .collect())
+}
+
+/// Update task PR information
+pub async fn update_task_pr(
+    pool: &PgPool,
+    task_id: Uuid,
+    pr_url: &str,
+    branch_name: &str,
+    pr_status: &str,
+) -> DbResult<Option<TaskRow>> {
+    let row = sqlx::query!(
+        r#"
+        UPDATE tasks
+        SET pr_url = $2,
+            branch_name = $3,
+            pr_status = $4,
+            pr_created_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
+                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                  pr_url, branch_name, pr_status, pr_created_at
+        "#,
+        task_id,
+        pr_url,
+        branch_name,
+        pr_status
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| map_task_row!(r)))
+}
+
+/// Update task branch name (for when branch is created before PR)
+pub async fn update_task_branch(
+    pool: &PgPool,
+    task_id: Uuid,
+    branch_name: &str,
+) -> DbResult<Option<TaskRow>> {
+    let row = sqlx::query!(
+        r#"
+        UPDATE tasks
+        SET branch_name = $2,
+            pr_status = 'pending',
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
+                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
+                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
+                  pr_url, branch_name, pr_status, pr_created_at
+        "#,
+        task_id,
+        branch_name
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| map_task_row!(r)))
 }

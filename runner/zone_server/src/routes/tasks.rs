@@ -319,8 +319,43 @@ pub async fn create_run(
     _auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    // Check if there's already a running task run for this task
+    // This prevents duplicate concurrent executions
+    match tasks::list_task_runs(state.db(), id).await {
+        Ok(runs) => {
+            let active_run = runs
+                .iter()
+                .find(|r| r.status == "running" || r.status == "pending");
+            if let Some(existing) = active_run {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::new(format!(
+                        "Task already has an active run (id: {}, status: {})",
+                        existing.id, existing.status
+                    ))),
+                )
+                    .into_response();
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to check existing runs: {}", e);
+            // Continue anyway - better to potentially have duplicates than fail entirely
+        }
+    }
+
     match tasks::create_task_run(state.db(), id).await {
-        Ok(run) => (StatusCode::CREATED, Json(TaskRunResponse::from(run))).into_response(),
+        Ok(run) => {
+            let run_id = run.id;
+            let task_id = id;
+            let state_clone = state.clone();
+
+            // Spawn background task execution
+            tokio::spawn(async move {
+                crate::workers::task::execute_task_run(&state_clone, run_id, task_id).await;
+            });
+
+            (StatusCode::CREATED, Json(TaskRunResponse::from(run))).into_response()
+        }
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (

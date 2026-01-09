@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import './AuthPage.css';
+import '../features/auth/pages/AuthPage.css';
 
 export default function UnauthorizedPage() {
   return (

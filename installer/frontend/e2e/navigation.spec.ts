@@ -6,28 +6,28 @@ test.describe('Installer Navigation', () => {
   });
 
   test('displays installer form', async ({ page }) => {
-    await expect(page.locator('h1')).toContainText('Zone Configuration');
+    await expect(page.locator('h1')).toContainText('Zone');
   });
 
-  test('shows step pills', async ({ page }) => {
-    await expect(page.locator('.step-pill')).toHaveCount(7);
+  test('shows step items', async ({ page }) => {
+    await expect(page.locator('.stepper-item')).toHaveCount(7);
   });
 
   test('navigates forward through steps', async ({ page }) => {
     await expect(page.locator('h2')).toContainText('Domain Configuration');
 
-    // Use step pills to navigate (bypasses validation)
-    await page.click('.step-pill:nth-child(2)');
+    // Use step items to navigate (bypasses validation)
+    await page.click('.stepper-item:nth-child(2) .stepper-button');
     await expect(page.locator('h2')).toContainText('Security');
 
-    await page.click('.step-pill:nth-child(3)');
-    await expect(page.locator('h2')).toContainText('Model Selection');
+    await page.click('.stepper-item:nth-child(3) .stepper-button');
+    await expect(page.locator('h2')).toContainText('AI Provider Configuration');
   });
 
   test('navigates backward through steps', async ({ page }) => {
-    // Navigate to step 3 via step pills
-    await page.click('.step-pill:nth-child(3)');
-    await expect(page.locator('h2')).toContainText('Model Selection');
+    // Navigate to step 3 via step items
+    await page.click('.stepper-item:nth-child(3) .stepper-button');
+    await expect(page.locator('h2')).toContainText('AI Provider Configuration');
 
     await page.click('text=Previous');
     await expect(page.locator('h2')).toContainText('Security');
@@ -37,9 +37,9 @@ test.describe('Installer Navigation', () => {
     await expect(page.locator('button:has-text("Previous")')).toBeDisabled();
   });
 
-  test('can click step pills to navigate', async ({ page }) => {
-    await page.click('.step-pill:nth-child(3)');
-    await expect(page.locator('h2')).toContainText('Model Selection');
+  test('can click step items to navigate', async ({ page }) => {
+    await page.click('.stepper-item:nth-child(3) .stepper-button');
+    await expect(page.locator('h2')).toContainText('AI Provider Configuration');
   });
 
   test('keyboard navigation with arrow keys', async ({ page }) => {
@@ -48,7 +48,7 @@ test.describe('Installer Navigation', () => {
 
     // ArrowRight should not work on step 1 without valid security keys
     // Instead test ArrowLeft from step 2
-    await page.click('.step-pill:nth-child(2)');
+    await page.click('.stepper-item:nth-child(2) .stepper-button');
     await expect(page.locator('h2')).toContainText('Security');
 
     // ArrowLeft should go back to Domain (no validation needed for back)
@@ -57,8 +57,8 @@ test.describe('Installer Navigation', () => {
   });
 
   test('shows Install button on last step', async ({ page }) => {
-    // Navigate to final step via step pill
-    await page.click('.step-pill:nth-child(7)');
+    // Navigate to final step via step item
+    await page.click('.stepper-item:nth-child(7) .stepper-button');
 
     await expect(page.locator('button:has-text("Install")')).toBeVisible();
   });

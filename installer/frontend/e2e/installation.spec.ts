@@ -7,14 +7,14 @@ test.describe('Installation Process', () => {
 
   test('shows Install button on final step', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('.step-pill:nth-child(7)');
+    await page.click('.stepper-item:nth-child(7) .stepper-button');
 
     await expect(page.locator('button:has-text("Install")')).toBeVisible();
   });
 
   test('opens modal when Install clicked', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('.step-pill:nth-child(7)');
+    await page.click('.stepper-item:nth-child(7) .stepper-button');
 
     // Set up route before clicking Install
     await page.route('**/api/install', (route) => {
@@ -29,15 +29,15 @@ test.describe('Installation Process', () => {
     await page.click('button:has-text("Install")');
 
     // Modal should appear immediately (before API response)
-    await expect(page.locator('.modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
   });
 
   test('shows progress during installation', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('.step-pill:nth-child(7)');
+    await page.click('.stepper-item:nth-child(7) .stepper-button');
 
     await page.route('**/api/install', async (route) => {
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 500));
       route.fulfill({
         status: 200,
         contentType: 'text/plain',
@@ -45,14 +45,17 @@ test.describe('Installation Process', () => {
       });
     });
 
-    await page.click('text=Install');
+    await page.click('button:has-text("Install")');
 
+    // Wait for modal to appear first
+    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
+    // Then check for progress bar (which has initial 0% width)
     await expect(page.locator('.progress-bar-fill')).toBeVisible();
   });
 
   test('shows success message on completion', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('.step-pill:nth-child(7)');
+    await page.click('.stepper-item:nth-child(7) .stepper-button');
 
     await page.route('**/api/install', (route) => {
       route.fulfill({
@@ -65,14 +68,14 @@ test.describe('Installation Process', () => {
     await page.click('button:has-text("Install")');
 
     // First verify modal opens
-    await expect(page.locator('.modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
     // Then check for completion
     await expect(page.locator('text=Installation Complete')).toBeVisible({ timeout: 10000 });
   });
 
   test('shows error message on failure', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('.step-pill:nth-child(7)');
+    await page.click('.stepper-item:nth-child(7) .stepper-button');
 
     await page.route('**/api/install', (route) => {
       route.fulfill({
@@ -84,14 +87,14 @@ test.describe('Installation Process', () => {
     await page.click('button:has-text("Install")');
 
     // First verify modal opens
-    await expect(page.locator('.modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
     // Then check for error
     await expect(page.locator('text=Installation Failed')).toBeVisible({ timeout: 10000 });
   });
 
   test('can close modal after completion', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('.step-pill:nth-child(7)');
+    await page.click('.stepper-item:nth-child(7) .stepper-button');
 
     await page.route('**/api/install', (route) => {
       route.fulfill({
@@ -102,10 +105,10 @@ test.describe('Installation Process', () => {
     });
 
     await page.click('button:has-text("Install")');
-    await expect(page.locator('.modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
     await expect(page.locator('text=Installation Complete')).toBeVisible({ timeout: 10000 });
 
     await page.click('button:has-text("Close")');
-    await expect(page.locator('.modal-overlay')).not.toBeVisible();
+    await expect(page.locator('.ui-modal-overlay')).not.toBeVisible();
   });
 });

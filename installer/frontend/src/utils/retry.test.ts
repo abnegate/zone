@@ -43,6 +43,33 @@ describe('withRetry', () => {
 
     expect(fn).toHaveBeenCalledWith(expect.any(AbortSignal));
   });
+
+  it('throws RetryError on timeout', async () => {
+    jest.useFakeTimers();
+
+    const fn = jest.fn().mockImplementation(
+      (signal: AbortSignal) =>
+        new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('Aborted')));
+        })
+    );
+
+    const retryPromise = withRetry(fn, { timeout: 100, maxAttempts: 1 });
+
+    // Advance time past the timeout
+    jest.advanceTimersByTime(101);
+
+    await expect(retryPromise).rejects.toThrow(RetryError);
+    await expect(retryPromise).rejects.toThrow(/timed out/);
+
+    jest.useRealTimers();
+  });
+
+  it('handles non-Error thrown values', async () => {
+    const fn = jest.fn().mockRejectedValue('string error');
+
+    await expect(withRetry(fn, { maxAttempts: 1, initialDelay: 1 })).rejects.toThrow(RetryError);
+  });
 });
 
 describe('RetryError', () => {
