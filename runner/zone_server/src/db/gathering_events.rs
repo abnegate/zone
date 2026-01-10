@@ -87,16 +87,35 @@ pub async fn get_events_since(
 }
 
 /// Cleanup events older than retention period
-pub async fn cleanup_old_events(pool: &PgPool, retention_hours: i64) -> DbResult<u64> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM gathering_events
-        WHERE created_at < NOW() - INTERVAL '1 hour' * $1
-        "#,
-    )
-    .bind(retention_hours)
-    .execute(pool)
-    .await?;
+/// If gathering_id is provided, only cleanup events for that gathering
+pub async fn cleanup_old_events(
+    pool: &PgPool,
+    retention_hours: i64,
+    gathering_id: Option<Uuid>,
+) -> DbResult<u64> {
+    let result = if let Some(gid) = gathering_id {
+        sqlx::query(
+            r#"
+            DELETE FROM gathering_events
+            WHERE created_at < NOW() - INTERVAL '1 hour' * $1
+            AND gathering_id = $2
+            "#,
+        )
+        .bind(retention_hours)
+        .bind(gid)
+        .execute(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            DELETE FROM gathering_events
+            WHERE created_at < NOW() - INTERVAL '1 hour' * $1
+            "#,
+        )
+        .bind(retention_hours)
+        .execute(pool)
+        .await?
+    };
 
     Ok(result.rows_affected())
 }
@@ -240,8 +259,8 @@ mod tests {
         .await
         .expect("Failed to update event timestamp");
 
-        // Cleanup events older than 24 hours
-        let deleted = cleanup_old_events(&pool, 24)
+        // Cleanup events older than 24 hours (filter by gathering_id for test isolation)
+        let deleted = cleanup_old_events(&pool, 24, Some(gathering_id))
             .await
             .expect("Failed to cleanup events");
 
@@ -266,8 +285,8 @@ mod tests {
             .await
             .expect("Failed to persist event");
 
-        // Cleanup events older than 24 hours (should not affect recent events)
-        let deleted = cleanup_old_events(&pool, 24)
+        // Cleanup events older than 24 hours (filter by gathering_id for test isolation)
+        let deleted = cleanup_old_events(&pool, 24, Some(gathering_id))
             .await
             .expect("Failed to cleanup events");
 
@@ -279,5 +298,38 @@ mod tests {
             .expect("Failed to get events");
 
         assert_eq!(events.len(), 1, "Should still have one event");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_without_gathering_id_cleans_all() {
+        let pool = create_test_pool().await;
+        let gathering_id = create_test_gathering(&pool).await;
+
+        // Insert an event
+        let payload = serde_json::json!({"test": "global_cleanup"});
+        persist_event(&pool, gathering_id, "Test", &payload)
+            .await
+            .expect("Failed to persist event");
+
+        // Make it old
+        sqlx::query(
+            r#"
+            UPDATE gathering_events
+            SET created_at = NOW() - INTERVAL '25 hours'
+            WHERE gathering_id = $1
+            "#,
+        )
+        .bind(gathering_id)
+        .execute(&pool)
+        .await
+        .expect("Failed to update event timestamp");
+
+        // Cleanup without gathering_id filter (global cleanup)
+        let deleted = cleanup_old_events(&pool, 24, None)
+            .await
+            .expect("Failed to cleanup events");
+
+        // Should delete at least our event (may delete more from other tests)
+        assert!(deleted >= 1, "Should delete at least one old event");
     }
 }

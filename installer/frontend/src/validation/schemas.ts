@@ -136,7 +136,7 @@ export const SearchSchema = z.object({
   SEARCH_CONCURRENT_REQUESTS: z
     .string()
     .regex(/^\d+$/, 'Must be a number')
-    .refine((val) => {
+    .refine((val: string) => {
       const num = Number.parseInt(val, 10);
       return num >= 1 && num <= 32;
     }, 'Must be between 1 and 32'),
@@ -176,42 +176,29 @@ export const AdvancedSchema = z
     ADVANCED_TZ: z.string().min(1, 'Timezone is required'),
     ADVANCED_ACME_EMAIL: z.string().min(1, 'Email is required').email('Invalid email address'),
   })
-  .refine(
-    (data) => {
-      if (data.MONITORING_ENABLED === 'true') {
-        return data.MONITORING_GRAFANA_ADMIN_PASSWORD.length >= 8;
-      }
-      return true;
-    },
-    {
-      message: 'Grafana password must be at least 8 characters when monitoring is enabled',
-      path: ['MONITORING_GRAFANA_ADMIN_PASSWORD'],
+  .superRefine((data, ctx) => {
+    if (data.MONITORING_ENABLED === 'true' && data.MONITORING_GRAFANA_ADMIN_PASSWORD.length < 8) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Grafana password must be at least 8 characters when monitoring is enabled',
+        path: ['MONITORING_GRAFANA_ADMIN_PASSWORD'],
+      });
     }
-  )
-  .refine(
-    (data) => {
-      if (data.ALERT_ENABLED === 'true') {
-        return data.ALERT_SMTP_HOST.length > 0;
-      }
-      return true;
-    },
-    {
-      message: 'SMTP host is required when alerting is enabled',
-      path: ['ALERT_SMTP_HOST'],
+    if (data.ALERT_ENABLED === 'true' && data.ALERT_SMTP_HOST.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'SMTP host is required when alerting is enabled',
+        path: ['ALERT_SMTP_HOST'],
+      });
     }
-  )
-  .refine(
-    (data) => {
-      if (data.ALERT_ENABLED === 'true') {
-        return data.ALERT_EMAIL_RECIPIENTS.length > 0;
-      }
-      return true;
-    },
-    {
-      message: 'At least one alert recipient is required when alerting is enabled',
-      path: ['ALERT_EMAIL_RECIPIENTS'],
+    if (data.ALERT_ENABLED === 'true' && data.ALERT_EMAIL_RECIPIENTS.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'At least one alert recipient is required when alerting is enabled',
+        path: ['ALERT_EMAIL_RECIPIENTS'],
+      });
     }
-  );
+  });
 
 // Map step IDs to schemas
 export const StepSchemas = {

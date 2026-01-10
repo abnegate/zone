@@ -1,22 +1,18 @@
-import '@testing-library/jest-dom';
-import { TextDecoder, TextEncoder } from 'node:util';
-
-// Polyfill TextEncoder/TextDecoder for Node.js environment
-global.TextEncoder = TextEncoder;
-global.TextDecoder = TextDecoder as typeof global.TextDecoder;
+import { mock } from 'bun:test';
+import '@testing-library/dom';
 
 // Mock window.matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
-  value: jest.fn().mockImplementation((query: string) => ({
+  value: mock((query: string) => ({
     matches: false,
     media: query,
     onchange: null,
-    addEventListener: jest.fn(),
-    removeEventListener: jest.fn(),
-    addListener: jest.fn(),
-    removeListener: jest.fn(),
-    dispatchEvent: jest.fn(),
+    addEventListener: mock(() => {}),
+    removeEventListener: mock(() => {}),
+    addListener: mock(() => {}),
+    removeListener: mock(() => {}),
+    dispatchEvent: mock(() => false),
   })),
 });
 
@@ -32,17 +28,17 @@ Object.defineProperty(global, 'crypto', {
       return arr;
     },
     subtle: {
-      generateKey: jest.fn().mockResolvedValue(mockCryptoKey),
-      encrypt: jest.fn().mockResolvedValue(new ArrayBuffer(32)),
-      decrypt: jest.fn().mockResolvedValue(new TextEncoder().encode('decrypted')),
-      importKey: jest.fn().mockResolvedValue(mockCryptoKey),
-      exportKey: jest.fn().mockResolvedValue({ kty: 'oct', k: 'test' }),
+      generateKey: mock(() => Promise.resolve(mockCryptoKey)),
+      encrypt: mock(() => Promise.resolve(new ArrayBuffer(32))),
+      decrypt: mock(() => Promise.resolve(new TextEncoder().encode('decrypted'))),
+      importKey: mock(() => Promise.resolve(mockCryptoKey)),
+      exportKey: mock(() => Promise.resolve({ kty: 'oct', k: 'test' })),
     },
   },
 });
 
 // Mock fetch
-global.fetch = jest.fn();
+global.fetch = mock(() => Promise.resolve(new Response()));
 
 // Mock sessionStorage
 const sessionStorageMock = (() => {

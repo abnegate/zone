@@ -74,9 +74,9 @@ async fn get_ws_auth_token_with_pool(pool: &PgPool) -> (String, Uuid) {
     let token = create_access_token(
         user.id,
         &email,
-        vec![],         // roles
-        vec![],         // permissions
-        false,          // is_admin
+        vec![], // roles
+        vec![], // permissions
+        false,  // is_admin
         &config.jwt_secret,
         Duration::seconds(config.jwt_access_lifetime as i64),
     )
@@ -381,11 +381,21 @@ async fn test_ws_streams_existing_events_in_order() {
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    add_gathering_event_with_pool(pool, gathering_id, "Progress", &json!({"step": 1, "total": 3}))
-        .await;
+    add_gathering_event_with_pool(
+        pool,
+        gathering_id,
+        "Progress",
+        &json!({"step": 1, "total": 3}),
+    )
+    .await;
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    add_gathering_event_with_pool(pool, gathering_id, "Progress", &json!({"step": 2, "total": 3}))
-        .await;
+    add_gathering_event_with_pool(
+        pool,
+        gathering_id,
+        "Progress",
+        &json!({"step": 2, "total": 3}),
+    )
+    .await;
 
     let url = format!("ws://{}/ws/context/{}", ctx.addr(), gathering_id);
     let (mut ws_stream, _) = connect_async(&url).await.expect("connect");

@@ -7,14 +7,28 @@
     "manager/frontend"
   ],
   "scripts": {
-    "build:ui": "npm run build -w @zone/ui",
-    "watch:ui": "npm run watch -w @zone/ui",
-    "start:installer": "npm run start -w zone-installer",
-    "start:manager": "npm run start -w zone",
-    "test": "npm run test --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present"
+    "dev": "bun run --filter '*' dev",
+    "dev:installer": "bun run --filter zone-installer dev",
+    "dev:manager": "bun run --filter zone dev",
+    "start:installer": "bun run --filter zone-installer start",
+    "start:manager": "bun run --filter zone start",
+    "build": "bun run --filter '*' build",
+    "build:ui": "bun run --filter @zone/ui build",
+    "watch:ui": "bun run --filter @zone/ui watch",
+    "format": "bun run --filter '*' format",
+    "format:check": "bun run --filter '*' format:check",
+    "lint": "bun run --filter '*' lint",
+    "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun run --filter '*' test",
+    "test:coverage": "bun run --filter '*' test:coverage",
+    "test:e2e": "bun run --filter '*' test:e2e",
+    "test:e2e:ui": "bun run --filter '*' test:e2e:ui",
+    "lighthouse": "bun run --filter '*' lighthouse",
+    "audit": "bun run --filter '*' audit",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test && bun run test:e2e"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.10",
     "typescript": "^5.3.0"
   }
 }

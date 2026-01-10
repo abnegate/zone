@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { blockServiceWorker } from './test-utils';
 
 // Mock data generators
 const generateMockSource = (
@@ -45,9 +46,55 @@ const mockSources = [
 ];
 
 test.describe('Sources Page', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ context, page }) => {
+    // Block service worker
+    await blockServiceWorker(context);
+
     // Set up API mocks
     await mockCommonEndpoints(page);
+
+    // Mock organizations with query params
+    await page.route('**/api/organizations?*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          organizations: [
+            {
+              id: '00000000-0000-0000-0000-000000000001',
+              name: 'Default Org',
+              slug: 'default',
+              description: null,
+              is_active: true,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          ],
+        }),
+      });
+    });
+
+    // Mock workspaces with query params
+    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          workspaces: [
+            {
+              id: '00000000-0000-0000-0000-000000000001',
+              organization_id: '00000000-0000-0000-0000-000000000001',
+              name: 'Default Workspace',
+              slug: 'default',
+              description: null,
+              is_active: true,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+          ],
+        }),
+      });
+    });
 
     // Default sources mock
     await page.route('**/api/sources*', (route) => {
@@ -82,7 +129,7 @@ test.describe('Sources Page', () => {
     });
 
     test('shows add source button', async ({ page }) => {
-      await expect(page.locator('.page-header .btn-primary')).toContainText('Add Source');
+      await expect(page.locator('.page-header .ui-btn--primary')).toContainText('Add Source');
     });
   });
 
@@ -209,12 +256,12 @@ test.describe('Sources Page', () => {
 
   test.describe('Create Source Modal', () => {
     test('opens create modal from header button', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
       await expect(page.locator('.modal-content h2')).toContainText('Add Source');
     });
 
     test('shows all source type options', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
 
       await expect(page.locator('.source-type-card')).toHaveCount(7);
       await expect(page.locator('.source-type-name').filter({ hasText: 'GitHub' })).toBeVisible();
@@ -223,7 +270,7 @@ test.describe('Sources Page', () => {
     });
 
     test('shows GitHub form fields by default', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
 
       await expect(page.locator('#ghOwner')).toBeVisible();
       await expect(page.locator('#ghRepo')).toBeVisible();
@@ -231,7 +278,7 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to GitLab form when selected', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
 
       await page.click('.source-type-card:has-text("GitLab")');
 
@@ -241,7 +288,7 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to Filesystem form when selected', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
 
       await page.click('.source-type-card:has-text("Filesystem")');
 
@@ -250,7 +297,7 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to Web URL form when selected', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
 
       await page.click('.source-type-card:has-text("Web URL")');
 
@@ -258,7 +305,7 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to Text form when selected', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
 
       await page.click('.source-type-card:has-text("Text")');
 
@@ -281,10 +328,10 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
-      await page.click('.form-actions .btn-primary');
+      await page.click('.form-actions .ui-btn--primary');
 
       await expect(page.locator('.modal-content')).not.toBeVisible({ timeout: 5000 });
     });
@@ -303,12 +350,12 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
-      await page.click('.form-actions .btn-primary');
+      await page.click('.form-actions .ui-btn--primary');
 
-      await expect(page.locator('.form-actions .btn-primary')).toContainText('Adding...');
+      await expect(page.locator('.form-actions .ui-btn--primary')).toContainText('Adding...');
     });
 
     test('shows error when creation fails', async ({ page }) => {
@@ -322,30 +369,30 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
-      await page.click('.form-actions .btn-primary');
+      await page.click('.form-actions .ui-btn--primary');
 
       await expect(page.locator('.form-error')).toBeVisible();
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
-      await page.click('.form-actions .btn-secondary');
+      await page.click('.page-header .ui-btn--primary');
+      await page.click('.form-actions .ui-btn--secondary');
 
       await expect(page.locator('.modal-content')).not.toBeVisible();
     });
 
     test('closes modal on backdrop click', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
       await page.click('.modal-overlay', { position: { x: 10, y: 10 } });
 
       await expect(page.locator('.modal-content')).not.toBeVisible();
     });
 
     test('expands additional options section', async ({ page }) => {
-      await page.click('.page-header .btn-primary');
+      await page.click('.page-header .ui-btn--primary');
 
       await page.click('.form-section-collapsed summary');
 

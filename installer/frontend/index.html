@@ -2,10 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <link rel="icon" href="/favicon.ico" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#121214" />
-    <meta name="description" content="Zone Dashboard - AI Infrastructure Management" />
+    <meta name="description" content="Zone - Self-hosted AI Stack Configuration" />
 
     <!-- Preconnect to external domains for faster font loading -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -22,24 +21,7 @@
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Fraunces:wght@500;600&display=swap" rel="stylesheet" />
     </noscript>
 
-    <!-- PWA meta tags -->
-    <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Zone" />
-
-    <!-- Apple touch icons -->
-    <link rel="apple-touch-icon" href="/logo192.png" />
-    <link rel="apple-touch-icon" sizes="192x192" href="/logo192.png" />
-    <link rel="apple-touch-icon" sizes="512x512" href="/logo512.png" />
-
-    <!-- Manifest for PWA -->
-    <link rel="manifest" href="/manifest.json" />
-
-    <!-- DNS prefetch for API endpoints (adjust domain as needed) -->
-    <link rel="dns-prefetch" href="//api.zone.local" />
-
-    <title>Zone</title>
+    <title>Zone Configuration</title>
 
     <!-- Critical inline styles for immediate render -->
     <style>
@@ -51,14 +33,14 @@
         margin: 0;
       }
       /* Initial loading state */
-      .initial-loader {
+      #root:empty {
         display: flex;
         align-items: center;
         justify-content: center;
         min-height: 100vh;
       }
-      .loader-spinner {
-        display: block;
+      #root:empty::after {
+        content: '';
         width: 40px;
         height: 40px;
         border: 3px solid #232326;
@@ -67,12 +49,11 @@
         animation: spin 0.8s linear infinite;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
-      .loader-title { font-family: 'Fraunces', serif; font-size: 48px; margin: 0 0 24px 0; color: #ed7a14; }
-      .loader-text { margin-top: 16px; font-size: 14px; color: #71717a; }
     </style>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"><div class="initial-loader" aria-label="Loading"><h1 class="loader-title">Zone</h1><span class="loader-spinner"></span><p class="loader-text">Loading...</p></div></div>
+    <div id="root"></div>
+    <script type="module" src="/src/index.tsx"></script>
   </body>
 </html>

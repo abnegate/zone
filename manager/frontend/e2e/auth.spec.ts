@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 // Helper to create a mock JWT token with embedded roles and permissions
 // JWT format: header.payload.signature (all base64url encoded)
@@ -94,6 +94,69 @@ const mockAdminAuthResponse = () => {
   };
 };
 
+async function mockModelsAndBrowse(page: Page) {
+  await page.route('**/api/models*', (route) => {
+    const url = new URL(route.request().url());
+    const source = url.searchParams.get('source');
+
+    if (source) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ source, models: [], has_more: false }),
+      });
+      return;
+    }
+
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ models: [] }),
+    });
+  });
+
+  await page.route('**/api/organizations', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        organizations: [
+          {
+            id: '00000000-0000-0000-0000-000000000001',
+            name: 'Default Org',
+            slug: 'default',
+            description: null,
+            is_active: true,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+  });
+
+  await page.route('**/api/organizations/*/workspaces', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        workspaces: [
+          {
+            id: '00000000-0000-0000-0000-000000000001',
+            organization_id: '00000000-0000-0000-0000-000000000001',
+            name: 'Default Workspace',
+            slug: 'default',
+            description: null,
+            is_active: true,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+  });
+}
+
 test.describe('Login Page', () => {
   test.beforeEach(async ({ page }) => {
     // Clear localStorage before each test
@@ -160,21 +223,7 @@ test.describe('Login Page', () => {
     });
 
     // Mock protected routes
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     await page.goto('/login');
     await page.fill('input[type="email"]', 'test@example.com');
@@ -194,21 +243,7 @@ test.describe('Login Page', () => {
       });
     });
 
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     await page.goto('/login');
     await page.fill('input[type="email"]', 'test@example.com');
@@ -243,21 +278,7 @@ test.describe('Login Page', () => {
       });
     });
 
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     await page.goto('/login');
     await page.fill('input[type="email"]', 'test@example.com');
@@ -334,21 +355,7 @@ test.describe('Register Page', () => {
       });
     });
 
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     await page.goto('/register');
     await page.fill('input[type="email"]', 'admin@example.com');
@@ -369,21 +376,7 @@ test.describe('Register Page', () => {
       });
     });
 
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     await page.goto('/register');
     await page.fill('input[type="email"]', 'new@example.com');
@@ -453,21 +446,7 @@ test.describe('Protected Routes', () => {
     };
 
     // Set up routes before navigating
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     // Navigate and set up authentication state
     await page.goto('/login');
@@ -506,6 +485,8 @@ test.describe('Unauthorized Access', () => {
       updated_at: '2024-01-01T00:00:00Z',
       last_login_at: null,
     };
+
+    await mockModelsAndBrowse(page);
 
     // Set up authentication state without proper permissions
     await page.goto('/login');
@@ -552,21 +533,7 @@ test.describe('Logout', () => {
       last_login_at: null,
     };
 
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     await page.route('**/api/auth/logout', (route) => {
       route.fulfill({
@@ -612,21 +579,7 @@ test.describe('Token Persistence', () => {
       });
     });
 
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     await page.goto('/login');
     await page.fill('input[type="email"]', 'test@example.com');
@@ -664,6 +617,8 @@ test.describe('Token Persistence', () => {
       updated_at: '2024-01-01T00:00:00Z',
       last_login_at: null,
     };
+
+    await mockModelsAndBrowse(page);
 
     // Refresh also fails
     await page.route('**/api/auth/refresh', (route) => {
@@ -708,7 +663,21 @@ test.describe('Permission-Based UI', () => {
       last_login_at: null,
     };
 
-    await page.route('**/api/models', (route) => {
+    await mockModelsAndBrowse(page);
+    await page.unroute('**/api/models*');
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+
+      if (source) {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source, models: [], has_more: false }),
+        });
+        return;
+      }
+
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -717,14 +686,6 @@ test.describe('Permission-Based UI', () => {
             { name: 'llama2', size: 3800000000, modified_at: '2024-01-01', digest: 'abc123' },
           ],
         }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
       });
     });
 
@@ -767,21 +728,7 @@ test.describe('Permission-Based UI', () => {
       last_login_at: null,
     };
 
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
+    await mockModelsAndBrowse(page);
 
     // Set up admin auth
     await page.goto('/login');
