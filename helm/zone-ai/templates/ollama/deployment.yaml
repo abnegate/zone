@@ -1,0 +1,85 @@
+{{- if .Values.ollama.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: {{ include "zone-ai.namespace" . }}
+  labels:
+    {{- include "zone-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: llm-inference
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollama
+        app.kubernetes.io/component: llm-inference
+    spec:
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: {{ .Values.ollama.securityContext.runAsNonRoot }}
+        runAsUser: {{ .Values.ollama.securityContext.runAsUser }}
+        fsGroup: {{ .Values.ollama.securityContext.fsGroup }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ollama
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          image: "{{ .Values.ollama.image.repository }}:{{ .Values.ollama.image.tag }}"
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          ports:
+            - containerPort: 11434
+              name: http
+          env:
+            - name: OLLAMA_HOST
+              value: {{ .Values.ollama.config.host | quote }}
+            - name: OLLAMA_KEEP_ALIVE
+              value: {{ .Values.ollama.config.keepAlive | quote }}
+            - name: OLLAMA_MAX_LOADED_MODELS
+              value: {{ .Values.ollama.config.maxLoadedModels | quote }}
+            - name: OLLAMA_MODELS
+              value: {{ .Values.ollama.persistence.mountPath | quote }}
+          volumeMounts:
+            - name: ollama-data
+              mountPath: {{ .Values.ollama.persistence.mountPath }}
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: {{ .Values.ollama.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.ollama.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.ollama.startupProbe.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          {{- with .Values.ollama.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: ollama-data
+          {{- if .Values.ollama.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: ollama-pvc
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

@@ -12,6 +12,7 @@
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
 	install-runner install-cli \
 	build-dev-cli install-dev-cli dev-format dev-format-check dev-lint dev-test dev-coverage dev-check \
+	kind-create kind-delete tilt-up tilt-down kind-status \
 
 .DEFAULT_GOAL := help
 
@@ -108,6 +109,32 @@ logs-follow: ## Follow logs from all services
 
 logs-service: ## Follow logs for a specific service (usage: make logs-service SERVICE=ollama)
 	@$(DOCKER_COMPOSE) logs -f $(SERVICE)
+
+##@ Kind + Tilt (Local Kubernetes)
+
+kind-create: ## Create Kind cluster with CNPG and HAProxy
+	@./scripts/kind-create.sh
+
+kind-delete: ## Delete Kind cluster
+	@./scripts/kind-delete.sh
+
+kind-status: ## Show Kind cluster status
+	@echo "$(BLUE)Kind Cluster Status:$(NC)"
+	@kind get clusters 2>/dev/null | grep -q "zone-dev" && echo "$(GREEN)Cluster 'zone-dev' is running$(NC)" || echo "$(YELLOW)Cluster 'zone-dev' not found$(NC)"
+	@echo ""
+	@if kind get clusters 2>/dev/null | grep -q "zone-dev"; then \
+		echo "$(BLUE)Pods in zone namespace:$(NC)"; \
+		kubectl get pods -n zone 2>/dev/null || echo "No pods found"; \
+	fi
+
+tilt-up: ## Start Tilt development environment
+	@./scripts/tilt-up.sh
+
+tilt-down: ## Stop Tilt and clean up
+	@echo "$(YELLOW)Stopping Tilt...$(NC)"
+	@cd k8s && tilt down
+	@echo "$(GREEN)Tilt stopped. Kind cluster still running.$(NC)"
+	@echo "$(YELLOW)Run 'make kind-delete' to remove the cluster entirely.$(NC)"
 
 ##@ Health & Monitoring
 

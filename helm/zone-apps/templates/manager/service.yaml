@@ -1,0 +1,17 @@
+{{- if .Values.manager.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "zone-apps.fullname" . }}-manager
+  labels:
+    {{- include "zone-apps.manager.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.manager.service.type }}
+  ports:
+    - port: {{ .Values.manager.service.port }}
+      targetPort: {{ .Values.manager.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "zone-apps.manager.selectorLabels" . | nindent 4 }}
+{{- end }}

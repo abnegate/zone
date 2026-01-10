@@ -1,0 +1,18 @@
+{{- if and .Values.openwebui.enabled .Values.openwebui.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openwebui-pvc
+  labels:
+    {{- include "zone-apps.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openwebui
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.openwebui.persistence.storageClass }}
+  storageClassName: {{ .Values.openwebui.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.openwebui.persistence.size }}
+{{- end }}

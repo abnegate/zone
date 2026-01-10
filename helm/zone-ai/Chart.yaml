@@ -1,0 +1,15 @@
+apiVersion: v2
+name: zone-ai
+description: AI services for Zone - Ollama LLM inference and LiteLLM proxy
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - zone
+  - ai
+  - ollama
+  - litellm
+  - llm
+home: https://github.com/abnegate/zone
+maintainers:
+  - name: Zone Team

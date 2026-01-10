@@ -1,0 +1,113 @@
+# Zone AI Services - Values
+# Ollama and LiteLLM configuration
+
+global:
+  namespace: zone
+
+# Ollama LLM inference
+ollama:
+  enabled: true
+
+  image:
+    repository: ollama/ollama
+    tag: "0.13.5"
+    pullPolicy: IfNotPresent
+
+  # Environment configuration
+  config:
+    host: "0.0.0.0:11434"
+    keepAlive: "24h"
+    maxLoadedModels: "3"
+
+  # Models to pull on init
+  models:
+    - nomic-embed-text
+    - llama3.1:8b
+
+  # Init job configuration
+  init:
+    enabled: true
+    image:
+      repository: curlimages/curl
+      tag: "8.17.0"
+
+  # Storage for models
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+    mountPath: /home/ollama/.ollama
+
+  # Resources
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "1000m"
+    limits:
+      memory: "16Gi"
+      cpu: "4000m"
+      # Uncomment for GPU support
+      # nvidia.com/gpu: 1
+
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+  # Probes
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 30
+
+# LiteLLM proxy
+litellm:
+  enabled: true
+
+  image:
+    repository: ghcr.io/berriai/litellm
+    tag: "v1.80.0-stable"
+    pullPolicy: IfNotPresent
+
+  # Number of workers
+  workers: 4
+
+  # Model configuration
+  models:
+    - name: "llama3.1:8b"
+      provider: ollama
+      timeout: 60
+    - name: "nomic-embed-text"
+      provider: ollama
+      timeout: 30
+
+  # Default model
+  defaultModel: "llama3.1:8b"
+
+  # Router settings
+  router:
+    retries: 2
+    timeout: 180
+
+  # Secrets reference
+  secrets:
+    existingSecret: "zone-secrets"
+    masterKeyKey: "litellm-master-key"
+    saltKeyKey: "litellm-salt-key"
+    databaseUrlKey: "database-url"
+
+  # Resources
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000

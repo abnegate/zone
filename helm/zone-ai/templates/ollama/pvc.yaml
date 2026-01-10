@@ -1,0 +1,19 @@
+{{- if and .Values.ollama.enabled .Values.ollama.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-pvc
+  namespace: {{ include "zone-ai.namespace" . }}
+  labels:
+    {{- include "zone-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: llm-inference
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.ollama.persistence.storageClass }}
+  storageClassName: {{ .Values.ollama.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.ollama.persistence.size }}
+{{- end }}

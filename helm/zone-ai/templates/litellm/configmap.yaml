@@ -1,0 +1,41 @@
+{{- if .Values.litellm.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: {{ include "zone-ai.namespace" . }}
+  labels:
+    {{- include "zone-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: llm-proxy
+data:
+  config.yaml: |
+    # LiteLLM Proxy Configuration
+    model_list:
+      {{- range .Values.litellm.models }}
+      - model_name: {{ .name | quote }}
+        litellm_params:
+          model: {{ .provider }}/{{ .name }}
+          api_base: http://ollama:11434
+          timeout: {{ .timeout }}
+      {{- end }}
+
+    # Router Configuration
+    router_settings:
+      num_retries: {{ .Values.litellm.router.retries }}
+      timeout: {{ .Values.litellm.router.timeout }}
+
+    # General Settings
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      default_model: {{ .Values.litellm.defaultModel | quote }}
+      store_model_in_db: true
+      store_prompts_in_spend_logs: false
+
+    # LiteLLM Settings
+    litellm_settings:
+      drop_params: false
+      set_verbose: false
+      return_response_headers: true
+      success_callback: ["prometheus"]
+      failure_callback: ["prometheus"]
+{{- end }}

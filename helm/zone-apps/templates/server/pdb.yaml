@@ -1,0 +1,13 @@
+{{- if and .Values.server.enabled .Values.server.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "zone-apps.fullname" . }}-server
+  labels:
+    {{- include "zone-apps.server.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.server.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "zone-apps.server.selectorLabels" . | nindent 6 }}
+{{- end }}

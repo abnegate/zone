@@ -1,0 +1,19 @@
+{{- if and .Values.valkey.enabled .Values.valkey.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-pvc
+  namespace: {{ include "zone-infra.namespace" . }}
+  labels:
+    {{- include "zone-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.valkey.persistence.storageClass }}
+  storageClassName: {{ .Values.valkey.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.valkey.persistence.size }}
+{{- end }}

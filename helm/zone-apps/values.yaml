@@ -1,0 +1,300 @@
+environment: production
+
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  externalDatabase: false    # Use external database instead of in-cluster
+  securityContexts: true     # Apply pod security contexts
+
+# Init container configuration
+initContainers:
+  postgres:
+    image: "postgres:15-alpine@sha256:f58300ac8d393b2e3b09d36ea12d7d24ee9440440e421472a300e929ddb63460"
+
+image:
+  pullPolicy: IfNotPresent
+
+# Common environment variables shared across all components
+commonEnv:
+  DB_HOST: "zone-postgres"
+  DB_PORT: "5432"
+  DB_NAME: "zone"
+  DB_USER: "zone"
+  RUST_LOG: "info"
+
+# Secrets - REQUIRED: Must be set via --set or external secret management
+# These MUST be provided during installation and should NEVER use default values in production
+secrets:
+  # Create secret - set to false when using external secret management (e.g., External Secrets Operator)
+  create: true
+
+  # Database password - REQUIRED
+  # Set via: --set secrets.dbPassword=<secure-password>
+  dbPassword: ""
+
+  # JWT secret for authentication - REQUIRED
+  # Set via: --set secrets.jwtSecret=<secure-random-string>
+  jwtSecret: ""
+
+  # Encryption key for data at rest - REQUIRED
+  # Set via: --set secrets.encryptionKey=<secure-random-key>
+  encryptionKey: ""
+
+  # Stripe secret key for payments - Optional
+  stripeSecretKey: ""
+
+  # SMTP password for email - Optional
+  smtpPassword: ""
+
+# Service account configuration
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 3000
+  fsGroup: 2000
+  fsGroupChangePolicy: "OnRootMismatch"
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 3000
+  seccompProfile:
+    type: RuntimeDefault
+
+# Server (Rust backend API)
+server:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: zone/server
+    tag: latest
+    pullPolicy: Always
+
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 70
+
+  env:
+    PORT: "8080"
+    HOST: "0.0.0.0"
+
+  # High availability configuration
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  # Anti-affinity to spread pods across nodes
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: server
+          topologyKey: kubernetes.io/hostname
+
+  # Topology spread for better distribution
+  # Note: In development (with HPA minReplicas < number of nodes), use ScheduleAnyway
+  # In production, use DoNotSchedule for strict distribution
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: server
+
+# Manager (React frontend)
+manager:
+  enabled: true
+  replicaCount: 2
+
+  image:
+    repository: zone/manager
+    tag: latest
+    pullPolicy: Always
+
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilization: 70
+
+  env:
+    PORT: "3000"
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: manager
+          topologyKey: kubernetes.io/hostname
+
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: manager
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+    # nginx example:
+    # nginx.ingress.kubernetes.io/rewrite-target: /
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # haproxy example:
+    # haproxy.org/path-rewrite: "/"
+    # haproxy.org/rate-limit-requests: "100"
+  hosts:
+    - host: zone.local
+      paths:
+        - path: /api
+          pathType: Prefix
+          service: server
+        - path: /
+          pathType: Prefix
+          service: manager
+  tls: []
+    # - secretName: zone-tls
+    #   hosts:
+    #     - zone.local
+
+# Database migration job
+migration:
+  enabled: true
+
+  image:
+    repository: zone/server
+    tag: latest
+    pullPolicy: Always
+
+  # Job configuration
+  backoffLimit: 0                    # No retries - fail fast
+  activeDeadlineSeconds: 600         # 10 minute timeout
+  ttlSecondsAfterFinished: 3600      # Keep job for 1 hour after completion
+
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  env: {}
+
+# Optional: Node selector for pod placement
+nodeSelector: {}
+
+# Optional: Tolerations for pod scheduling
+tolerations: []
+
+# Optional: Affinity rules
+affinity: {}
+
+# Network Policy configuration
+networkPolicy:
+  enabled: false  # Enable in production for enhanced security
+  # Ingress namespace for allowing traffic from ingress controller
+  ingressNamespace: ingress-nginx
+
+# OpenWebUI - Chat interface
+openwebui:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: ghcr.io/open-webui/open-webui
+    tag: v0.6.43
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+
+  # OpenWebUI configuration
+  config:
+    auth: true
+    signup: true
+    ragWebSearch: true
+    defaultModels: "llama3.1:8b"
+    corsAllowOrigin: "http://localhost:8080,http://webui.localhost"
+
+  # LiteLLM connection
+  litellm:
+    host: "http://litellm:4000/v1"
+    secretName: "zone-secrets"
+    secretKey: "litellm-master-key"
+
+  # Storage for user data
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000

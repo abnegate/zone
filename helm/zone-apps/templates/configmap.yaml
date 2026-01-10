@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "zone-apps.fullname" . }}-config
+  labels:
+    {{- include "zone-apps.labels" . | nindent 4 }}
+data:
+  # Database configuration
+  DB_HOST: {{ .Values.commonEnv.DB_HOST | quote }}
+  DB_PORT: {{ .Values.commonEnv.DB_PORT | quote }}
+  DB_NAME: {{ .Values.commonEnv.DB_NAME | quote }}
+  DB_USER: {{ .Values.commonEnv.DB_USER | quote }}
+
+  # Logging
+  RUST_LOG: {{ .Values.commonEnv.RUST_LOG | quote }}
+
+  # Environment
+  ENVIRONMENT: {{ .Values.environment | quote }}

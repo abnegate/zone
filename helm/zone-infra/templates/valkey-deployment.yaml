@@ -1,0 +1,101 @@
+{{- if .Values.valkey.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  namespace: {{ include "zone-infra.namespace" . }}
+  labels:
+    {{- include "zone-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: valkey
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey
+        app.kubernetes.io/component: cache
+    spec:
+      securityContext:
+        runAsNonRoot: {{ .Values.valkey.securityContext.runAsNonRoot }}
+        runAsUser: {{ .Values.valkey.securityContext.runAsUser }}
+        fsGroup: {{ .Values.valkey.securityContext.fsGroup }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: valkey
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          image: "{{ .Values.valkey.image.repository }}:{{ .Values.valkey.image.tag }}"
+          imagePullPolicy: {{ .Values.valkey.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              valkey-server \
+                --requirepass "$VALKEY_PASSWORD" \
+                --maxmemory {{ .Values.valkey.maxMemory }} \
+                --maxmemory-policy {{ .Values.valkey.maxMemoryPolicy }}
+          ports:
+            - containerPort: 6379
+              name: redis
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.valkey.auth.existingSecret | default (include "zone-infra.secretsName" .) }}
+                  key: {{ .Values.valkey.auth.secretKey }}
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.valkey.auth.existingSecret | default (include "zone-infra.secretsName" .) }}
+                  key: {{ .Values.valkey.auth.secretKey }}
+          volumeMounts:
+            - name: valkey-data
+              mountPath: /data
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - valkey-cli ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - valkey-cli ping
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - valkey-cli ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          {{- with .Values.valkey.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: valkey-data
+          {{- if .Values.valkey.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: valkey-pvc
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}
