@@ -1,0 +1,17 @@
+{{- if .Values.openwebui.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: openwebui
+  labels:
+    {{- include "zone-apps.labels" . | nindent 4 }}
+    app.kubernetes.io/component: openwebui
+spec:
+  type: {{ .Values.openwebui.service.type }}
+  ports:
+    - port: {{ .Values.openwebui.service.port }}
+      targetPort: http
+      name: http
+  selector:
+    app.kubernetes.io/name: openwebui
+{{- end }}

@@ -1,0 +1,90 @@
+# Zone Infrastructure - Values
+# PostgreSQL (CNPG) and Valkey configuration
+
+global:
+  # Namespace for all resources
+  namespace: zone
+
+# PostgreSQL via CloudNativePG
+postgres:
+  enabled: true
+
+  # CNPG Cluster configuration
+  instances: 1
+  image: ghcr.io/cloudnative-pg/postgresql:16.11
+
+  # Database initialization
+  database: zone
+  owner: zone
+
+  # Extensions to load
+  sharedPreloadLibraries:
+    - vector
+
+  # Post-init SQL
+  postInitSQL:
+    - CREATE EXTENSION IF NOT EXISTS vector
+    - CREATE EXTENSION IF NOT EXISTS pg_trgm
+
+  # Storage
+  storage:
+    size: 10Gi
+    storageClass: ""  # Use default
+
+  # Resources
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+
+  # Monitoring
+  monitoring:
+    enabled: false
+
+# Valkey (Redis-compatible cache)
+valkey:
+  enabled: true
+
+  image:
+    repository: valkey/valkey
+    tag: "8.1-alpine"
+    pullPolicy: IfNotPresent
+
+  # Configuration
+  maxMemory: "256mb"
+  maxMemoryPolicy: "allkeys-lru"
+
+  # Authentication - password from secret
+  auth:
+    enabled: true
+    existingSecret: ""  # If empty, uses zone-secrets
+    secretKey: "valkey-password"
+
+  # Storage
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+
+  # Resources
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    fsGroup: 999
+
+# Secrets configuration
+secrets:
+  # Existing secret name
+  existingSecret: "zone-secrets"

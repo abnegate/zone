@@ -1,0 +1,18 @@
+{{- if .Values.litellm.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: {{ include "zone-ai.namespace" . }}
+  labels:
+    {{- include "zone-ai.labels" . | nindent 4 }}
+    app.kubernetes.io/component: llm-proxy
+spec:
+  type: ClusterIP
+  ports:
+    - port: 4000
+      targetPort: http
+      name: http
+  selector:
+    app.kubernetes.io/name: litellm
+{{- end }}

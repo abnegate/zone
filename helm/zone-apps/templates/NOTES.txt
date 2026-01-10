@@ -1,0 +1,83 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }}
+  $ helm get all {{ .Release.Name }}
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+
+Application URLs:
+  {{- range .paths }}
+  {{- if eq .service "server" }}
+  - API: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ .path }}
+  {{- else if eq .service "manager" }}
+  - Manager UI: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ .path }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+{{- else }}
+
+Get the application URLs by running these commands:
+
+{{- if .Values.server.enabled }}
+  export SERVER_POD=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "zone-apps.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=server" -o jsonpath="{.items[0].metadata.name}")
+  echo "Server API: http://127.0.0.1:8080"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $SERVER_POD 8080:{{ .Values.server.service.port }}
+{{- end }}
+
+{{- if .Values.manager.enabled }}
+  export MANAGER_POD=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "zone-apps.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=manager" -o jsonpath="{.items[0].metadata.name}")
+  echo "Manager UI: http://127.0.0.1:3000"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $MANAGER_POD 3000:{{ .Values.manager.service.port }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.migration.enabled }}
+
+Database migration job has been scheduled to run before deployment.
+Check migration status:
+
+  kubectl get jobs --namespace {{ .Release.Namespace }} -l app.kubernetes.io/component=migration
+  kubectl logs --namespace {{ .Release.Namespace }} -l app.kubernetes.io/component=migration
+{{- end }}
+
+{{- if eq .Values.secrets.dbPassword "changeme" }}
+
+WARNING: You are using the default database password!
+Please update your secrets in production:
+
+  helm upgrade {{ .Release.Name }} {{ .Chart.Name }} \
+    --set secrets.dbPassword=YOUR_SECURE_PASSWORD \
+    --set secrets.jwtSecret=YOUR_JWT_SECRET \
+    --set secrets.encryptionKey=YOUR_ENCRYPTION_KEY
+{{- end }}
+
+{{- if not .Values.global.externalDatabase }}
+
+NOTE: You are using an in-cluster database. Make sure your PostgreSQL
+database is running and accessible at {{ .Values.commonEnv.DB_HOST }}:{{ .Values.commonEnv.DB_PORT }}
+{{- end }}
+
+Monitor your deployment:
+
+  kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/instance={{ .Release.Name }}" -w
+
+{{- if .Values.server.autoscaling.enabled }}
+
+Horizontal Pod Autoscaler is enabled for the server:
+  kubectl get hpa --namespace {{ .Release.Namespace }} {{ include "zone-apps.fullname" . }}-server
+{{- end }}
+
+{{- if .Values.manager.autoscaling.enabled }}
+
+Horizontal Pod Autoscaler is enabled for the manager:
+  kubectl get hpa --namespace {{ .Release.Namespace }} {{ include "zone-apps.fullname" . }}-manager
+{{- end }}
+
+For more information, visit:
+  - Documentation: https://docs.zone.dev
+  - GitHub: https://github.com/yourusername/zone

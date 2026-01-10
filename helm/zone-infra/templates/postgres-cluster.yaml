@@ -1,0 +1,51 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: zone-postgres
+  namespace: {{ include "zone-infra.namespace" . }}
+  labels:
+    {{- include "zone-infra.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  instances: {{ .Values.postgres.instances }}
+
+  imageName: {{ .Values.postgres.image }}
+
+  postgresql:
+    shared_preload_libraries:
+      {{- toYaml .Values.postgres.sharedPreloadLibraries | nindent 6 }}
+
+  bootstrap:
+    initdb:
+      database: {{ .Values.postgres.database }}
+      owner: {{ .Values.postgres.owner }}
+      secret:
+        name: {{ include "zone-infra.secretsName" . }}
+        key: postgres-password
+      {{- if .Values.postgres.postInitSQL }}
+      postInitSQL:
+        {{- toYaml .Values.postgres.postInitSQL | nindent 8 }}
+      {{- end }}
+
+  superuserSecret:
+    name: zone-postgres-superuser
+
+  storage:
+    size: {{ .Values.postgres.storage.size }}
+    {{- if .Values.postgres.storage.storageClass }}
+    storageClass: {{ .Values.postgres.storage.storageClass }}
+    {{- end }}
+
+  {{- if .Values.postgres.resources }}
+  resources:
+    {{- toYaml .Values.postgres.resources | nindent 4 }}
+  {{- end }}
+
+  monitoring:
+    enablePodMonitor: {{ .Values.postgres.monitoring.enabled }}
+
+  nodeMaintenanceWindow:
+    inProgress: false
+    reusePVC: true
+{{- end }}
