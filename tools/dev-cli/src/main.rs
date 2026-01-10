@@ -2,21 +2,23 @@ use anyhow::Result;
 use chrono::Local;
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use owo_colors::OwoColorize;
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
-    Frame, Terminal,
 };
 use std::{
-    io::{stdout, BufRead, BufReader},
+    io::{BufRead, BufReader, stdout},
     path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -26,7 +28,9 @@ use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(name = "zone-dev")]
-#[command(about = "Development CLI tool for Zone - runs format/lint/test/coverage across all projects")]
+#[command(
+    about = "Development CLI tool for Zone - runs format/lint/test/coverage across all projects"
+)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -76,7 +80,7 @@ enum Commands {
         #[arg(long)]
         open: bool,
     },
-    /// Run all checks (format --check, lint, test)
+    /// Run all checks (format, lint, audit, unit tests, e2e tests, lighthouse)
     Check {
         /// Only run on specific projects
         #[arg(long, short, value_enum)]
@@ -87,6 +91,24 @@ enum Commands {
         /// Target frontend: installer, manager, or all
         #[arg(long, short, value_enum, default_value = "all")]
         target: LighthouseTarget,
+    },
+    /// Run E2E tests (Playwright)
+    E2e {
+        /// Only run on specific projects (installer-frontend, manager-frontend)
+        #[arg(long, short, value_enum)]
+        project: Option<Vec<Project>>,
+        /// Run in headed mode (show browser)
+        #[arg(long)]
+        headed: bool,
+        /// Run in UI mode (interactive)
+        #[arg(long)]
+        ui: bool,
+    },
+    /// Run security audit (npm audit / cargo audit)
+    Audit {
+        /// Only run on specific projects
+        #[arg(long, short, value_enum)]
+        project: Option<Vec<Project>>,
     },
 }
 
@@ -100,7 +122,7 @@ enum LighthouseTarget {
     All,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum Project {
     /// Installer frontend (React/TypeScript)
     InstallerFrontend,
@@ -222,9 +244,21 @@ enum FocusedPane {
     Output,
 }
 
+/// Represents an item in the visual task list (either a project header or a task)
+#[derive(Clone, Debug)]
+enum ListEntry {
+    /// Project header (not selectable)
+    ProjectHeader(Project),
+    /// Task with its index in the tasks Vec
+    Task(usize),
+}
+
 struct App {
     tasks: Vec<Arc<Mutex<TaskState>>>,
-    selected_task: usize,
+    /// Visual list entries (headers + tasks)
+    list_entries: Vec<ListEntry>,
+    /// Currently selected index in list_entries
+    selected_index: usize,
     should_quit: bool,
     all_done: bool,
     start_time: Instant,
@@ -246,9 +280,35 @@ impl App {
             .map(|config| Arc::new(Mutex::new(TaskState::new(config))))
             .collect();
 
+        // Group task indices by project
+        let mut tasks_by_project: std::collections::BTreeMap<Project, Vec<usize>> =
+            std::collections::BTreeMap::new();
+
+        for (idx, task) in task_states.iter().enumerate() {
+            let project = task.lock().unwrap().config.project;
+            tasks_by_project.entry(project).or_default().push(idx);
+        }
+
+        // Build list entries grouped by project
+        let mut list_entries = Vec::new();
+
+        for (project, task_indices) in tasks_by_project {
+            list_entries.push(ListEntry::ProjectHeader(project));
+            for idx in task_indices {
+                list_entries.push(ListEntry::Task(idx));
+            }
+        }
+
+        // Find the first selectable task (skip initial headers)
+        let first_task_idx = list_entries
+            .iter()
+            .position(|e| matches!(e, ListEntry::Task(_)))
+            .unwrap_or(0);
+
         Self {
             tasks: task_states,
-            selected_task: 0,
+            list_entries,
+            selected_index: first_task_idx,
             should_quit: false,
             all_done: false,
             start_time: Instant::now(),
@@ -257,6 +317,36 @@ impl App {
             output_scroll: 0,
             tasks_area: Rect::default(),
             output_area: Rect::default(),
+        }
+    }
+
+    /// Get the currently selected task index (if a task is selected)
+    fn selected_task(&self) -> Option<usize> {
+        match self.list_entries.get(self.selected_index) {
+            Some(ListEntry::Task(idx)) => Some(*idx),
+            _ => None,
+        }
+    }
+
+    /// Move selection to the next task (skipping headers)
+    fn select_next(&mut self) {
+        for i in (self.selected_index + 1)..self.list_entries.len() {
+            if matches!(self.list_entries[i], ListEntry::Task(_)) {
+                self.selected_index = i;
+                self.reset_output_scroll();
+                return;
+            }
+        }
+    }
+
+    /// Move selection to the previous task (skipping headers)
+    fn select_prev(&mut self) {
+        for i in (0..self.selected_index).rev() {
+            if matches!(self.list_entries[i], ListEntry::Task(_)) {
+                self.selected_index = i;
+                self.reset_output_scroll();
+                return;
+            }
         }
     }
 
@@ -328,7 +418,7 @@ fn find_project_root(start_dir: Option<PathBuf>) -> Result<PathBuf> {
             None => {
                 return Err(anyhow::anyhow!(
                     "Could not find Zone project root. Make sure you're in the project directory."
-                ))
+                ));
             }
         }
     }
@@ -336,6 +426,7 @@ fn find_project_root(start_dir: Option<PathBuf>) -> Result<PathBuf> {
 
 fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
+    let mut rust_task_added = false;
 
     for project in projects {
         let working_dir = root.join(project.relative_path());
@@ -383,8 +474,9 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
                 }
             }
             Project::Runner | Project::Server => {
-                // Only add format task once for Rust (both share same dir)
-                if *project == Project::Runner {
+                // Only add format task once for Rust (Runner and Server share same dir)
+                if !rust_task_added {
+                    rust_task_added = true;
                     let (cmd, args) = if check {
                         ("cargo", vec!["fmt", "--all", "--", "--check"])
                     } else {
@@ -407,6 +499,7 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
 
 fn create_lint_tasks(root: &PathBuf, projects: &[Project], fix: bool) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
+    let mut rust_task_added = false;
 
     for project in projects {
         let working_dir = root.join(project.relative_path());
@@ -430,18 +523,19 @@ fn create_lint_tasks(root: &PathBuf, projects: &[Project], fix: bool) -> Vec<Tas
                     });
                 }
 
-                // TypeScript check
+                // TypeScript check - use local tsc to avoid npx cache issues
                 tasks.push(TaskConfig {
                     project: *project,
                     name: format!("TypeCheck {}", project.display_name()),
-                    command: "npx".to_string(),
-                    args: vec!["tsc".to_string(), "--noEmit".to_string()],
+                    command: format!("{}/node_modules/.bin/tsc", root.display()),
+                    args: vec!["--noEmit".to_string()],
                     working_dir,
                 });
             }
             Project::Runner | Project::Server => {
-                // Only add clippy task once for Rust (both share same dir)
-                if *project == Project::Runner {
+                // Only add clippy task once for Rust (Runner and Server share same dir)
+                if !rust_task_added {
+                    rust_task_added = true;
                     let args = if fix {
                         vec![
                             "clippy",
@@ -486,11 +580,17 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
 
         match project {
             Project::InstallerFrontend | Project::ManagerFrontend => {
+                // Run npm test directly from the frontend directory
+                // This ensures npm sets up PATH correctly to include local node_modules/.bin
                 tasks.push(TaskConfig {
                     project: *project,
                     name: format!("Test {}", project.display_name()),
                     command: "npm".to_string(),
-                    args: vec!["test".to_string(), "--".to_string(), "--watchAll=false".to_string()],
+                    args: vec![
+                        "test".to_string(),
+                        "--".to_string(),
+                        "--watchAll=false".to_string(),
+                    ],
                     working_dir,
                 });
             }
@@ -502,22 +602,38 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
                     command: "cargo".to_string(),
                     args: vec![
                         "test".to_string(),
-                        "-p".to_string(), "tool_runner".to_string(),
-                        "-p".to_string(), "zone_core".to_string(),
-                        "-p".to_string(), "zone_cli".to_string(),
+                        "-p".to_string(),
+                        "tool_runner".to_string(),
+                        "-p".to_string(),
+                        "zone_core".to_string(),
+                        "-p".to_string(),
+                        "zone_cli".to_string(),
                     ],
                     working_dir,
                 });
             }
             Project::Server => {
-                // Test zone_server (requires DATABASE_URL from env or .env)
+                // Test zone_server - start DB containers first, set up test DB, run migrations, then run tests
+                // The tests expect postgres://postgres:postgres@localhost:5432/zone_test
+                // Docker compose uses litellm credentials, so we create a test user/db
+                let server_dir = root.join("runner/zone_server");
                 tasks.push(TaskConfig {
                     project: *project,
                     name: "Test Server".to_string(),
-                    command: "cargo".to_string(),
+                    command: "bash".to_string(),
                     args: vec![
-                        "test".to_string(),
-                        "-p".to_string(), "zone_server".to_string(),
+                        "-c".to_string(),
+                        format!(
+                            "cd {root} && docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres valkey && \
+                             sleep 3 && \
+                             docker exec postgres psql -U litellm -d litellm -c \"CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres';\" 2>/dev/null || true && \
+                             docker exec postgres psql -U postgres -c \"CREATE DATABASE zone_test;\" 2>/dev/null || true && \
+                             cd {server_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test sqlx migrate run && \
+                             cd {working_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test cargo test -p zone_server",
+                            root = root.display(),
+                            server_dir = server_dir.display(),
+                            working_dir = working_dir.display()
+                        ),
                     ],
                     working_dir,
                 });
@@ -528,33 +644,125 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
     tasks
 }
 
-fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
+fn create_e2e_tasks(
+    root: &PathBuf,
+    projects: &[Project],
+    headed: bool,
+    ui: bool,
+) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
+
+    for project in projects {
+        let project_dir = root.join(project.relative_path());
+
+        match project {
+            Project::InstallerFrontend | Project::ManagerFrontend => {
+                // Check if playwright config exists
+                let playwright_config = project_dir.join("playwright.config.ts");
+                if !playwright_config.exists() {
+                    continue;
+                }
+
+                // Run npm run test:e2e directly from the frontend directory
+                // This ensures npm sets up PATH correctly to include local node_modules/.bin
+                let mut args = vec![
+                    "run".to_string(),
+                    if ui { "test:e2e:ui" } else { "test:e2e" }.to_string(),
+                    "--".to_string(),
+                    "--project=chromium".to_string(),
+                ];
+
+                // Add headed flag if requested (and not using UI mode)
+                if headed && !ui {
+                    args.push("--headed".to_string());
+                }
+
+                tasks.push(TaskConfig {
+                    project: *project,
+                    name: format!("E2E {}", project.display_name()),
+                    command: "npm".to_string(),
+                    args,
+                    working_dir: project_dir,
+                });
+            }
+            // E2E tests only apply to frontend projects
+            Project::Runner | Project::Server => {}
+        }
+    }
+
+    tasks
+}
+
+fn create_audit_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
+    let mut tasks = Vec::new();
+    let mut rust_task_added = false;
 
     for project in projects {
         let working_dir = root.join(project.relative_path());
 
         match project {
             Project::InstallerFrontend | Project::ManagerFrontend => {
+                // npm audit for JavaScript/TypeScript
+                // Using critical level since webpack-dev-server high vulnerabilities are
+                // known issues in react-scripts with no current fix available
                 tasks.push(TaskConfig {
                     project: *project,
-                    name: format!("Coverage {}", project.display_name()),
+                    name: format!("Audit {}", project.display_name()),
                     command: "npm".to_string(),
-                    args: vec!["run".to_string(), "test:coverage".to_string()],
+                    args: vec!["audit".to_string(), "--audit-level=critical".to_string()],
                     working_dir,
                 });
             }
             Project::Runner | Project::Server => {
-                // Only add coverage task once for Rust
-                if *project == Project::Runner {
+                // cargo audit for Rust - only add once (Runner and Server share same dir)
+                if !rust_task_added {
+                    rust_task_added = true;
+                    tasks.push(TaskConfig {
+                        project: *project,
+                        name: "Audit Rust".to_string(),
+                        command: "cargo".to_string(),
+                        args: vec!["audit".to_string()],
+                        working_dir,
+                    });
+                }
+            }
+        }
+    }
+
+    tasks
+}
+
+fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
+    let mut tasks = Vec::new();
+    let mut rust_task_added = false;
+
+    for project in projects {
+        let working_dir = root.join(project.relative_path());
+
+        match project {
+            Project::InstallerFrontend | Project::ManagerFrontend => {
+                // Run npm run test:coverage directly from the frontend directory
+                // This ensures npm sets up PATH correctly to include local node_modules/.bin
+                tasks.push(TaskConfig {
+                    project: *project,
+                    name: format!("Coverage {}", project.display_name()),
+                    command: "npm".to_string(),
+                    args: vec![
+                        "run".to_string(),
+                        "test:coverage".to_string(),
+                    ],
+                    working_dir,
+                });
+            }
+            Project::Runner | Project::Server => {
+                // Only add coverage task once for Rust (Runner and Server share same dir)
+                if !rust_task_added {
+                    rust_task_added = true;
                     tasks.push(TaskConfig {
                         project: *project,
                         name: "Coverage Rust".to_string(),
                         command: "cargo".to_string(),
-                        args: vec![
-                            "llvm-cov".to_string(),
-                            "--html".to_string(),
-                        ],
+                        args: vec!["llvm-cov".to_string(), "--html".to_string()],
                         working_dir,
                     });
                 }
@@ -577,15 +785,16 @@ fn create_lighthouse_tasks(root: &PathBuf, target: LighthouseTarget) -> Vec<Task
     for project in targets {
         let working_dir = root.join(project.relative_path());
 
-        // Combined task: install deps, build, then run Lighthouse CI
-        // Using bash to chain commands so they run sequentially
+        // Build then run Lighthouse CI
+        // Note: Assumes dependencies are already installed (npm ci is not run here
+        // as it would clear node_modules and break other concurrent tasks)
         tasks.push(TaskConfig {
             project,
             name: format!("Lighthouse {}", project.display_name()),
             command: "bash".to_string(),
             args: vec![
                 "-c".to_string(),
-                "npm ci && npm run build && npx @lhci/cli autorun".to_string(),
+                "npm run build && npx @lhci/cli autorun".to_string(),
             ],
             working_dir,
         });
@@ -594,11 +803,7 @@ fn create_lighthouse_tasks(root: &PathBuf, target: LighthouseTarget) -> Vec<Task
     tasks
 }
 
-async fn run_task(
-    task_idx: usize,
-    task: Arc<Mutex<TaskState>>,
-    tx: mpsc::Sender<TaskMessage>,
-) {
+async fn run_task(task_idx: usize, task: Arc<Mutex<TaskState>>, tx: mpsc::Sender<TaskMessage>) {
     let config = {
         let state = task.lock().unwrap();
         state.config.clone()
@@ -642,19 +847,42 @@ async fn run_task(
 
     // Run the command
     let mut cmd = Command::new(&config.command);
+
+    // Get current PATH and prepend node_modules/.bin directories
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let root_bin = config.working_dir.join("node_modules/.bin");
+    let root_root_bin = config.working_dir.parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("node_modules/.bin"));
+
+    let mut new_path = String::new();
+    if root_bin.exists() {
+        new_path.push_str(&root_bin.to_string_lossy());
+        new_path.push(':');
+    }
+    if let Some(ref bin) = root_root_bin {
+        if bin.exists() {
+            new_path.push_str(&bin.to_string_lossy());
+            new_path.push(':');
+        }
+    }
+    new_path.push_str(&path_var);
+
     cmd.args(&config.args)
         .current_dir(&config.working_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("CI", "true")
-        .env("FORCE_COLOR", "0")
-        .env("NO_COLOR", "1");
+        .env("PATH", &new_path);
 
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             let _ = tx
-                .send(TaskMessage::Failed(task_idx, format!("Failed to spawn: {}", e)))
+                .send(TaskMessage::Failed(
+                    task_idx,
+                    format!("Failed to spawn: {}", e),
+                ))
                 .await;
             let mut state = task.lock().unwrap();
             state.status = TaskStatus::Failed;
@@ -663,8 +891,8 @@ async fn run_task(
         }
     };
 
-    let stdout = child.stdout;
-    let stderr = child.stderr;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
 
     // Read stdout and stderr in separate threads
     let tx_stdout = tx.clone();
@@ -687,41 +915,14 @@ async fn run_task(
         }
     });
 
+    // Wait for output readers to finish
     stdout_handle.join().ok();
     stderr_handle.join().ok();
 
-    // Wait for process to complete - we need to get ownership of child
-    // Since we consumed stdout/stderr, we need to drop them properly
-    // Actually we need to handle this differently
-    let exit_status = {
-        let mut cmd = Command::new(&config.command);
-        cmd.args(&config.args)
-            .current_dir(&config.working_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("CI", "true")
-            .env("FORCE_COLOR", "0")
-            .env("NO_COLOR", "1");
-
-        match cmd.output() {
-            Ok(output) => {
-                // Send any remaining output
-                for line in String::from_utf8_lossy(&output.stdout).lines() {
-                    if !line.is_empty() {
-                        let mut state = task.lock().unwrap();
-                        state.output.push(line.to_string());
-                    }
-                }
-                for line in String::from_utf8_lossy(&output.stderr).lines() {
-                    if !line.is_empty() {
-                        let mut state = task.lock().unwrap();
-                        state.output.push(line.to_string());
-                    }
-                }
-                Some(output.status.code().unwrap_or(-1))
-            }
-            Err(_) => None,
-        }
+    // Wait for the process to complete and get exit status
+    let exit_status = match child.wait() {
+        Ok(status) => Some(status.code().unwrap_or(-1)),
+        Err(_) => None,
     };
 
     // Update state and drop lock before await
@@ -750,7 +951,10 @@ async fn run_task(
         }
         None => {
             let _ = tx
-                .send(TaskMessage::Failed(task_idx, "Process terminated".to_string()))
+                .send(TaskMessage::Failed(
+                    task_idx,
+                    "Process terminated".to_string(),
+                ))
                 .await;
         }
     }
@@ -769,12 +973,13 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
         .split(frame.area());
 
     // Header
-    let header_text = format!(
-        " Zone Dev Tools - {} ",
-        Local::now().format("%H:%M:%S")
-    );
+    let header_text = format!(" Zone Dev Tools - {} ", Local::now().format("%H:%M:%S"));
     let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(Block::default().borders(Borders::ALL).title("Zone"));
     frame.render_widget(header, chunks[0]);
 
@@ -830,48 +1035,75 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
     app.tasks_area = main_chunks[0];
     app.output_area = main_chunks[1];
 
-    // Task list
+    // Task list with project grouping
     let items: Vec<ListItem> = app
-        .tasks
+        .list_entries
         .iter()
         .enumerate()
-        .map(|(idx, task)| {
-            let state = task.lock().unwrap();
-            let (status_icon, status_color) = match state.status {
-                TaskStatus::Pending => ("○", Color::DarkGray),
-                TaskStatus::Running => ("◐", Color::Yellow),
-                TaskStatus::Success => ("✓", Color::Green),
-                TaskStatus::Failed => ("✗", Color::Red),
-                TaskStatus::Skipped => ("⊘", Color::DarkGray),
-            };
+        .map(|(idx, entry)| {
+            match entry {
+                ListEntry::ProjectHeader(project) => {
+                    // Project header - styled differently, not selectable
+                    let content = Line::from(vec![Span::styled(
+                        format!("▸ {}", project.display_name()),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )]);
+                    ListItem::new(content)
+                }
+                ListEntry::Task(task_idx) => {
+                    let state = app.tasks[*task_idx].lock().unwrap();
+                    let (status_icon, status_color) = match state.status {
+                        TaskStatus::Pending => ("○", Color::DarkGray),
+                        TaskStatus::Running => ("◐", Color::Yellow),
+                        TaskStatus::Success => ("✓", Color::Green),
+                        TaskStatus::Failed => ("✗", Color::Red),
+                        TaskStatus::Skipped => ("⊘", Color::DarkGray),
+                    };
 
-            let duration = state.duration_str();
+                    let duration = state.duration_str();
+                    let is_selected = idx == app.selected_index;
 
-            let style = if idx == app.selected_task {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-
-            let content = Line::from(vec![
-                Span::styled(format!(" {} ", status_icon), Style::default().fg(status_color)),
-                Span::styled(
-                    format!("{:<20}", state.config.name),
-                    Style::default().fg(if idx == app.selected_task {
-                        Color::White
+                    let style = if is_selected {
+                        Style::default()
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Color::Gray
-                    }),
-                ),
-                Span::styled(
-                    format!(" {:>8}", duration),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
+                        Style::default()
+                    };
 
-            ListItem::new(content).style(style)
+                    // Extract just the task type from the name (remove project prefix)
+                    let task_name = state
+                        .config
+                        .name
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(&state.config.name);
+
+                    let content = Line::from(vec![
+                        Span::raw("  "), // Indent for tasks under project
+                        Span::styled(
+                            format!("{} ", status_icon),
+                            Style::default().fg(status_color),
+                        ),
+                        Span::styled(
+                            format!("{:<16}", task_name),
+                            Style::default().fg(if is_selected {
+                                Color::White
+                            } else {
+                                Color::Gray
+                            }),
+                        ),
+                        Span::styled(
+                            format!(" {:>8}", duration),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]);
+
+                    ListItem::new(content).style(style)
+                }
+            }
         })
         .collect();
 
@@ -899,13 +1131,9 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
     let output_area_height = main_chunks[1].height.saturating_sub(2) as usize; // subtract borders
 
     let (selected_output, total_lines, scroll_offset): (Vec<Line>, usize, usize) =
-        if app.selected_task < app.tasks.len() {
-            let state = app.tasks[app.selected_task].lock().unwrap();
-            let cmd_line = format!(
-                "$ {} {}",
-                state.config.command,
-                state.config.args.join(" ")
-            );
+        if let Some(task_idx) = app.selected_task() {
+            let state = app.tasks[task_idx].lock().unwrap();
+            let cmd_line = format!("$ {} {}", state.config.command, state.config.args.join(" "));
             let dir_line = format!("Directory: {:?}", state.config.working_dir);
 
             // Clone output to avoid lifetime issues
@@ -920,18 +1148,23 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
 
             // Add all output lines with color coding
             for line in &output_clone {
-                let color =
-                    if line.contains("error") || line.contains("Error") || line.contains("FAILED") {
-                        Color::Red
-                    } else if line.contains("warning") || line.contains("Warning") {
-                        Color::Yellow
-                    } else if line.contains("passed") || line.contains("success") || line.contains("ok")
-                    {
-                        Color::Green
-                    } else {
-                        Color::Gray
-                    };
-                lines.push(Line::from(Span::styled(line.clone(), Style::default().fg(color))));
+                let color = if line.contains("error")
+                    || line.contains("Error")
+                    || line.contains("FAILED")
+                {
+                    Color::Red
+                } else if line.contains("warning") || line.contains("Warning") {
+                    Color::Yellow
+                } else if line.contains("passed") || line.contains("success") || line.contains("ok")
+                {
+                    Color::Green
+                } else {
+                    Color::Gray
+                };
+                lines.push(Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(color),
+                )));
             }
 
             let total = lines.len();
@@ -1100,32 +1333,22 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
                                 app.task_pane_width = (app.task_pane_width + 5).min(85);
                             }
                             // Up/Down navigation depends on focused pane
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                match app.focused_pane {
-                                    FocusedPane::Tasks => {
-                                        if app.selected_task > 0 {
-                                            app.selected_task -= 1;
-                                            app.reset_output_scroll();
-                                        }
-                                    }
-                                    FocusedPane::Output => {
-                                        app.output_scroll = app.output_scroll.saturating_sub(1);
-                                    }
+                            KeyCode::Up | KeyCode::Char('k') => match app.focused_pane {
+                                FocusedPane::Tasks => {
+                                    app.select_prev();
                                 }
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                match app.focused_pane {
-                                    FocusedPane::Tasks => {
-                                        if app.selected_task < app.tasks.len().saturating_sub(1) {
-                                            app.selected_task += 1;
-                                            app.reset_output_scroll();
-                                        }
-                                    }
-                                    FocusedPane::Output => {
-                                        app.output_scroll = app.output_scroll.saturating_add(1);
-                                    }
+                                FocusedPane::Output => {
+                                    app.output_scroll = app.output_scroll.saturating_sub(1);
                                 }
-                            }
+                            },
+                            KeyCode::Down | KeyCode::Char('j') => match app.focused_pane {
+                                FocusedPane::Tasks => {
+                                    app.select_next();
+                                }
+                                FocusedPane::Output => {
+                                    app.output_scroll = app.output_scroll.saturating_add(1);
+                                }
+                            },
                             // Page up/down for faster scrolling in output pane
                             KeyCode::PageUp => {
                                 if app.focused_pane == FocusedPane::Output {
@@ -1183,12 +1406,15 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
                         MouseEventKind::Down(_) => {
                             if in_tasks {
                                 app.focused_pane = FocusedPane::Tasks;
-                                // Calculate which task was clicked (accounting for border)
-                                let task_y = y.saturating_sub(app.tasks_area.y + 1);
-                                let task_idx = task_y as usize;
-                                if task_idx < app.tasks.len() && app.selected_task != task_idx {
-                                    app.selected_task = task_idx;
-                                    app.reset_output_scroll();
+                                // Calculate which list entry was clicked (accounting for border)
+                                let entry_y = y.saturating_sub(app.tasks_area.y + 1);
+                                let entry_idx = entry_y as usize;
+                                // Only select if it's a valid task entry (not a header)
+                                if entry_idx < app.list_entries.len() {
+                                    if matches!(app.list_entries[entry_idx], ListEntry::Task(_)) {
+                                        app.selected_index = entry_idx;
+                                        app.reset_output_scroll();
+                                    }
                                 }
                             } else if in_output {
                                 app.focused_pane = FocusedPane::Output;
@@ -1197,17 +1423,15 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
                         MouseEventKind::ScrollUp => {
                             if in_output {
                                 app.output_scroll = app.output_scroll.saturating_sub(3);
-                            } else if in_tasks && app.selected_task > 0 {
-                                app.selected_task -= 1;
-                                app.reset_output_scroll();
+                            } else if in_tasks {
+                                app.select_prev();
                             }
                         }
                         MouseEventKind::ScrollDown => {
                             if in_output {
                                 app.output_scroll = app.output_scroll.saturating_add(3);
-                            } else if in_tasks && app.selected_task < app.tasks.len().saturating_sub(1) {
-                                app.selected_task += 1;
-                                app.reset_output_scroll();
+                            } else if in_tasks {
+                                app.select_next();
                             }
                         }
                         _ => {}
@@ -1231,11 +1455,7 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
 }
 
 async fn run_simple(tasks: Vec<TaskConfig>) -> Result<bool> {
-    println!(
-        "{} Running {} tasks...\n",
-        "→".cyan().bold(),
-        tasks.len()
-    );
+    println!("{} Running {} tasks...\n", "→".cyan().bold(), tasks.len());
 
     let (tx, mut rx) = mpsc::channel::<TaskMessage>(100);
 
@@ -1381,10 +1601,38 @@ async fn main() -> Result<()> {
             let mut all_tasks = Vec::new();
             all_tasks.extend(create_format_tasks(&root, &projects, true));
             all_tasks.extend(create_lint_tasks(&root, &projects, false));
+            all_tasks.extend(create_audit_tasks(&root, &projects));
             all_tasks.extend(create_test_tasks(&root, &projects));
+            all_tasks.extend(create_e2e_tasks(&root, &projects, false, false));
+            // Only run lighthouse for frontend projects
+            let lighthouse_target = match project {
+                Some(ps)
+                    if ps.contains(&Project::InstallerFrontend)
+                        && ps.contains(&Project::ManagerFrontend) =>
+                {
+                    Some(LighthouseTarget::All)
+                }
+                Some(ps) if ps.contains(&Project::InstallerFrontend) => {
+                    Some(LighthouseTarget::Installer)
+                }
+                Some(ps) if ps.contains(&Project::ManagerFrontend) => {
+                    Some(LighthouseTarget::Manager)
+                }
+                Some(_) => None, // Only backend projects selected
+                None => Some(LighthouseTarget::All), // No filter = all projects
+            };
+            if let Some(target) = lighthouse_target {
+                all_tasks.extend(create_lighthouse_tasks(&root, target));
+            }
             all_tasks
         }
         Commands::Lighthouse { target } => create_lighthouse_tasks(&root, *target),
+        Commands::E2e {
+            project,
+            headed,
+            ui,
+        } => create_e2e_tasks(&root, &get_projects(project.clone()), *headed, *ui),
+        Commands::Audit { project } => create_audit_tasks(&root, &get_projects(project.clone())),
     };
 
     if tasks.is_empty() {

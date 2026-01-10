@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { blockServiceWorker } from './test-utils';
 
 // Mock data generators
 const generateMockChat = (id: string, title: string, modelName: string, archived = false) => ({
@@ -25,9 +27,14 @@ const generateMockModel = (name: string) => ({
 });
 
 test.describe('Chats Page', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ context, page }) => {
+    // Block service worker to allow route interception to work
+    await blockServiceWorker(context);
+    await mockCommonEndpoints(page);
+
     // Mock models API for the new chat dialog
-    await page.route('**/api/models', (route) => {
+    await page.unroute('**/api/models*');
+    await page.route('**/api/models*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -56,9 +63,9 @@ test.describe('Chats Page', () => {
 
     // Set API key and navigate
     await page.goto('/');
-    await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
+    await setupAuth(page);
     await page.reload();
-    await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
     // Navigate to chats page
     await page.click('a[href="/chats"]');
@@ -194,19 +201,19 @@ test.describe('Chats Page', () => {
 
   test.describe('Create Chat', () => {
     test('opens new chat modal from sidebar button', async ({ page }) => {
-      await page.click('.chats-sidebar-header .btn-primary');
-      await expect(page.locator('.modal-content h3')).toContainText('New Chat');
+      await page.click('.chats-sidebar-header .ui-btn--primary');
+      await expect(page.locator('.ui-modal__title')).toContainText('New Chat');
     });
 
     test('opens new chat modal from placeholder button', async ({ page }) => {
-      await page.click('.chat-placeholder .btn-primary');
-      await expect(page.locator('.modal-content h3')).toContainText('New Chat');
+      await page.click('.chat-placeholder .ui-btn--primary');
+      await expect(page.locator('.ui-modal__title')).toContainText('New Chat');
     });
 
     test('shows available models in dropdown', async ({ page }) => {
-      await page.click('.chats-sidebar-header .btn-primary');
+      await page.click('.chats-sidebar-header .ui-btn--primary');
 
-      const options = page.locator('#model-select option');
+      const options = page.locator('#select-model option');
       await expect(options).toHaveCount(4); // Including "Choose a model..." option
       await expect(options.nth(1)).toContainText('llama3.2');
       await expect(options.nth(2)).toContainText('codellama');
@@ -216,43 +223,52 @@ test.describe('Chats Page', () => {
     test('creates new chat successfully', async ({ page }) => {
       const newChat = generateMockChat('new-chat-id', 'New Chat', 'llama3.2');
 
-      await page.route('**/api/chats', (route) => {
-        if (route.request().method() === 'POST') {
+      // Unroute existing chats routes and set up new ones
+      await page.unroute(/\/api\/chats/);
+      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+        const url = route.request().url();
+        const method = route.request().method();
+
+        if (method === 'POST' && !url.includes('/new-chat-id')) {
           route.fulfill({
             status: 201,
             contentType: 'application/json',
-            body: JSON.stringify({ chat: newChat }),
+            body: JSON.stringify({ chat: { ...newChat, messages: [] } }),
+          });
+        } else if (url.includes('/new-chat-id') && method === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              chat: { ...newChat, messages: [] },
+            }),
+          });
+        } else if (method === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ chats: [] }),
           });
         }
       });
 
-      await page.route('**/api/chats/new-chat-id', (route) => {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            chat: { ...newChat, messages: [] },
-          }),
-        });
-      });
-
-      await page.click('.chats-sidebar-header .btn-primary');
-      await page.selectOption('#model-select', 'llama3.2');
-      await page.click('.modal-actions .btn-primary');
+      await page.click('.chats-sidebar-header .ui-btn--primary');
+      await page.selectOption('#select-model', 'llama3.2');
+      await page.click('.modal-actions .ui-btn--primary');
 
       // Modal should close
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await expect(page.locator('.ui-modal')).not.toBeVisible();
     });
 
     test('disables create button when no model selected', async ({ page }) => {
-      await page.click('.chats-sidebar-header .btn-primary');
-      await expect(page.locator('.modal-actions .btn-primary')).toBeDisabled();
+      await page.click('.chats-sidebar-header .ui-btn--primary');
+      await expect(page.locator('.modal-actions .ui-btn--primary')).toBeDisabled();
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      await page.click('.chats-sidebar-header .btn-primary');
-      await page.click('.modal-actions .btn-secondary');
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await page.click('.chats-sidebar-header .ui-btn--primary');
+      await page.click('.modal-actions .ui-btn--secondary');
+      await expect(page.locator('.ui-modal')).not.toBeVisible();
     });
   });
 
@@ -316,7 +332,7 @@ test.describe('Chats Page', () => {
       await page.click('.chat-item');
 
       await expect(page.locator('.message-form textarea')).toBeVisible();
-      await expect(page.locator('.message-form .btn-primary')).toContainText('Send');
+      await expect(page.locator('.message-form .ui-btn--primary')).toContainText('Send');
     });
 
     test('sends message successfully', async ({ page }) => {
@@ -334,7 +350,7 @@ test.describe('Chats Page', () => {
 
       await page.click('.chat-item');
       await page.fill('.message-form textarea', 'Test message');
-      await page.click('.message-form .btn-primary');
+      await page.click('.message-form .ui-btn--primary');
 
       // New message should appear
       await expect(page.locator('.message')).toHaveCount(3);
@@ -342,7 +358,7 @@ test.describe('Chats Page', () => {
 
     test('disables send button when input is empty', async ({ page }) => {
       await page.click('.chat-item');
-      await expect(page.locator('.message-form .btn-primary')).toBeDisabled();
+      await expect(page.locator('.message-form .ui-btn--primary')).toBeDisabled();
     });
 
     test('clears input after sending', async ({ page }) => {
@@ -360,7 +376,7 @@ test.describe('Chats Page', () => {
 
       await page.click('.chat-item');
       await page.fill('.message-form textarea', 'Test');
-      await page.click('.message-form .btn-primary');
+      await page.click('.message-form .ui-btn--primary');
 
       await expect(page.locator('.message-form textarea')).toHaveValue('');
     });
@@ -418,8 +434,8 @@ test.describe('Chats Page', () => {
       await page.hover('.chat-item');
       await page.click('button[title="Delete"]');
 
-      await expect(page.locator('.modal-content h3')).toContainText('Delete Chat');
-      await expect(page.locator('.modal-content')).toContainText('cannot be undone');
+      await expect(page.locator('.ui-modal__title')).toContainText('Delete Chat');
+      await expect(page.locator('.ui-modal')).toContainText('cannot be undone');
     });
 
     test('deletes chat after confirmation', async ({ page }) => {
@@ -431,18 +447,18 @@ test.describe('Chats Page', () => {
 
       await page.hover('.chat-item');
       await page.click('button[title="Delete"]');
-      await page.click('.modal-actions .btn-danger');
+      await page.click('.modal-actions .ui-btn--danger');
 
       // Modal should close
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await expect(page.locator('.ui-modal')).not.toBeVisible();
     });
 
     test('cancels delete', async ({ page }) => {
       await page.hover('.chat-item');
       await page.click('button[title="Delete"]');
-      await page.click('.modal-actions .btn-secondary');
+      await page.click('.modal-actions .ui-btn--secondary');
 
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await expect(page.locator('.ui-modal')).not.toBeVisible();
     });
   });
 
@@ -487,8 +503,8 @@ test.describe('Chats Page', () => {
     });
 
     test('modals can be closed with escape key', async ({ page }) => {
-      await page.click('.chats-sidebar-header .btn-primary');
-      await expect(page.locator('.modal-content')).toBeVisible();
+      await page.click('.chats-sidebar-header .ui-btn--primary');
+      await expect(page.locator('.ui-modal')).toBeVisible();
 
       await page.keyboard.press('Escape');
       // Note: Escape handling is on the backdrop, not the modal

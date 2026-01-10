@@ -1,0 +1,8 @@
+# Cargo audit configuration
+
+[advisories]
+# Ignore specific advisories that have no fix available
+ignore = [
+    # RSA Marvin Attack - no fix available, transitive dependency of sqlx-mysql and jsonwebtoken
+    "RUSTSEC-2023-0071",
+]

@@ -39,6 +39,9 @@ export async function setupAuth(page: Page, options: { isAdmin?: boolean } = {})
             'workspaces:read',
             'workspaces:update',
             'workspaces:delete',
+            'organizations:read',
+            'organizations:update',
+            'organizations:delete',
             'users:read',
             'users:create',
             'users:update',
@@ -121,19 +124,23 @@ export async function clearAuth(page: Page): Promise<void> {
  * Common mock for models and browse endpoints that most pages need.
  */
 export async function mockCommonEndpoints(page: Page): Promise<void> {
-  await page.route('**/api/models', (route) => {
+  await page.route('**/api/models*', (route) => {
+    const url = new URL(route.request().url());
+    const source = url.searchParams.get('source');
+
+    if (source) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ source, models: [], has_more: false }),
+      });
+      return;
+    }
+
     route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify({ models: [] }),
-    });
-  });
-
-  await page.route('**/api/browse*', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ models: [], has_more: false }),
     });
   });
 

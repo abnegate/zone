@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 // Allow configurable port for running alongside other services
-const port = process.env.PORT || '3000';
+const port = process.env.PLAYWRIGHT_PORT || process.env.PORT || '3001';
 const baseURL = `http://localhost:${port}`;
 
 // Allow running specific browser via environment variable (for CI matrix)
@@ -84,9 +84,9 @@ export default defineConfig({
     ? [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]
     : projects,
   webServer: {
-    command: `PORT=${port} npm start`,
+    command: `HOST=127.0.0.1 PORT=${port} npm start`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: process.env.PLAYWRIGHT_REUSE_SERVER === 'true',
     timeout: 120000,
   },
 });

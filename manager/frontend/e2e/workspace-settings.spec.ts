@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { blockServiceWorker } from './test-utils';
 
 const mockTheme = {
   id: 'theme-1',
@@ -16,12 +17,98 @@ const mockTheme = {
 };
 
 test.describe('Workspace Settings Page', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ context, page }) => {
+    // Block service worker first
+    await blockServiceWorker(context);
+
     // Set up API mocks
     await mockCommonEndpoints(page);
 
-    // Mock theme endpoint
-    await page.route('**/api/organizations/*/workspaces/*/settings/theme', (route) => {
+    // Mock organizations (with and without query params)
+    const orgMock = {
+      organizations: [
+        {
+          id: '00000000-0000-0000-0000-000000000001',
+          name: 'Default Org',
+          slug: 'default',
+          description: null,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    };
+    await page.route('**/api/organizations?*', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(orgMock) })
+    );
+    await page.route('**/api/organizations', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(orgMock) })
+    );
+
+    // Mock workspaces (with and without query params)
+    const workspaceMock = {
+      workspaces: [
+        {
+          id: '00000000-0000-0000-0000-000000000001',
+          organization_id: '00000000-0000-0000-0000-000000000001',
+          name: 'Default Workspace',
+          slug: 'default',
+          description: null,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    };
+    await page.route('**/api/organizations/*/workspaces?*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(workspaceMock),
+      })
+    );
+    await page.route('**/api/organizations/*/workspaces', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(workspaceMock),
+      })
+    );
+
+    // Mock AI settings endpoints - matches AiSettingsResponseSchema
+    const mockAiSettings = {
+      provider: 'openai',
+      has_litellm_key: false,
+      litellm_host: null,
+      has_openai_api_key: true,
+      openai_base_url: null,
+      has_anthropic_api_key: false,
+      anthropic_base_url: null,
+      bedrock_region: null,
+      bedrock_use_iam_role: false,
+      has_bedrock_credentials: false,
+      model_fast: 'gpt-4o-mini',
+      model_reasoning: 'gpt-4o',
+      model_embedding: 'text-embedding-3-small',
+    };
+    await context.route('**/**/api/organizations/**/workspaces/**/settings/ai/effective**', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockAiSettings),
+      });
+    });
+    await context.route('**/**/api/organizations/**/workspaces/**/settings/ai', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(mockAiSettings),
+      });
+    });
+
+    // Mock theme endpoint - use context.route for precedence over service worker
+    // Use wildcard pattern that matches any character in path segments
+    await context.route('**/**/api/organizations/**/workspaces/**/settings/theme**', (route) => {
       const method = route.request().method();
 
       if (method === 'GET') {
@@ -148,8 +235,8 @@ test.describe('Workspace Settings Page', () => {
     });
 
     test('shows preview buttons', async ({ page }) => {
-      await expect(page.locator('.preview-buttons .btn-primary')).toContainText('Primary Button');
-      await expect(page.locator('.preview-buttons .btn-secondary')).toContainText('Secondary Button');
+      await expect(page.getByRole('button', { name: 'Primary Button' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Secondary Button' })).toBeVisible();
     });
 
     test('shows sample preview card', async ({ page }) => {
@@ -188,12 +275,12 @@ test.describe('Workspace Settings Page', () => {
       await page.click('button:has-text("Save Changes")');
 
       // Should show success message
-      await expect(page.locator('.alert-success')).toContainText('Theme saved successfully');
+      await expect(page.locator('.alert-success')).toContainText('Settings saved successfully');
     });
 
-    test('shows loading state while saving', async ({ page }) => {
-      await page.unroute('**/api/organizations/*/workspaces/*/settings/theme');
-      await page.route('**/api/organizations/*/workspaces/*/settings/theme', async (route) => {
+    test('shows loading state while saving', async ({ context, page }) => {
+      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.route(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/, async (route) => {
         const method = route.request().method();
         if (method === 'PUT') {
           await new Promise((resolve) => setTimeout(resolve, 500));
@@ -216,9 +303,9 @@ test.describe('Workspace Settings Page', () => {
       await expect(page.locator('button:has-text("Saving...")')).toBeVisible();
     });
 
-    test('shows error when save fails', async ({ page }) => {
-      await page.unroute('**/api/organizations/*/workspaces/*/settings/theme');
-      await page.route('**/api/organizations/*/workspaces/*/settings/theme', (route) => {
+    test('shows error when save fails', async ({ context, page }) => {
+      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.route(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/, (route) => {
         const method = route.request().method();
         if (method === 'GET') {
           route.fulfill({
@@ -250,12 +337,12 @@ test.describe('Workspace Settings Page', () => {
       await page.click('button:has-text("Reset to Defaults")');
 
       // Should show success message
-      await expect(page.locator('.alert-success')).toContainText('Theme reset to defaults');
+      await expect(page.locator('.alert-success')).toContainText('Settings reset to defaults');
     });
 
-    test('shows error when reset fails', async ({ page }) => {
-      await page.unroute('**/api/organizations/*/workspaces/*/settings/theme');
-      await page.route('**/api/organizations/*/workspaces/*/settings/theme', (route) => {
+    test('shows error when reset fails', async ({ context, page }) => {
+      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.route(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/, (route) => {
         const method = route.request().method();
         if (method === 'GET') {
           route.fulfill({
@@ -279,9 +366,9 @@ test.describe('Workspace Settings Page', () => {
   });
 
   test.describe('Loading State', () => {
-    test('shows loading state while fetching theme', async ({ page }) => {
-      await page.unroute('**/api/organizations/*/workspaces/*/settings/theme');
-      await page.route('**/api/organizations/*/workspaces/*/settings/theme', async (route) => {
+    test('shows loading state while fetching theme', async ({ context, page }) => {
+      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.route(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/, async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 500));
         route.fulfill({
           status: 200,
@@ -298,9 +385,9 @@ test.describe('Workspace Settings Page', () => {
   });
 
   test.describe('Error State', () => {
-    test('shows error when loading theme fails', async ({ page }) => {
-      await page.unroute('**/api/organizations/*/workspaces/*/settings/theme');
-      await page.route('**/api/organizations/*/workspaces/*/settings/theme', (route) => {
+    test('shows error when loading theme fails', async ({ context, page }) => {
+      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.route(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/, (route) => {
         route.fulfill({
           status: 500,
           contentType: 'application/json',

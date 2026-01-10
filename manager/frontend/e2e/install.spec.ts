@@ -1,27 +1,15 @@
 import { test, expect } from '@playwright/test';
+import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { blockServiceWorker } from './test-utils';
 
 test.describe('Model Installation', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
-
+  test.beforeEach(async ({ context, page }) => {
+    await blockServiceWorker(context);
+    await mockCommonEndpoints(page);
     await page.goto('/');
-    await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
+    await setupAuth(page);
     await page.reload();
-    await expect(page.locator('.login-overlay')).not.toBeVisible();
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
   });
 
   test('install form shows model input', async ({ page }) => {
@@ -65,27 +53,13 @@ test.describe('Model Installation', () => {
 });
 
 test.describe('Add Model Section UI', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
-
-    await page.route('**/api/browse*', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [], has_more: false }),
-      });
-    });
-
+  test.beforeEach(async ({ context, page }) => {
+    await blockServiceWorker(context);
+    await mockCommonEndpoints(page);
     await page.goto('/');
-    await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
+    await setupAuth(page);
     await page.reload();
-    await expect(page.locator('.login-overlay')).not.toBeVisible();
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
   });
 
   test('add model section has correct heading', async ({ page }) => {
@@ -109,27 +83,36 @@ test.describe('Install from Browse', () => {
     { id: 'codellama', name: 'codellama', description: 'Code Llama', downloads: 500000, tags: ['code'] },
   ];
 
-  test.beforeEach(async ({ page }) => {
-    await page.route('**/api/models', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [] }),
-      });
-    });
+  test.beforeEach(async ({ context, page }) => {
+    await blockServiceWorker(context);
+    await mockCommonEndpoints(page);
+    await page.unroute('**/api/models*');
+    await page.route('**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
 
-    await page.route('**/api/browse*', (route) => {
+      if (!source) {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: [] }),
+        });
+        return;
+      }
+
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ models: mockBrowseModels, has_more: false }),
+        body: JSON.stringify({ source, models: mockBrowseModels, has_more: false }),
       });
     });
 
     await page.goto('/');
-    await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
+    await setupAuth(page);
     await page.reload();
-    await expect(page.locator('.login-overlay')).not.toBeVisible();
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+    await page.click('button.main-tab:has-text("Browse")');
+    await expect(page.locator('.search-container')).toBeVisible();
   });
 
   test('browse item has install button', async ({ page }) => {
@@ -139,6 +122,8 @@ test.describe('Install from Browse', () => {
 
   test('clicking install on browse item populates form', async ({ page }) => {
     await page.locator('.browse-item').first().locator('.btn-primary').click();
+    // Switch to Installed tab to see the form
+    await page.click('button.main-tab:has-text("Installed")');
     await expect(page.locator('.model-form input')).toHaveValue('llama3.2');
   });
 
@@ -147,8 +132,11 @@ test.describe('Install from Browse', () => {
     await page.locator('.browse-item').first().click();
     await expect(page.locator('.modal-details')).toBeVisible();
 
-    // Click install in modal
-    await page.locator('.modal-details .btn-primary').click();
+    // Click install in modal - uses Button component with ui-btn--primary class
+    await page.locator('.modal-details .ui-btn--primary').click();
+
+    // Switch to Installed tab to see the form
+    await page.click('button.main-tab:has-text("Installed")');
 
     // Form should be populated
     await expect(page.locator('.model-form input')).toHaveValue('llama3.2');
@@ -157,10 +145,15 @@ test.describe('Install from Browse', () => {
   test('multiple installs overwrite previous input', async ({ page }) => {
     // Click first model's install
     await page.locator('.browse-item').first().locator('.btn-primary').click();
+    // Switch to Installed tab to verify first input
+    await page.click('button.main-tab:has-text("Installed")');
     await expect(page.locator('.model-form input')).toHaveValue('llama3.2');
 
-    // Click second model's install
+    // Switch back to Browse and click second model's install
+    await page.click('button.main-tab:has-text("Browse")');
     await page.locator('.browse-item').nth(1).locator('.btn-primary').click();
+    // Switch to Installed tab to verify second input
+    await page.click('button.main-tab:has-text("Installed")');
     await expect(page.locator('.model-form input')).toHaveValue('codellama');
   });
 });

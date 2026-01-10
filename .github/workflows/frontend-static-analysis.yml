@@ -7,7 +7,6 @@ on:
       - 'manager/frontend/**'
       - '.github/workflows/frontend-static-analysis.yml'
   pull_request:
-    branches: [main]
     paths:
       - 'manager/frontend/**'
       - '.github/workflows/frontend-static-analysis.yml'
@@ -16,49 +15,35 @@ jobs:
   typecheck:
     name: TypeScript Check
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: manager/frontend
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: manager/frontend/package-lock.json
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Type check
-        run: npx tsc --noEmit
+        working-directory: manager/frontend
+        run: bun run typecheck
 
   build:
     name: Build Check
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: manager/frontend
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: manager/frontend/package-lock.json
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Build
-        run: npm run build
+        working-directory: manager/frontend
+        run: bun run build
         env:
           CI: true

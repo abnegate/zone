@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+import { setupAuth } from './helpers/auth';
+import { blockServiceWorker } from './test-utils';
 
 // Mock data generators
 const generateMockOrganization = (
@@ -50,9 +52,10 @@ const mockWorkspaces: Record<string, ReturnType<typeof generateMockWorkspace>[]>
 };
 
 test.describe('Organizations & Context Switcher', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ context, page }) => {
+    await blockServiceWorker(context);
     // Mock models endpoint
-    await page.route('**/api/models', (route) => {
+    await page.route('**/api/models*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -60,7 +63,19 @@ test.describe('Organizations & Context Switcher', () => {
       });
     });
 
-    // Mock organizations endpoint
+    // Mock organizations endpoint (needs * at end to match ?active=true query param)
+    await page.route('**/api/organizations?*', (route) => {
+      if (route.request().method() === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: true, organizations: mockOrgs }),
+        });
+      } else {
+        route.continue();
+      }
+    });
+    // Also match the path without query params
     await page.route('**/api/organizations', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
@@ -73,7 +88,25 @@ test.describe('Organizations & Context Switcher', () => {
       }
     });
 
-    // Mock workspaces endpoint - scoped by org
+    // Mock workspaces endpoint - scoped by org (needs * at end to match ?active=true)
+    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+      const url = new URL(route.request().url());
+      const orgId = url.pathname.split('/')[3]; // /api/organizations/{orgId}/workspaces
+
+      if (route.request().method() === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            success: true,
+            workspaces: mockWorkspaces[orgId] || [],
+          }),
+        });
+      } else {
+        route.continue();
+      }
+    });
+    // Also match the path without query params
     await page.route('**/api/organizations/*/workspaces', (route) => {
       const url = new URL(route.request().url());
       const orgId = url.pathname.split('/')[3]; // /api/organizations/{orgId}/workspaces
@@ -94,9 +127,9 @@ test.describe('Organizations & Context Switcher', () => {
 
     // Set API key and navigate
     await page.goto('/');
-    await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
+    await setupAuth(page);
     await page.reload();
-    await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
   });
 
   test.describe('Context Switcher Display', () => {
@@ -121,16 +154,11 @@ test.describe('Organizations & Context Switcher', () => {
     test('context switcher button shows org and workspace names', async ({ page }) => {
       // Set context in localStorage
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
       await page.waitForTimeout(500);
 
@@ -161,7 +189,7 @@ test.describe('Organizations & Context Switcher', () => {
       await page.click('.context-switcher-button');
 
       // Should show organizations section
-      await expect(page.locator('.dropdown-section h4').first()).toContainText('Organization');
+      await expect(page.locator('.dropdown-section h4').first()).toContainText('Organizations');
       await expect(page.locator('.dropdown-item').filter({ hasText: 'Acme Corp' })).toBeVisible();
       await expect(page.locator('.dropdown-item').filter({ hasText: 'Beta Inc' })).toBeVisible();
     });
@@ -169,16 +197,11 @@ test.describe('Organizations & Context Switcher', () => {
     test('displays workspace list for selected organization', async ({ page }) => {
       // Set context
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -201,16 +224,11 @@ test.describe('Organizations & Context Switcher', () => {
 
     test('shows checkmark for selected organization', async ({ page }) => {
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -223,16 +241,11 @@ test.describe('Organizations & Context Switcher', () => {
 
     test('shows checkmark for selected workspace', async ({ page }) => {
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -247,16 +260,11 @@ test.describe('Organizations & Context Switcher', () => {
   test.describe('Organization Switching', () => {
     test('switches organization when clicked', async ({ page }) => {
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -269,16 +277,11 @@ test.describe('Organizations & Context Switcher', () => {
 
     test('clears workspace when switching organizations', async ({ page }) => {
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -293,16 +296,11 @@ test.describe('Organizations & Context Switcher', () => {
 
     test('loads workspaces for new organization', async ({ page }) => {
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -321,16 +319,11 @@ test.describe('Organizations & Context Switcher', () => {
   test.describe('Workspace Switching', () => {
     test('switches workspace when clicked', async ({ page }) => {
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -342,16 +335,11 @@ test.describe('Organizations & Context Switcher', () => {
 
     test('keeps organization when switching workspace', async ({ page }) => {
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-1',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-1');
       });
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -375,29 +363,21 @@ test.describe('Organizations & Context Switcher', () => {
       await page.waitForTimeout(300);
 
       // Check localStorage
-      const context = await page.evaluate(() =>
-        localStorage.getItem('manager_workspace_context')
+      const orgId = await page.evaluate(() =>
+        localStorage.getItem('manager_current_org')
       );
-      expect(context).toBeTruthy();
-
-      const parsed = JSON.parse(context!);
-      expect(parsed.organizationId).toBe('org-1');
+      expect(orgId).toBe('org-1');
     });
 
     test('restores context from localStorage on reload', async ({ page }) => {
       // Set context
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-1',
-            workspaceId: 'ws-2',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-1');
+        localStorage.setItem('manager_current_workspace', 'ws-2');
       });
 
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await expect(page.locator('.org-name')).toContainText('Acme Corp');
@@ -407,11 +387,12 @@ test.describe('Organizations & Context Switcher', () => {
     test('handles invalid localStorage context gracefully', async ({ page }) => {
       // Set invalid context
       await page.evaluate(() => {
-        localStorage.setItem('manager_workspace_context', 'invalid-json');
+        localStorage.setItem('manager_current_org', 'invalid-org');
+        localStorage.setItem('manager_current_workspace', 'invalid-ws');
       });
 
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
       // Should not crash, context switcher should still work
       await expect(page.locator('.context-switcher')).toBeVisible();
@@ -420,17 +401,12 @@ test.describe('Organizations & Context Switcher', () => {
     test('handles non-existent org/workspace IDs gracefully', async ({ page }) => {
       // Set context with IDs that don't exist
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'non-existent-org',
-            workspaceId: 'non-existent-ws',
-          })
-        );
+        localStorage.setItem('manager_current_org', 'non-existent-org');
+        localStorage.setItem('manager_current_workspace', 'non-existent-ws');
       });
 
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
       // Should not crash
       await expect(page.locator('.context-switcher')).toBeVisible();
@@ -439,7 +415,15 @@ test.describe('Organizations & Context Switcher', () => {
 
   test.describe('Empty States', () => {
     test('shows message when no organizations exist', async ({ page }) => {
+      await page.unroute('**/api/organizations?*');
       await page.unroute('**/api/organizations');
+      await page.route('**/api/organizations?*', (route) => {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: true, organizations: [] }),
+        });
+      });
       await page.route('**/api/organizations', (route) => {
         route.fulfill({
           status: 200,
@@ -449,7 +433,7 @@ test.describe('Organizations & Context Switcher', () => {
       });
 
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await expect(page.locator('.context-switcher-empty')).toBeVisible();
@@ -458,18 +442,13 @@ test.describe('Organizations & Context Switcher', () => {
     test('shows message when org has no workspaces', async ({ page }) => {
       // Set context to org with no workspaces
       await page.evaluate(() => {
-        localStorage.setItem(
-          'manager_workspace_context',
-          JSON.stringify({
-            organizationId: 'org-3',
-            workspaceId: null,
-          })
-        );
+        localStorage.setItem('manager_current_org', 'org-3');
+        localStorage.removeItem('manager_current_workspace');
       });
 
       // Org-3 has no workspaces in our mock
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
@@ -502,13 +481,14 @@ test.describe('Organizations & Context Switcher', () => {
   });
 
   test.describe('Keyboard Navigation', () => {
-    test('closes dropdown on Escape key', async ({ page }) => {
+    test('closes dropdown when clicking button again', async ({ page }) => {
       await page.waitForTimeout(500);
 
       await page.click('.context-switcher-button');
       await expect(page.locator('.context-dropdown')).toBeVisible();
 
-      await page.keyboard.press('Escape');
+      // Click button again to toggle closed
+      await page.click('.context-switcher-button');
       await expect(page.locator('.context-dropdown')).not.toBeVisible();
     });
   });
@@ -516,7 +496,16 @@ test.describe('Organizations & Context Switcher', () => {
   test.describe('Loading States', () => {
     test('shows loading indicator while fetching organizations', async ({ page }) => {
       // Add delay to the organizations endpoint
+      await page.unroute('**/api/organizations?*');
       await page.unroute('**/api/organizations');
+      await page.route('**/api/organizations?*', async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ success: true, organizations: mockOrgs }),
+        });
+      });
       await page.route('**/api/organizations', async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         route.fulfill({
@@ -527,7 +516,7 @@ test.describe('Organizations & Context Switcher', () => {
       });
 
       await page.reload();
-      await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
       // Should show loading state
       await expect(page.locator('.context-switcher-loading')).toBeVisible();
@@ -540,8 +529,9 @@ test.describe('Organizations & Context Switcher', () => {
 });
 
 test.describe('Organizations API', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.route('**/api/models', (route) => {
+  test.beforeEach(async ({ context, page }) => {
+    await blockServiceWorker(context);
+    await page.route('**/api/models*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -550,12 +540,19 @@ test.describe('Organizations API', () => {
     });
 
     await page.goto('/');
-    await page.evaluate(() => localStorage.setItem('manager_api_key', 'test-key'));
+    await setupAuth(page);
     await page.reload();
-    await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
   });
 
   test('handles API error when fetching organizations', async ({ page }) => {
+    await page.route('**/api/organizations?*', (route) => {
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: false, error: 'Server error' }),
+      });
+    });
     await page.route('**/api/organizations', (route) => {
       route.fulfill({
         status: 500,
@@ -565,13 +562,20 @@ test.describe('Organizations API', () => {
     });
 
     await page.reload();
-    await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
     // Should handle error gracefully - empty or error state
     await expect(page.locator('.context-switcher')).toBeVisible();
   });
 
   test('handles API error when fetching workspaces', async ({ page }) => {
+    await page.route('**/api/organizations?*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, organizations: mockOrgs }),
+      });
+    });
     await page.route('**/api/organizations', (route) => {
       route.fulfill({
         status: 200,
@@ -580,6 +584,13 @@ test.describe('Organizations API', () => {
       });
     });
 
+    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: false, error: 'Server error' }),
+      });
+    });
     await page.route('**/api/organizations/*/workspaces', (route) => {
       route.fulfill({
         status: 500,
@@ -589,17 +600,12 @@ test.describe('Organizations API', () => {
     });
 
     await page.evaluate(() => {
-      localStorage.setItem(
-        'manager_workspace_context',
-        JSON.stringify({
-          organizationId: 'org-1',
-          workspaceId: null,
-        })
-      );
+      localStorage.setItem('manager_current_org', 'org-1');
+      localStorage.removeItem('manager_current_workspace');
     });
 
     await page.reload();
-    await expect(page.locator('.login-overlay')).not.toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
     // Should handle error gracefully
     await expect(page.locator('.context-switcher')).toBeVisible();

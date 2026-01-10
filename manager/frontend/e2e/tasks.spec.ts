@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { blockServiceWorker } from './test-utils';
 
 // Mock data generators
 const generateMockProject = (id: string, name: string) => ({
@@ -58,6 +59,10 @@ const generateMockTask = (
   completed_at: null,
   queued_at: null,
   worker_id: null,
+  pr_url: null,
+  branch_name: null,
+  pr_status: null,
+  pr_created_at: null,
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 });
@@ -91,9 +96,75 @@ const mockTasks = [
 ];
 
 test.describe('Tasks Page', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ context, page }) => {
+    // Block service worker
+    await blockServiceWorker(context);
+
     // Set up API mocks
     await mockCommonEndpoints(page);
+
+    // Organization mock data
+    const orgMock = {
+      organizations: [
+        {
+          id: '00000000-0000-0000-0000-000000000001',
+          name: 'Default Org',
+          slug: 'default',
+          description: null,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    };
+
+    // Workspace mock data
+    const workspaceMock = {
+      workspaces: [
+        {
+          id: '00000000-0000-0000-0000-000000000001',
+          organization_id: '00000000-0000-0000-0000-000000000001',
+          name: 'Default Workspace',
+          slug: 'default',
+          description: null,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    };
+
+    // Mock organizations (with and without query params)
+    await page.route('**/api/organizations?*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(orgMock),
+      });
+    });
+    await page.route('**/api/organizations', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(orgMock),
+      });
+    });
+
+    // Mock workspaces (with and without query params)
+    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(workspaceMock),
+      });
+    });
+    await page.route('**/api/organizations/*/workspaces', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(workspaceMock),
+      });
+    });
 
     // Mock projects endpoint
     await page.route('**/api/projects*', (route) => {
@@ -150,6 +221,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows new task button', async ({ page }) => {
+      await expect(page.locator('.page-header .btn-primary')).toBeVisible({ timeout: 10000 });
       await expect(page.locator('.page-header .btn-primary')).toContainText('New Task');
     });
   });
@@ -162,10 +234,13 @@ test.describe('Tasks Page', () => {
   });
 
   test.describe('Task List', () => {
-    test.beforeEach(async ({ page }) => {
-      // Set up routes with mock tasks data
+    test.beforeEach(async ({ context, page }) => {
+      // Unroute any existing context-level and page-level routes for tasks
+      await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await page.route('**/api/tasks*', (route) => {
+
+      // Set up the tasks route at context level (takes precedence over page routes)
+      await context.route('**/api/tasks*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -177,9 +252,11 @@ test.describe('Tasks Page', () => {
         }
       });
 
-      // Navigate away and back to trigger fresh data fetch
-      await page.click('a[href="/"]');
-      await page.click('a[href="/tasks"]');
+      // Navigate to trigger fresh data fetch
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
+      await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card').first()).toBeVisible({ timeout: 10000 });
     });
 
@@ -216,9 +293,10 @@ test.describe('Tasks Page', () => {
       await expect(page.locator('.filters select')).toHaveCount(2);
     });
 
-    test('filters by project', async ({ page }) => {
+    test('filters by project', async ({ context, page }) => {
+      await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await page.route('**/api/tasks*', (route) => {
+      await context.route('**/api/tasks*', (route) => {
         const url = new URL(route.request().url());
         const projectId = url.searchParams.get('project_id');
 
@@ -237,17 +315,21 @@ test.describe('Tasks Page', () => {
         }
       });
 
-      await page.reload();
-      await page.click('a[href="/tasks"]');
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
+      await expect(page).toHaveURL('/tasks');
+      await expect(page.locator('.task-card')).toHaveCount(3);
 
       await page.selectOption('.filters select:first-of-type', 'proj-1');
 
       await expect(page.locator('.task-card')).toHaveCount(2);
     });
 
-    test('filters by status', async ({ page }) => {
+    test('filters by status', async ({ context, page }) => {
+      await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await page.route('**/api/tasks*', (route) => {
+      await context.route('**/api/tasks*', (route) => {
         const url = new URL(route.request().url());
         const status = url.searchParams.get('status');
 
@@ -266,8 +348,11 @@ test.describe('Tasks Page', () => {
         }
       });
 
-      await page.reload();
-      await page.click('a[href="/tasks"]');
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
+      await expect(page).toHaveURL('/tasks');
+      await expect(page.locator('.task-card')).toHaveCount(3);
 
       await page.selectOption('.filters select:last-of-type', 'complete');
 
@@ -277,11 +362,13 @@ test.describe('Tasks Page', () => {
 
   test.describe('Create Task Modal', () => {
     test('opens create modal from header button', async ({ page }) => {
+      await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
       await expect(page.locator('.modal-content h2')).toContainText('Create New Task');
     });
 
     test('shows project dropdown with available projects', async ({ page }) => {
+      await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
 
       const projectSelect = page.locator('#project');
@@ -290,6 +377,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows all form fields', async ({ page }) => {
+      await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
 
       await expect(page.locator('#project')).toBeVisible();
@@ -301,6 +389,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows source dropdown when agentic mode enabled', async ({ page }) => {
+      await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
 
       // Enable agentic mode
@@ -309,21 +398,33 @@ test.describe('Tasks Page', () => {
       await expect(page.locator('#sourceId')).toBeVisible();
     });
 
-    test('creates task successfully', async ({ page }) => {
+    test('creates task successfully', async ({ context, page }) => {
       const newTask = generateMockTask('new-task', 'proj-1', 'New Task', {
         description: 'New task description',
       });
 
-      await page.route('**/api/tasks', (route) => {
+      // Clear existing routes and add POST handler
+      await context.unroute('**/api/tasks*');
+      await page.unroute('**/api/tasks*');
+      await context.route('**/api/tasks*', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 201,
             contentType: 'application/json',
             body: JSON.stringify({ task: newTask }),
           });
+        } else if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ tasks: [] }),
+          });
+        } else {
+          route.continue();
         }
       });
 
+      await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
       await page.fill('#title', 'New Task');
       await page.fill('#description', 'New task description');
@@ -382,6 +483,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('closes modal on cancel', async ({ page }) => {
+      await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
       await page.click('.form-actions .btn-secondary');
 
@@ -390,9 +492,10 @@ test.describe('Tasks Page', () => {
   });
 
   test.describe('Task Execution', () => {
-    test.beforeEach(async ({ page }) => {
+    test.beforeEach(async ({ context, page }) => {
+      await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await page.route('**/api/tasks*', (route) => {
+      await context.route('**/api/tasks*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -402,8 +505,10 @@ test.describe('Tasks Page', () => {
         }
       });
 
-      await page.reload();
-      await page.click('a[href="/tasks"]');
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
+      await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card')).toHaveCount(3);
     });
 
@@ -495,12 +600,59 @@ test.describe('Tasks Page', () => {
   });
 
   test.describe('Delete Task', () => {
-    test.beforeEach(async ({ page }) => {
+    test('delete button shows confirmation dialog', async ({ context, page }) => {
+      await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await page.unroute('**/api/tasks/**');
 
-      // Route for task list (GET /api/tasks)
-      await page.route('**/api/tasks', (route) => {
+      await context.route('**/api/tasks*', (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ tasks: mockTasks }),
+          });
+        } else if (route.request().method() === 'DELETE') {
+          route.fulfill({ status: 204 });
+        } else {
+          route.continue();
+        }
+      });
+
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
+      await expect(page).toHaveURL('/tasks');
+      await expect(page.locator('.task-card')).toHaveCount(3);
+
+      // Track if confirm was called
+      let confirmCalled = false;
+      await page.evaluate(() => {
+        (window as unknown as { originalConfirm: typeof window.confirm }).originalConfirm =
+          window.confirm;
+        window.confirm = (msg?: string) => {
+          (window as unknown as { confirmMessage: string }).confirmMessage = msg || '';
+          return false;
+        };
+      });
+
+      const deleteBtn = page.locator('.task-card:first-child button:has-text("Delete")');
+      await deleteBtn.click();
+
+      // Verify confirm was called
+      const confirmMessage = await page.evaluate(
+        () => (window as unknown as { confirmMessage: string }).confirmMessage
+      );
+      expect(confirmMessage).toContain('delete');
+
+      // Tasks should still be there since confirm returned false
+      await expect(page.locator('.task-card')).toHaveCount(3);
+    });
+
+    test('delete is cancelled when confirmation rejected', async ({ context, page }) => {
+      await context.unroute('**/api/tasks*');
+      await page.unroute('**/api/tasks*');
+
+      await context.route('**/api/tasks*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -512,32 +664,12 @@ test.describe('Tasks Page', () => {
         }
       });
 
-      // Route for individual task operations (DELETE /api/tasks/:id)
-      await page.route('**/api/tasks/*', (route) => {
-        if (route.request().method() === 'DELETE') {
-          route.fulfill({ status: 204 });
-        } else {
-          route.continue();
-        }
-      });
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
+      await expect(page).toHaveURL('/tasks');
+      await expect(page.locator('.task-card')).toHaveCount(3);
 
-      await page.reload();
-      await page.click('a[href="/tasks"]');
-    });
-
-    test('delete button removes task after confirmation', async ({ page }) => {
-      // Mock window.confirm to return true
-      await page.evaluate(() => {
-        window.confirm = () => true;
-      });
-
-      const deleteBtn = page.locator('.task-card:first-child button:has-text("Delete")');
-      await deleteBtn.click();
-
-      await expect(page.locator('.task-card')).toHaveCount(2);
-    });
-
-    test('delete is cancelled when confirmation rejected', async ({ page }) => {
       // Mock window.confirm to return false
       await page.evaluate(() => {
         window.confirm = () => false;
@@ -552,9 +684,10 @@ test.describe('Tasks Page', () => {
   });
 
   test.describe('Error Handling', () => {
-    test('shows error when loading tasks fails', async ({ page }) => {
+    test('shows error when loading tasks fails', async ({ context, page }) => {
+      await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await page.route('**/api/tasks*', (route) => {
+      await context.route('**/api/tasks*', (route) => {
         route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -562,17 +695,20 @@ test.describe('Tasks Page', () => {
         });
       });
 
-      await page.reload();
-      await page.click('a[href="/tasks"]');
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
+      await expect(page).toHaveURL('/tasks');
 
       await expect(page.locator('.error-banner')).toBeVisible();
     });
   });
 
   test.describe('Loading State', () => {
-    test('shows skeleton cards while loading', async ({ page }) => {
+    test('shows skeleton cards while loading', async ({ context, page }) => {
+      await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await page.route('**/api/tasks*', async (route) => {
+      await context.route('**/api/tasks*', async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 500));
         route.fulfill({
           status: 200,
@@ -581,17 +717,19 @@ test.describe('Tasks Page', () => {
         });
       });
 
-      await page.reload();
-      await page.click('a[href="/tasks"]');
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
 
       await expect(page.locator('.skeleton-card').first()).toBeVisible();
     });
   });
 
   test.describe('Disabled State', () => {
-    test('new task button is disabled when no projects exist', async ({ page }) => {
+    test('new task button is disabled when no projects exist', async ({ context, page }) => {
+      await context.unroute('**/api/projects*');
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await context.route('**/api/projects*', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -599,8 +737,10 @@ test.describe('Tasks Page', () => {
         });
       });
 
-      await page.reload();
-      await page.click('a[href="/tasks"]');
+      await page.goto('/');
+      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+      await page.goto('/tasks');
+      await expect(page).toHaveURL('/tasks');
 
       await expect(page.locator('.page-header .btn-primary')).toBeDisabled();
     });

@@ -39,14 +39,15 @@ export default function ModelsPage() {
   const [modelCardLoading, setModelCardLoading] = useState(false);
   const [modelCardExpanded, setModelCardExpanded] = useState(false);
   const [modelSize, setModelSize] = useState<number | null>(null);
+  const [browseInitialized, setBrowseInitialized] = useState(false);
 
   // Initial browse load - when switching to browse tab
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Intentionally only trigger on tab change to prevent infinite loops
   useEffect(() => {
-    if (activeTab === 'browse' && browse.models.length === 0 && !browse.loading) {
+    if (activeTab === 'browse' && !browseInitialized) {
       browse.search();
+      setBrowseInitialized(true);
     }
-  }, [activeTab]);
+  }, [activeTab, browseInitialized, browse]);
 
   const handlePull = async (e: FormEvent) => {
     e.preventDefault();
