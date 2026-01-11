@@ -1,5 +1,5 @@
 /* =============================================================================
-   Sidebar - Obsidian Design
+   Sidebar - Midnight Design
    Premium navigation with refined styling
    ============================================================================= */
 
@@ -8,7 +8,7 @@
   left: 0;
   top: 0;
   bottom: 0;
-  width: 260px;
+  width: 240px;
   background: var(--ui-bg-elevated);
   border-right: 1px solid var(--ui-border);
   display: flex;
@@ -32,23 +32,23 @@
 }
 
 .sidebar.collapsed {
-  width: 72px;
+  width: 64px;
 }
 
 /* Header */
 .sidebar-header {
   position: relative;
-  padding: var(--ui-space-5) var(--ui-space-5);
+  padding: var(--ui-space-4) var(--ui-space-4);
   border-bottom: 1px solid var(--ui-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 64px;
+  min-height: 56px;
 }
 
 .sidebar.collapsed .sidebar-header {
   justify-content: center;
-  padding: var(--ui-space-4);
+  padding: var(--ui-space-3);
 }
 
 .logo {
@@ -80,17 +80,17 @@
 /* Context Switcher Area */
 .sidebar-context {
   position: relative;
-  padding: var(--ui-space-4);
+  padding: var(--ui-space-3);
   border-bottom: 1px solid var(--ui-border);
 }
 
 /* Navigation */
 .sidebar-nav {
   flex: 1;
-  padding: var(--ui-space-4);
+  padding: var(--ui-space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-1);
+  gap: var(--ui-space-0-5);
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--ui-bg-muted) transparent;
@@ -128,22 +128,22 @@
 .nav-item {
   display: flex;
   align-items: center;
-  gap: var(--ui-space-3);
-  padding: var(--ui-space-3) var(--ui-space-3);
+  gap: var(--ui-space-2-5);
+  padding: var(--ui-space-2) var(--ui-space-3);
   color: var(--ui-text-secondary);
   text-decoration: none;
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-md);
   transition: all var(--ui-duration-fast) var(--ui-ease-out);
   white-space: nowrap;
   overflow: hidden;
-  font-size: var(--ui-text-base);
+  font-size: var(--ui-text-sm);
   font-weight: 450;
   position: relative;
 }
 
 .sidebar.collapsed .nav-item {
   justify-content: center;
-  padding: var(--ui-space-3);
+  padding: var(--ui-space-2);
 }
 
 .sidebar.collapsed .nav-item span {
@@ -157,7 +157,7 @@
 
 .nav-item.active {
   color: var(--ui-accent-500);
-  background: rgba(237, 122, 20, 0.08);
+  background: rgba(6, 182, 212, 0.08);
 }
 
 /* Active indicator bar */
@@ -211,11 +211,11 @@
 /* Footer */
 .sidebar-footer {
   position: relative;
-  padding: var(--ui-space-4);
+  padding: var(--ui-space-3);
   border-top: 1px solid var(--ui-border);
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1-5);
 }
 
 /* Footer actions row */
@@ -234,12 +234,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   color: var(--ui-text-muted);
   background: transparent;
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-md);
+  border-radius: var(--ui-radius-sm);
   cursor: pointer;
   transition: all var(--ui-duration-fast) var(--ui-ease-out);
 }
@@ -265,19 +265,19 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   color: var(--ui-text-muted);
   background: transparent;
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-md);
+  border-radius: var(--ui-radius-sm);
   cursor: pointer;
   transition: all var(--ui-duration-fast) var(--ui-ease-out);
 }
 
 .theme-toggle:hover {
   color: var(--ui-accent-500);
-  background: rgba(237, 122, 20, 0.08);
+  background: rgba(6, 182, 212, 0.08);
   border-color: var(--ui-accent-500);
 }
 
@@ -291,15 +291,15 @@
 .logout-btn {
   display: flex;
   align-items: center;
-  gap: var(--ui-space-3);
+  gap: var(--ui-space-2-5);
   width: 100%;
-  padding: var(--ui-space-3) var(--ui-space-3);
+  padding: var(--ui-space-2) var(--ui-space-3);
   color: var(--ui-text-secondary);
   background: transparent;
   border: none;
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-md);
   cursor: pointer;
-  font-size: var(--ui-text-base);
+  font-size: var(--ui-text-sm);
   font-weight: 450;
   transition: all var(--ui-duration-fast) var(--ui-ease-out);
   white-space: nowrap;
@@ -308,7 +308,7 @@
 
 .sidebar.collapsed .logout-btn {
   justify-content: center;
-  padding: var(--ui-space-3);
+  padding: var(--ui-space-2);
 }
 
 .sidebar.collapsed .logout-btn span {
@@ -378,7 +378,7 @@
   }
 
   .sidebar.collapsed {
-    width: 260px;
+    width: 240px;
   }
 
   .sidebar-overlay {

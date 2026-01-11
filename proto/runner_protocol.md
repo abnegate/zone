@@ -49,7 +49,7 @@ Start executing a command.
   "type": "RunStart",
   "job_id": "550e8400-e29b-41d4-a716-446655440000",
   "workspace": "/path/to/workspace",
-  "command": "npm",
+  "command": "bun",
   "args": ["install"],
   "env": {"NODE_ENV": "production"},
   "timeout_ms": 60000,

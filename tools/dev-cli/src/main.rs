@@ -104,7 +104,7 @@ enum Commands {
         #[arg(long)]
         ui: bool,
     },
-    /// Run security audit (npm audit / cargo audit)
+    /// Run security audit (bun pm audit / cargo audit)
     Audit {
         /// Only run on specific projects
         #[arg(long, short, value_enum)]
@@ -580,17 +580,12 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
 
         match project {
             Project::InstallerFrontend | Project::ManagerFrontend => {
-                // Run npm test directly from the frontend directory
-                // This ensures npm sets up PATH correctly to include local node_modules/.bin
+                // Run bun test directly from the frontend directory
                 tasks.push(TaskConfig {
                     project: *project,
                     name: format!("Test {}", project.display_name()),
-                    command: "npm".to_string(),
-                    args: vec![
-                        "test".to_string(),
-                        "--".to_string(),
-                        "--watchAll=false".to_string(),
-                    ],
+                    command: "bun".to_string(),
+                    args: vec!["test".to_string()],
                     working_dir,
                 });
             }
@@ -663,8 +658,7 @@ fn create_e2e_tasks(
                     continue;
                 }
 
-                // Run npm run test:e2e directly from the frontend directory
-                // This ensures npm sets up PATH correctly to include local node_modules/.bin
+                // Run bun run test:e2e directly from the frontend directory
                 let mut args = vec![
                     "run".to_string(),
                     if ui { "test:e2e:ui" } else { "test:e2e" }.to_string(),
@@ -680,7 +674,7 @@ fn create_e2e_tasks(
                 tasks.push(TaskConfig {
                     project: *project,
                     name: format!("E2E {}", project.display_name()),
-                    command: "npm".to_string(),
+                    command: "bun".to_string(),
                     args,
                     working_dir: project_dir,
                 });
@@ -702,14 +696,12 @@ fn create_audit_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
 
         match project {
             Project::InstallerFrontend | Project::ManagerFrontend => {
-                // npm audit for JavaScript/TypeScript
-                // Using critical level since webpack-dev-server high vulnerabilities are
-                // known issues in react-scripts with no current fix available
+                // bun audit for JavaScript/TypeScript
                 tasks.push(TaskConfig {
                     project: *project,
                     name: format!("Audit {}", project.display_name()),
-                    command: "npm".to_string(),
-                    args: vec!["audit".to_string(), "--audit-level=critical".to_string()],
+                    command: "bun".to_string(),
+                    args: vec!["audit".to_string()],
                     working_dir,
                 });
             }
@@ -741,16 +733,12 @@ fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig
 
         match project {
             Project::InstallerFrontend | Project::ManagerFrontend => {
-                // Run npm run test:coverage directly from the frontend directory
-                // This ensures npm sets up PATH correctly to include local node_modules/.bin
+                // Run bun test with coverage
                 tasks.push(TaskConfig {
                     project: *project,
                     name: format!("Coverage {}", project.display_name()),
-                    command: "npm".to_string(),
-                    args: vec![
-                        "run".to_string(),
-                        "test:coverage".to_string(),
-                    ],
+                    command: "bun".to_string(),
+                    args: vec!["test".to_string(), "--coverage".to_string()],
                     working_dir,
                 });
             }
@@ -786,15 +774,14 @@ fn create_lighthouse_tasks(root: &PathBuf, target: LighthouseTarget) -> Vec<Task
         let working_dir = root.join(project.relative_path());
 
         // Build then run Lighthouse CI
-        // Note: Assumes dependencies are already installed (npm ci is not run here
-        // as it would clear node_modules and break other concurrent tasks)
+        // Note: Assumes dependencies are already installed
         tasks.push(TaskConfig {
             project,
             name: format!("Lighthouse {}", project.display_name()),
             command: "bash".to_string(),
             args: vec![
                 "-c".to_string(),
-                "npm run build && npx @lhci/cli autorun".to_string(),
+                "bun run build && bunx @lhci/cli autorun".to_string(),
             ],
             working_dir,
         });

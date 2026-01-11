@@ -1,16 +1,14 @@
 .wiki-page {
-  padding: 2rem;
-  max-width: 1400px;
-  margin: 0 auto;
+  /* Uses standard page-container width from Layout.css */
 }
 
 .wiki-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 2rem;
+  margin-bottom: var(--ui-space-5);
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: var(--ui-space-4);
 }
 
 .wiki-header h1 {
@@ -123,9 +121,9 @@
 
 .knowledge-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-  gap: 1.5rem;
-  margin-bottom: 2rem;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--ui-space-4);
+  margin-bottom: var(--ui-space-5);
 }
 
 .knowledge-card {
@@ -323,40 +321,56 @@
 /* Modal styles */
 .modal-overlay {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
-  padding: 1rem;
+  z-index: 9999;
+  padding: var(--ui-space-4);
+  animation: fadeIn 0.15s ease;
 }
 
-.modal {
-  background: var(--bg-primary);
-  border-radius: 12px;
-  max-width: 600px;
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.wiki-page .modal {
+  position: relative;
+  display: block;
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-xl);
   width: 100%;
-  max-height: 90vh;
+  max-width: 480px;
+  max-height: 85vh;
   overflow-y: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  animation: slideUp 0.2s ease;
+  margin: auto;
 }
 
-.modal-header {
-  padding: 1.5rem;
-  border-bottom: 1px solid var(--border);
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.wiki-page .modal-header {
+  padding: var(--ui-space-4) var(--ui-space-5);
+  border-bottom: 1px solid var(--ui-border);
   display: flex;
+  flex-direction: row;
   justify-content: space-between;
   align-items: center;
 }
 
-.modal-header h2 {
+.wiki-page .modal-header h2 {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: var(--ui-text-lg);
   font-weight: 600;
+  flex: 1;
 }
 
 .modal-close {
@@ -380,15 +394,15 @@
 }
 
 .modal-body {
-  padding: 1.5rem;
+  padding: var(--ui-space-5);
 }
 
 .modal-footer {
-  padding: 1.5rem;
-  border-top: 1px solid var(--border);
+  padding: var(--ui-space-4) var(--ui-space-5);
+  border-top: 1px solid var(--ui-border);
   display: flex;
   justify-content: flex-end;
-  gap: 1rem;
+  gap: var(--ui-space-3);
 }
 
 .form-group {

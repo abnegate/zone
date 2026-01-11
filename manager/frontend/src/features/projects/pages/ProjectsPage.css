@@ -88,9 +88,8 @@
 /* Projects Grid */
 .projects-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: var(--spacing-md);
-  padding-right: 360px;
 }
 
 .project-card {
@@ -223,18 +222,22 @@
   color: #ef4444;
 }
 
-/* Project Details Sidebar */
+/* Project Details Panel - slide-in from right */
 .project-details {
   position: fixed;
-  top: 60px;
+  top: 0;
   right: 0;
   bottom: 0;
-  width: 350px;
+  width: 360px;
+  max-width: 90vw;
   background: var(--color-bg-secondary);
   border-left: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
-  z-index: 10;
+  z-index: 100;
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.15);
+  transform: translateX(0);
+  transition: transform 0.2s ease-out;
 }
 
 .details-header {

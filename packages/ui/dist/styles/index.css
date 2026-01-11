@@ -1,5 +1,5 @@
 /* =============================================================================
-   Zone UI - Obsidian Component Styles
+   Zone UI - Midnight Component Styles
    Premium, sophisticated component library
    ============================================================================= */
 
@@ -53,13 +53,13 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1-5);
   font-family: var(--ui-font-body);
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
   border: none;
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-md);
   cursor: pointer;
   transition:
     background var(--ui-transition-fast),
@@ -82,23 +82,23 @@ body {
 
 /* Sizes */
 .ui-btn--sm {
-  height: 32px;
+  height: 28px;
   padding: 0 var(--ui-space-3);
   font-size: var(--ui-text-sm);
-  border-radius: var(--ui-radius-md);
+  border-radius: var(--ui-radius-sm);
 }
 
 .ui-btn--md {
-  height: 40px;
-  padding: 0 var(--ui-space-5);
-  font-size: var(--ui-text-base);
+  height: 34px;
+  padding: 0 var(--ui-space-4);
+  font-size: var(--ui-text-sm);
 }
 
 .ui-btn--lg {
-  height: 48px;
-  padding: 0 var(--ui-space-6);
-  font-size: var(--ui-text-md);
-  border-radius: var(--ui-radius-xl);
+  height: 40px;
+  padding: 0 var(--ui-space-5);
+  font-size: var(--ui-text-base);
+  border-radius: var(--ui-radius-lg);
 }
 
 /* Primary - Warm accent with glow */
@@ -114,14 +114,14 @@ body {
 .ui-btn--primary:hover:not(:disabled) {
   background: linear-gradient(180deg, var(--ui-accent-400) 0%, var(--ui-accent-500) 100%);
   box-shadow:
-    0 4px 12px rgba(237, 122, 20, 0.3),
+    0 4px 12px rgba(6, 182, 212, 0.3),
     0 0 0 1px rgba(255, 255, 255, 0.15) inset,
     0 -1px 0 rgba(0, 0, 0, 0.15) inset;
 }
 
 .ui-btn--primary:focus-visible {
   box-shadow:
-    0 4px 12px rgba(237, 122, 20, 0.3),
+    0 4px 12px rgba(6, 182, 212, 0.3),
     0 0 0 2px var(--ui-bg-base),
     0 0 0 4px var(--ui-accent-500);
 }
@@ -172,7 +172,7 @@ body {
 }
 
 .ui-btn--generate:hover:not(:disabled) {
-  background: rgba(237, 122, 20, 0.1);
+  background: rgba(6, 182, 212, 0.1);
   box-shadow: 0 0 0 1px var(--ui-accent-400);
 }
 
@@ -191,7 +191,7 @@ body {
    ============================================================================= */
 
 .ui-form-field {
-  margin-bottom: var(--ui-space-6);
+  margin-bottom: var(--ui-space-4);
 }
 
 .ui-form-field__label {
@@ -199,7 +199,7 @@ body {
   font-size: var(--ui-text-sm);
   font-weight: 500;
   color: var(--ui-text-secondary);
-  margin-bottom: var(--ui-space-2);
+  margin-bottom: var(--ui-space-1-5);
   letter-spacing: var(--ui-tracking-wide);
 }
 
@@ -233,14 +233,14 @@ body {
 
 .ui-input {
   width: 100%;
-  height: 44px;
-  padding: 0 var(--ui-space-4);
+  height: 36px;
+  padding: 0 var(--ui-space-3);
   font-family: var(--ui-font-body);
-  font-size: var(--ui-text-base);
+  font-size: var(--ui-text-sm);
   color: var(--ui-text-primary);
   background: var(--ui-bg-surface);
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-md);
   transition:
     border-color var(--ui-transition-fast),
     background var(--ui-transition-fast),
@@ -260,7 +260,7 @@ body {
   border-color: var(--ui-accent-500);
   background: var(--ui-bg-elevated);
   box-shadow:
-    0 0 0 3px rgba(237, 122, 20, 0.1),
+    0 0 0 3px rgba(6, 182, 212, 0.1),
     var(--ui-shadow-sm);
 }
 
@@ -294,19 +294,19 @@ body {
 
 .ui-select {
   width: 100%;
-  height: 44px;
-  padding: 0 var(--ui-space-10) 0 var(--ui-space-4);
+  height: 36px;
+  padding: 0 var(--ui-space-8) 0 var(--ui-space-3);
   font-family: var(--ui-font-body);
-  font-size: var(--ui-text-base);
+  font-size: var(--ui-text-sm);
   color: var(--ui-text-primary);
   background: var(--ui-bg-surface);
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-md);
   cursor: pointer;
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b6b66' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right var(--ui-space-3) center;
+  background-position: right var(--ui-space-2) center;
   transition:
     border-color var(--ui-transition-fast),
     background-color var(--ui-transition-fast),
@@ -321,7 +321,7 @@ body {
   outline: none;
   border-color: var(--ui-accent-500);
   background-color: var(--ui-bg-elevated);
-  box-shadow: 0 0 0 3px rgba(237, 122, 20, 0.1);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1);
 }
 
 .ui-select:disabled {
@@ -336,11 +336,11 @@ body {
 .ui-checkbox {
   display: flex;
   align-items: flex-start;
-  gap: var(--ui-space-3);
-  padding: var(--ui-space-4);
+  gap: var(--ui-space-2-5);
+  padding: var(--ui-space-3);
   background: var(--ui-bg-surface);
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-md);
   cursor: pointer;
   transition:
     border-color var(--ui-transition-fast),
@@ -396,7 +396,7 @@ body {
 }
 
 .ui-checkbox__input:focus-visible {
-  box-shadow: 0 0 0 3px rgba(237, 122, 20, 0.2);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.2);
 }
 
 .ui-checkbox__label {
@@ -427,12 +427,12 @@ body {
 .ui-modal {
   position: relative;
   width: 100%;
-  max-width: 480px;
-  max-height: calc(100vh - var(--ui-space-8));
+  max-width: 440px;
+  max-height: calc(100vh - var(--ui-space-6));
   overflow-y: auto;
   background: var(--ui-bg-elevated);
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-2xl);
+  border-radius: var(--ui-radius-xl);
   box-shadow: var(--ui-shadow-card);
   animation: ui-scale-in var(--ui-duration-normal) var(--ui-ease-bounce);
 }
@@ -443,33 +443,33 @@ body {
   top: 0;
   left: 0;
   right: 0;
-  height: 100px;
+  height: 80px;
   background: var(--ui-bg-radial);
-  border-radius: var(--ui-radius-2xl) var(--ui-radius-2xl) 0 0;
+  border-radius: var(--ui-radius-xl) var(--ui-radius-xl) 0 0;
   pointer-events: none;
   opacity: 0.5;
 }
 
 .ui-modal__content {
   position: relative;
-  padding: var(--ui-space-8);
+  padding: var(--ui-space-5);
 }
 
 .ui-modal__title {
   font-family: var(--ui-font-display);
-  font-size: var(--ui-text-2xl);
+  font-size: var(--ui-text-xl);
   font-weight: 600;
   color: var(--ui-text-primary);
-  margin-bottom: var(--ui-space-6);
+  margin-bottom: var(--ui-space-4);
   letter-spacing: var(--ui-tracking-tight);
 }
 
 .ui-modal__buttons {
   display: flex;
   justify-content: flex-end;
-  gap: var(--ui-space-3);
-  margin-top: var(--ui-space-8);
-  padding-top: var(--ui-space-6);
+  gap: var(--ui-space-2);
+  margin-top: var(--ui-space-5);
+  padding-top: var(--ui-space-4);
   border-top: 1px solid var(--ui-border);
 }
 
@@ -479,9 +479,9 @@ body {
 
 .ui-info-box {
   display: flex;
-  gap: var(--ui-space-3);
-  padding: var(--ui-space-4);
-  border-radius: var(--ui-radius-lg);
+  gap: var(--ui-space-2-5);
+  padding: var(--ui-space-3);
+  border-radius: var(--ui-radius-md);
   font-size: var(--ui-text-sm);
   line-height: var(--ui-leading-relaxed);
   border: 1px solid transparent;
@@ -608,7 +608,7 @@ body {
 .ui-card {
   background: var(--ui-bg-elevated);
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-xl);
+  border-radius: var(--ui-radius-lg);
   box-shadow: var(--ui-shadow-card);
   overflow: hidden;
 }
@@ -630,7 +630,7 @@ body {
   height: 1px;
   background: var(--ui-border);
   border: none;
-  margin: var(--ui-space-6) 0;
+  margin: var(--ui-space-4) 0;
 }
 
 .ui-divider--subtle {
@@ -655,9 +655,9 @@ body {
 }
 
 .ui-badge--accent {
-  background: rgba(237, 122, 20, 0.1);
+  background: rgba(6, 182, 212, 0.1);
   color: var(--ui-accent-500);
-  border-color: rgba(237, 122, 20, 0.2);
+  border-color: rgba(6, 182, 212, 0.2);
 }
 
 .ui-badge--success {

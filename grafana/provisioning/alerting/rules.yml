@@ -335,6 +335,29 @@ groups:
           severity: warning
           service: valkey
 
+      # Valkey Low Cache Hit Rate
+      - uid: valkey-low-hit-rate
+        title: Valkey Low Cache Hit Rate
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              expr: (redis_keyspace_hits_total / (redis_keyspace_hits_total + redis_keyspace_misses_total)) < 0.80
+              refId: A
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: Valkey cache hit rate is low
+          description: Valkey cache hit rate has fallen below 80% for 10 minutes. This may indicate inefficient caching patterns or cache key mismatches.
+        labels:
+          severity: warning
+          service: valkey
+
   # =============================================================================
   # LLM Service Alerts
   # =============================================================================

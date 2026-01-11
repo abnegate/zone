@@ -1,5 +1,5 @@
 /* =============================================================================
-   Buttons - Obsidian Design
+   Buttons - Midnight Design
    Premium button styles extending @zone/ui
    ============================================================================= */
 
@@ -51,14 +51,14 @@
 .btn-primary:hover:not(:disabled) {
   background: linear-gradient(180deg, var(--ui-accent-400) 0%, var(--ui-accent-500) 100%);
   box-shadow:
-    0 4px 12px rgba(237, 122, 20, 0.3),
+    0 4px 12px rgba(6, 182, 212, 0.3),
     0 0 0 1px rgba(255, 255, 255, 0.15) inset,
     0 -1px 0 rgba(0, 0, 0, 0.15) inset;
 }
 
 .btn-primary:focus-visible {
   box-shadow:
-    0 4px 12px rgba(237, 122, 20, 0.3),
+    0 4px 12px rgba(6, 182, 212, 0.3),
     0 0 0 2px var(--ui-bg-base),
     0 0 0 4px var(--ui-accent-500);
 }
@@ -165,7 +165,7 @@
 }
 
 .btn-accent-outline:hover:not(:disabled) {
-  background: rgba(237, 122, 20, 0.1);
+  background: rgba(6, 182, 212, 0.1);
   box-shadow: 0 0 0 1px var(--ui-accent-400);
 }
 

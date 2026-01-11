@@ -21,7 +21,7 @@
     "**/*.css"
   ],
   "scripts": {
-    "build": "npm run build:ts && npm run build:css",
+    "build": "bun run build:ts && bun run build:css",
     "build:ts": "tsup src/index.ts --format cjs,esm --dts --clean",
     "build:css": "cp -r src/styles dist/",
     "watch": "tsup src/index.ts --format cjs,esm --dts --watch",

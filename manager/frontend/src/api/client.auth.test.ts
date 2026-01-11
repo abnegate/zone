@@ -1,7 +1,7 @@
 import { client } from './client';
 
 describe('Client - Auth Methods', () => {
-  const API_BASE = process.env.REACT_APP_API_URL || '';
+  const API_BASE = import.meta.env.VITE_API_URL || '';
 
   beforeEach(() => {
     global.fetch = jest.fn();

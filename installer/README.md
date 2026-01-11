@@ -21,8 +21,7 @@ A web-based configuration wizard for the Zone AI Stack.
 
 ### Prerequisites
 - Rust 1.85+
-- Node.js 20+
-- npm
+- Bun 1.0+
 
 ### Build Locally
 
@@ -31,7 +30,7 @@ A web-based configuration wizard for the Zone AI Stack.
 cd runner && cargo build --release --package zone_installer
 
 # Build the frontend
-cd installer/frontend && npm install && npm run build
+cd installer/frontend && bun install && bun run build
 ```
 
 ### Build Docker Image

@@ -12,8 +12,8 @@
 /* Main Content Area */
 .main-content {
   flex: 1;
-  margin-left: 260px;
-  padding: var(--ui-space-8);
+  margin-left: 240px;
+  padding: var(--ui-space-6) var(--ui-space-8);
   transition: margin-left var(--ui-duration-normal) var(--ui-ease-out);
   min-height: 100vh;
   display: flex;
@@ -21,22 +21,27 @@
 }
 
 :root[data-sidebar-collapsed='true'] .main-content {
-  margin-left: 72px;
+  margin-left: 64px;
 }
 
-/* Page Container */
+/* Page Container - Standard width for all pages */
 .page-container {
   flex: 1;
-  max-width: 1400px;
   width: 100%;
+  max-width: 900px;
   margin: 0 auto;
   animation: ui-fade-up var(--ui-duration-normal) var(--ui-ease-out);
 }
 
+/* Full width variant for special layouts like chats */
+.page-container--full {
+  max-width: none;
+}
+
 /* Page Header */
 .page-header {
-  margin-bottom: var(--ui-space-8);
-  padding-bottom: var(--ui-space-6);
+  margin-bottom: var(--ui-space-5);
+  padding-bottom: var(--ui-space-4);
   border-bottom: 1px solid var(--ui-border);
 }
 

@@ -3,7 +3,7 @@ import { parse } from '../validation';
 import { ModelsResponseSchema, BrowseResponseSchema } from '../features/models/schemas';
 import { client } from './client';
 
-const API_BASE = process.env.REACT_APP_API_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
 /**
  * Models API

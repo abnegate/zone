@@ -1,15 +1,13 @@
 /* =============================================================================
-   Zone UI - Obsidian Design System
-   A sophisticated, warm, premium interface language
+   Zone UI - Midnight Design System
+   A clean, modern, sophisticated interface language
    ============================================================================= */
 
 /*
    Typography - Fonts loaded via HTML preload for better performance
-   Fallback fonts defined inline ensure no FOUT (Flash of Unstyled Text)
 
    Required fonts (add to HTML head):
-   - DM Sans: 400, 500, 600
-   - Fraunces: 500, 600
+   - Plus Jakarta Sans: 400, 500, 600, 700
    - JetBrains Mono: 400, 500 (optional, for code)
 */
 
@@ -18,8 +16,8 @@
      TYPOGRAPHY
      ═══════════════════════════════════════════════════════════════════════════ */
 
-  --ui-font-display: 'Fraunces', Georgia, serif;
-  --ui-font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --ui-font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --ui-font-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   --ui-font-mono: 'JetBrains Mono', 'SF Mono', Monaco, monospace;
 
   /* Type Scale - Major Third (1.25) */
@@ -51,47 +49,47 @@
   --ui-tracking-widest: 0.1em;
 
   /* ═══════════════════════════════════════════════════════════════════════════
-     SPACING SYSTEM - 4px base unit
+     SPACING SYSTEM - Compact 4px base unit (tightened ~25%)
      ═══════════════════════════════════════════════════════════════════════════ */
 
   --ui-space-0: 0;
   --ui-space-px: 1px;
-  --ui-space-0-5: 0.125rem;   /* 2px */
-  --ui-space-1: 0.25rem;      /* 4px */
-  --ui-space-1-5: 0.375rem;   /* 6px */
-  --ui-space-2: 0.5rem;       /* 8px */
-  --ui-space-2-5: 0.625rem;   /* 10px */
-  --ui-space-3: 0.75rem;      /* 12px */
-  --ui-space-4: 1rem;         /* 16px */
-  --ui-space-5: 1.25rem;      /* 20px */
-  --ui-space-6: 1.5rem;       /* 24px */
-  --ui-space-8: 2rem;         /* 32px */
-  --ui-space-10: 2.5rem;      /* 40px */
-  --ui-space-12: 3rem;        /* 48px */
-  --ui-space-16: 4rem;        /* 64px */
-  --ui-space-20: 5rem;        /* 80px */
-  --ui-space-24: 6rem;        /* 96px */
+  --ui-space-0-5: 0.0625rem;  /* 1px */
+  --ui-space-1: 0.1875rem;    /* 3px */
+  --ui-space-1-5: 0.25rem;    /* 4px */
+  --ui-space-2: 0.375rem;     /* 6px */
+  --ui-space-2-5: 0.5rem;     /* 8px */
+  --ui-space-3: 0.625rem;     /* 10px */
+  --ui-space-4: 0.75rem;      /* 12px */
+  --ui-space-5: 1rem;         /* 16px */
+  --ui-space-6: 1.25rem;      /* 20px */
+  --ui-space-8: 1.5rem;       /* 24px */
+  --ui-space-10: 2rem;        /* 32px */
+  --ui-space-12: 2.5rem;      /* 40px */
+  --ui-space-16: 3rem;        /* 48px */
+  --ui-space-20: 4rem;        /* 64px */
+  --ui-space-24: 5rem;        /* 80px */
 
   /* Legacy spacing aliases */
   --ui-space-xs: var(--ui-space-1);
   --ui-space-sm: var(--ui-space-2);
   --ui-space-md: var(--ui-space-3);
   --ui-space-lg: var(--ui-space-4);
-  --ui-space-xl: var(--ui-space-6);
-  --ui-space-2xl: var(--ui-space-8);
-  --ui-space-3xl: var(--ui-space-12);
+  --ui-space-xl: var(--ui-space-5);
+  --ui-space-2xl: var(--ui-space-6);
+  --ui-space-3xl: var(--ui-space-10);
 
   /* ═══════════════════════════════════════════════════════════════════════════
-     BORDER RADIUS
+     BORDER RADIUS - Refined, subtle corners
      ═══════════════════════════════════════════════════════════════════════════ */
 
   --ui-radius-none: 0;
-  --ui-radius-sm: 0.25rem;    /* 4px */
-  --ui-radius-md: 0.5rem;     /* 8px */
-  --ui-radius-lg: 0.75rem;    /* 12px */
-  --ui-radius-xl: 1rem;       /* 16px */
-  --ui-radius-2xl: 1.25rem;   /* 20px */
-  --ui-radius-3xl: 1.5rem;    /* 24px */
+  --ui-radius-sm: 0.1875rem;  /* 3px */
+  --ui-radius-md: 0.3125rem;  /* 5px */
+  --ui-radius-lg: 0.5rem;     /* 8px */
+  --ui-radius-xl: 0.625rem;   /* 10px */
+  --ui-radius-2xl: 0.75rem;   /* 12px */
+  --ui-radius-3xl: 1rem;      /* 16px */
   --ui-radius-full: 9999px;
 
   /* ═══════════════════════════════════════════════════════════════════════════
@@ -129,42 +127,47 @@
   --ui-shadow-inner: inset 0 2px 4px 0 rgb(0 0 0 / 0.05);
 
   /* ═══════════════════════════════════════════════════════════════════════════
-     ACCENT COLORS - Warm Copper/Amber
+     ACCENT COLORS - Teal/Cyan
      ═══════════════════════════════════════════════════════════════════════════ */
 
-  --ui-accent-50: #fef7ed;
-  --ui-accent-100: #fdecd3;
-  --ui-accent-200: #fad5a5;
-  --ui-accent-300: #f6b76d;
-  --ui-accent-400: #f19132;
-  --ui-accent-500: #ed7a14;
-  --ui-accent-600: #de5f0a;
-  --ui-accent-700: #b8460b;
-  --ui-accent-800: #933810;
-  --ui-accent-900: #782f11;
+  --ui-accent-50: #ecfeff;
+  --ui-accent-100: #cffafe;
+  --ui-accent-200: #a5f3fc;
+  --ui-accent-300: #67e8f9;
+  --ui-accent-400: #22d3ee;
+  --ui-accent-500: #06b6d4;
+  --ui-accent-600: #0891b2;
+  --ui-accent-700: #0e7490;
+  --ui-accent-800: #155e75;
+  --ui-accent-900: #164e63;
 
   /* Primary accent (exposed as single variable) */
   --ui-accent: var(--ui-accent-500);
-  --ui-accent-muted: var(--ui-accent-500) / 0.15;
-  --ui-accent-hover: var(--ui-accent-600);
-  --ui-accent-glow: var(--ui-accent-400) / 0.25;
+  --ui-accent-muted: rgba(6, 182, 212, 0.12);
+  --ui-accent-hover: var(--ui-accent-400);
+  --ui-accent-glow: rgba(6, 182, 212, 0.25);
+
+  /* Secondary accent - Emerald */
+  --ui-secondary-400: #34d399;
+  --ui-secondary-500: #10b981;
+  --ui-secondary-600: #059669;
 
   /* ═══════════════════════════════════════════════════════════════════════════
      SEMANTIC STATUS COLORS
      ═══════════════════════════════════════════════════════════════════════════ */
 
-  /* Success - Sage Green */
-  --ui-success-50: #f0fdf4;
-  --ui-success-100: #dcfce7;
-  --ui-success-200: #bbf7d0;
-  --ui-success-300: #86efac;
-  --ui-success-400: #4ade80;
-  --ui-success-500: #22c55e;
-  --ui-success-600: #16a34a;
+  /* Success - Emerald Green */
+  --ui-success-50: #ecfdf5;
+  --ui-success-100: #d1fae5;
+  --ui-success-200: #a7f3d0;
+  --ui-success-300: #6ee7b7;
+  --ui-success-400: #34d399;
+  --ui-success-500: #10b981;
+  --ui-success-600: #059669;
   --ui-success: var(--ui-success-500);
-  --ui-success-muted: rgb(34 197 94 / 0.12);
+  --ui-success-muted: rgba(16, 185, 129, 0.12);
 
-  /* Warning - Warm Amber */
+  /* Warning - Amber */
   --ui-warning-50: #fffbeb;
   --ui-warning-100: #fef3c7;
   --ui-warning-200: #fde68a;
@@ -173,55 +176,96 @@
   --ui-warning-500: #f59e0b;
   --ui-warning-600: #d97706;
   --ui-warning: var(--ui-warning-500);
-  --ui-warning-muted: rgb(245 158 11 / 0.12);
+  --ui-warning-muted: rgba(245, 158, 11, 0.12);
 
-  /* Error - Soft Red */
-  --ui-error-50: #fef2f2;
-  --ui-error-100: #fee2e2;
-  --ui-error-200: #fecaca;
-  --ui-error-300: #fca5a5;
-  --ui-error-400: #f87171;
-  --ui-error-500: #ef4444;
-  --ui-error-600: #dc2626;
+  /* Error - Rose */
+  --ui-error-50: #fff1f2;
+  --ui-error-100: #ffe4e6;
+  --ui-error-200: #fecdd3;
+  --ui-error-300: #fda4af;
+  --ui-error-400: #fb7185;
+  --ui-error-500: #f43f5e;
+  --ui-error-600: #e11d48;
   --ui-error: var(--ui-error-500);
-  --ui-error-muted: rgb(239 68 68 / 0.12);
+  --ui-error-muted: rgba(244, 63, 94, 0.12);
 
-  /* Info - Cool Blue */
-  --ui-info-50: #eff6ff;
-  --ui-info-100: #dbeafe;
-  --ui-info-200: #bfdbfe;
-  --ui-info-300: #93c5fd;
-  --ui-info-400: #60a5fa;
-  --ui-info-500: #3b82f6;
-  --ui-info-600: #2563eb;
+  /* Info - Sky Blue */
+  --ui-info-50: #f0f9ff;
+  --ui-info-100: #e0f2fe;
+  --ui-info-200: #bae6fd;
+  --ui-info-300: #7dd3fc;
+  --ui-info-400: #38bdf8;
+  --ui-info-500: #0ea5e9;
+  --ui-info-600: #0284c7;
   --ui-info: var(--ui-info-500);
-  --ui-info-muted: rgb(59 130 246 / 0.12);
+  --ui-info-muted: rgba(14, 165, 233, 0.12);
 }
 
 /* =============================================================================
-   DARK THEME (Default) - Obsidian
+   LIGHT THEME (Default) - Clean White
    ============================================================================= */
 
 :root,
-:root[data-theme='dark'] {
-  /* Backgrounds - Warm charcoal with subtle depth */
-  --ui-bg-base: #121214;
-  --ui-bg-elevated: #1a1a1d;
-  --ui-bg-surface: #232326;
-  --ui-bg-muted: #2a2a2e;
-  --ui-bg-hover: #323236;
-  --ui-bg-active: #3a3a3f;
+:root[data-theme='light'] {
+  /* Backgrounds - Clean whites and light grays */
+  --ui-bg-base: #f8fafc;
+  --ui-bg-elevated: #ffffff;
+  --ui-bg-surface: #f1f5f9;
+  --ui-bg-muted: #e2e8f0;
+  --ui-bg-hover: #e2e8f0;
+  --ui-bg-active: #cbd5e1;
 
   /* Subtle gradient for depth */
-  --ui-bg-gradient: linear-gradient(180deg, #1a1a1d 0%, #121214 100%);
-  --ui-bg-radial: radial-gradient(ellipse at top, #232326 0%, #121214 70%);
+  --ui-bg-gradient: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  --ui-bg-radial: radial-gradient(ellipse at top, #ffffff 0%, #f1f5f9 70%);
 
   /* Text hierarchy */
-  --ui-text-primary: #fafaf9;
-  --ui-text-secondary: #a8a8a3;
-  --ui-text-muted: #6b6b66;
-  --ui-text-disabled: #4a4a46;
-  --ui-text-inverse: #121214;
+  --ui-text-primary: #0f172a;
+  --ui-text-secondary: #475569;
+  --ui-text-muted: #64748b;
+  --ui-text-disabled: #94a3b8;
+  --ui-text-inverse: #ffffff;
+
+  /* Borders */
+  --ui-border: #e2e8f0;
+  --ui-border-subtle: #f1f5f9;
+  --ui-border-strong: #cbd5e1;
+  --ui-border-focus: var(--ui-accent-500);
+
+  /* Overlays */
+  --ui-overlay-light: rgba(0, 0, 0, 0.02);
+  --ui-overlay-medium: rgba(0, 0, 0, 0.3);
+  --ui-overlay-heavy: rgba(0, 0, 0, 0.6);
+
+  /* Shadows for light mode */
+  --ui-shadow-color: 0 0 0;
+  --ui-shadow-glow: 0 0 40px rgba(6, 182, 212, 0.1);
+  --ui-shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+}
+
+/* =============================================================================
+   DARK THEME - Midnight
+   ============================================================================= */
+
+:root[data-theme='dark'] {
+  /* Backgrounds - Deep slate/navy */
+  --ui-bg-base: #0a0f14;
+  --ui-bg-elevated: #0f1419;
+  --ui-bg-surface: #151c24;
+  --ui-bg-muted: #1e2730;
+  --ui-bg-hover: #263340;
+  --ui-bg-active: #2e3d4d;
+
+  /* Subtle gradient for depth */
+  --ui-bg-gradient: linear-gradient(180deg, #0f1419 0%, #0a0f14 100%);
+  --ui-bg-radial: radial-gradient(ellipse at top, #151c24 0%, #0a0f14 70%);
+
+  /* Text hierarchy */
+  --ui-text-primary: #f1f5f9;
+  --ui-text-secondary: #94a3b8;
+  --ui-text-muted: #64748b;
+  --ui-text-disabled: #475569;
+  --ui-text-inverse: #0a0f14;
 
   /* Borders */
   --ui-border: rgba(255, 255, 255, 0.08);
@@ -236,52 +280,8 @@
 
   /* Shadows for dark mode */
   --ui-shadow-color: 0 0 0;
-  --ui-shadow-glow: 0 0 40px rgba(237, 122, 20, 0.15);
+  --ui-shadow-glow: 0 0 40px rgba(6, 182, 212, 0.15);
   --ui-shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
-
-  /* Grain texture overlay */
-  --ui-grain: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
-}
-
-/* =============================================================================
-   LIGHT THEME - Parchment
-   ============================================================================= */
-
-:root[data-theme='light'] {
-  /* Backgrounds - Warm cream/parchment */
-  --ui-bg-base: #faf9f7;
-  --ui-bg-elevated: #ffffff;
-  --ui-bg-surface: #f5f4f1;
-  --ui-bg-muted: #eeede9;
-  --ui-bg-hover: #e8e7e3;
-  --ui-bg-active: #dddcd8;
-
-  /* Subtle gradient for depth */
-  --ui-bg-gradient: linear-gradient(180deg, #ffffff 0%, #faf9f7 100%);
-  --ui-bg-radial: radial-gradient(ellipse at top, #ffffff 0%, #f5f4f1 70%);
-
-  /* Text hierarchy */
-  --ui-text-primary: #1a1918;
-  --ui-text-secondary: #57534e;
-  --ui-text-muted: #8c8680;
-  --ui-text-disabled: #bdb8b2;
-  --ui-text-inverse: #fafaf9;
-
-  /* Borders */
-  --ui-border: rgba(0, 0, 0, 0.08);
-  --ui-border-subtle: rgba(0, 0, 0, 0.04);
-  --ui-border-strong: rgba(0, 0, 0, 0.12);
-  --ui-border-focus: var(--ui-accent-500);
-
-  /* Overlays */
-  --ui-overlay-light: rgba(0, 0, 0, 0.02);
-  --ui-overlay-medium: rgba(0, 0, 0, 0.3);
-  --ui-overlay-heavy: rgba(0, 0, 0, 0.6);
-
-  /* Shadows for light mode */
-  --ui-shadow-color: 0 0 0;
-  --ui-shadow-glow: 0 0 40px rgba(237, 122, 20, 0.1);
-  --ui-shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
 }
 
 /* =============================================================================
@@ -353,10 +353,10 @@
 
 @keyframes ui-glow-pulse {
   0%, 100% {
-    box-shadow: 0 0 20px rgba(237, 122, 20, 0.2);
+    box-shadow: 0 0 20px rgba(6, 182, 212, 0.2);
   }
   50% {
-    box-shadow: 0 0 30px rgba(237, 122, 20, 0.35);
+    box-shadow: 0 0 30px rgba(6, 182, 212, 0.35);
   }
 }
 

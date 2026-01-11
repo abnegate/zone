@@ -381,8 +381,8 @@ mod tests {
             "type": "RunStart",
             "job_id": "full-job",
             "workspace": "/home/user/project",
-            "command": "npm",
-            "args": ["install", "--save"],
+            "command": "bun",
+            "args": ["install"],
             "env": {"NODE_ENV": "production", "CI": "true"},
             "timeout_ms": 300000,
             "max_output_bytes": 10485760,
@@ -403,8 +403,8 @@ mod tests {
             } => {
                 assert_eq!(job_id, "full-job");
                 assert_eq!(workspace.to_str().unwrap(), "/home/user/project");
-                assert_eq!(command, "npm");
-                assert_eq!(args, vec!["install", "--save"]);
+                assert_eq!(command, "bun");
+                assert_eq!(args, vec!["install"]);
                 assert_eq!(env.len(), 2);
                 assert_eq!(env.get("NODE_ENV"), Some(&"production".to_string()));
                 assert_eq!(env.get("CI"), Some(&"true".to_string()));
