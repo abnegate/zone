@@ -3,6 +3,7 @@ import { NavLink } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import { useTheme } from '../../context/ThemeContext';
 import ContextSwitcher from '../ContextSwitcher/ContextSwitcher';
+import ZoneLogo from '../ZoneLogo';
 import './Sidebar.css';
 
 const COLLAPSED_KEY = 'manager_sidebar_collapsed';
@@ -96,7 +97,7 @@ export default function Sidebar() {
 
       <aside className={`sidebar ${mobileOpen ? 'open' : ''} ${collapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          {!collapsed && <h1 className="logo">Zone</h1>}
+          <ZoneLogo size={collapsed ? 'sm' : 'md'} showText={!collapsed} />
           <button
             className="theme-toggle"
             onClick={toggleTheme}

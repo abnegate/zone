@@ -76,6 +76,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql
+      - ./postgres/init-manager-db.sh:/docker-entrypoint-initdb.d/init-manager-db.sh:ro
     networks:
       - internal
     healthcheck:
@@ -89,8 +90,6 @@ services:
     image: valkey/valkey:${DOCKER_VERSION_VALKEY:-8.1-alpine}
     container_name: valkey
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     volumes:
       - valkey_data:/data
     command: valkey-server --maxmemory 256mb --maxmemory-policy allkeys-lru
@@ -228,10 +227,13 @@ services:
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - LITELLM_HOST=http://litellm:4000
+      - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_MANAGER_API_KEY=${SECURITY_MANAGER_API_KEY}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${MANAGER_POSTGRES_DB:-manager}
+      - REDIS_URL=redis://valkey:6379
       - POSTGRES_HOST=postgres
       - POSTGRES_DB=${MANAGER_POSTGRES_DB:-manager}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -259,7 +261,7 @@ services:
       - traefik.http.routers.manager-secure.tls=true
       - traefik.http.routers.manager-secure.tls.certresolver=letsencrypt
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -294,7 +296,7 @@ services:
       - traefik.http.routers.console-secure.tls.certresolver=letsencrypt
       - traefik.http.routers.console-secure.priority=1
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
       interval: 30s
       timeout: 5s
       retries: 3

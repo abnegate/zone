@@ -1,88 +1,102 @@
 # =============================================================================
-# Zone Installer Dockerfile
-# Multi-stage build: UI package -> React frontend -> Rust backend
-#
-# Build context must be repository root:
-#   docker build -f installer/Dockerfile .
-# =============================================================================
-
-# =============================================================================
 # Stage 1: Build shared UI package
 # =============================================================================
-FROM node:20-slim AS ui-builder
+FROM oven/bun:1-alpine AS ui-builder
 
 WORKDIR /ui
 
-# Copy UI package files (no lock file in workspace packages)
 COPY packages/ui/package.json ./
-RUN npm install
+RUN bun install
 
 COPY packages/ui/ ./
-RUN npm run build
+RUN bun run build
 
 # =============================================================================
-# Stage 2: Build React frontend
+# Stage 2: Install frontend dependencies
 # =============================================================================
-FROM node:20-slim AS frontend-builder
+FROM oven/bun:1-alpine AS frontend-deps
 
 WORKDIR /frontend
 
-# Copy package files (without @zone/ui dependency for initial install)
-COPY installer/frontend/package.json installer/frontend/package-lock.json ./
+COPY installer/frontend/package.json ./
+RUN sed -i 's/"@zone\/ui": "\*",//' package.json && bun install
 
-# Create a temporary package.json without the workspace dependency and install
-RUN sed -i 's/"@zone\/ui": "\*",//' package.json && npm install
+# =============================================================================
+# Stage 3: Build React frontend
+# =============================================================================
+FROM oven/bun:1-alpine AS frontend-builder
 
-# Copy the built UI package and install it
+WORKDIR /frontend
+
+COPY --from=frontend-deps /frontend/node_modules ./node_modules
+COPY --from=frontend-deps /frontend/package.json ./
+
 COPY --from=ui-builder /ui/dist /ui/dist
 COPY --from=ui-builder /ui/package.json /ui/package.json
-RUN npm install /ui --legacy-peer-deps
+RUN bun add /ui
 
-# Copy source and build
-COPY installer/frontend/ ./
-RUN npm run build
+COPY installer/frontend/tsconfig.json installer/frontend/vite.config.ts installer/frontend/index.html ./
+
+COPY installer/frontend/src ./src
+
+RUN bun run build
 
 # =============================================================================
-# Stage 3: Build Rust backend
+# Stage 4: Build Rust backend with dependency caching
 # =============================================================================
-FROM rust:1.85-slim AS builder
+FROM rust:1.85-alpine AS builder
 
 WORKDIR /build
 
-# Install build dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends pkg-config libssl-dev && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
 
-# Copy workspace files
 COPY runner/Cargo.toml runner/Cargo.lock ./
-COPY runner/zone_installer zone_installer
-COPY runner/zone_core zone_core
-COPY runner/zone_server zone_server
-COPY runner/zone_cli zone_cli
-COPY runner/zone_runner zone_runner
-COPY runner/tool_runner tool_runner
 
-# Build only the installer binary
+COPY runner/zone_installer/Cargo.toml ./zone_installer/
+COPY runner/zone_core/Cargo.toml ./zone_core/
+COPY runner/zone_server/Cargo.toml ./zone_server/
+COPY runner/zone_cli/Cargo.toml ./zone_cli/
+COPY runner/zone_runner/Cargo.toml ./zone_runner/
+COPY runner/tool_runner/Cargo.toml ./tool_runner/
+COPY runner/zone_context/Cargo.toml ./zone_context/
+
+RUN mkdir -p zone_installer/src zone_core/src zone_server/src zone_cli/src \
+             zone_runner/src tool_runner/src zone_context/src && \
+    echo "fn main() {}" > zone_installer/src/main.rs && \
+    echo "fn main() {}" > zone_core/src/lib.rs && \
+    echo "fn main() {}" > zone_server/src/main.rs && \
+    echo "fn main() {}" > zone_cli/src/main.rs && \
+    echo "fn main() {}" > zone_runner/src/main.rs && \
+    echo "fn main() {}" > tool_runner/src/lib.rs && \
+    echo "fn main() {}" > zone_context/src/lib.rs
+
+RUN cargo build --release --package zone_installer 2>/dev/null || true
+
+COPY runner/zone_installer ./zone_installer/
+COPY runner/zone_core ./zone_core/
+COPY runner/zone_server ./zone_server/
+COPY runner/zone_cli ./zone_cli/
+COPY runner/zone_runner ./zone_runner/
+COPY runner/tool_runner ./tool_runner/
+COPY runner/zone_context ./zone_context/
+
+# Touch all source files to ensure Cargo detects changes from dummy files
+RUN find . -name "*.rs" -exec touch {} +
+
 RUN cargo build --release --package zone_installer
 
 # =============================================================================
-# Stage 4: Runtime
+# Stage 5: Runtime
 # =============================================================================
-FROM debian:bookworm-slim AS runtime
+FROM alpine:3.21 AS runtime
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends apache2-utils ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache apache2-utils ca-certificates
 
-RUN groupadd -r appuser && useradd -r -g appuser -s /bin/false appuser
+RUN addgroup -S appuser && adduser -S -G appuser -s /sbin/nologin appuser
 
 WORKDIR /app
 
-# Copy the binary
 COPY --from=builder /build/target/release/zone-installer /app/zone-installer
-
-# Copy frontend build
 COPY --from=frontend-builder /frontend/build /app/frontend/build
 
 RUN chown -R appuser:appuser /app

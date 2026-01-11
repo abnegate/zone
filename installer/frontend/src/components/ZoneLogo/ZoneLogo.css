@@ -1,0 +1,30 @@
+.zone-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.zone-logo__icon {
+  flex-shrink: 0;
+}
+
+.zone-logo__text {
+  font-weight: 700;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -0.02em;
+}
+
+.zone-logo--sm .zone-logo__text {
+  font-size: 1rem;
+}
+
+.zone-logo--md .zone-logo__text {
+  font-size: 1.25rem;
+}
+
+.zone-logo--lg .zone-logo__text {
+  font-size: 1.75rem;
+}

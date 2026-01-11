@@ -42,6 +42,6 @@
     "check:fix": "biome check --write src",
     "typecheck": "tsc --noEmit",
     "lighthouse": "lhci autorun",
-    "audit": "bunx better-npm-audit audit --level critical"
+    "audit": "bun audit"
   }
 }

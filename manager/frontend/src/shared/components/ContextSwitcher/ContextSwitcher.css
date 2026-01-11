@@ -1,5 +1,5 @@
 /* =============================================================================
-   Context Switcher - Obsidian Design
+   Context Switcher - Midnight Design
    Organization/Workspace selector
    ============================================================================= */
 
@@ -38,7 +38,7 @@
 .context-switcher-button:focus {
   outline: none;
   border-color: var(--ui-accent-500);
-  box-shadow: 0 0 0 3px rgba(237, 122, 20, 0.1);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1);
 }
 
 .context-label {
@@ -142,7 +142,7 @@
 }
 
 .dropdown-item.active {
-  background: rgba(237, 122, 20, 0.08);
+  background: rgba(6, 182, 212, 0.08);
   color: var(--ui-accent-500);
 }
 

@@ -2,9 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <link rel="icon" href="/favicon.ico" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#121214" />
+    <meta name="theme-color" content="#f8fafc" />
     <meta name="description" content="Zone Dashboard - AI Infrastructure Management" />
 
     <!-- Preconnect to external domains for faster font loading -->
@@ -14,12 +15,12 @@
     <!-- Preload critical fonts with optimal loading strategy -->
     <link
       rel="preload"
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Fraunces:wght@500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
       as="style"
       onload="this.onload=null;this.rel='stylesheet'"
     />
     <noscript>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Fraunces:wght@500;600&display=swap" rel="stylesheet" />
+      <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
     </noscript>
 
     <!-- PWA meta tags -->
@@ -29,7 +30,8 @@
     <meta name="apple-mobile-web-app-title" content="Zone" />
 
     <!-- Apple touch icons -->
-    <link rel="apple-touch-icon" href="/logo192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="apple-touch-icon" sizes="192x192" href="/logo192.png" />
     <link rel="apple-touch-icon" sizes="512x512" href="/logo512.png" />
 
@@ -42,9 +44,9 @@
     <style>
       /* Prevent FOUT with fallback fonts */
       body {
-        font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        background: #121214;
-        color: #fafaf9;
+        font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #f8fafc;
+        color: #0f172a;
         margin: 0;
       }
       /* Initial loading state */
@@ -59,14 +61,14 @@
         display: block;
         width: 40px;
         height: 40px;
-        border: 3px solid #232326;
-        border-top-color: #ed7a14;
+        border: 3px solid #e2e8f0;
+        border-top-color: #06b6d4;
         border-radius: 50%;
         animation: spin 0.8s linear infinite;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
-      .loader-title { font-family: 'Fraunces', serif; font-size: 48px; margin: 0 0 24px 0; color: #ed7a14; }
-      .loader-text { margin-top: 16px; font-size: 14px; color: #71717a; }
+      .loader-title { font-family: 'Plus Jakarta Sans', sans-serif; font-size: 48px; font-weight: 700; margin: 0 0 24px 0; color: #06b6d4; }
+      .loader-text { margin-top: 16px; font-size: 14px; color: #64748b; }
     </style>
   </head>
   <body>

@@ -336,10 +336,10 @@ make dev
 cd runner && cargo test
 
 # Run frontend tests
-cd manager/frontend && npm test
+cd manager/frontend && bun test
 
 # Run E2E tests
-cd manager/frontend && npm run test:e2e
+cd manager/frontend && bun run test:e2e
 
 # Install the zone CLI
 make install-cli

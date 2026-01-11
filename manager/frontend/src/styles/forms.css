@@ -1,5 +1,5 @@
 /* =============================================================================
-   Form Elements - Obsidian Design
+   Form Elements - Midnight Design
    Premium form styling extending @zone/ui
    ============================================================================= */
 
@@ -75,7 +75,7 @@ input[type="password"]:focus {
   border-color: var(--ui-accent-500);
   background: var(--ui-bg-elevated);
   box-shadow:
-    0 0 0 3px rgba(237, 122, 20, 0.1),
+    0 0 0 3px rgba(6, 182, 212, 0.1),
     var(--ui-shadow-sm);
 }
 
@@ -109,7 +109,7 @@ textarea:focus {
   border-color: var(--ui-accent-500);
   background: var(--ui-bg-elevated);
   box-shadow:
-    0 0 0 3px rgba(237, 122, 20, 0.1),
+    0 0 0 3px rgba(6, 182, 212, 0.1),
     var(--ui-shadow-sm);
 }
 
@@ -143,7 +143,7 @@ select:focus {
   outline: none;
   border-color: var(--ui-accent-500);
   background-color: var(--ui-bg-elevated);
-  box-shadow: 0 0 0 3px rgba(237, 122, 20, 0.1);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1);
 }
 
 select:disabled {
@@ -212,7 +212,7 @@ select:disabled {
 
 .source-tab.active {
   color: var(--ui-accent-500);
-  background: rgba(237, 122, 20, 0.08);
+  background: rgba(6, 182, 212, 0.08);
   border-color: var(--ui-accent-500);
 }
 
@@ -250,9 +250,9 @@ select:disabled {
 }
 
 .filter-pill.active {
-  background: rgba(237, 122, 20, 0.1);
+  background: rgba(6, 182, 212, 0.1);
   color: var(--ui-accent-500);
-  border-color: rgba(237, 122, 20, 0.3);
+  border-color: rgba(6, 182, 212, 0.3);
 }
 
 .filter-pill .remove {

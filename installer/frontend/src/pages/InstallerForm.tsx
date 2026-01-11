@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { Button, InfoBox, Modal, StatusLog, StepPills } from '../components';
+import { Button, InfoBox, Modal, StatusLog, StepPills, ZoneLogo } from '../components';
 import {
   useConfigPersistence,
   useInstallation,
@@ -196,7 +196,7 @@ export default function InstallerForm() {
     <div className="installer-layout">
       <aside className="installer-sidebar">
         <header className="sidebar-header">
-          <h1>Zone</h1>
+          <ZoneLogo size="lg" />
           <p>Configuration</p>
         </header>
         <StepPills currentStep={currentStep} onStepClick={handleStepClick} />

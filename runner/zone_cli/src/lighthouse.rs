@@ -55,29 +55,29 @@ pub fn run_lighthouse(project_root: &Path, frontend: Frontend, verbose: bool) ->
     // Check if node_modules exists
     if !frontend_path.join("node_modules").exists() {
         println!("{} Installing dependencies...", style("→").dim());
-        let status = Command::new("npm")
-            .arg("ci")
+        let status = Command::new("bun")
+            .arg("install")
             .current_dir(&frontend_path)
             .status()
-            .context("Failed to run npm ci")?;
+            .context("Failed to run bun install")?;
 
         if !status.success() {
-            bail!("npm ci failed");
+            bail!("bun install failed");
         }
     }
 
     // Build the frontend
     println!("{} Building frontend...", style("→").dim());
-    let status = Command::new("npm")
+    let status = Command::new("bun")
         .arg("run")
         .arg("build")
         .current_dir(&frontend_path)
         .env("CI", "false")
         .status()
-        .context("Failed to run npm build")?;
+        .context("Failed to run bun build")?;
 
     if !status.success() {
-        bail!("npm build failed");
+        bail!("bun build failed");
     }
 
     let build_dir = frontend_path.join(frontend.build_dir());
@@ -86,16 +86,15 @@ pub fn run_lighthouse(project_root: &Path, frontend: Frontend, verbose: bool) ->
     }
 
     // Check if lighthouse is installed
-    let lhci_check = Command::new("npx")
-        .arg("--no")
-        .arg("lhci")
+    let lhci_check = Command::new("bunx")
+        .arg("@lhci/cli")
         .arg("--version")
         .output();
 
     if lhci_check.is_err() || !lhci_check.unwrap().status.success() {
         println!("{} Installing @lhci/cli...", style("→").dim());
-        let status = Command::new("npm")
-            .arg("install")
+        let status = Command::new("bun")
+            .arg("add")
             .arg("-g")
             .arg("@lhci/cli")
             .status()
@@ -109,8 +108,10 @@ pub fn run_lighthouse(project_root: &Path, frontend: Frontend, verbose: bool) ->
     // Run Lighthouse CI
     println!("{} Running Lighthouse...", style("→").dim());
 
-    let mut cmd = Command::new("npx");
-    cmd.arg("lhci").arg("autorun").current_dir(&frontend_path);
+    let mut cmd = Command::new("bunx");
+    cmd.arg("@lhci/cli")
+        .arg("autorun")
+        .current_dir(&frontend_path);
 
     if verbose {
         cmd.arg("--verbose");

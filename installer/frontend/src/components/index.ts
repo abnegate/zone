@@ -13,3 +13,4 @@ export type {
 // App-specific components
 export { StatusLog } from './StatusLog';
 export { StepPills } from './StepPills';
+export { default as ZoneLogo } from './ZoneLogo';

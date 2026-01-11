@@ -20,7 +20,8 @@
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "types": ["bun-types", "vite/client"]
+    "types": ["@types/bun", "vite/client"]
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "vite.config.ts"],
+  "exclude": ["**/*.test.ts", "**/*.test.tsx", "**/__mocks__/**", "**/setupTests.ts"]
 }

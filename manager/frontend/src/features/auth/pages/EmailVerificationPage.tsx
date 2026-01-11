@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import { isValidTokenFormat } from '../utils';
+import ZoneLogo from '../../../shared/components/ZoneLogo';
 import './AuthPage.css';
 
 export default function EmailVerificationPage() {
@@ -61,7 +62,7 @@ export default function EmailVerificationPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <h1>Zone</h1>
+          <ZoneLogo size="xl" />
           {status === 'loading' && <p>Verifying your email...</p>}
           {status === 'success' && <p>Email Verified</p>}
           {status === 'error' && <p>Verification Failed</p>}

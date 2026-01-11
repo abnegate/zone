@@ -55,6 +55,8 @@ pub struct AuthResponse {
     token_type: &'static str,
     expires_in: u64,
     user: UserResponse,
+    roles: Vec<String>,
+    permissions: Vec<String>,
 }
 
 /// User response
@@ -64,7 +66,11 @@ pub struct UserResponse {
     email: String,
     display_name: Option<String>,
     is_admin: bool,
+    is_active: bool,
     email_verified: bool,
+    created_at: String,
+    updated_at: String,
+    last_login_at: Option<String>,
 }
 
 /// POST /api/auth/register
@@ -193,12 +199,29 @@ pub async fn register(
             token_type: "Bearer",
             expires_in: state.config().jwt_access_lifetime,
             user: UserResponse {
-                id: user.id,
-                email: user.email.clone(),
-                display_name: user.display_name,
-                is_admin: user.is_admin.unwrap_or(false),
-                email_verified: user.email_verified,
+                id: user_perms.user.id,
+                email: user_perms.user.email.clone(),
+                display_name: user_perms.user.display_name.clone(),
+                is_admin: user_perms.user.is_admin.unwrap_or(false),
+                is_active: user_perms.user.is_active.unwrap_or(true),
+                email_verified: user_perms.user.email_verified,
+                created_at: user_perms
+                    .user
+                    .created_at
+                    .map(|dt| dt.and_utc().to_rfc3339())
+                    .unwrap_or_default(),
+                updated_at: user_perms
+                    .user
+                    .updated_at
+                    .map(|dt| dt.and_utc().to_rfc3339())
+                    .unwrap_or_default(),
+                last_login_at: user_perms
+                    .user
+                    .last_login_at
+                    .map(|dt| dt.and_utc().to_rfc3339()),
             },
+            roles: user_perms.roles.clone(),
+            permissions: user_perms.permissions.clone(),
         }),
     )
         .into_response()
@@ -296,12 +319,29 @@ pub async fn login(
         token_type: "Bearer",
         expires_in: state.config().jwt_access_lifetime,
         user: UserResponse {
-            id: user.id,
-            email: user.email,
-            display_name: user.display_name,
-            is_admin: user.is_admin.unwrap_or(false),
-            email_verified: user.email_verified,
+            id: user_perms.user.id,
+            email: user_perms.user.email.clone(),
+            display_name: user_perms.user.display_name.clone(),
+            is_admin: user_perms.user.is_admin.unwrap_or(false),
+            is_active: user_perms.user.is_active.unwrap_or(true),
+            email_verified: user_perms.user.email_verified,
+            created_at: user_perms
+                .user
+                .created_at
+                .map(|dt| dt.and_utc().to_rfc3339())
+                .unwrap_or_default(),
+            updated_at: user_perms
+                .user
+                .updated_at
+                .map(|dt| dt.and_utc().to_rfc3339())
+                .unwrap_or_default(),
+            last_login_at: user_perms
+                .user
+                .last_login_at
+                .map(|dt| dt.and_utc().to_rfc3339()),
         },
+        roles: user_perms.roles.clone(),
+        permissions: user_perms.permissions.clone(),
     })
     .into_response()
 }
@@ -373,11 +413,28 @@ pub async fn refresh(
         expires_in: state.config().jwt_access_lifetime,
         user: UserResponse {
             id: user_perms.user.id,
-            email: user_perms.user.email,
-            display_name: user_perms.user.display_name,
+            email: user_perms.user.email.clone(),
+            display_name: user_perms.user.display_name.clone(),
             is_admin: user_perms.user.is_admin.unwrap_or(false),
+            is_active: user_perms.user.is_active.unwrap_or(true),
             email_verified: user_perms.user.email_verified,
+            created_at: user_perms
+                .user
+                .created_at
+                .map(|dt| dt.and_utc().to_rfc3339())
+                .unwrap_or_default(),
+            updated_at: user_perms
+                .user
+                .updated_at
+                .map(|dt| dt.and_utc().to_rfc3339())
+                .unwrap_or_default(),
+            last_login_at: user_perms
+                .user
+                .last_login_at
+                .map(|dt| dt.and_utc().to_rfc3339()),
         },
+        roles: user_perms.roles.clone(),
+        permissions: user_perms.permissions.clone(),
     })
     .into_response()
 }

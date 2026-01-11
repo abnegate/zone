@@ -1,5 +1,5 @@
 /* =============================================================================
-   Cards - Obsidian Design
+   Cards - Midnight Design
    Premium card styles extending @zone/ui
    ============================================================================= */
 
@@ -84,11 +84,11 @@
 }
 
 .card--accent {
-  border-color: rgba(237, 122, 20, 0.2);
+  border-color: rgba(6, 182, 212, 0.2);
 }
 
 .card--accent::before {
-  background: linear-gradient(180deg, rgba(237, 122, 20, 0.08) 0%, transparent 100%);
+  background: linear-gradient(180deg, rgba(6, 182, 212, 0.08) 0%, transparent 100%);
   opacity: 1;
 }
 
@@ -222,7 +222,7 @@
 }
 
 :root[data-theme='dark'] .feature-card-icon {
-  background: linear-gradient(135deg, rgba(237, 122, 20, 0.15) 0%, rgba(237, 122, 20, 0.08) 100%);
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.15) 0%, rgba(6, 182, 212, 0.08) 100%);
   color: var(--ui-accent-400);
 }
 

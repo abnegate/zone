@@ -11,7 +11,8 @@ export function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T>
   if (!result.success) {
     const errors = result.error.errors
       .map(
-        (e: { path: (string | number)[]; message: string }) => `${e.path.join('.')}: ${e.message}`
+        (e: { path: (string | number)[]; message: string }) =>
+          `${e.path.join('.') || 'Field'}: ${e.message}`
       )
       .join(', ');
     throw new Error(`Validation failed: ${errors}`);

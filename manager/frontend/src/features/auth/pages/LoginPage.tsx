@@ -5,6 +5,7 @@ import { Button, Input } from '@zone/ui';
 import { useAuth } from '../hooks';
 import { LoginRequestSchema } from '../schemas';
 import { getErrors } from '../../../validation';
+import ZoneLogo from '../../../shared/components/ZoneLogo';
 import './AuthPage.css';
 
 export default function LoginPage() {
@@ -62,7 +63,7 @@ export default function LoginPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <h1>Zone</h1>
+          <ZoneLogo size="xl" />
           <p>Sign in to your account</p>
         </div>
 

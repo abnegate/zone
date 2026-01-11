@@ -5,6 +5,7 @@ import { client } from '../../../api/client';
 import { Button, Input } from '@zone/ui';
 import { ForgotPasswordSchema } from '../schemas';
 import { getErrors } from '../../../validation';
+import ZoneLogo from '../../../shared/components/ZoneLogo';
 import './AuthPage.css';
 
 export default function ForgotPasswordPage() {
@@ -43,7 +44,7 @@ export default function ForgotPasswordPage() {
       <div className="auth-page">
         <div className="auth-container">
           <div className="auth-header">
-            <h1>Zone</h1>
+            <ZoneLogo size="xl" />
             <p>Check your email</p>
           </div>
 
@@ -85,7 +86,7 @@ export default function ForgotPasswordPage() {
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <h1>Zone</h1>
+          <ZoneLogo size="xl" />
           <p>Reset your password</p>
         </div>
 

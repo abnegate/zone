@@ -18,7 +18,7 @@ import type {
 } from '../features/sources/types';
 import type { SourceVerifyResponse, SourceTypesResponse } from '../features/sources/schemas';
 
-export const API_BASE = process.env.REACT_APP_API_URL || '';
+export const API_BASE = import.meta.env.VITE_API_URL || '';
 
 class SourcesApi {
   private getAccessToken: (() => string | null) | null = null;

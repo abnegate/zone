@@ -257,11 +257,11 @@ dev: ## Start in development mode with live logs
 
 dev-console: ## Start console frontend in development mode
 	@echo "$(BLUE)Starting console frontend dev server...$(NC)"
-	cd manager/frontend && npm start
+	cd manager/frontend && bun start
 
 dev-installer: ## Start installer frontend in development mode
 	@echo "$(BLUE)Starting installer frontend dev server...$(NC)"
-	cd installer/frontend && npm start
+	cd installer/frontend && bun start
 
 rebuild: ## Rebuild and restart all services
 	@echo "$(BLUE)Rebuilding services...$(NC)"
@@ -427,23 +427,23 @@ sqlx-prepare: ## Prepare sqlx offline query data (requires running postgres)
 
 test-console: ## Run console (React) unit tests
 	@echo "$(BLUE)Running console unit tests...$(NC)"
-	cd manager/frontend && npm test -- --watchAll=false
+	cd manager/frontend && bun test
 
 test-console-coverage: ## Run console tests with coverage report
 	@echo "$(BLUE)Running console tests with coverage...$(NC)"
-	cd manager/frontend && npm run test:coverage
+	cd manager/frontend && bun test --coverage
 
 test-e2e: ## Run Playwright end-to-end tests
 	@echo "$(BLUE)Running E2E tests...$(NC)"
-	cd manager/frontend && npm run test:e2e
+	cd manager/frontend && bun run test:e2e
 
 test-e2e-ui: ## Run Playwright tests with UI
 	@echo "$(BLUE)Running E2E tests with UI...$(NC)"
-	cd manager/frontend && npm run test:e2e:ui
+	cd manager/frontend && bun run test:e2e:ui
 
 test-e2e-headed: ## Run Playwright tests in headed mode
 	@echo "$(BLUE)Running E2E tests in headed mode...$(NC)"
-	cd manager/frontend && npm run test:e2e:headed
+	cd manager/frontend && bun run test:e2e:headed
 
 test-all: ## Run all tests (requires 'make up' for server tests)
 	@echo "$(BLUE)Running all tests...$(NC)"
@@ -453,27 +453,27 @@ test-all: ## Run all tests (requires 'make up' for server tests)
 
 lint-console: ## Run linter on console code
 	@echo "$(BLUE)Linting console code...$(NC)"
-	cd manager/frontend && npm run lint
+	cd manager/frontend && bun run lint
 
 lint-console-fix: ## Run linter and fix issues
 	@echo "$(BLUE)Linting and fixing console code...$(NC)"
-	cd manager/frontend && npm run lint:fix
+	cd manager/frontend && bun run lint:fix
 
 format-console: ## Check console code formatting
 	@echo "$(BLUE)Checking console code formatting...$(NC)"
-	cd manager/frontend && npm run format
+	cd manager/frontend && bun run format
 
 format-console-fix: ## Format console code
 	@echo "$(BLUE)Formatting console code...$(NC)"
-	cd manager/frontend && npm run format:fix
+	cd manager/frontend && bun run format:fix
 
 check-console: ## Run all Biome checks on console
 	@echo "$(BLUE)Running Biome checks...$(NC)"
-	cd manager/frontend && npm run check
+	cd manager/frontend && bun run check
 
 check-console-fix: ## Run Biome checks and fix issues
 	@echo "$(BLUE)Running Biome checks with fixes...$(NC)"
-	cd manager/frontend && npm run check:fix
+	cd manager/frontend && bun run check:fix
 
 ##@ Information
 
