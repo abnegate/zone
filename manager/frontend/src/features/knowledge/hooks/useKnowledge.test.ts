@@ -1,11 +1,30 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { knowledgeApi } from '../../../api/knowledge';
-import { useKnowledge } from './useKnowledge';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { KnowledgeEntry, CreateKnowledgeRequest } from '../types';
 
-jest.mock('../../../api/knowledge');
+const mockGetKnowledge = mock();
+const mockCreateKnowledge = mock();
+const mockDeleteKnowledge = mock();
+const mockRefreshKnowledge = mock();
 
-const mockKnowledgeApi = knowledgeApi as jest.Mocked<typeof knowledgeApi>;
+mock.module('../../../api/knowledge', () => ({
+  knowledgeApi: {
+    getKnowledge: mockGetKnowledge,
+    createKnowledge: mockCreateKnowledge,
+    deleteKnowledge: mockDeleteKnowledge,
+    refreshKnowledge: mockRefreshKnowledge,
+  },
+}));
+
+let useKnowledge: typeof import('./useKnowledge').useKnowledge;
+
+beforeAll(async () => {
+  ({ useKnowledge } = await import('./useKnowledge'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useKnowledge', () => {
   const mockEntries: KnowledgeEntry[] = [
@@ -41,7 +60,7 @@ describe('useKnowledge', () => {
 
   describe('initialization', () => {
     it('should load knowledge entries on mount', async () => {
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
+      mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -52,13 +71,13 @@ describe('useKnowledge', () => {
         expect(result.current.loading).toBe(false);
       });
 
-      expect(mockKnowledgeApi.getKnowledge).toHaveBeenCalledTimes(1);
+      expect(mockGetKnowledge).toHaveBeenCalledTimes(1);
       expect(result.current.entries).toEqual(mockEntries);
       expect(result.current.error).toBeNull();
     });
 
     it('should handle load error', async () => {
-      mockKnowledgeApi.getKnowledge.mockRejectedValue(new Error('Load failed'));
+      mockGetKnowledge.mockRejectedValue(new Error('Load failed'));
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -71,7 +90,7 @@ describe('useKnowledge', () => {
     });
 
     it('should load with workspace ID', async () => {
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
+      mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
 
       const { result } = renderHook(() => useKnowledge('ws-1'));
 
@@ -79,7 +98,7 @@ describe('useKnowledge', () => {
         expect(result.current.loading).toBe(false);
       });
 
-      expect(mockKnowledgeApi.getKnowledge).toHaveBeenCalledWith('ws-1');
+      expect(mockGetKnowledge).toHaveBeenCalledWith('ws-1');
     });
   });
 
@@ -91,8 +110,8 @@ describe('useKnowledge', () => {
         title: 'New Entry',
       };
 
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
-      mockKnowledgeApi.createKnowledge.mockResolvedValue(newEntry);
+      mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
+      mockCreateKnowledge.mockResolvedValue(newEntry);
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -111,14 +130,14 @@ describe('useKnowledge', () => {
         await result.current.createEntry(request);
       });
 
-      expect(mockKnowledgeApi.createKnowledge).toHaveBeenCalledWith(request);
+      expect(mockCreateKnowledge).toHaveBeenCalledWith(request);
       expect(result.current.entries).toContainEqual(newEntry);
       expect(result.current.entries).toHaveLength(mockEntries.length + 1);
     });
 
     it('should handle create error', async () => {
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
-      mockKnowledgeApi.createKnowledge.mockRejectedValue(new Error('Create failed'));
+      mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
+      mockCreateKnowledge.mockRejectedValue(new Error('Create failed'));
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -139,8 +158,8 @@ describe('useKnowledge', () => {
 
   describe('deleteEntry', () => {
     it('should delete knowledge entry', async () => {
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
-      mockKnowledgeApi.deleteKnowledge.mockResolvedValue();
+      mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
+      mockDeleteKnowledge.mockResolvedValue();
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -152,14 +171,14 @@ describe('useKnowledge', () => {
         await result.current.deleteEntry('kb-1');
       });
 
-      expect(mockKnowledgeApi.deleteKnowledge).toHaveBeenCalledWith('kb-1');
+      expect(mockDeleteKnowledge).toHaveBeenCalledWith('kb-1');
       expect(result.current.entries).toHaveLength(mockEntries.length - 1);
       expect(result.current.entries.find((e) => e.id === 'kb-1')).toBeUndefined();
     });
 
     it('should handle delete error', async () => {
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
-      mockKnowledgeApi.deleteKnowledge.mockRejectedValue(new Error('Delete failed'));
+      mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
+      mockDeleteKnowledge.mockRejectedValue(new Error('Delete failed'));
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -180,8 +199,8 @@ describe('useKnowledge', () => {
         last_refreshed_at: '2024-01-03T00:00:00Z',
       };
 
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
-      mockKnowledgeApi.refreshKnowledge.mockImplementation(
+      mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
+      mockRefreshKnowledge.mockImplementation(
         () => new Promise((resolve) => setTimeout(() => resolve(refreshedEntry), 10))
       );
 
@@ -207,7 +226,7 @@ describe('useKnowledge', () => {
         await promise;
       });
 
-      expect(mockKnowledgeApi.refreshKnowledge).toHaveBeenCalledWith('kb-2');
+      expect(mockRefreshKnowledge).toHaveBeenCalledWith('kb-2');
       expect(result.current.refreshing).toBeNull();
 
       const updatedEntry = result.current.entries.find((e) => e.id === 'kb-2');
@@ -215,8 +234,8 @@ describe('useKnowledge', () => {
     });
 
     it('should handle refresh error', async () => {
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
-      mockKnowledgeApi.refreshKnowledge.mockRejectedValue(new Error('Refresh failed'));
+      mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
+      mockRefreshKnowledge.mockRejectedValue(new Error('Refresh failed'));
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -241,7 +260,7 @@ describe('useKnowledge', () => {
         },
       ];
 
-      mockKnowledgeApi.getKnowledge.mockResolvedValueOnce({ entries: mockEntries });
+      mockGetKnowledge.mockResolvedValueOnce({ entries: mockEntries });
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -251,18 +270,18 @@ describe('useKnowledge', () => {
 
       expect(result.current.entries).toEqual(mockEntries);
 
-      mockKnowledgeApi.getKnowledge.mockResolvedValueOnce({ entries: updatedEntries });
+      mockGetKnowledge.mockResolvedValueOnce({ entries: updatedEntries });
 
       await act(async () => {
         await result.current.reload();
       });
 
-      expect(mockKnowledgeApi.getKnowledge).toHaveBeenCalledTimes(2);
+      expect(mockGetKnowledge).toHaveBeenCalledTimes(2);
       expect(result.current.entries).toEqual(updatedEntries);
     });
 
     it('should handle reload error', async () => {
-      mockKnowledgeApi.getKnowledge.mockResolvedValueOnce({ entries: mockEntries });
+      mockGetKnowledge.mockResolvedValueOnce({ entries: mockEntries });
 
       const { result } = renderHook(() => useKnowledge());
 
@@ -270,7 +289,7 @@ describe('useKnowledge', () => {
         expect(result.current.loading).toBe(false);
       });
 
-      mockKnowledgeApi.getKnowledge.mockRejectedValueOnce(new Error('Reload failed'));
+      mockGetKnowledge.mockRejectedValueOnce(new Error('Reload failed'));
 
       await act(async () => {
         await result.current.reload();

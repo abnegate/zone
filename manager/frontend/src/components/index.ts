@@ -1,5 +1,5 @@
 // Re-export shared components from @zone/ui
-export { Button, Input, Select, Checkbox, InfoBox, Modal, ProgressBar } from '@zone/ui';
+export { Button, Input, Select, Checkbox, InfoBox, Modal, ProgressBar, Wizard } from '@zone/ui';
 export type {
   ButtonProps,
   InputProps,
@@ -9,6 +9,8 @@ export type {
   InfoBoxProps,
   ModalProps,
   ProgressBarProps,
+  WizardProps,
+  WizardStep,
 } from '@zone/ui';
 
 // Re-export shared components

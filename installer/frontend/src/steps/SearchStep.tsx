@@ -1,14 +1,16 @@
 import type React from 'react';
+import { useFormContext } from 'react-hook-form';
 import { Checkbox, InfoBox, Input } from '../components';
 import type { InstallerConfig } from '../types';
 
-interface SearchStepProps {
-  config: InstallerConfig;
-  onChange: (key: keyof InstallerConfig, value: string) => void;
-  getFieldError: (field: string) => string | undefined;
-}
-
-export function SearchStep({ config, onChange, getFieldError }: SearchStepProps) {
+export function SearchStep() {
+  const {
+    register,
+    setValue,
+    watch,
+    formState: { errors },
+  } = useFormContext<InstallerConfig>();
+  const webSearchEnabled = watch('SEARCH_ENABLE_WEB_SEARCH') === 'true';
   return (
     <div className="step-content">
       <div className="step-header">
@@ -19,9 +21,12 @@ export function SearchStep({ config, onChange, getFieldError }: SearchStepProps)
       <div className="form-field">
         <Checkbox
           label="Enable web search in RAG pipeline"
-          checked={config.SEARCH_ENABLE_WEB_SEARCH === 'true'}
+          checked={webSearchEnabled}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-            onChange('SEARCH_ENABLE_WEB_SEARCH', e.target.checked ? 'true' : 'false')
+            setValue('SEARCH_ENABLE_WEB_SEARCH', e.target.checked ? 'true' : 'false', {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
           }
         />
       </div>
@@ -29,35 +34,26 @@ export function SearchStep({ config, onChange, getFieldError }: SearchStepProps)
       <Input
         label="Results per Query"
         type="number"
-        value={config.SEARCH_RESULT_COUNT}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('SEARCH_RESULT_COUNT', e.target.value)
-        }
         min={1}
         max={20}
-        error={getFieldError('SEARCH_RESULT_COUNT')}
+        error={errors.SEARCH_RESULT_COUNT?.message}
+        {...register('SEARCH_RESULT_COUNT')}
       />
 
       <Input
         label="Concurrent Requests"
         type="number"
-        value={config.SEARCH_CONCURRENT_REQUESTS}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('SEARCH_CONCURRENT_REQUESTS', e.target.value)
-        }
         min={1}
         max={32}
-        error={getFieldError('SEARCH_CONCURRENT_REQUESTS')}
+        error={errors.SEARCH_CONCURRENT_REQUESTS?.message}
+        {...register('SEARCH_CONCURRENT_REQUESTS')}
       />
 
       <Input
         label="Search Instance Name"
         type="text"
-        value={config.SEARCH_SEARXNG_INSTANCE_NAME}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('SEARCH_SEARXNG_INSTANCE_NAME', e.target.value)
-        }
-        error={getFieldError('SEARCH_SEARXNG_INSTANCE_NAME')}
+        error={errors.SEARCH_SEARXNG_INSTANCE_NAME?.message}
+        {...register('SEARCH_SEARXNG_INSTANCE_NAME')}
       />
 
       <InfoBox variant="info">Web search requires VPN configuration in the next step.</InfoBox>

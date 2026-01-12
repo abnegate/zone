@@ -1,4 +1,5 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
+import { routeApi } from './test-utils';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 
 // Use iPhone 12 viewport dimensions for mobile tests
@@ -64,7 +65,7 @@ test.describe('Mobile Responsiveness', () => {
 
   test.describe('Navigation', () => {
     test('navigates correctly on mobile', async ({ page }) => {
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -80,7 +81,7 @@ test.describe('Mobile Responsiveness', () => {
     });
 
     test('maintains navigation state after sidebar closes', async ({ page }) => {
-      await page.route('**/api/chats*', (route) => {
+      await routeApi(page, '**/api/chats*', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',

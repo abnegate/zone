@@ -1,11 +1,31 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterAll, mock, beforeEach, describe, it, expect } from 'bun:test';
 import type { KnowledgeEntry } from '../types';
-import { knowledgeApi } from '../../../api/knowledge';
 import WikiPage from './WikiPage';
 
+// Create mock functions for knowledge API
+const mockGetKnowledge = mock(() => Promise.resolve({ entries: [] as KnowledgeEntry[] }));
+const mockCreateKnowledge = mock(() => Promise.resolve({} as KnowledgeEntry));
+const mockUpdateKnowledge = mock(() => Promise.resolve({} as KnowledgeEntry));
+const mockDeleteKnowledge = mock(() => Promise.resolve());
+const mockRefreshKnowledge = mock(() => Promise.resolve({} as KnowledgeEntry));
+const mockSearchKnowledge = mock(() => Promise.resolve({ entries: [] as KnowledgeEntry[] }));
+
 // Mock the knowledgeApi
-jest.mock('../../../api/knowledge');
-const mockKnowledgeApi = knowledgeApi as jest.Mocked<typeof knowledgeApi>;
+mock.module('../../../api/knowledge', () => ({
+  knowledgeApi: {
+    getKnowledge: mockGetKnowledge,
+    createKnowledge: mockCreateKnowledge,
+    updateKnowledge: mockUpdateKnowledge,
+    deleteKnowledge: mockDeleteKnowledge,
+    refreshKnowledge: mockRefreshKnowledge,
+    searchKnowledge: mockSearchKnowledge,
+  },
+}));
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('WikiPage', () => {
   const mockEntries: KnowledgeEntry[] = [
@@ -36,8 +56,13 @@ describe('WikiPage', () => {
   ];
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: mockEntries });
+    mockGetKnowledge.mockReset();
+    mockCreateKnowledge.mockReset();
+    mockUpdateKnowledge.mockReset();
+    mockDeleteKnowledge.mockReset();
+    mockRefreshKnowledge.mockReset();
+    mockSearchKnowledge.mockReset();
+    mockGetKnowledge.mockImplementation(() => Promise.resolve({ entries: mockEntries }));
   });
 
   describe('Initial Load', () => {
@@ -53,7 +78,7 @@ describe('WikiPage', () => {
       render(<WikiPage />);
 
       await waitFor(() => {
-        expect(mockKnowledgeApi.getKnowledge).toHaveBeenCalled();
+        expect(mockGetKnowledge).toHaveBeenCalled();
       });
 
       expect(screen.getByText('Text Entry')).toBeInTheDocument();
@@ -71,7 +96,7 @@ describe('WikiPage', () => {
     });
 
     it('displays error message on load failure', async () => {
-      mockKnowledgeApi.getKnowledge.mockRejectedValue(new Error('Failed to load'));
+      mockGetKnowledge.mockImplementation(() => Promise.reject(new Error('Failed to load')));
 
       render(<WikiPage />);
 
@@ -81,7 +106,7 @@ describe('WikiPage', () => {
     });
 
     it('displays empty state when no entries', async () => {
-      mockKnowledgeApi.getKnowledge.mockResolvedValue({ entries: [] });
+      mockGetKnowledge.mockImplementation(() => Promise.resolve({ entries: [] }));
 
       render(<WikiPage />);
 
@@ -298,8 +323,8 @@ describe('WikiPage', () => {
     });
   });
 
-  describe('Create Knowledge Modal', () => {
-    it('opens create modal when Add Knowledge button is clicked', async () => {
+  describe('Create Knowledge Wizard', () => {
+    it('opens create wizard when Add Knowledge button is clicked', async () => {
       render(<WikiPage />);
 
       await waitFor(() => {
@@ -312,7 +337,7 @@ describe('WikiPage', () => {
       expect(screen.getByText('Add Knowledge Entry')).toBeInTheDocument();
     });
 
-    it('renders form fields in create modal', async () => {
+    it('renders wizard steps', async () => {
       render(<WikiPage />);
 
       await waitFor(() => {
@@ -322,13 +347,12 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      expect(screen.getByLabelText('Title')).toBeInTheDocument();
-      expect(screen.getByLabelText('Type')).toBeInTheDocument();
-      expect(screen.getByLabelText('Content')).toBeInTheDocument();
-      expect(screen.getByLabelText(/Tags/)).toBeInTheDocument();
+      // Step 1: Type selection is shown first
+      expect(screen.getByText('Text Content')).toBeInTheDocument();
+      expect(screen.getByText('URL / Web Page')).toBeInTheDocument();
     });
 
-    it('closes modal when Cancel button is clicked', async () => {
+    it('closes wizard when Cancel button is clicked', async () => {
       render(<WikiPage />);
 
       await waitFor(() => {
@@ -341,10 +365,12 @@ describe('WikiPage', () => {
       const cancelButton = screen.getByRole('button', { name: 'Cancel' });
       fireEvent.click(cancelButton);
 
-      expect(screen.queryByText('Add Knowledge Entry')).not.toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.queryByText('Add Knowledge Entry')).not.toBeInTheDocument();
+      });
     });
 
-    it('closes modal when close icon is clicked', async () => {
+    it('closes wizard when close icon is clicked', async () => {
       render(<WikiPage />);
 
       await waitFor(() => {
@@ -354,13 +380,15 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const closeButton = screen.getByLabelText('Close modal');
+      const closeButton = screen.getByRole('button', { name: 'Close wizard' });
       fireEvent.click(closeButton);
 
-      expect(screen.queryByText('Add Knowledge Entry')).not.toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.queryByText('Add Knowledge Entry')).not.toBeInTheDocument();
+      });
     });
 
-    it('closes modal when clicking overlay', async () => {
+    it('closes wizard when clicking overlay', async () => {
       render(<WikiPage />);
 
       await waitFor(() => {
@@ -370,7 +398,7 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const overlay = screen.getByText('Add Knowledge Entry').closest('.modal-overlay');
+      const overlay = document.querySelector('.ui-wizard-overlay');
       if (overlay) {
         fireEvent.click(overlay);
       }
@@ -380,7 +408,7 @@ describe('WikiPage', () => {
       });
     });
 
-    it('switches input type when type is changed', async () => {
+    it('shows URL input when URL type is selected', async () => {
       render(<WikiPage />);
 
       await waitFor(() => {
@@ -390,16 +418,21 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const typeSelect = screen.getByLabelText('Type') as HTMLSelectElement;
-      fireEvent.change(typeSelect, { target: { value: 'url' } });
+      // Click URL option
+      fireEvent.click(screen.getByText('URL / Web Page'));
 
-      expect(screen.getByLabelText('URL')).toBeInTheDocument();
+      // Go to step 2 (content)
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('URL')).toBeInTheDocument();
+      });
       expect((screen.getByLabelText('URL') as HTMLInputElement).type).toBe('url');
     });
   });
 
   describe('Create Knowledge Submission', () => {
-    it('creates text knowledge entry', async () => {
+    it('creates text knowledge entry via wizard', async () => {
       const newEntry: KnowledgeEntry = {
         ...mockEntries[0],
         id: 'kb-new',
@@ -407,7 +440,7 @@ describe('WikiPage', () => {
         content: 'New content',
       };
 
-      mockKnowledgeApi.createKnowledge.mockResolvedValue(newEntry);
+      mockCreateKnowledge.mockImplementation(() => Promise.resolve(newEntry));
 
       render(<WikiPage />);
 
@@ -418,21 +451,35 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const titleInput = screen.getByLabelText('Title');
-      const contentInput = screen.getByLabelText('Content');
+      // Step 1: Type is text by default, go to step 2
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      fireEvent.change(titleInput, { target: { value: 'New Entry' } });
+      // Step 2: Content
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Content/)).toBeInTheDocument();
+      });
+      const contentInput = screen.getByLabelText(/Content/);
       fireEvent.change(contentInput, { target: { value: 'New content' } });
+
+      // Go to step 3 (details)
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      // Step 3: Title and tags
+      await waitFor(() => {
+        expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      });
+      const titleInput = screen.getByLabelText('Title');
+      fireEvent.change(titleInput, { target: { value: 'New Entry' } });
 
       const submitButton = screen.getByRole('button', { name: 'Create Entry' });
       fireEvent.click(submitButton);
 
       await waitFor(() => {
-        expect(mockKnowledgeApi.createKnowledge).toHaveBeenCalledWith({
+        expect(mockCreateKnowledge).toHaveBeenCalledWith({
           title: 'New Entry',
           type: 'text',
           content: 'New content',
-          tags: [],
+          tags: undefined,
         });
       });
 
@@ -441,7 +488,7 @@ describe('WikiPage', () => {
       });
     });
 
-    it('creates URL knowledge entry', async () => {
+    it('creates URL knowledge entry via wizard', async () => {
       const newEntry: KnowledgeEntry = {
         ...mockEntries[1],
         id: 'kb-new',
@@ -449,7 +496,7 @@ describe('WikiPage', () => {
         content: 'https://newurl.com',
       };
 
-      mockKnowledgeApi.createKnowledge.mockResolvedValue(newEntry);
+      mockCreateKnowledge.mockImplementation(() => Promise.resolve(newEntry));
 
       render(<WikiPage />);
 
@@ -460,36 +507,50 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const typeSelect = screen.getByLabelText('Type');
-      fireEvent.change(typeSelect, { target: { value: 'url' } });
+      // Step 1: Select URL type
+      fireEvent.click(screen.getByText('URL / Web Page'));
 
-      const titleInput = screen.getByLabelText('Title');
+      // Go to step 2 (content)
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      // Step 2: URL input
+      await waitFor(() => {
+        expect(screen.getByLabelText('URL')).toBeInTheDocument();
+      });
       const urlInput = screen.getByLabelText('URL');
-
-      fireEvent.change(titleInput, { target: { value: 'New URL' } });
       fireEvent.change(urlInput, { target: { value: 'https://newurl.com' } });
+
+      // Go to step 3 (details)
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      // Step 3: Title
+      await waitFor(() => {
+        expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      });
+      const titleInput = screen.getByLabelText('Title');
+      fireEvent.change(titleInput, { target: { value: 'New URL' } });
 
       const submitButton = screen.getByRole('button', { name: 'Create Entry' });
       fireEvent.click(submitButton);
 
       await waitFor(() => {
-        expect(mockKnowledgeApi.createKnowledge).toHaveBeenCalledWith({
+        expect(mockCreateKnowledge).toHaveBeenCalledWith({
           title: 'New URL',
           type: 'url',
           content: 'https://newurl.com',
-          tags: [],
+          tags: undefined,
         });
       });
     });
 
-    it('adds tags to knowledge entry', async () => {
+    it('adds tags to knowledge entry via wizard', async () => {
       const newEntry: KnowledgeEntry = {
         ...mockEntries[0],
         id: 'kb-new',
         tags: ['tag1', 'tag2'],
       };
 
-      mockKnowledgeApi.createKnowledge.mockResolvedValue(newEntry);
+      mockCreateKnowledge.mockImplementation(() => Promise.resolve(newEntry));
 
       render(<WikiPage />);
 
@@ -500,13 +561,27 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const titleInput = screen.getByLabelText('Title');
-      const contentInput = screen.getByLabelText('Content');
-      const tagsInput = screen.getByLabelText(/Tags/);
+      // Step 1: Type is text by default, go to step 2
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      fireEvent.change(titleInput, { target: { value: 'Tagged Entry' } });
+      // Step 2: Content
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Content/)).toBeInTheDocument();
+      });
+      const contentInput = screen.getByLabelText(/Content/);
       fireEvent.change(contentInput, { target: { value: 'Content' } });
 
+      // Go to step 3 (details)
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      // Step 3: Title and tags
+      await waitFor(() => {
+        expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      });
+      const titleInput = screen.getByLabelText('Title');
+      fireEvent.change(titleInput, { target: { value: 'Tagged Entry' } });
+
+      const tagsInput = screen.getByLabelText(/Tags/);
       fireEvent.change(tagsInput, { target: { value: 'tag1' } });
       fireEvent.keyDown(tagsInput, { key: 'Enter' });
 
@@ -517,7 +592,7 @@ describe('WikiPage', () => {
       fireEvent.click(submitButton);
 
       await waitFor(() => {
-        expect(mockKnowledgeApi.createKnowledge).toHaveBeenCalledWith(
+        expect(mockCreateKnowledge).toHaveBeenCalledWith(
           expect.objectContaining({
             tags: ['tag1', 'tag2'],
           })
@@ -534,6 +609,24 @@ describe('WikiPage', () => {
 
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
+
+      // Step 1: Type is text by default, go to step 2
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      // Step 2: Content
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Content/)).toBeInTheDocument();
+      });
+      const contentInput = screen.getByLabelText(/Content/);
+      fireEvent.change(contentInput, { target: { value: 'Content' } });
+
+      // Go to step 3 (details)
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      // Step 3: Add and remove tags
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Tags/)).toBeInTheDocument();
+      });
 
       const tagsInput = screen.getByLabelText(/Tags/);
 
@@ -552,7 +645,7 @@ describe('WikiPage', () => {
       });
     });
 
-    it('validates required fields', async () => {
+    it('wizard requires content before proceeding', async () => {
       render(<WikiPage />);
 
       await waitFor(() => {
@@ -562,16 +655,20 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const submitButton = screen.getByRole('button', { name: 'Create Entry' });
-      fireEvent.click(submitButton);
+      // Step 1: Type is text by default, go to step 2
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
+      // Step 2: Try to proceed without content - Next should be disabled
       await waitFor(() => {
-        expect(mockKnowledgeApi.createKnowledge).not.toHaveBeenCalled();
+        expect(screen.getByLabelText(/Content/)).toBeInTheDocument();
       });
+
+      const nextButton = screen.getByRole('button', { name: 'Next' });
+      expect(nextButton).toBeDisabled();
     });
 
     it('displays error message on creation failure', async () => {
-      mockKnowledgeApi.createKnowledge.mockRejectedValue(new Error('Creation failed'));
+      mockCreateKnowledge.mockImplementation(() => Promise.reject(new Error('Creation failed')));
 
       render(<WikiPage />);
 
@@ -582,11 +679,25 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const titleInput = screen.getByLabelText('Title');
-      const contentInput = screen.getByLabelText('Content');
+      // Step 1: Next
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      fireEvent.change(titleInput, { target: { value: 'New Entry' } });
+      // Step 2: Content
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Content/)).toBeInTheDocument();
+      });
+      const contentInput = screen.getByLabelText(/Content/);
       fireEvent.change(contentInput, { target: { value: 'New content' } });
+
+      // Step 2: Next
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      // Step 3: Title
+      await waitFor(() => {
+        expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      });
+      const titleInput = screen.getByLabelText('Title');
+      fireEvent.change(titleInput, { target: { value: 'New Entry' } });
 
       const submitButton = screen.getByRole('button', { name: 'Create Entry' });
       fireEvent.click(submitButton);
@@ -597,7 +708,7 @@ describe('WikiPage', () => {
     });
 
     it('shows submitting state during creation', async () => {
-      mockKnowledgeApi.createKnowledge.mockImplementation(
+      mockCreateKnowledge.mockImplementation(
         () => new Promise((resolve) => setTimeout(resolve, 100))
       );
 
@@ -610,11 +721,25 @@ describe('WikiPage', () => {
       const addButton = screen.getAllByText('Add Knowledge')[0];
       fireEvent.click(addButton);
 
-      const titleInput = screen.getByLabelText('Title');
-      const contentInput = screen.getByLabelText('Content');
+      // Step 1: Next
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-      fireEvent.change(titleInput, { target: { value: 'New Entry' } });
+      // Step 2: Content
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Content/)).toBeInTheDocument();
+      });
+      const contentInput = screen.getByLabelText(/Content/);
       fireEvent.change(contentInput, { target: { value: 'New content' } });
+
+      // Step 2: Next
+      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+      // Step 3: Title
+      await waitFor(() => {
+        expect(screen.getByLabelText('Title')).toBeInTheDocument();
+      });
+      const titleInput = screen.getByLabelText('Title');
+      fireEvent.change(titleInput, { target: { value: 'New Entry' } });
 
       const submitButton = screen.getByRole('button', { name: 'Create Entry' });
       fireEvent.click(submitButton);
@@ -626,11 +751,11 @@ describe('WikiPage', () => {
 
   describe('Delete Knowledge', () => {
     beforeEach(() => {
-      window.confirm = jest.fn(() => true);
+      window.confirm = mock(() => true);
     });
 
     it('deletes knowledge entry when delete button is clicked', async () => {
-      mockKnowledgeApi.deleteKnowledge.mockResolvedValue();
+      mockDeleteKnowledge.mockImplementation(() => Promise.resolve());
 
       render(<WikiPage />);
 
@@ -646,12 +771,12 @@ describe('WikiPage', () => {
       );
 
       await waitFor(() => {
-        expect(mockKnowledgeApi.deleteKnowledge).toHaveBeenCalledWith('kb-1');
+        expect(mockDeleteKnowledge).toHaveBeenCalledWith('kb-1');
       });
     });
 
     it('does not delete when confirmation is cancelled', async () => {
-      window.confirm = jest.fn(() => false);
+      window.confirm = mock(() => false);
 
       render(<WikiPage />);
 
@@ -662,11 +787,11 @@ describe('WikiPage', () => {
       const deleteButtons = screen.getAllByLabelText('Delete entry');
       fireEvent.click(deleteButtons[0]);
 
-      expect(mockKnowledgeApi.deleteKnowledge).not.toHaveBeenCalled();
+      expect(mockDeleteKnowledge).not.toHaveBeenCalled();
     });
 
     it('displays error message on deletion failure', async () => {
-      mockKnowledgeApi.deleteKnowledge.mockRejectedValue(new Error('Deletion failed'));
+      mockDeleteKnowledge.mockImplementation(() => Promise.reject(new Error('Deletion failed')));
 
       render(<WikiPage />);
 
@@ -691,7 +816,7 @@ describe('WikiPage', () => {
         last_refreshed_at: '2024-01-03T00:00:00Z',
       };
 
-      mockKnowledgeApi.refreshKnowledge.mockResolvedValue(refreshedEntry);
+      mockRefreshKnowledge.mockImplementation(() => Promise.resolve(refreshedEntry));
 
       render(<WikiPage />);
 
@@ -703,12 +828,12 @@ describe('WikiPage', () => {
       fireEvent.click(refreshButton);
 
       await waitFor(() => {
-        expect(mockKnowledgeApi.refreshKnowledge).toHaveBeenCalledWith('kb-2');
+        expect(mockRefreshKnowledge).toHaveBeenCalledWith('kb-2');
       });
     });
 
     it('shows refreshing state during refresh', async () => {
-      mockKnowledgeApi.refreshKnowledge.mockImplementation(
+      mockRefreshKnowledge.mockImplementation(
         () => new Promise((resolve) => setTimeout(resolve, 100))
       );
 
@@ -726,7 +851,7 @@ describe('WikiPage', () => {
     });
 
     it('displays error message on refresh failure', async () => {
-      mockKnowledgeApi.refreshKnowledge.mockRejectedValue(new Error('Refresh failed'));
+      mockRefreshKnowledge.mockImplementation(() => Promise.reject(new Error('Refresh failed')));
 
       render(<WikiPage />);
 
@@ -864,7 +989,7 @@ describe('WikiPage', () => {
     });
 
     it('includes role="alert" for error messages', async () => {
-      mockKnowledgeApi.getKnowledge.mockRejectedValue(new Error('Load error'));
+      mockGetKnowledge.mockImplementation(() => Promise.reject(new Error('Load error')));
 
       render(<WikiPage />);
 

@@ -4,13 +4,36 @@
 
 import { renderHook, waitFor } from '@testing-library/react';
 import { act } from 'react';
-import { useSources } from './useSources';
-import { sourcesApi } from '../../../api/sources';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Source } from '../types';
 
-jest.mock('../../../api/sources');
+const mockGetSources = mock();
+const mockCreateSource = mock();
+const mockUpdateSource = mock();
+const mockDeleteSource = mock();
+const mockVerifySource = mock();
+const mockGetSource = mock();
 
-const mockSourcesApi = sourcesApi as jest.Mocked<typeof sourcesApi>;
+mock.module('../../../api/sources', () => ({
+  sourcesApi: {
+    getSources: mockGetSources,
+    createSource: mockCreateSource,
+    updateSource: mockUpdateSource,
+    deleteSource: mockDeleteSource,
+    verifySource: mockVerifySource,
+    getSource: mockGetSource,
+  },
+}));
+
+let useSources: typeof import('./useSources').useSources;
+
+beforeAll(async () => {
+  ({ useSources } = await import('./useSources'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useSources', () => {
   const mockSources: Source[] = [
@@ -49,7 +72,7 @@ describe('useSources', () => {
   });
 
   it('should fetch sources on mount', async () => {
-    mockSourcesApi.getSources.mockResolvedValue(mockSources);
+    mockGetSources.mockResolvedValue(mockSources);
 
     const { result } = renderHook(() => useSources());
 
@@ -62,12 +85,12 @@ describe('useSources', () => {
 
     expect(result.current.sources).toEqual(mockSources);
     expect(result.current.error).toBeNull();
-    expect(sourcesApi.getSources).toHaveBeenCalledTimes(1);
+    expect(mockGetSources).toHaveBeenCalledTimes(1);
   });
 
   it('should handle fetch error', async () => {
     const errorMessage = 'Failed to fetch sources';
-    mockSourcesApi.getSources.mockRejectedValue(new Error(errorMessage));
+    mockGetSources.mockRejectedValue(new Error(errorMessage));
 
     const { result } = renderHook(() => useSources());
 
@@ -80,7 +103,7 @@ describe('useSources', () => {
   });
 
   it('should filter sources by type', async () => {
-    mockSourcesApi.getSources.mockResolvedValue(mockSources);
+    mockGetSources.mockResolvedValue(mockSources);
 
     const { result } = renderHook(() => useSources({ type: 'github' }));
 
@@ -88,11 +111,11 @@ describe('useSources', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(sourcesApi.getSources).toHaveBeenCalledWith('github', false);
+    expect(mockGetSources).toHaveBeenCalledWith('github', false);
   });
 
   it('should filter active sources only', async () => {
-    mockSourcesApi.getSources.mockResolvedValue([mockSources[0]]);
+    mockGetSources.mockResolvedValue([mockSources[0]]);
 
     const { result } = renderHook(() => useSources({ activeOnly: true }));
 
@@ -100,13 +123,13 @@ describe('useSources', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(sourcesApi.getSources).toHaveBeenCalledWith(undefined, true);
+    expect(mockGetSources).toHaveBeenCalledWith(undefined, true);
   });
 
   it('should create source', async () => {
     const newSource: Source = { ...mockSources[0], id: '3', name: 'New Source' };
-    mockSourcesApi.getSources.mockResolvedValue(mockSources);
-    mockSourcesApi.createSource.mockResolvedValue(newSource);
+    mockGetSources.mockResolvedValue(mockSources);
+    mockCreateSource.mockResolvedValue(newSource);
 
     const { result } = renderHook(() => useSources());
 
@@ -127,8 +150,8 @@ describe('useSources', () => {
 
   it('should update source', async () => {
     const updatedSource: Source = { ...mockSources[0], name: 'Updated Name' };
-    mockSourcesApi.getSources.mockResolvedValue(mockSources);
-    mockSourcesApi.updateSource.mockResolvedValue(updatedSource);
+    mockGetSources.mockResolvedValue(mockSources);
+    mockUpdateSource.mockResolvedValue(updatedSource);
 
     const { result } = renderHook(() => useSources());
 
@@ -144,8 +167,8 @@ describe('useSources', () => {
   });
 
   it('should delete source', async () => {
-    mockSourcesApi.getSources.mockResolvedValue(mockSources);
-    mockSourcesApi.deleteSource.mockResolvedValue();
+    mockGetSources.mockResolvedValue(mockSources);
+    mockDeleteSource.mockResolvedValue();
 
     const { result } = renderHook(() => useSources());
 
@@ -168,12 +191,12 @@ describe('useSources', () => {
       ...mockSources[0],
       last_verified_at: '2024-01-02T00:00:00Z',
     };
-    mockSourcesApi.getSources.mockResolvedValue(mockSources);
-    mockSourcesApi.verifySource.mockResolvedValue({
+    mockGetSources.mockResolvedValue(mockSources);
+    mockVerifySource.mockResolvedValue({
       success: true,
       message: 'Verified successfully',
     });
-    mockSourcesApi.getSource.mockResolvedValue(verifiedSource);
+    mockGetSource.mockResolvedValue(verifiedSource);
 
     const { result } = renderHook(() => useSources());
 
@@ -193,7 +216,7 @@ describe('useSources', () => {
   });
 
   it('should refresh sources', async () => {
-    mockSourcesApi.getSources.mockResolvedValue(mockSources);
+    mockGetSources.mockResolvedValue(mockSources);
 
     const { result } = renderHook(() => useSources());
 
@@ -201,12 +224,12 @@ describe('useSources', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(sourcesApi.getSources).toHaveBeenCalledTimes(1);
+    expect(mockGetSources).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       await result.current.refresh();
     });
 
-    expect(sourcesApi.getSources).toHaveBeenCalledTimes(2);
+    expect(mockGetSources).toHaveBeenCalledTimes(2);
   });
 });

@@ -1,9 +1,32 @@
 import { renderHook, waitFor } from '@testing-library/react';
-import { useChats } from './useChats';
-import { chatsApi } from '../../../api/chats';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Chat } from '../types';
 
-jest.mock('../../../api/chats');
+const mockGetChats = mock();
+const mockCreateChat = mock();
+const mockDeleteChat = mock();
+const mockArchiveChat = mock();
+const mockUnarchiveChat = mock();
+
+mock.module('../../../api/chats', () => ({
+  chatsApi: {
+    getChats: mockGetChats,
+    createChat: mockCreateChat,
+    deleteChat: mockDeleteChat,
+    archiveChat: mockArchiveChat,
+    unarchiveChat: mockUnarchiveChat,
+  },
+}));
+
+let useChats: typeof import('./useChats').useChats;
+
+beforeAll(async () => {
+  ({ useChats } = await import('./useChats'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useChats', () => {
   const mockChats: Chat[] = [
@@ -30,7 +53,7 @@ describe('useChats', () => {
   });
 
   it('should fetch chats on mount', async () => {
-    (chatsApi.getChats as jest.Mock).mockResolvedValue(mockChats);
+    mockGetChats.mockResolvedValue(mockChats);
 
     const { result } = renderHook(() => useChats());
 
@@ -42,7 +65,7 @@ describe('useChats', () => {
 
     expect(result.current.chats).toEqual(mockChats);
     expect(result.current.error).toBeNull();
-    expect(chatsApi.getChats).toHaveBeenCalledWith(false);
+    expect(mockGetChats).toHaveBeenCalledWith(false);
   });
 
   it('should fetch archived chats when archived is true', async () => {
@@ -56,7 +79,7 @@ describe('useChats', () => {
         archived: true,
       },
     ];
-    (chatsApi.getChats as jest.Mock).mockResolvedValue(archivedChats);
+    mockGetChats.mockResolvedValue(archivedChats);
 
     const { result } = renderHook(() => useChats({ archived: true }));
 
@@ -65,12 +88,12 @@ describe('useChats', () => {
     });
 
     expect(result.current.chats).toEqual(archivedChats);
-    expect(chatsApi.getChats).toHaveBeenCalledWith(true);
+    expect(mockGetChats).toHaveBeenCalledWith(true);
   });
 
   it('should handle errors when fetching chats', async () => {
     const error = new Error('Failed to fetch chats');
-    (chatsApi.getChats as jest.Mock).mockRejectedValue(error);
+    mockGetChats.mockRejectedValue(error);
 
     const { result } = renderHook(() => useChats());
 
@@ -91,8 +114,8 @@ describe('useChats', () => {
       updated_at: '2024-01-03T00:00:00Z',
       archived: false,
     };
-    (chatsApi.getChats as jest.Mock).mockResolvedValue(mockChats);
-    (chatsApi.createChat as jest.Mock).mockResolvedValue(newChat);
+    mockGetChats.mockResolvedValue(mockChats);
+    mockCreateChat.mockResolvedValue(newChat);
 
     const { result } = renderHook(() => useChats());
 
@@ -103,15 +126,15 @@ describe('useChats', () => {
     const createdChat = await result.current.createChat({ model_name: 'gpt-4' });
 
     expect(createdChat).toEqual(newChat);
-    expect(chatsApi.createChat).toHaveBeenCalledWith({ model_name: 'gpt-4' });
+    expect(mockCreateChat).toHaveBeenCalledWith({ model_name: 'gpt-4' });
     await waitFor(() => {
       expect(result.current.chats).toContainEqual(newChat);
     });
   });
 
   it('should delete a chat', async () => {
-    (chatsApi.getChats as jest.Mock).mockResolvedValue(mockChats);
-    (chatsApi.deleteChat as jest.Mock).mockResolvedValue(undefined);
+    mockGetChats.mockResolvedValue(mockChats);
+    mockDeleteChat.mockResolvedValue(undefined);
 
     const { result } = renderHook(() => useChats());
 
@@ -124,14 +147,14 @@ describe('useChats', () => {
     await waitFor(() => {
       expect(result.current.chats).toHaveLength(1);
     });
-    expect(chatsApi.deleteChat).toHaveBeenCalledWith('1');
+    expect(mockDeleteChat).toHaveBeenCalledWith('1');
     expect(result.current.chats).not.toContainEqual(mockChats[0]);
   });
 
   it('should archive a chat', async () => {
     const archivedChat: Chat = { ...mockChats[0], archived: true };
-    (chatsApi.getChats as jest.Mock).mockResolvedValue(mockChats);
-    (chatsApi.archiveChat as jest.Mock).mockResolvedValue(archivedChat);
+    mockGetChats.mockResolvedValue(mockChats);
+    mockArchiveChat.mockResolvedValue(archivedChat);
 
     const { result } = renderHook(() => useChats());
 
@@ -144,14 +167,14 @@ describe('useChats', () => {
     await waitFor(() => {
       expect(result.current.chats.find((c) => c.id === '1')?.archived).toBe(true);
     });
-    expect(chatsApi.archiveChat).toHaveBeenCalledWith('1');
+    expect(mockArchiveChat).toHaveBeenCalledWith('1');
   });
 
   it('should unarchive a chat', async () => {
     const unarchivedChat: Chat = { ...mockChats[0], archived: false };
     const archivedChats: Chat[] = [{ ...mockChats[0], archived: true }];
-    (chatsApi.getChats as jest.Mock).mockResolvedValue(archivedChats);
-    (chatsApi.unarchiveChat as jest.Mock).mockResolvedValue(unarchivedChat);
+    mockGetChats.mockResolvedValue(archivedChats);
+    mockUnarchiveChat.mockResolvedValue(unarchivedChat);
 
     const { result } = renderHook(() => useChats({ archived: true }));
 
@@ -164,11 +187,11 @@ describe('useChats', () => {
     await waitFor(() => {
       expect(result.current.chats.find((c) => c.id === '1')?.archived).toBe(false);
     });
-    expect(chatsApi.unarchiveChat).toHaveBeenCalledWith('1');
+    expect(mockUnarchiveChat).toHaveBeenCalledWith('1');
   });
 
   it('should refresh chats', async () => {
-    (chatsApi.getChats as jest.Mock).mockResolvedValue(mockChats);
+    mockGetChats.mockResolvedValue(mockChats);
 
     const { result } = renderHook(() => useChats());
 
@@ -187,7 +210,7 @@ describe('useChats', () => {
         archived: false,
       },
     ];
-    (chatsApi.getChats as jest.Mock).mockResolvedValue(updatedChats);
+    mockGetChats.mockResolvedValue(updatedChats);
 
     await result.current.refresh();
 

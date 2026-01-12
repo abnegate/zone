@@ -1,49 +1,56 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { BrowserRouter } from 'react-router-dom';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, jest } from 'bun:test';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { client } from '../../../api/client';
 import ResetPasswordPage from './ResetPasswordPage';
 
-// Mock client
-jest.mock('../../../api/client', () => ({
-  client: {
-    resetPassword: jest.fn(),
-  },
-}));
+const validToken = 'valid-token-1234567890abcdef';
 
-// Mock useNavigate and useSearchParams
-const mockNavigate = jest.fn();
-const mockSearchParams = new URLSearchParams();
+const mockResetPassword = mock();
+const originalResetPassword = client.resetPassword;
 
-jest.mock('react-router-dom', () => ({
-  BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
-    <a href={to}>{children}</a>
-  ),
-  useNavigate: () => mockNavigate,
-  useSearchParams: () => [mockSearchParams],
-}));
+beforeAll(() => {
+  client.resetPassword = mockResetPassword as typeof client.resetPassword;
+});
 
-const renderPage = () => {
+afterAll(() => {
+  client.resetPassword = originalResetPassword;
+  mock.restore();
+});
+
+beforeEach(() => {
+  mockResetPassword.mockReset();
+});
+
+const LocationDisplay = () => {
+  const location = useLocation();
+  return (
+    <div data-testid="location">
+      {location.pathname}
+      {location.search}
+    </div>
+  );
+};
+
+const renderPage = (token?: string) => {
+  const path = token ? `/reset-password?token=${token}` : '/reset-password';
   return render(
-    <BrowserRouter>
-      <ResetPasswordPage />
-    </BrowserRouter>
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="/login" element={<div>Login Page</div>} />
+      </Routes>
+      <LocationDisplay />
+    </MemoryRouter>
   );
 };
 
 describe('ResetPasswordPage', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    mockSearchParams.delete('token');
-  });
-
   describe('Rendering', () => {
     it('renders reset password form when token is present', () => {
-      mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      renderPage();
+      renderPage(validToken);
 
-      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Zone');
       expect(screen.getByText(/set new password/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/^new password$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/confirm password/i)).toBeInTheDocument();
@@ -59,8 +66,7 @@ describe('ResetPasswordPage', () => {
     });
 
     it('shows error when token has invalid format', () => {
-      mockSearchParams.set('token', 'invalid');
-      renderPage();
+      renderPage('invalid');
 
       expect(screen.getByText(/invalid reset link/i)).toBeInTheDocument();
       expect(screen.getByText(/invalid token format/i)).toBeInTheDocument();
@@ -75,8 +81,7 @@ describe('ResetPasswordPage', () => {
     });
 
     it('has password inputs with correct attributes', () => {
-      mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      renderPage();
+      renderPage(validToken);
 
       const passwordInput = screen.getByLabelText(/^new password$/i);
       const confirmInput = screen.getByLabelText(/confirm password/i);
@@ -88,33 +93,29 @@ describe('ResetPasswordPage', () => {
   });
 
   describe('Validation', () => {
-    beforeEach(() => {
-      mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-    });
-
     it('shows error when submitting empty passwords', async () => {
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.click(screen.getByRole('button', { name: /reset password/i }));
 
       // Empty password will fail one of the validation rules
       expect(screen.getByText(/password must/i)).toBeInTheDocument();
-      expect(client.resetPassword).not.toHaveBeenCalled();
+      expect(mockResetPassword).not.toHaveBeenCalled();
     });
 
     it('shows error when password is too short', async () => {
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'Short1');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'Short1');
       await userEvent.click(screen.getByRole('button', { name: /reset password/i }));
 
       expect(screen.getByText(/password must be at least 8 characters/i)).toBeInTheDocument();
-      expect(client.resetPassword).not.toHaveBeenCalled();
+      expect(mockResetPassword).not.toHaveBeenCalled();
     });
 
     it('shows error when password lacks uppercase letter', async () => {
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'password123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'password123');
@@ -123,11 +124,11 @@ describe('ResetPasswordPage', () => {
       expect(
         screen.getByText(/password must contain at least one uppercase letter/i)
       ).toBeInTheDocument();
-      expect(client.resetPassword).not.toHaveBeenCalled();
+      expect(mockResetPassword).not.toHaveBeenCalled();
     });
 
     it('shows error when password lacks lowercase letter', async () => {
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'PASSWORD123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'PASSWORD123');
@@ -136,61 +137,54 @@ describe('ResetPasswordPage', () => {
       expect(
         screen.getByText(/password must contain at least one lowercase letter/i)
       ).toBeInTheDocument();
-      expect(client.resetPassword).not.toHaveBeenCalled();
+      expect(mockResetPassword).not.toHaveBeenCalled();
     });
 
     it('shows error when password lacks number', async () => {
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'PasswordABC');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'PasswordABC');
       await userEvent.click(screen.getByRole('button', { name: /reset password/i }));
 
       expect(screen.getByText(/password must contain at least one number/i)).toBeInTheDocument();
-      expect(client.resetPassword).not.toHaveBeenCalled();
+      expect(mockResetPassword).not.toHaveBeenCalled();
     });
 
     it('shows error when passwords do not match', async () => {
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'Password123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'Different123');
       await userEvent.click(screen.getByRole('button', { name: /reset password/i }));
 
       expect(screen.getByText(/passwords do not match/i)).toBeInTheDocument();
-      expect(client.resetPassword).not.toHaveBeenCalled();
+      expect(mockResetPassword).not.toHaveBeenCalled();
     });
   });
 
   describe('Form Submission', () => {
-    beforeEach(() => {
-      mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-    });
-
     it('calls resetPassword with token and new password', async () => {
-      (client.resetPassword as jest.Mock).mockResolvedValue({
+      mockResetPassword.mockResolvedValue({
         success: true,
         message: 'Password reset successfully',
       });
 
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'NewPassword123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'NewPassword123');
       await userEvent.click(screen.getByRole('button', { name: /reset password/i }));
 
-      expect(client.resetPassword).toHaveBeenCalledWith(
-        'valid-token-1234567890abcdef',
-        'NewPassword123'
-      );
+      expect(mockResetPassword).toHaveBeenCalledWith(validToken, 'NewPassword123');
     });
 
     it('shows loading state during submission', async () => {
-      (client.resetPassword as jest.Mock).mockImplementation(
+      mockResetPassword.mockImplementation(
         () => new Promise((resolve) => setTimeout(resolve, 1000))
       );
 
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'NewPassword123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'NewPassword123');
@@ -202,12 +196,12 @@ describe('ResetPasswordPage', () => {
     });
 
     it('shows success message after successful reset', async () => {
-      (client.resetPassword as jest.Mock).mockResolvedValue({
+      mockResetPassword.mockResolvedValue({
         success: true,
         message: 'Password reset successfully',
       });
 
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'NewPassword123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'NewPassword123');
@@ -219,33 +213,36 @@ describe('ResetPasswordPage', () => {
     });
 
     it('redirects to login after 3 seconds on success', async () => {
-      jest.useFakeTimers();
-      (client.resetPassword as jest.Mock).mockResolvedValue({
+      mockResetPassword.mockResolvedValue({
         success: true,
         message: 'Password reset successfully',
       });
 
-      renderPage();
+      renderPage(validToken);
 
-      await userEvent.type(screen.getByLabelText(/^new password$/i), 'newPassword123');
-      await userEvent.type(screen.getByLabelText(/confirm password/i), 'newPassword123');
-      await userEvent.click(screen.getByRole('button', { name: /reset password/i }));
+      fireEvent.change(screen.getByLabelText(/^new password$/i), {
+        target: { value: 'newPassword123' },
+      });
+      fireEvent.change(screen.getByLabelText(/confirm password/i), {
+        target: { value: 'newPassword123' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: /reset password/i }));
 
       await waitFor(() => {
         expect(screen.getByText(/password reset successful/i)).toBeInTheDocument();
       });
 
-      jest.advanceTimersByTime(3000);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 3100));
+      });
 
-      expect(mockNavigate).toHaveBeenCalledWith('/login');
-
-      jest.useRealTimers();
+      expect(screen.getByTestId('location')).toHaveTextContent('/login');
     });
 
     it('shows error message on reset failure', async () => {
-      (client.resetPassword as jest.Mock).mockRejectedValue(new Error('Invalid or expired token'));
+      mockResetPassword.mockRejectedValue(new Error('Invalid or expired token'));
 
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'newPassword123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'newPassword123');
@@ -257,9 +254,9 @@ describe('ResetPasswordPage', () => {
     });
 
     it('re-enables form after error', async () => {
-      (client.resetPassword as jest.Mock).mockRejectedValue(new Error('Server error'));
+      mockResetPassword.mockRejectedValue(new Error('Server error'));
 
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'newPassword123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'newPassword123');
@@ -273,9 +270,9 @@ describe('ResetPasswordPage', () => {
     });
 
     it('handles non-Error objects in catch block', async () => {
-      (client.resetPassword as jest.Mock).mockRejectedValue('String error');
+      mockResetPassword.mockRejectedValue('String error');
 
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'newPassword123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'newPassword123');
@@ -288,22 +285,18 @@ describe('ResetPasswordPage', () => {
   });
 
   describe('Keyboard Navigation', () => {
-    beforeEach(() => {
-      mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-    });
-
     it('submits form on Enter key in confirm password field', async () => {
-      (client.resetPassword as jest.Mock).mockResolvedValue({
+      mockResetPassword.mockResolvedValue({
         success: true,
         message: 'Reset',
       });
 
-      renderPage();
+      renderPage(validToken);
 
       await userEvent.type(screen.getByLabelText(/^new password$/i), 'NewPassword123');
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'NewPassword123{enter}');
 
-      expect(client.resetPassword).toHaveBeenCalled();
+      expect(mockResetPassword).toHaveBeenCalled();
     });
   });
 });

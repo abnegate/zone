@@ -1,12 +1,7 @@
 import type React from 'react';
+import { useFormContext } from 'react-hook-form';
 import { Checkbox, Select } from '../components';
 import type { InstallerConfig } from '../types';
-
-interface InterfaceStepProps {
-  config: InstallerConfig;
-  onChange: (key: keyof InstallerConfig, value: string) => void;
-  getFieldError: (field: string) => string | undefined;
-}
 
 const localeOptions = [
   { value: 'en-US', label: 'English (US)' },
@@ -18,8 +13,10 @@ const localeOptions = [
   { value: 'zh-CN', label: 'Chinese (Simplified)' },
 ];
 
-export function InterfaceStep({ config, onChange, getFieldError }: InterfaceStepProps) {
-  void getFieldError; // Interface uses checkboxes and selects, no validation errors shown
+export function InterfaceStep() {
+  const { register, setValue, watch } = useFormContext<InstallerConfig>();
+  const authEnabled = watch('WEBUI_AUTH') === 'true';
+  const signupEnabled = watch('WEBUI_ENABLE_SIGNUP') === 'true';
   return (
     <div className="step-content">
       <div className="step-header">
@@ -30,9 +27,12 @@ export function InterfaceStep({ config, onChange, getFieldError }: InterfaceStep
       <div className="form-field">
         <Checkbox
           label="Enable built-in authentication"
-          checked={config.WEBUI_AUTH === 'true'}
+          checked={authEnabled}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-            onChange('WEBUI_AUTH', e.target.checked ? 'true' : 'false')
+            setValue('WEBUI_AUTH', e.target.checked ? 'true' : 'false', {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
           }
         />
         <p className="help-text" style={{ marginLeft: '2.25rem' }}>
@@ -43,9 +43,12 @@ export function InterfaceStep({ config, onChange, getFieldError }: InterfaceStep
       <div className="form-field">
         <Checkbox
           label="Allow user signups"
-          checked={config.WEBUI_ENABLE_SIGNUP === 'true'}
+          checked={signupEnabled}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-            onChange('WEBUI_ENABLE_SIGNUP', e.target.checked ? 'true' : 'false')
+            setValue('WEBUI_ENABLE_SIGNUP', e.target.checked ? 'true' : 'false', {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
           }
         />
       </div>
@@ -53,10 +56,7 @@ export function InterfaceStep({ config, onChange, getFieldError }: InterfaceStep
       <Select
         label="Default Language"
         options={localeOptions}
-        value={config.WEBUI_DEFAULT_LOCALE}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-          onChange('WEBUI_DEFAULT_LOCALE', e.target.value)
-        }
+        {...register('WEBUI_DEFAULT_LOCALE')}
       />
     </div>
   );

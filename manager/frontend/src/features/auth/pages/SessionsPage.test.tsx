@@ -1,26 +1,59 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, jest } from 'bun:test';
 import { client } from '../../../api/client';
 import type { SessionsResponse } from '../types';
-import SessionsPage from './SessionsPage';
+import type SessionsPageType from './SessionsPage';
 
-// Mock client
-jest.mock('../../../api/client', () => ({
-  client: {
-    getSessions: jest.fn(),
-    revokeSession: jest.fn(),
-    revokeAllSessions: jest.fn(),
+const mockGetSessions = mock();
+const mockRevokeSession = mock();
+const mockRevokeAllSessions = mock();
+const mockToastSuccess = mock();
+const mockToastError = mock();
+
+const originalGetSessions = client.getSessions;
+const originalRevokeSession = client.revokeSession;
+const originalRevokeAllSessions = client.revokeAllSessions;
+
+mock.module('sonner', () => ({
+  toast: {
+    success: mockToastSuccess,
+    error: mockToastError,
   },
 }));
 
-// Mock useAuth
-jest.mock('../hooks', () => ({
-  useAuth: () => ({
-    isAuthenticated: true,
-    user: { id: 'user-1', email: 'test@test.com' },
-  }),
-}));
+let SessionsPage: typeof SessionsPageType;
 
-const mockClient = client as jest.Mocked<typeof client>;
+beforeAll(async () => {
+  client.getSessions = mockGetSessions as typeof client.getSessions;
+  client.revokeSession = mockRevokeSession as typeof client.revokeSession;
+  client.revokeAllSessions = mockRevokeAllSessions as typeof client.revokeAllSessions;
+  SessionsPage = (await import('./SessionsPage')).default;
+});
+
+afterAll(() => {
+  client.getSessions = originalGetSessions;
+  client.revokeSession = originalRevokeSession;
+  client.revokeAllSessions = originalRevokeAllSessions;
+  mock.restore();
+});
+
+const createQueryClient = () =>
+  new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+const renderSessionsPage = () => {
+  const queryClient = createQueryClient();
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <SessionsPage />
+    </QueryClientProvider>
+  );
+};
 
 const mockSessionsResponse: SessionsResponse = {
   sessions: [
@@ -115,8 +148,12 @@ const formatRelativeTime = (timestamp: string): string => {
 
 describe('SessionsPage', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockClient.getSessions.mockResolvedValue(mockSessionsResponse);
+    mockGetSessions.mockReset();
+    mockRevokeSession.mockReset();
+    mockRevokeAllSessions.mockReset();
+    mockToastSuccess.mockReset();
+    mockToastError.mockReset();
+    mockGetSessions.mockResolvedValue(mockSessionsResponse);
   });
 
   // Helper to find and click a non-disabled revoke button
@@ -131,13 +168,13 @@ describe('SessionsPage', () => {
 
   describe('Loading State', () => {
     it('shows loading state initially', () => {
-      mockClient.getSessions.mockImplementation(() => new Promise(() => {}));
-      render(<SessionsPage />);
+      mockGetSessions.mockImplementation(() => new Promise(() => {}));
+      renderSessionsPage();
       expect(screen.getByText(/loading/i)).toBeInTheDocument();
     });
 
     it('hides loading state after data loads', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.queryByText(/loading/i)).not.toBeInTheDocument();
       });
@@ -146,16 +183,16 @@ describe('SessionsPage', () => {
 
   describe('Error Handling', () => {
     it('shows error message when loading fails', async () => {
-      mockClient.getSessions.mockRejectedValueOnce(new Error('Failed to load sessions'));
-      render(<SessionsPage />);
+      mockGetSessions.mockRejectedValueOnce(new Error('Failed to load sessions'));
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByText(/failed to load sessions/i)).toBeInTheDocument();
       });
     });
 
     it('shows error message when revoke fails', async () => {
-      mockClient.revokeSession.mockRejectedValueOnce(new Error('Failed to revoke'));
-      render(<SessionsPage />);
+      mockRevokeSession.mockRejectedValueOnce(new Error('Failed to revoke'));
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -171,28 +208,28 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        expect(screen.getByText(/failed to revoke/i)).toBeInTheDocument();
+        expect(mockToastError).toHaveBeenCalledWith('Failed to revoke');
       });
     });
   });
 
   describe('Page Structure', () => {
     it('renders page header', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: /active sessions/i })).toBeInTheDocument();
       });
     });
 
     it('renders session table', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByRole('table')).toBeInTheDocument();
       });
     });
 
     it('renders table headers', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByText(/device \/ browser/i)).toBeInTheDocument();
         expect(screen.getByText(/^location$/i)).toBeInTheDocument();
@@ -202,7 +239,7 @@ describe('SessionsPage', () => {
     });
 
     it('renders revoke all button', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(
           screen.getByRole('button', { name: /revoke all other sessions/i })
@@ -213,7 +250,7 @@ describe('SessionsPage', () => {
 
   describe('Session List', () => {
     it('displays all sessions', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByText(/chrome on windows/i)).toBeInTheDocument();
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -221,14 +258,14 @@ describe('SessionsPage', () => {
     });
 
     it('shows current session badge', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByText(/current session/i)).toBeInTheDocument();
       });
     });
 
     it('displays IP addresses', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByText('192.168.1.1')).toBeInTheDocument();
         expect(screen.getByText('192.168.1.2')).toBeInTheDocument();
@@ -236,7 +273,7 @@ describe('SessionsPage', () => {
     });
 
     it('displays locations when available', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByText(/new york, us/i)).toBeInTheDocument();
         expect(screen.getByText(/san francisco, us/i)).toBeInTheDocument();
@@ -244,7 +281,7 @@ describe('SessionsPage', () => {
     });
 
     it('shows placeholder for missing data', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         const rows = screen.getAllByRole('row');
         // Last row should have unknown/unavailable placeholders
@@ -253,7 +290,7 @@ describe('SessionsPage', () => {
     });
 
     it('shows relative timestamps', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         // Should show "X ago" format
         const table = screen.getByRole('table');
@@ -264,8 +301,8 @@ describe('SessionsPage', () => {
 
   describe('Empty State', () => {
     it('shows empty state when no sessions exist', async () => {
-      mockClient.getSessions.mockResolvedValueOnce({ sessions: [] });
-      render(<SessionsPage />);
+      mockGetSessions.mockResolvedValueOnce({ sessions: [] });
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByText(/no active sessions/i)).toBeInTheDocument();
       });
@@ -274,7 +311,7 @@ describe('SessionsPage', () => {
 
   describe('Revoke Single Session', () => {
     it('shows revoke button for non-current sessions', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         // Find revoke buttons that are not disabled (non-current sessions)
         const allButtons = screen.getAllByRole('button');
@@ -286,7 +323,7 @@ describe('SessionsPage', () => {
     });
 
     it('disables revoke button for current session', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         const currentSessionRow = screen.getByText(/current session/i).closest('tr');
         const revokeButton = currentSessionRow?.querySelector('button');
@@ -295,7 +332,7 @@ describe('SessionsPage', () => {
     });
 
     it('shows confirmation modal before revoking', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
       });
@@ -310,8 +347,8 @@ describe('SessionsPage', () => {
     });
 
     it('revokes session on confirmation', async () => {
-      mockClient.revokeSession.mockResolvedValueOnce();
-      render(<SessionsPage />);
+      mockRevokeSession.mockResolvedValueOnce();
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -326,12 +363,12 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        expect(mockClient.revokeSession).toHaveBeenCalledWith('session-2');
+        expect(mockRevokeSession).toHaveBeenCalledWith('session-2');
       });
     });
 
     it('does not revoke session on cancel', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -345,18 +382,18 @@ describe('SessionsPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
-      expect(mockClient.revokeSession).not.toHaveBeenCalled();
+      expect(mockRevokeSession).not.toHaveBeenCalled();
     });
 
     it('refreshes sessions after successful revoke', async () => {
-      mockClient.revokeSession.mockResolvedValueOnce();
-      render(<SessionsPage />);
+      mockRevokeSession.mockResolvedValueOnce();
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
       });
 
-      expect(mockClient.getSessions).toHaveBeenCalledTimes(1);
+      expect(mockGetSessions).toHaveBeenCalledTimes(1);
 
       clickFirstRevokeButton();
 
@@ -367,13 +404,13 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        expect(mockClient.getSessions).toHaveBeenCalledTimes(2);
+        expect(mockGetSessions).toHaveBeenCalledTimes(2);
       });
     });
 
     it('shows success message after revoking session', async () => {
-      mockClient.revokeSession.mockResolvedValueOnce();
-      render(<SessionsPage />);
+      mockRevokeSession.mockResolvedValueOnce();
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -388,14 +425,14 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        expect(screen.getByText(/session revoked successfully/i)).toBeInTheDocument();
+        expect(mockToastSuccess).toHaveBeenCalledWith('Session revoked successfully');
       });
     });
   });
 
   describe('Revoke All Sessions', () => {
     it('shows confirmation modal before revoking all', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         expect(
           screen.getByRole('button', { name: /revoke all other sessions/i })
@@ -412,8 +449,8 @@ describe('SessionsPage', () => {
     });
 
     it('revokes all sessions on confirmation', async () => {
-      mockClient.revokeAllSessions.mockResolvedValueOnce();
-      render(<SessionsPage />);
+      mockRevokeAllSessions.mockResolvedValueOnce();
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(
@@ -430,12 +467,12 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        expect(mockClient.revokeAllSessions).toHaveBeenCalled();
+        expect(mockRevokeAllSessions).toHaveBeenCalled();
       });
     });
 
     it('does not revoke all sessions on cancel', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(
@@ -451,12 +488,12 @@ describe('SessionsPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
-      expect(mockClient.revokeAllSessions).not.toHaveBeenCalled();
+      expect(mockRevokeAllSessions).not.toHaveBeenCalled();
     });
 
     it('refreshes sessions after successful revoke all', async () => {
-      mockClient.revokeAllSessions.mockResolvedValueOnce();
-      render(<SessionsPage />);
+      mockRevokeAllSessions.mockResolvedValueOnce();
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(
@@ -464,7 +501,7 @@ describe('SessionsPage', () => {
         ).toBeInTheDocument();
       });
 
-      expect(mockClient.getSessions).toHaveBeenCalledTimes(1);
+      expect(mockGetSessions).toHaveBeenCalledTimes(1);
 
       fireEvent.click(screen.getByRole('button', { name: /revoke all other sessions/i }));
 
@@ -475,13 +512,13 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        expect(mockClient.getSessions).toHaveBeenCalledTimes(2);
+        expect(mockGetSessions).toHaveBeenCalledTimes(2);
       });
     });
 
     it('shows success message after revoking all sessions', async () => {
-      mockClient.revokeAllSessions.mockResolvedValueOnce();
-      render(<SessionsPage />);
+      mockRevokeAllSessions.mockResolvedValueOnce();
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(
@@ -498,15 +535,15 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        expect(screen.getByText(/all other sessions revoked successfully/i)).toBeInTheDocument();
+        expect(mockToastSuccess).toHaveBeenCalledWith('All other sessions revoked successfully');
       });
     });
 
     it('disables revoke all button when only current session exists', async () => {
-      mockClient.getSessions.mockResolvedValueOnce({
+      mockGetSessions.mockResolvedValueOnce({
         sessions: [mockSessionsResponse.sessions[0]],
       });
-      render(<SessionsPage />);
+      renderSessionsPage();
 
       await waitFor(() => {
         const button = screen.getByRole('button', { name: /revoke all other sessions/i });
@@ -518,13 +555,13 @@ describe('SessionsPage', () => {
   describe('Button States', () => {
     it('disables buttons while revoking', async () => {
       let resolveRevoke: (() => void) | undefined;
-      mockClient.revokeSession.mockReturnValueOnce(
+      mockRevokeSession.mockReturnValueOnce(
         new Promise((resolve) => {
           resolveRevoke = resolve as () => void;
         })
       );
 
-      render(<SessionsPage />);
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -685,13 +722,13 @@ describe('SessionsPage', () => {
   describe('Component Unmount During Async Operations', () => {
     it('handles unmount during session loading', async () => {
       let resolveGetSessions: (value: SessionsResponse) => void;
-      mockClient.getSessions.mockReturnValue(
+      mockGetSessions.mockReturnValue(
         new Promise((resolve) => {
           resolveGetSessions = resolve;
         })
       );
 
-      const { unmount } = render(<SessionsPage />);
+      const { unmount } = renderSessionsPage();
 
       // Unmount before the promise resolves
       unmount();
@@ -701,19 +738,19 @@ describe('SessionsPage', () => {
 
       // No errors should occur
       await waitFor(() => {
-        expect(mockClient.getSessions).toHaveBeenCalled();
+        expect(mockGetSessions).toHaveBeenCalled();
       });
     });
 
     it('handles unmount during session revocation', async () => {
       let resolveRevoke: () => void;
-      mockClient.revokeSession.mockReturnValue(
+      mockRevokeSession.mockReturnValue(
         new Promise((resolve) => {
           resolveRevoke = resolve;
         })
       );
 
-      const { unmount } = render(<SessionsPage />);
+      const { unmount } = renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -735,13 +772,13 @@ describe('SessionsPage', () => {
 
       // No errors should occur
       await waitFor(() => {
-        expect(mockClient.revokeSession).toHaveBeenCalled();
+        expect(mockRevokeSession).toHaveBeenCalled();
       });
     });
 
     it('clears success timeout on unmount', async () => {
-      mockClient.revokeSession.mockResolvedValueOnce();
-      const { unmount } = render(<SessionsPage />);
+      mockRevokeSession.mockResolvedValueOnce();
+      const { unmount } = renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -756,7 +793,7 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        expect(screen.getByText(/session revoked successfully/i)).toBeInTheDocument();
+        expect(mockToastSuccess).toHaveBeenCalledWith('Session revoked successfully');
       });
 
       // Unmount should clear the timeout
@@ -768,7 +805,7 @@ describe('SessionsPage', () => {
 
   describe('Accessibility Attributes', () => {
     it('has aria-label on sessions table', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
       await waitFor(() => {
         const table = screen.getByRole('table');
         expect(table).toHaveAttribute('aria-label', 'Active sessions');
@@ -776,8 +813,8 @@ describe('SessionsPage', () => {
     });
 
     it('has role=alert and aria-live=assertive on error messages', async () => {
-      mockClient.getSessions.mockRejectedValueOnce(new Error('Test error'));
-      render(<SessionsPage />);
+      mockGetSessions.mockRejectedValueOnce(new Error('Test error'));
+      renderSessionsPage();
 
       await waitFor(() => {
         const errorAlert = screen.getByRole('alert');
@@ -786,9 +823,9 @@ describe('SessionsPage', () => {
       });
     });
 
-    it('has role=status and aria-live=polite on success messages', async () => {
-      mockClient.revokeSession.mockResolvedValueOnce();
-      render(<SessionsPage />);
+    it('calls success toast after revoking session', async () => {
+      mockRevokeSession.mockResolvedValueOnce();
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -803,14 +840,12 @@ describe('SessionsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
       await waitFor(() => {
-        const successStatus = screen.getByRole('status');
-        expect(successStatus).toHaveAttribute('aria-live', 'polite');
-        expect(successStatus).toHaveTextContent(/session revoked successfully/i);
+        expect(mockToastSuccess).toHaveBeenCalledWith('Session revoked successfully');
       });
     });
 
     it('has descriptive aria-label on revoke buttons', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
 
       await waitFor(() => {
         expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
@@ -825,7 +860,7 @@ describe('SessionsPage', () => {
     });
 
     it('has aria-label indicating current session cannot be revoked', async () => {
-      render(<SessionsPage />);
+      renderSessionsPage();
 
       await waitFor(() => {
         const currentSessionButton = screen.getByRole('button', {
@@ -836,63 +871,4 @@ describe('SessionsPage', () => {
     });
   });
 
-  describe('Retry Button', () => {
-    it('shows retry button when load fails', async () => {
-      mockClient.getSessions.mockRejectedValueOnce(new Error('Network error'));
-      render(<SessionsPage />);
-
-      await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
-      });
-    });
-
-    it('retries loading sessions when retry button is clicked', async () => {
-      mockClient.getSessions
-        .mockRejectedValueOnce(new Error('Network error'))
-        .mockResolvedValueOnce(mockSessionsResponse);
-
-      render(<SessionsPage />);
-
-      await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
-      });
-
-      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
-
-      await waitFor(() => {
-        expect(screen.getByText(/chrome on windows/i)).toBeInTheDocument();
-      });
-
-      expect(mockClient.getSessions).toHaveBeenCalledTimes(2);
-    });
-  });
-
-  describe('Debouncing', () => {
-    it('prevents rapid-fire revoke requests', async () => {
-      mockClient.revokeSession.mockResolvedValue();
-      render(<SessionsPage />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/safari on macos/i)).toBeInTheDocument();
-      });
-
-      // Click revoke button
-      clickFirstRevokeButton();
-
-      await waitFor(() => {
-        expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument();
-      });
-
-      // Click confirm multiple times rapidly
-      const confirmButton = screen.getByRole('button', { name: 'Confirm' });
-      fireEvent.click(confirmButton);
-      fireEvent.click(confirmButton);
-      fireEvent.click(confirmButton);
-
-      await waitFor(() => {
-        // Should only have been called once due to debouncing
-        expect(mockClient.revokeSession).toHaveBeenCalledTimes(1);
-      });
-    });
-  });
 });

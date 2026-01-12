@@ -1,12 +1,6 @@
-import type React from 'react';
+import { useFormContext } from 'react-hook-form';
 import { InfoBox, Input, Select } from '../components';
 import type { InstallerConfig } from '../types';
-
-interface VPNStepProps {
-  config: InstallerConfig;
-  onChange: (key: keyof InstallerConfig, value: string) => void;
-  getFieldError: (field: string) => string | undefined;
-}
 
 const providerOptions = [
   { value: 'surfshark', label: 'Surfshark' },
@@ -21,8 +15,13 @@ const protocolOptions = [
   { value: 'wireguard', label: 'WireGuard' },
 ];
 
-export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
-  const isWireGuard = config.VPN_TYPE === 'wireguard';
+export function VPNStep() {
+  const {
+    register,
+    watch,
+    formState: { errors },
+  } = useFormContext<InstallerConfig>();
+  const isWireGuard = watch('VPN_TYPE') === 'wireguard';
 
   return (
     <div className="step-content">
@@ -34,17 +33,13 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
       <Select
         label="VPN Provider"
         options={providerOptions}
-        value={config.VPN_SERVICE_PROVIDER}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-          onChange('VPN_SERVICE_PROVIDER', e.target.value)
-        }
+        {...register('VPN_SERVICE_PROVIDER')}
       />
 
       <Select
         label="Protocol"
         options={protocolOptions}
-        value={config.VPN_TYPE}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onChange('VPN_TYPE', e.target.value)}
+        {...register('VPN_TYPE')}
       />
 
       {!isWireGuard ? (
@@ -52,20 +47,14 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
           <Input
             label="Username"
             type="text"
-            value={config.VPN_OPENVPN_USER}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('VPN_OPENVPN_USER', e.target.value)
-            }
-            error={getFieldError('VPN_OPENVPN_USER')}
+            error={errors.VPN_OPENVPN_USER?.message}
+            {...register('VPN_OPENVPN_USER')}
           />
           <Input
             label="Password"
             type="password"
-            value={config.VPN_OPENVPN_PASSWORD}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('VPN_OPENVPN_PASSWORD', e.target.value)
-            }
-            error={getFieldError('VPN_OPENVPN_PASSWORD')}
+            error={errors.VPN_OPENVPN_PASSWORD?.message}
+            {...register('VPN_OPENVPN_PASSWORD')}
           />
         </>
       ) : (
@@ -73,23 +62,17 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
           <Input
             label="Private Key"
             type="text"
-            value={config.VPN_WIREGUARD_PRIVATE_KEY}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('VPN_WIREGUARD_PRIVATE_KEY', e.target.value)
-            }
             className="font-mono"
-            error={getFieldError('VPN_WIREGUARD_PRIVATE_KEY')}
+            error={errors.VPN_WIREGUARD_PRIVATE_KEY?.message}
+            {...register('VPN_WIREGUARD_PRIVATE_KEY')}
           />
           <Input
             label="Addresses"
             type="text"
-            value={config.VPN_WIREGUARD_ADDRESSES}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('VPN_WIREGUARD_ADDRESSES', e.target.value)
-            }
             placeholder="10.x.x.x/32"
             className="font-mono"
-            error={getFieldError('VPN_WIREGUARD_ADDRESSES')}
+            error={errors.VPN_WIREGUARD_ADDRESSES?.message}
+            {...register('VPN_WIREGUARD_ADDRESSES')}
           />
         </>
       )}
@@ -99,37 +82,28 @@ export function VPNStep({ config, onChange, getFieldError }: VPNStepProps) {
       <Input
         label="Country"
         type="text"
-        value={config.VPN_SERVER_COUNTRIES}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('VPN_SERVER_COUNTRIES', e.target.value)
-        }
         placeholder="United States"
         helpText="e.g., United States, Germany, Japan"
-        error={getFieldError('VPN_SERVER_COUNTRIES')}
+        error={errors.VPN_SERVER_COUNTRIES?.message}
+        {...register('VPN_SERVER_COUNTRIES')}
       />
 
       <Input
         label="City"
         type="text"
-        value={config.VPN_SERVER_CITIES}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('VPN_SERVER_CITIES', e.target.value)
-        }
         placeholder="New York"
         helpText="e.g., New York, Los Angeles, London"
-        error={getFieldError('VPN_SERVER_CITIES')}
+        error={errors.VPN_SERVER_CITIES?.message}
+        {...register('VPN_SERVER_CITIES')}
       />
 
       <Input
         label="Region"
         type="text"
-        value={config.VPN_SERVER_REGIONS}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('VPN_SERVER_REGIONS', e.target.value)
-        }
         placeholder="California"
         helpText="e.g., California, Texas"
-        error={getFieldError('VPN_SERVER_REGIONS')}
+        error={errors.VPN_SERVER_REGIONS?.message}
+        {...register('VPN_SERVER_REGIONS')}
       />
 
       <InfoBox variant="info">

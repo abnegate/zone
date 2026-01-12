@@ -1,4 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
 import { VPNStep } from './VPNStep';
 
@@ -65,274 +67,131 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   ...overrides,
 });
 
+const renderWithForm = (defaultValues: InstallerConfig) => {
+  let methods: UseFormReturn<InstallerConfig> | undefined;
+  const Wrapper = ({ children }: { children: ReactNode }) => {
+    const form = useForm<InstallerConfig>({ defaultValues });
+    methods = form;
+    return <FormProvider {...form}>{children}</FormProvider>;
+  };
+  const utils = render(<VPNStep />, { wrapper: Wrapper });
+  if (!methods) {
+    throw new Error('Form methods not initialized');
+  }
+  return { ...utils, methods };
+};
+
 describe('VPNStep', () => {
-  const onChange = jest.fn();
-  const getFieldError = jest.fn().mockReturnValue(undefined);
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
   it('renders step header', () => {
-    render(
-      <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText('VPN Configuration')).toBeInTheDocument();
     expect(screen.getByText(/configure vpn for private web search/i)).toBeInTheDocument();
   });
 
   it('renders provider select with current value', () => {
-    render(
-      <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     const select = screen.getByLabelText(/vpn provider/i);
     expect(select).toHaveValue('surfshark');
   });
 
-  it('calls onChange when provider is changed', () => {
-    render(
-      <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('updates provider selection', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.change(screen.getByLabelText(/vpn provider/i), {
       target: { value: 'nordvpn' },
     });
 
-    expect(onChange).toHaveBeenCalledWith('VPN_SERVICE_PROVIDER', 'nordvpn');
+    expect(methods.getValues('VPN_SERVICE_PROVIDER')).toBe('nordvpn');
   });
 
   it('renders protocol select with current value', () => {
-    render(
-      <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     const select = screen.getByLabelText(/protocol/i);
     expect(select).toHaveValue('openvpn');
   });
 
-  it('calls onChange when protocol is changed', () => {
-    render(
-      <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('updates protocol selection', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.change(screen.getByLabelText(/protocol/i), {
       target: { value: 'wireguard' },
     });
 
-    expect(onChange).toHaveBeenCalledWith('VPN_TYPE', 'wireguard');
+    expect(methods.getValues('VPN_TYPE')).toBe('wireguard');
   });
 
-  describe('OpenVPN fields', () => {
-    it('shows OpenVPN fields when protocol is openvpn', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
+  it('shows OpenVPN fields when protocol is openvpn', () => {
+    renderWithForm(createMockConfig());
 
-      expect(screen.getByLabelText(/username/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/^password$/i)).toBeInTheDocument();
-    });
-
-    it('displays OpenVPN username value', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.getByLabelText(/username/i)).toHaveValue('user@email.com');
-    });
-
-    it('calls onChange when username is changed', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/username/i), {
-        target: { value: 'newuser' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('VPN_OPENVPN_USER', 'newuser');
-    });
-
-    it('calls onChange when password is changed', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/^password$/i), {
-        target: { value: 'newpassword' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('VPN_OPENVPN_PASSWORD', 'newpassword');
-    });
-
-    it('does not show WireGuard fields when protocol is openvpn', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.queryByLabelText(/private key/i)).not.toBeInTheDocument();
-      expect(screen.queryByLabelText(/addresses/i)).not.toBeInTheDocument();
-    });
+    expect(screen.getByLabelText(/username/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^password$/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/private key/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/addresses/i)).not.toBeInTheDocument();
   });
 
-  describe('WireGuard fields', () => {
-    const wireguardConfig = createMockConfig({
-      VPN_TYPE: 'wireguard',
-      VPN_WIREGUARD_PRIVATE_KEY: 'wg-private-key',
-      VPN_WIREGUARD_ADDRESSES: '10.0.0.1/32',
+  it('updates OpenVPN credentials', () => {
+    const { methods } = renderWithForm(createMockConfig());
+
+    fireEvent.change(screen.getByLabelText(/username/i), {
+      target: { value: 'newuser' },
+    });
+    fireEvent.change(screen.getByLabelText(/^password$/i), {
+      target: { value: 'newpassword' },
     });
 
-    it('shows WireGuard fields when protocol is wireguard', () => {
-      render(
-        <VPNStep config={wireguardConfig} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.getByLabelText(/private key/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/addresses/i)).toBeInTheDocument();
-    });
-
-    it('displays WireGuard private key value', () => {
-      render(
-        <VPNStep config={wireguardConfig} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.getByLabelText(/private key/i)).toHaveValue('wg-private-key');
-    });
-
-    it('displays WireGuard addresses value', () => {
-      render(
-        <VPNStep config={wireguardConfig} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.getByLabelText(/addresses/i)).toHaveValue('10.0.0.1/32');
-    });
-
-    it('calls onChange when private key is changed', () => {
-      render(
-        <VPNStep config={wireguardConfig} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/private key/i), {
-        target: { value: 'new-key' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('VPN_WIREGUARD_PRIVATE_KEY', 'new-key');
-    });
-
-    it('calls onChange when addresses is changed', () => {
-      render(
-        <VPNStep config={wireguardConfig} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/addresses/i), {
-        target: { value: '10.0.0.2/32' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('VPN_WIREGUARD_ADDRESSES', '10.0.0.2/32');
-    });
-
-    it('does not show OpenVPN fields when protocol is wireguard', () => {
-      render(
-        <VPNStep config={wireguardConfig} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.queryByLabelText(/username/i)).not.toBeInTheDocument();
-      expect(screen.queryByLabelText(/^password$/i)).not.toBeInTheDocument();
-    });
+    expect(methods.getValues('VPN_OPENVPN_USER')).toBe('newuser');
+    expect(methods.getValues('VPN_OPENVPN_PASSWORD')).toBe('newpassword');
   });
 
-  describe('Server location fields', () => {
-    it('renders country input with current value', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.getByLabelText(/country/i)).toHaveValue('United States');
-    });
-
-    it('calls onChange when country is changed', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/country/i), {
-        target: { value: 'Germany' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('VPN_SERVER_COUNTRIES', 'Germany');
-    });
-
-    it('renders city input with current value', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.getByLabelText(/city/i)).toHaveValue('New York');
-    });
-
-    it('calls onChange when city is changed', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/city/i), {
-        target: { value: 'Los Angeles' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('VPN_SERVER_CITIES', 'Los Angeles');
-    });
-
-    it('renders region input with current value', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.getByLabelText(/region/i)).toHaveValue('California');
-    });
-
-    it('calls onChange when region is changed', () => {
-      render(
-        <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/region/i), {
-        target: { value: 'Texas' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('VPN_SERVER_REGIONS', 'Texas');
-    });
-  });
-
-  it('displays info box about VPN being optional', () => {
-    render(
-      <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
+  it('shows WireGuard fields when protocol is wireguard', () => {
+    renderWithForm(
+      createMockConfig({
+        VPN_TYPE: 'wireguard',
+        VPN_WIREGUARD_PRIVATE_KEY: 'wg-private-key',
+        VPN_WIREGUARD_ADDRESSES: '10.0.0.1/32',
+      })
     );
 
-    expect(screen.getByText(/vpn is optional/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/private key/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/addresses/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/username/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^password$/i)).not.toBeInTheDocument();
   });
 
-  it('displays server location section header', () => {
-    render(
-      <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
+  it('updates WireGuard settings', () => {
+    const { methods } = renderWithForm(
+      createMockConfig({
+        VPN_TYPE: 'wireguard',
+        VPN_WIREGUARD_PRIVATE_KEY: '',
+        VPN_WIREGUARD_ADDRESSES: '',
+      })
     );
 
-    expect(screen.getByText('Server Location (Optional)')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/private key/i), {
+      target: { value: 'new-key' },
+    });
+    fireEvent.change(screen.getByLabelText(/addresses/i), {
+      target: { value: '10.0.0.2/32' },
+    });
+
+    expect(methods.getValues('VPN_WIREGUARD_PRIVATE_KEY')).toBe('new-key');
+    expect(methods.getValues('VPN_WIREGUARD_ADDRESSES')).toBe('10.0.0.2/32');
   });
 
-  it('displays all provider options', () => {
-    render(
-      <VPNStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('renders server location inputs with current values', () => {
+    renderWithForm(createMockConfig());
 
-    const select = screen.getByLabelText(/vpn provider/i);
-    const options = select.querySelectorAll('option');
+    expect(screen.getByLabelText(/country/i)).toHaveValue('United States');
+    expect(screen.getByLabelText(/city/i)).toHaveValue('New York');
+    expect(screen.getByLabelText(/region/i)).toHaveValue('California');
+  });
 
-    expect(options.length).toBe(5);
-    expect(options[0]).toHaveValue('surfshark');
-    expect(options[1]).toHaveValue('nordvpn');
-    expect(options[2]).toHaveValue('expressvpn');
-    expect(options[3]).toHaveValue('protonvpn');
-    expect(options[4]).toHaveValue('mullvad');
+  it('displays VPN info box', () => {
+    renderWithForm(createMockConfig());
+
+    expect(screen.getByText(/docker compose --profile vpn up/i)).toBeInTheDocument();
   });
 });

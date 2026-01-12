@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 // Mock data generators
 const generateMockSource = (
@@ -54,7 +54,7 @@ test.describe('Sources Page', () => {
     await mockCommonEndpoints(page);
 
     // Mock organizations with query params
-    await page.route('**/api/organizations?*', (route) => {
+    await routeApi(page, '**/api/organizations?*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -75,7 +75,7 @@ test.describe('Sources Page', () => {
     });
 
     // Mock workspaces with query params
-    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+    await routeApi(page, '**/api/organizations/*/workspaces?*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -97,7 +97,7 @@ test.describe('Sources Page', () => {
     });
 
     // Default sources mock
-    await page.route('**/api/sources*', (route) => {
+    await routeApi(page, '**/api/sources*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -129,7 +129,9 @@ test.describe('Sources Page', () => {
     });
 
     test('shows add source button', async ({ page }) => {
-      await expect(page.locator('.page-header .ui-btn--primary')).toContainText('Add Source');
+      await expect(
+        page.locator('.page-header').getByRole('button', { name: /Add Source/i })
+      ).toBeVisible();
     });
   });
 
@@ -143,7 +145,7 @@ test.describe('Sources Page', () => {
   test.describe('Source List', () => {
     test('displays list of source cards', async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', (route) => {
+      await routeApi(page, '**/api/sources*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -161,7 +163,7 @@ test.describe('Sources Page', () => {
 
     test('displays source name and type badge', async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', (route) => {
+      await routeApi(page, '**/api/sources*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -180,7 +182,7 @@ test.describe('Sources Page', () => {
 
     test('shows verified status for verified sources', async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', (route) => {
+      await routeApi(page, '**/api/sources*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -198,7 +200,7 @@ test.describe('Sources Page', () => {
 
     test('shows inactive status for disabled sources', async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', (route) => {
+      await routeApi(page, '**/api/sources*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -216,7 +218,7 @@ test.describe('Sources Page', () => {
 
     test('shows error status for sources with errors', async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', (route) => {
+      await routeApi(page, '**/api/sources*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -235,7 +237,7 @@ test.describe('Sources Page', () => {
 
     test('displays source URL as link', async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', (route) => {
+      await routeApi(page, '**/api/sources*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -256,21 +258,22 @@ test.describe('Sources Page', () => {
 
   test.describe('Create Source Modal', () => {
     test('opens create modal from header button', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
-      await expect(page.locator('.modal-content h2')).toContainText('Add Source');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
+      await expect(page.getByRole('dialog', { name: 'Add Source' })).toBeVisible();
     });
 
     test('shows all source type options', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
 
-      await expect(page.locator('.source-type-card')).toHaveCount(7);
+      await expect(page.locator('.source-type-option')).toHaveCount(7);
       await expect(page.locator('.source-type-name').filter({ hasText: 'GitHub' })).toBeVisible();
       await expect(page.locator('.source-type-name').filter({ hasText: 'GitLab' })).toBeVisible();
       await expect(page.locator('.source-type-name').filter({ hasText: 'Filesystem' })).toBeVisible();
     });
 
     test('shows GitHub form fields by default', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
 
       await expect(page.locator('#ghOwner')).toBeVisible();
       await expect(page.locator('#ghRepo')).toBeVisible();
@@ -278,9 +281,10 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to GitLab form when selected', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
 
-      await page.click('.source-type-card:has-text("GitLab")');
+      await page.getByRole('button', { name: /GitLab/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
 
       await expect(page.locator('#glHost')).toBeVisible();
       await expect(page.locator('#glProjectId')).toBeVisible();
@@ -288,26 +292,29 @@ test.describe('Sources Page', () => {
     });
 
     test('switches to Filesystem form when selected', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
 
-      await page.click('.source-type-card:has-text("Filesystem")');
+      await page.getByRole('button', { name: /Filesystem/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
 
       await expect(page.locator('#fsBasePath')).toBeVisible();
       await expect(page.locator('.toggle-title')).toContainText('Allow write operations');
     });
 
     test('switches to Web URL form when selected', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
 
-      await page.click('.source-type-card:has-text("Web URL")');
+      await page.getByRole('button', { name: /Web URL/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
 
       await expect(page.locator('#webUrl')).toBeVisible();
     });
 
     test('switches to Text form when selected', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
 
-      await page.click('.source-type-card:has-text("Text")');
+      await page.getByRole('button', { name: /Text/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
 
       await expect(page.locator('#textLabel')).toBeVisible();
       await expect(page.locator('#textContent')).toBeVisible();
@@ -318,7 +325,7 @@ test.describe('Sources Page', () => {
         url: 'https://github.com/test/repo',
       });
 
-      await page.route('**/api/sources', (route) => {
+      await routeApi(page, '**/api/sources', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 201,
@@ -328,16 +335,22 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
-      await page.click('.form-actions .ui-btn--primary');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.fill('#name', 'test/repo');
+      await page
+        .getByRole('dialog', { name: 'Add Source' })
+        .getByRole('button', { name: 'Add Source' })
+        .click();
 
-      await expect(page.locator('.modal-content')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('dialog', { name: 'Add Source' })).toHaveCount(0);
     });
 
     test('shows loading state during creation', async ({ page }) => {
-      await page.route('**/api/sources', async (route) => {
+      await routeApi(page, '**/api/sources', async (route) => {
         if (route.request().method() === 'POST') {
           await new Promise((resolve) => setTimeout(resolve, 500));
           route.fulfill({
@@ -350,16 +363,22 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
-      await page.click('.form-actions .ui-btn--primary');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.fill('#name', 'test/repo');
+      await page
+        .getByRole('dialog', { name: 'Add Source' })
+        .getByRole('button', { name: 'Add Source' })
+        .click();
 
-      await expect(page.locator('.form-actions .ui-btn--primary')).toContainText('Adding...');
+      await expect(page.getByRole('button', { name: 'Adding...' })).toBeVisible();
     });
 
     test('shows error when creation fails', async ({ page }) => {
-      await page.route('**/api/sources', (route) => {
+      await routeApi(page, '**/api/sources', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 400,
@@ -369,32 +388,44 @@ test.describe('Sources Page', () => {
         }
       });
 
-      await page.click('.page-header .ui-btn--primary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
-      await page.click('.form-actions .ui-btn--primary');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.fill('#name', 'test/repo');
+      await page
+        .getByRole('dialog', { name: 'Add Source' })
+        .getByRole('button', { name: 'Add Source' })
+        .click();
 
       await expect(page.locator('.form-error')).toBeVisible();
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
-      await page.click('.form-actions .ui-btn--secondary');
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
+      await page
+        .getByRole('dialog', { name: 'Add Source' })
+        .getByRole('button', { name: 'Cancel' })
+        .click();
 
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Add Source' })).toHaveCount(0);
     });
 
     test('closes modal on backdrop click', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
-      await page.click('.modal-overlay', { position: { x: 10, y: 10 } });
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
+      const overlay = page.getByRole('dialog', { name: 'Add Source' }).locator('..');
+      await overlay.dispatchEvent('click');
 
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Add Source' })).toHaveCount(0);
     });
 
-    test('expands additional options section', async ({ page }) => {
-      await page.click('.page-header .ui-btn--primary');
-
-      await page.click('.form-section-collapsed summary');
+    test('shows details fields on final step', async ({ page }) => {
+      await page.locator('.page-header').getByRole('button', { name: /Add Source/i }).click();
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.fill('#ghOwner', 'test');
+      await page.fill('#ghRepo', 'repo');
+      await page.getByRole('button', { name: 'Next' }).click();
 
       await expect(page.locator('#name')).toBeVisible();
       await expect(page.locator('#description')).toBeVisible();
@@ -404,7 +435,7 @@ test.describe('Sources Page', () => {
   test.describe('Source Actions', () => {
     test.beforeEach(async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', (route) => {
+      await routeApi(page, '**/api/sources*', (route) => {
         const url = route.request().url();
         const method = route.request().method();
 
@@ -425,7 +456,7 @@ test.describe('Sources Page', () => {
     });
 
     test('verify button triggers verification', async ({ page }) => {
-      await page.route('**/api/sources/src-1/verify', (route) => {
+      await routeApi(page, '**/api/sources/src-1/verify', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -433,7 +464,7 @@ test.describe('Sources Page', () => {
         });
       });
 
-      await page.route('**/api/sources/src-1', (route) => {
+      await routeApi(page, '**/api/sources/src-1', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -452,7 +483,7 @@ test.describe('Sources Page', () => {
     });
 
     test('enable/disable button toggles source status', async ({ page }) => {
-      await page.route('**/api/sources/src-1', (route) => {
+      await routeApi(page, '**/api/sources/src-1', (route) => {
         if (route.request().method() === 'PATCH') {
           route.fulfill({
             status: 200,
@@ -475,7 +506,7 @@ test.describe('Sources Page', () => {
         window.confirm = () => true;
       });
 
-      await page.route('**/api/sources/src-1', (route) => {
+      await routeApi(page, '**/api/sources/src-1', (route) => {
         if (route.request().method() === 'DELETE') {
           route.fulfill({ status: 204 });
         }
@@ -491,7 +522,7 @@ test.describe('Sources Page', () => {
   test.describe('Error Handling', () => {
     test('shows error when loading sources fails', async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', (route) => {
+      await routeApi(page, '**/api/sources*', (route) => {
         route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -509,7 +540,7 @@ test.describe('Sources Page', () => {
   test.describe('Loading State', () => {
     test('shows skeleton cards while loading', async ({ page }) => {
       await page.unroute('**/api/sources*');
-      await page.route('**/api/sources*', async (route) => {
+      await routeApi(page, '**/api/sources*', async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 500));
         route.fulfill({
           status: 200,

@@ -1,9 +1,30 @@
 import { renderHook, waitFor } from '@testing-library/react';
-import { useProjects } from './useProjects';
-import { projectsApi } from '../../../api/projects';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Project, CreateProjectRequest, UpdateProjectRequest } from '../types';
 
-jest.mock('../../../api/projects');
+const mockGetProjects = mock();
+const mockCreateProject = mock();
+const mockUpdateProject = mock();
+const mockDeleteProject = mock();
+
+mock.module('../../../api/projects', () => ({
+  projectsApi: {
+    getProjects: mockGetProjects,
+    createProject: mockCreateProject,
+    updateProject: mockUpdateProject,
+    deleteProject: mockDeleteProject,
+  },
+}));
+
+let useProjects: typeof import('./useProjects').useProjects;
+
+beforeAll(async () => {
+  ({ useProjects } = await import('./useProjects'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const mockProjects: Project[] = [
   {
@@ -34,7 +55,7 @@ describe('useProjects', () => {
   });
 
   it('should fetch projects on mount', async () => {
-    (projectsApi.getProjects as jest.Mock as jest.Mock).mockResolvedValue(mockProjects);
+    mockGetProjects.mockResolvedValue(mockProjects);
 
     const { result } = renderHook(() => useProjects());
 
@@ -46,11 +67,11 @@ describe('useProjects', () => {
 
     expect(result.current.projects).toEqual(mockProjects);
     expect(result.current.error).toBeNull();
-    expect(projectsApi.getProjects).toHaveBeenCalledWith(undefined);
+    expect(mockGetProjects).toHaveBeenCalledWith(undefined);
   });
 
   it('should fetch projects with status filter', async () => {
-    (projectsApi.getProjects as jest.Mock).mockResolvedValue([mockProjects[0]]);
+    mockGetProjects.mockResolvedValue([mockProjects[0]]);
 
     const { result } = renderHook(() => useProjects('active'));
 
@@ -59,12 +80,12 @@ describe('useProjects', () => {
     });
 
     expect(result.current.projects).toEqual([mockProjects[0]]);
-    expect(projectsApi.getProjects).toHaveBeenCalledWith('active');
+    expect(mockGetProjects).toHaveBeenCalledWith('active');
   });
 
   it('should handle fetch error', async () => {
     const error = new Error('Failed to fetch');
-    (projectsApi.getProjects as jest.Mock).mockRejectedValue(error);
+    mockGetProjects.mockRejectedValue(error);
 
     const { result } = renderHook(() => useProjects());
 
@@ -88,8 +109,8 @@ describe('useProjects', () => {
       updated_at: '2024-01-05T00:00:00Z',
     };
 
-    (projectsApi.getProjects as jest.Mock).mockResolvedValue(mockProjects);
-    (projectsApi.createProject as jest.Mock).mockResolvedValue(newProject);
+    mockGetProjects.mockResolvedValue(mockProjects);
+    mockCreateProject.mockResolvedValue(newProject);
 
     const { result } = renderHook(() => useProjects());
 
@@ -109,7 +130,7 @@ describe('useProjects', () => {
       expect(result.current.projects).toContainEqual(newProject);
     });
 
-    expect(projectsApi.createProject).toHaveBeenCalledWith(createRequest);
+    expect(mockCreateProject).toHaveBeenCalledWith(createRequest);
   });
 
   it('should update project', async () => {
@@ -119,8 +140,8 @@ describe('useProjects', () => {
       status: 'on_hold',
     };
 
-    (projectsApi.getProjects as jest.Mock).mockResolvedValue(mockProjects);
-    (projectsApi.updateProject as jest.Mock).mockResolvedValue(updatedProject);
+    mockGetProjects.mockResolvedValue(mockProjects);
+    mockUpdateProject.mockResolvedValue(updatedProject);
 
     const { result } = renderHook(() => useProjects());
 
@@ -141,12 +162,12 @@ describe('useProjects', () => {
       expect(project?.status).toBe('on_hold');
     });
 
-    expect(projectsApi.updateProject).toHaveBeenCalledWith('1', updateRequest);
+    expect(mockUpdateProject).toHaveBeenCalledWith('1', updateRequest);
   });
 
   it('should delete project', async () => {
-    (projectsApi.getProjects as jest.Mock).mockResolvedValue(mockProjects);
-    (projectsApi.deleteProject as jest.Mock).mockResolvedValue(undefined);
+    mockGetProjects.mockResolvedValue(mockProjects);
+    mockDeleteProject.mockResolvedValue(undefined);
 
     const { result } = renderHook(() => useProjects());
 
@@ -160,11 +181,11 @@ describe('useProjects', () => {
       expect(result.current.projects).not.toContainEqual(mockProjects[0]);
     });
 
-    expect(projectsApi.deleteProject).toHaveBeenCalledWith('1');
+    expect(mockDeleteProject).toHaveBeenCalledWith('1');
   });
 
   it('should refetch projects', async () => {
-    (projectsApi.getProjects as jest.Mock).mockResolvedValue(mockProjects);
+    mockGetProjects.mockResolvedValue(mockProjects);
 
     const { result } = renderHook(() => useProjects());
 
@@ -172,10 +193,10 @@ describe('useProjects', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(projectsApi.getProjects).toHaveBeenCalledTimes(1);
+    expect(mockGetProjects).toHaveBeenCalledTimes(1);
 
     await result.current.refetch();
 
-    expect(projectsApi.getProjects).toHaveBeenCalledTimes(2);
+    expect(mockGetProjects).toHaveBeenCalledTimes(2);
   });
 });

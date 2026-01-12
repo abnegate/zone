@@ -1,14 +1,13 @@
-import type React from 'react';
+import { useFormContext } from 'react-hook-form';
 import { Input } from '../components';
 import type { InstallerConfig } from '../types';
 
-interface DomainStepProps {
-  config: InstallerConfig;
-  onChange: (key: keyof InstallerConfig, value: string) => void;
-  getFieldError: (field: string) => string | undefined;
-}
+export function DomainStep() {
+  const {
+    register,
+    formState: { errors },
+  } = useFormContext<InstallerConfig>();
 
-export function DomainStep({ config, onChange, getFieldError }: DomainStepProps) {
   return (
     <div className="step-content">
       <div className="step-header">
@@ -19,13 +18,10 @@ export function DomainStep({ config, onChange, getFieldError }: DomainStepProps)
       <Input
         label="Web Interface Hostname"
         type="text"
-        value={config.DOMAIN_HOST_WEBUI}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('DOMAIN_HOST_WEBUI', e.target.value)
-        }
+        {...register('DOMAIN_HOST_WEBUI')}
         placeholder="webui.localhost"
         helpText="Hostname for the chat interface"
-        error={getFieldError('DOMAIN_HOST_WEBUI')}
+        error={errors.DOMAIN_HOST_WEBUI?.message}
       />
     </div>
   );

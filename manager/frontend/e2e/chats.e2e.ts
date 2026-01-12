@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 // Mock data generators
 const generateMockChat = (id: string, title: string, modelName: string, archived = false) => ({
@@ -34,7 +34,7 @@ test.describe('Chats Page', () => {
 
     // Mock models API for the new chat dialog
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -49,7 +49,7 @@ test.describe('Chats Page', () => {
     });
 
     // Default mock for chats - use regex for better matching
-    await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+    await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -92,7 +92,7 @@ test.describe('Chats Page', () => {
       ];
 
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -113,7 +113,7 @@ test.describe('Chats Page', () => {
       const mockChats = [generateMockChat('chat-1', 'Test Chat', 'llama3.2')];
 
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -132,7 +132,7 @@ test.describe('Chats Page', () => {
       const archivedChats = [generateMockChat('chat-2', 'Archived Chat', 'codellama', true)];
 
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         const url = new URL(route.request().url());
         const archived = url.searchParams.get('archived');
 
@@ -170,7 +170,7 @@ test.describe('Chats Page', () => {
       ];
 
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         const url = route.request().url();
         if (url.includes('/chat-1') && route.request().method() === 'GET') {
           route.fulfill({
@@ -201,17 +201,17 @@ test.describe('Chats Page', () => {
 
   test.describe('Create Chat', () => {
     test('opens new chat modal from sidebar button', async ({ page }) => {
-      await page.click('.chats-sidebar-header .ui-btn--primary');
-      await expect(page.locator('.ui-modal__title')).toContainText('New Chat');
+      await page.getByRole('button', { name: /\+ New/i }).click();
+      await expect(page.getByRole('dialog', { name: 'New Chat' })).toBeVisible();
     });
 
     test('opens new chat modal from placeholder button', async ({ page }) => {
-      await page.click('.chat-placeholder .ui-btn--primary');
-      await expect(page.locator('.ui-modal__title')).toContainText('New Chat');
+      await page.getByRole('button', { name: 'Start New Chat' }).click();
+      await expect(page.getByRole('dialog', { name: 'New Chat' })).toBeVisible();
     });
 
     test('shows available models in dropdown', async ({ page }) => {
-      await page.click('.chats-sidebar-header .ui-btn--primary');
+      await page.getByRole('button', { name: /\+ New/i }).click();
 
       const options = page.locator('#select-model option');
       await expect(options).toHaveCount(4); // Including "Choose a model..." option
@@ -225,7 +225,7 @@ test.describe('Chats Page', () => {
 
       // Unroute existing chats routes and set up new ones
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         const url = route.request().url();
         const method = route.request().method();
 
@@ -252,23 +252,32 @@ test.describe('Chats Page', () => {
         }
       });
 
-      await page.click('.chats-sidebar-header .ui-btn--primary');
+      await page.getByRole('button', { name: /\+ New/i }).click();
       await page.selectOption('#select-model', 'llama3.2');
-      await page.click('.modal-actions .ui-btn--primary');
+      await page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
+        name: 'Create Chat',
+      }).click();
 
       // Modal should close
-      await expect(page.locator('.ui-modal')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'New Chat' })).toHaveCount(0);
     });
 
     test('disables create button when no model selected', async ({ page }) => {
-      await page.click('.chats-sidebar-header .ui-btn--primary');
-      await expect(page.locator('.modal-actions .ui-btn--primary')).toBeDisabled();
+      await page.getByRole('button', { name: /\+ New/i }).click();
+      await expect(
+        page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
+          name: 'Create Chat',
+        })
+      ).toBeDisabled();
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      await page.click('.chats-sidebar-header .ui-btn--primary');
-      await page.click('.modal-actions .ui-btn--secondary');
-      await expect(page.locator('.ui-modal')).not.toBeVisible();
+      await page.getByRole('button', { name: /\+ New/i }).click();
+      await page
+        .getByRole('dialog', { name: 'New Chat' })
+        .getByRole('button', { name: 'Cancel' })
+        .click();
+      await expect(page.getByRole('dialog', { name: 'New Chat' })).toHaveCount(0);
     });
   });
 
@@ -281,7 +290,7 @@ test.describe('Chats Page', () => {
 
     test.beforeEach(async ({ page }) => {
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         const url = route.request().url();
         if (url.includes('/chat-1') && route.request().method() === 'GET') {
           route.fulfill({
@@ -332,13 +341,13 @@ test.describe('Chats Page', () => {
       await page.click('.chat-item');
 
       await expect(page.locator('.message-form textarea')).toBeVisible();
-      await expect(page.locator('.message-form .ui-btn--primary')).toContainText('Send');
+      await expect(page.locator('.message-form').getByRole('button', { name: 'Send' })).toBeVisible();
     });
 
     test('sends message successfully', async ({ page }) => {
       const newMessage = generateMockMessage('msg-3', 'chat-1', 'user', 'Test message');
 
-      await page.route('**/api/chats/chat-1/messages', (route) => {
+      await routeApi(page, '**/api/chats/chat-1/messages', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 201,
@@ -350,7 +359,7 @@ test.describe('Chats Page', () => {
 
       await page.click('.chat-item');
       await page.fill('.message-form textarea', 'Test message');
-      await page.click('.message-form .ui-btn--primary');
+      await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
 
       // New message should appear
       await expect(page.locator('.message')).toHaveCount(3);
@@ -358,13 +367,13 @@ test.describe('Chats Page', () => {
 
     test('disables send button when input is empty', async ({ page }) => {
       await page.click('.chat-item');
-      await expect(page.locator('.message-form .ui-btn--primary')).toBeDisabled();
+      await expect(page.locator('.message-form').getByRole('button', { name: 'Send' })).toBeDisabled();
     });
 
     test('clears input after sending', async ({ page }) => {
       const newMessage = generateMockMessage('msg-3', 'chat-1', 'user', 'Test');
 
-      await page.route('**/api/chats/chat-1/messages', (route) => {
+      await routeApi(page, '**/api/chats/chat-1/messages', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 201,
@@ -376,7 +385,7 @@ test.describe('Chats Page', () => {
 
       await page.click('.chat-item');
       await page.fill('.message-form textarea', 'Test');
-      await page.click('.message-form .ui-btn--primary');
+      await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
 
       await expect(page.locator('.message-form textarea')).toHaveValue('');
     });
@@ -387,7 +396,7 @@ test.describe('Chats Page', () => {
 
     test.beforeEach(async ({ page }) => {
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         const url = route.request().url();
         const method = route.request().method();
 
@@ -416,7 +425,7 @@ test.describe('Chats Page', () => {
     });
 
     test('archives chat', async ({ page }) => {
-      await page.route('**/api/chats/chat-1/archive', (route) => {
+      await routeApi(page, '**/api/chats/chat-1/archive', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -434,12 +443,13 @@ test.describe('Chats Page', () => {
       await page.hover('.chat-item');
       await page.click('button[title="Delete"]');
 
-      await expect(page.locator('.ui-modal__title')).toContainText('Delete Chat');
-      await expect(page.locator('.ui-modal')).toContainText('cannot be undone');
+      const deleteDialog = page.getByRole('dialog', { name: 'Delete Chat' });
+      await expect(deleteDialog).toBeVisible();
+      await expect(deleteDialog).toContainText('cannot be undone');
     });
 
     test('deletes chat after confirmation', async ({ page }) => {
-      await page.route('**/api/chats/chat-1', (route) => {
+      await routeApi(page, '**/api/chats/chat-1', (route) => {
         if (route.request().method() === 'DELETE') {
           route.fulfill({ status: 204 });
         }
@@ -447,25 +457,31 @@ test.describe('Chats Page', () => {
 
       await page.hover('.chat-item');
       await page.click('button[title="Delete"]');
-      await page.click('.modal-actions .ui-btn--danger');
+      await page
+        .getByRole('dialog', { name: 'Delete Chat' })
+        .getByRole('button', { name: 'Delete' })
+        .click();
 
       // Modal should close
-      await expect(page.locator('.ui-modal')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Delete Chat' })).toHaveCount(0);
     });
 
     test('cancels delete', async ({ page }) => {
       await page.hover('.chat-item');
       await page.click('button[title="Delete"]');
-      await page.click('.modal-actions .ui-btn--secondary');
+      await page
+        .getByRole('dialog', { name: 'Delete Chat' })
+        .getByRole('button', { name: 'Cancel' })
+        .click();
 
-      await expect(page.locator('.ui-modal')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'Delete Chat' })).toHaveCount(0);
     });
   });
 
   test.describe('Error Handling', () => {
     test('shows error when loading chats fails', async ({ page }) => {
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -485,7 +501,7 @@ test.describe('Chats Page', () => {
       const mockChats = [generateMockChat('chat-1', 'Test Chat', 'llama3.2')];
 
       await page.unroute(/\/api\/chats/);
-      await page.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
         if (route.request().method() === 'GET' && !route.request().url().includes('/chat-')) {
           route.fulfill({
             status: 200,
@@ -503,11 +519,11 @@ test.describe('Chats Page', () => {
     });
 
     test('modals can be closed with escape key', async ({ page }) => {
-      await page.click('.chats-sidebar-header .ui-btn--primary');
-      await expect(page.locator('.ui-modal')).toBeVisible();
+      await page.getByRole('button', { name: /\+ New/i }).click();
+      await expect(page.getByRole('dialog', { name: 'New Chat' })).toBeVisible();
 
       await page.keyboard.press('Escape');
-      // Note: Escape handling is on the backdrop, not the modal
+      await expect(page.getByRole('dialog', { name: 'New Chat' })).toHaveCount(0);
     });
   });
 });

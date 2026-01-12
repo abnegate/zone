@@ -1,0 +1,40 @@
+@import "tailwindcss";
+@plugin "tailwindcss-animate";
+
+@import "./variables.css";
+
+@theme {
+  /* Shadcn / Standard Mappings */
+  --color-background: var(--ui-bg-base);
+  --color-foreground: var(--ui-text-primary);
+
+  --color-card: var(--ui-bg-elevated);
+  --color-card-foreground: var(--ui-text-primary);
+
+  --color-popover: var(--ui-bg-elevated);
+  --color-popover-foreground: var(--ui-text-primary);
+
+  --color-primary: var(--ui-accent-500);
+  --color-primary-foreground: var(--ui-text-inverse);
+
+  --color-secondary: var(--ui-bg-surface);
+  --color-secondary-foreground: var(--ui-text-primary);
+
+  --color-muted: var(--ui-bg-muted);
+  --color-muted-foreground: var(--ui-text-muted);
+
+  --color-accent: var(--ui-accent-500);
+  --color-accent-foreground: var(--ui-text-inverse);
+
+  --color-destructive: var(--ui-error-500);
+  --color-destructive-foreground: var(--ui-text-inverse);
+
+  --color-border: var(--ui-border);
+  --color-input: var(--ui-border);
+  --color-ring: var(--ui-border-focus);
+
+  --radius-sm: var(--ui-radius-sm);
+  --radius-md: var(--ui-radius-md);
+  --radius-lg: var(--ui-radius-lg);
+  --radius-xl: var(--ui-radius-xl);
+}

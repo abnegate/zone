@@ -4,13 +4,30 @@
 
 import { renderHook, waitFor } from '@testing-library/react';
 import { act } from 'react';
-import { useSource } from './useSource';
-import { sourcesApi } from '../../../api/sources';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Source } from '../types';
 
-jest.mock('../../../api/sources');
+const mockGetSource = mock();
+const mockUpdateSource = mock();
+const mockVerifySource = mock();
 
-const mockSourcesApi = sourcesApi as jest.Mocked<typeof sourcesApi>;
+mock.module('../../../api/sources', () => ({
+  sourcesApi: {
+    getSource: mockGetSource,
+    updateSource: mockUpdateSource,
+    verifySource: mockVerifySource,
+  },
+}));
+
+let useSource: typeof import('./useSource').useSource;
+
+beforeAll(async () => {
+  ({ useSource } = await import('./useSource'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useSource', () => {
   const mockSource: Source = {
@@ -33,7 +50,7 @@ describe('useSource', () => {
   });
 
   it('should fetch source on mount', async () => {
-    mockSourcesApi.getSource.mockResolvedValue(mockSource);
+    mockGetSource.mockResolvedValue(mockSource);
 
     const { result } = renderHook(() => useSource('1'));
 
@@ -46,12 +63,12 @@ describe('useSource', () => {
 
     expect(result.current.source).toEqual(mockSource);
     expect(result.current.error).toBeNull();
-    expect(sourcesApi.getSource).toHaveBeenCalledWith('1');
+    expect(mockGetSource).toHaveBeenCalledWith('1');
   });
 
   it('should handle fetch error', async () => {
     const errorMessage = 'Failed to fetch source';
-    mockSourcesApi.getSource.mockRejectedValue(new Error(errorMessage));
+    mockGetSource.mockRejectedValue(new Error(errorMessage));
 
     const { result } = renderHook(() => useSource('1'));
 
@@ -65,8 +82,8 @@ describe('useSource', () => {
 
   it('should update source', async () => {
     const updatedSource: Source = { ...mockSource, name: 'Updated Name' };
-    mockSourcesApi.getSource.mockResolvedValue(mockSource);
-    mockSourcesApi.updateSource.mockResolvedValue(updatedSource);
+    mockGetSource.mockResolvedValue(mockSource);
+    mockUpdateSource.mockResolvedValue(updatedSource);
 
     const { result } = renderHook(() => useSource('1'));
 
@@ -86,13 +103,13 @@ describe('useSource', () => {
       ...mockSource,
       last_verified_at: '2024-01-02T00:00:00Z',
     };
-    mockSourcesApi.getSource.mockResolvedValue(mockSource);
-    mockSourcesApi.verifySource.mockResolvedValue({
+    mockGetSource.mockResolvedValue(mockSource);
+    mockVerifySource.mockResolvedValue({
       success: true,
       message: 'Verified successfully',
     });
-    mockSourcesApi.getSource.mockResolvedValueOnce(mockSource); // Initial load
-    mockSourcesApi.getSource.mockResolvedValueOnce(verifiedSource); // After verify
+    mockGetSource.mockResolvedValueOnce(mockSource); // Initial load
+    mockGetSource.mockResolvedValueOnce(verifiedSource); // After verify
 
     const { result } = renderHook(() => useSource('1'));
 
@@ -111,8 +128,8 @@ describe('useSource', () => {
 
   it('should refresh source', async () => {
     const refreshedSource: Source = { ...mockSource, name: 'Refreshed Name' };
-    mockSourcesApi.getSource.mockResolvedValueOnce(mockSource); // Initial load
-    mockSourcesApi.getSource.mockResolvedValueOnce(refreshedSource); // After refresh
+    mockGetSource.mockResolvedValueOnce(mockSource); // Initial load
+    mockGetSource.mockResolvedValueOnce(refreshedSource); // After refresh
 
     const { result } = renderHook(() => useSource('1'));
 
@@ -127,7 +144,7 @@ describe('useSource', () => {
     });
 
     expect(result.current.source?.name).toBe('Refreshed Name');
-    expect(sourcesApi.getSource).toHaveBeenCalledTimes(2);
+    expect(mockGetSource).toHaveBeenCalledTimes(2);
   });
 
   it('should not fetch if id is null', () => {
@@ -135,6 +152,6 @@ describe('useSource', () => {
 
     expect(result.current.loading).toBe(false);
     expect(result.current.source).toBeNull();
-    expect(sourcesApi.getSource).not.toHaveBeenCalled();
+    expect(mockGetSource).not.toHaveBeenCalled();
   });
 });

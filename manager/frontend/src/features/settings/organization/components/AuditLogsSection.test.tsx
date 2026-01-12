@@ -1,10 +1,26 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../../../api/client';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { AuditLog, AuditLogsResponse } from '../types';
-import { AuditLogsSection } from './AuditLogsSection';
 
-jest.mock('../../../../api/client');
-const mockClient = client as jest.Mocked<typeof client>;
+const mockGetAuditLogs = mock();
+const mockExportAuditLogs = mock();
+
+mock.module('../../../../api/client', () => ({
+  client: {
+    getAuditLogs: mockGetAuditLogs,
+    exportAuditLogs: mockExportAuditLogs,
+  },
+}));
+
+let AuditLogsSection: typeof import('./AuditLogsSection').AuditLogsSection;
+
+beforeAll(async () => {
+  ({ AuditLogsSection } = await import('./AuditLogsSection'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('AuditLogsSection', () => {
   const orgId = 'org-123';
@@ -51,7 +67,7 @@ describe('AuditLogsSection', () => {
 
   describe('Initial Load', () => {
     it('renders loading state initially', () => {
-      mockClient.getAuditLogs.mockImplementation(() => new Promise(() => {}));
+      mockGetAuditLogs.mockImplementation(() => new Promise(() => {}));
 
       render(<AuditLogsSection orgId={orgId} />);
 
@@ -64,7 +80,7 @@ describe('AuditLogsSection', () => {
         total: 3,
       };
 
-      mockClient.getAuditLogs.mockResolvedValue(response);
+      mockGetAuditLogs.mockResolvedValue(response);
 
       render(<AuditLogsSection orgId={orgId} />);
 
@@ -97,7 +113,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('displays error state when fetch fails', async () => {
-      mockClient.getAuditLogs.mockRejectedValue(new Error('Failed to load'));
+      mockGetAuditLogs.mockRejectedValue(new Error('Failed to load'));
 
       render(<AuditLogsSection orgId={orgId} />);
 
@@ -109,7 +125,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('retries loading on retry button click', async () => {
-      mockClient.getAuditLogs
+      mockGetAuditLogs
         .mockRejectedValueOnce(new Error('Failed to load'))
         .mockResolvedValueOnce({ logs: mockLogs, total: 3 });
 
@@ -149,7 +165,7 @@ describe('AuditLogsSection', () => {
 
   describe('Table Display', () => {
     beforeEach(async () => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -239,7 +255,7 @@ describe('AuditLogsSection', () => {
 
   describe('Expandable Metadata', () => {
     beforeEach(async () => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -309,7 +325,7 @@ describe('AuditLogsSection', () => {
 
   describe('Filters', () => {
     beforeEach(async () => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -363,7 +379,7 @@ describe('AuditLogsSection', () => {
       const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
 
       // Set up the mock response
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: [mockLogs[0]],
         total: 1,
       });
@@ -383,8 +399,8 @@ describe('AuditLogsSection', () => {
       );
 
       // Clear mock to isolate the "Apply Filters" call
-      mockClient.getAuditLogs.mockClear();
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockClear();
+      mockGetAuditLogs.mockResolvedValue({
         logs: [mockLogs[0]],
         total: 1,
       });
@@ -395,13 +411,13 @@ describe('AuditLogsSection', () => {
       // Wait for the API call from Apply Filters
       await waitFor(
         () => {
-          expect(mockClient.getAuditLogs).toHaveBeenCalled();
+          expect(mockGetAuditLogs).toHaveBeenCalled();
         },
         { timeout: 3000 }
       );
 
       // Verify it was called with the action filter
-      expect(mockClient.getAuditLogs).toHaveBeenCalledWith(
+      expect(mockGetAuditLogs).toHaveBeenCalledWith(
         orgId,
         expect.objectContaining({
           action: 'create',
@@ -441,7 +457,7 @@ describe('AuditLogsSection', () => {
       const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
 
       // Set up mock to handle automatic reload when filter changes
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -509,7 +525,7 @@ describe('AuditLogsSection', () => {
       const startDateInput = screen.getByLabelText('Start Date') as HTMLInputElement;
 
       // Set up mock response
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -529,8 +545,8 @@ describe('AuditLogsSection', () => {
       );
 
       // Clear mock to isolate the "Apply Filters" call
-      mockClient.getAuditLogs.mockClear();
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockClear();
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -544,13 +560,13 @@ describe('AuditLogsSection', () => {
       // Wait for the new API call to complete
       await waitFor(
         () => {
-          expect(mockClient.getAuditLogs).toHaveBeenCalled();
+          expect(mockGetAuditLogs).toHaveBeenCalled();
         },
         { timeout: 3000 }
       );
 
       // Verify it was called with the start date filter
-      expect(mockClient.getAuditLogs).toHaveBeenCalledWith(
+      expect(mockGetAuditLogs).toHaveBeenCalledWith(
         orgId,
         expect.objectContaining({
           start_date: '2024-01-01',
@@ -590,8 +606,8 @@ describe('AuditLogsSection', () => {
       const actorInput = screen.getByLabelText('Actor (User ID)') as HTMLInputElement;
       fireEvent.change(actorInput, { target: { value: 'user-1' } });
 
-      mockClient.getAuditLogs.mockClear();
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockClear();
+      mockGetAuditLogs.mockResolvedValue({
         logs: [mockLogs[0], mockLogs[2]],
         total: 2,
       });
@@ -605,13 +621,13 @@ describe('AuditLogsSection', () => {
       // Wait for the new API call to complete
       await waitFor(
         () => {
-          expect(mockClient.getAuditLogs).toHaveBeenCalled();
+          expect(mockGetAuditLogs).toHaveBeenCalled();
         },
         { timeout: 3000 }
       );
 
       // Verify it was called with the correct filters
-      expect(mockClient.getAuditLogs).toHaveBeenCalledWith(
+      expect(mockGetAuditLogs).toHaveBeenCalledWith(
         orgId,
         expect.objectContaining({
           actor_id: 'user-1',
@@ -622,7 +638,7 @@ describe('AuditLogsSection', () => {
 
   describe('Export', () => {
     beforeEach(() => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -648,7 +664,7 @@ describe('AuditLogsSection', () => {
 
     it('exports audit logs as CSV', async () => {
       const mockBlob = new Blob(['csv,data'], { type: 'text/csv' });
-      mockClient.exportAuditLogs.mockResolvedValue(mockBlob);
+      mockExportAuditLogs.mockResolvedValue(mockBlob);
 
       render(<AuditLogsSection orgId={orgId} />);
 
@@ -659,7 +675,7 @@ describe('AuditLogsSection', () => {
       fireEvent.click(screen.getByText('Export CSV'));
 
       await waitFor(() => {
-        expect(mockClient.exportAuditLogs).toHaveBeenCalledWith(orgId, {});
+        expect(mockExportAuditLogs).toHaveBeenCalledWith(orgId, {});
       });
 
       expect(global.URL.createObjectURL).toHaveBeenCalledWith(mockBlob);
@@ -668,7 +684,7 @@ describe('AuditLogsSection', () => {
 
     it('exports with filters applied', async () => {
       const mockBlob = new Blob(['csv,data'], { type: 'text/csv' });
-      mockClient.exportAuditLogs.mockResolvedValue(mockBlob);
+      mockExportAuditLogs.mockResolvedValue(mockBlob);
 
       render(<AuditLogsSection orgId={orgId} />);
 
@@ -696,7 +712,7 @@ describe('AuditLogsSection', () => {
       fireEvent.click(exportButton);
 
       await waitFor(() => {
-        expect(mockClient.exportAuditLogs).toHaveBeenCalledWith(
+        expect(mockExportAuditLogs).toHaveBeenCalledWith(
           orgId,
           expect.objectContaining({
             action: 'create',
@@ -706,7 +722,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('handles export errors', async () => {
-      mockClient.exportAuditLogs.mockRejectedValue(new Error('Export failed'));
+      mockExportAuditLogs.mockRejectedValue(new Error('Export failed'));
 
       render(<AuditLogsSection orgId={orgId} />);
 
@@ -724,7 +740,7 @@ describe('AuditLogsSection', () => {
 
   describe('Pagination', () => {
     it('shows load more button when there are more logs', async () => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 100,
       });
@@ -737,7 +753,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('does not show load more when all logs are loaded', async () => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -755,7 +771,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('loads more logs when button is clicked', async () => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 100,
       });
@@ -766,8 +782,8 @@ describe('AuditLogsSection', () => {
         expect(screen.getByText(/Load More/)).toBeInTheDocument();
       });
 
-      mockClient.getAuditLogs.mockClear();
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockClear();
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 100,
       });
@@ -775,7 +791,7 @@ describe('AuditLogsSection', () => {
       fireEvent.click(screen.getByText(/Load More/));
 
       await waitFor(() => {
-        expect(mockClient.getAuditLogs).toHaveBeenCalledWith(
+        expect(mockGetAuditLogs).toHaveBeenCalledWith(
           orgId,
           expect.objectContaining({
             offset: 50,
@@ -787,7 +803,7 @@ describe('AuditLogsSection', () => {
 
   describe('Empty State', () => {
     it('shows empty state when no logs', async () => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: [],
         total: 0,
       });
@@ -800,7 +816,7 @@ describe('AuditLogsSection', () => {
     });
 
     it('shows clear filters button in empty state with filters', async () => {
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockResolvedValue({
         logs: mockLogs,
         total: 3,
       });
@@ -824,8 +840,8 @@ describe('AuditLogsSection', () => {
       const actionSelect = screen.getByLabelText('Action') as HTMLSelectElement;
       fireEvent.change(actionSelect, { target: { value: 'create' } });
 
-      mockClient.getAuditLogs.mockClear();
-      mockClient.getAuditLogs.mockResolvedValue({
+      mockGetAuditLogs.mockClear();
+      mockGetAuditLogs.mockResolvedValue({
         logs: [],
         total: 0,
       });

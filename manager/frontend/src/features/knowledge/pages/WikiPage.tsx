@@ -1,8 +1,7 @@
 import { useState } from 'react';
-import type { CreateKnowledgeRequest, KnowledgeEntry, KnowledgeType } from '../types';
-import { getErrors } from '../../../validation';
-import { CreateKnowledgeRequestSchema } from '../schemas';
+import type { KnowledgeEntry } from '../types';
 import { useKnowledge } from '../hooks';
+import { CreateKnowledgeWizard } from '../components';
 import './WikiPage.css';
 
 type FilterType = 'all' | 'text' | 'url';
@@ -13,44 +12,14 @@ export default function WikiPage() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<FilterType>('all');
-  const [showModal, setShowModal] = useState(false);
+  const [showCreateWizard, setShowCreateWizard] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<KnowledgeEntry | null>(null);
-
-  // Form state
-  const [formData, setFormData] = useState<CreateKnowledgeRequest>({
-    title: '',
-    type: 'text',
-    content: '',
-    tags: [],
-  });
-  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
-  const [submitting, setSubmitting] = useState(false);
-  const [tagInput, setTagInput] = useState('');
-
-  const handleCreateKnowledge = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    const errors = getErrors(CreateKnowledgeRequestSchema, formData);
-    if (Object.keys(errors).length > 0) {
-      setFormErrors(errors);
-      return;
-    }
-
-    try {
-      setSubmitting(true);
-      setFormErrors({});
-      await createEntry(formData);
-      setShowModal(false);
-      resetForm();
-    } catch (err) {
-      setFormErrors({ _root: err instanceof Error ? err.message : 'Failed to create knowledge' });
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+
+  const handleEntryCreated = (_entry: KnowledgeEntry) => {
+    // Entry is already added to the list by the hook
+  };
 
   const handleDeleteKnowledge = async (id: string) => {
     if (!window.confirm('Are you sure you want to delete this knowledge entry?')) {
@@ -78,37 +47,6 @@ export default function WikiPage() {
     } catch (err) {
       setRefreshError(err instanceof Error ? err.message : 'Failed to refresh knowledge');
     }
-  };
-
-  const resetForm = () => {
-    setFormData({
-      title: '',
-      type: 'text',
-      content: '',
-      tags: [],
-    });
-    setTagInput('');
-    setFormErrors({});
-  };
-
-  const handleAddTag = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' && tagInput.trim()) {
-      e.preventDefault();
-      if (!formData.tags?.includes(tagInput.trim())) {
-        setFormData({
-          ...formData,
-          tags: [...(formData.tags || []), tagInput.trim()],
-        });
-      }
-      setTagInput('');
-    }
-  };
-
-  const handleRemoveTag = (tag: string) => {
-    setFormData({
-      ...formData,
-      tags: formData.tags?.filter((t) => t !== tag) || [],
-    });
   };
 
   const filteredEntries = entries.filter((entry) => {
@@ -166,10 +104,7 @@ export default function WikiPage() {
           <button
             type="button"
             className="add-knowledge-btn"
-            onClick={() => {
-              resetForm();
-              setShowModal(true);
-            }}
+            onClick={() => setShowCreateWizard(true)}
           >
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path
@@ -256,10 +191,7 @@ export default function WikiPage() {
             <button
               type="button"
               className="add-knowledge-btn"
-              onClick={() => {
-                resetForm();
-                setShowModal(true);
-              }}
+              onClick={() => setShowCreateWizard(true)}
             >
               <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                 <path
@@ -378,163 +310,16 @@ export default function WikiPage() {
         </div>
       )}
 
-      {/* Create/Edit Modal */}
-      {showModal && (
-        <div
-          className="modal-overlay"
-          onClick={() => setShowModal(false)}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              setShowModal(false);
-            }
-          }}
-          role="button"
-          tabIndex={0}
-        >
-          <div
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-          >
-            <div className="modal-header">
-              <h2>Add Knowledge Entry</h2>
-              <button
-                type="button"
-                className="modal-close"
-                onClick={() => setShowModal(false)}
-                aria-label="Close modal"
-              >
-                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
-              </button>
-            </div>
-            <form onSubmit={handleCreateKnowledge}>
-              <div className="modal-body">
-                {formErrors._root && (
-                  <div className="alert alert-error" role="alert">
-                    {formErrors._root}
-                  </div>
-                )}
-
-                <div className="form-group">
-                  <label htmlFor="title">Title</label>
-                  <input
-                    id="title"
-                    type="text"
-                    value={formData.title}
-                    onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                    placeholder="Enter a title"
-                    required
-                  />
-                  {formErrors.title && <div className="error">{formErrors.title}</div>}
-                </div>
-
-                <div className="form-group">
-                  <label htmlFor="type">Type</label>
-                  <select
-                    id="type"
-                    value={formData.type}
-                    onChange={(e) =>
-                      setFormData({ ...formData, type: e.target.value as KnowledgeType })
-                    }
-                  >
-                    <option value="text">Text</option>
-                    <option value="url">URL</option>
-                  </select>
-                  {formErrors.type && <div className="error">{formErrors.type}</div>}
-                </div>
-
-                <div className="form-group">
-                  <label htmlFor="content">{formData.type === 'url' ? 'URL' : 'Content'}</label>
-                  {formData.type === 'url' ? (
-                    <input
-                      id="content"
-                      type="url"
-                      value={formData.content}
-                      onChange={(e) => setFormData({ ...formData, content: e.target.value })}
-                      placeholder="https://example.com"
-                      required
-                    />
-                  ) : (
-                    <textarea
-                      id="content"
-                      value={formData.content}
-                      onChange={(e) => setFormData({ ...formData, content: e.target.value })}
-                      placeholder="Enter your content"
-                      required
-                    />
-                  )}
-                  {formErrors.content && <div className="error">{formErrors.content}</div>}
-                </div>
-
-                <div className="form-group">
-                  <label htmlFor="tags">Tags (press Enter to add)</label>
-                  <div className="tag-input-wrapper">
-                    {formData.tags?.map((tag) => (
-                      <span key={tag} className="tag-item">
-                        {tag}
-                        <button
-                          type="button"
-                          className="tag-remove"
-                          onClick={() => handleRemoveTag(tag)}
-                          aria-label={`Remove tag ${tag}`}
-                        >
-                          <svg
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                            aria-hidden="true"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M6 18L18 6M6 6l12 12"
-                            />
-                          </svg>
-                        </button>
-                      </span>
-                    ))}
-                    <input
-                      id="tags"
-                      type="text"
-                      value={tagInput}
-                      onChange={(e) => setTagInput(e.target.value)}
-                      onKeyDown={handleAddTag}
-                      placeholder="Add tags..."
-                    />
-                  </div>
-                  {formErrors.tags && <div className="error">{formErrors.tags}</div>}
-                </div>
-              </div>
-              <div className="modal-footer">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setShowModal(false)}
-                  disabled={submitting}
-                >
-                  Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={submitting}>
-                  {submitting ? 'Creating...' : 'Create Entry'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Create Knowledge Wizard */}
+      <CreateKnowledgeWizard
+        isOpen={showCreateWizard}
+        onClose={() => setShowCreateWizard(false)}
+        onCreated={handleEntryCreated}
+        createEntry={createEntry}
+      />
 
       {/* View Entry Modal */}
-      {selectedEntry && !showModal && (
+      {selectedEntry && !showCreateWizard && (
         <div
           className="modal-overlay"
           onClick={() => setSelectedEntry(null)}

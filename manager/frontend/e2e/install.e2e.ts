@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 test.describe('Model Installation', () => {
   test.beforeEach(async ({ context, page }) => {
@@ -87,7 +87,7 @@ test.describe('Install from Browse', () => {
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -132,8 +132,10 @@ test.describe('Install from Browse', () => {
     await page.locator('.browse-item').first().click();
     await expect(page.locator('.modal-details')).toBeVisible();
 
-    // Click install in modal - uses Button component with ui-btn--primary class
-    await page.locator('.modal-details .ui-btn--primary').click();
+    await page
+      .locator('.modal-details')
+      .getByRole('button', { name: 'Install Model' })
+      .click();
 
     // Switch to Installed tab to see the form
     await page.click('button.main-tab:has-text("Installed")');

@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import { routeApi } from '../test-utils';
 
 /**
  * Sets up authenticated state for e2e tests by storing mock tokens in localStorage.
@@ -124,7 +125,31 @@ export async function clearAuth(page: Page): Promise<void> {
  * Common mock for models and browse endpoints that most pages need.
  */
 export async function mockCommonEndpoints(page: Page): Promise<void> {
-  await page.route('**/api/models*', (route) => {
+  const isApiEndpoint = (url: string) => {
+    // Skip source files (Vite dev server)
+    if (url.includes('/src/') || url.endsWith('.ts') || url.endsWith('.tsx')) {
+      return false;
+    }
+    return true;
+  };
+
+  await routeApi(page, '**/api/auth/refresh', (route) => {
+    if (!isApiEndpoint(route.request().url())) {
+      route.continue();
+      return;
+    }
+    route.fulfill({
+      status: 401,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'Invalid refresh token' }),
+    });
+  });
+
+  await routeApi(page, '**/api/models*', (route) => {
+    if (!isApiEndpoint(route.request().url())) {
+      route.continue();
+      return;
+    }
     const url = new URL(route.request().url());
     const source = url.searchParams.get('source');
 
@@ -145,44 +170,80 @@ export async function mockCommonEndpoints(page: Page): Promise<void> {
   });
 
   // Mock organizations and workspaces for context switcher
-  await page.route('**/api/organizations', (route) => {
+  const orgResponse = {
+    organizations: [
+      {
+        id: '00000000-0000-0000-0000-000000000001',
+        name: 'Default Org',
+        slug: 'default',
+        description: null,
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+  };
+
+  const workspaceResponse = {
+    workspaces: [
+      {
+        id: '00000000-0000-0000-0000-000000000001',
+        organization_id: '00000000-0000-0000-0000-000000000001',
+        name: 'Default Workspace',
+        slug: 'default',
+        description: null,
+        is_active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+  };
+
+  // Handle organizations with and without query params (e.g., ?active=true)
+  await routeApi(page, '**/api/organizations?**', (route) => {
+    if (!isApiEndpoint(route.request().url())) {
+      route.continue();
+      return;
+    }
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        organizations: [
-          {
-            id: '00000000-0000-0000-0000-000000000001',
-            name: 'Default Org',
-            slug: 'default',
-            description: null,
-            is_active: true,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-        ],
-      }),
+      body: JSON.stringify(orgResponse),
+    });
+  });
+  await routeApi(page, '**/api/organizations', (route) => {
+    if (!isApiEndpoint(route.request().url())) {
+      route.continue();
+      return;
+    }
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(orgResponse),
     });
   });
 
-  await page.route('**/api/organizations/*/workspaces', (route) => {
+  // Handle workspaces with and without query params (e.g., ?active=true)
+  await routeApi(page, '**/api/organizations/*/workspaces?**', (route) => {
+    if (!isApiEndpoint(route.request().url())) {
+      route.continue();
+      return;
+    }
     route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({
-        workspaces: [
-          {
-            id: '00000000-0000-0000-0000-000000000001',
-            organization_id: '00000000-0000-0000-0000-000000000001',
-            name: 'Default Workspace',
-            slug: 'default',
-            description: null,
-            is_active: true,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-        ],
-      }),
+      body: JSON.stringify(workspaceResponse),
+    });
+  });
+  await routeApi(page, '**/api/organizations/*/workspaces', (route) => {
+    if (!isApiEndpoint(route.request().url())) {
+      route.continue();
+      return;
+    }
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(workspaceResponse),
     });
   });
 }

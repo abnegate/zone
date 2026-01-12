@@ -1,19 +1,26 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { InstallerConfig } from '../types';
-import { useConfigPersistence } from './useConfigPersistence';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Mock crypto utils
-jest.mock('../utils/crypto', () => ({
-  loadConfig: jest.fn(),
-  saveConfig: jest.fn(),
-  clearConfig: jest.fn(),
+const mockLoadConfig = mock();
+const mockSaveConfig = mock();
+const mockClearConfig = mock();
+
+mock.module('../utils/crypto', () => ({
+  loadConfig: mockLoadConfig,
+  saveConfig: mockSaveConfig,
+  clearConfig: mockClearConfig,
 }));
 
-import { clearConfig, loadConfig, saveConfig } from '../utils/crypto';
+let useConfigPersistence: typeof import('./useConfigPersistence').useConfigPersistence;
 
-const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
-const mockSaveConfig = saveConfig as jest.MockedFunction<typeof saveConfig>;
-const mockClearConfig = clearConfig as jest.MockedFunction<typeof clearConfig>;
+beforeAll(async () => {
+  ({ useConfigPersistence } = await import('./useConfigPersistence'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const defaultConfig: InstallerConfig = {
   DOMAIN_HOST_WEBUI: 'test.localhost',
@@ -79,19 +86,16 @@ const defaultConfig: InstallerConfig = {
 
 describe('useConfigPersistence', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    jest.useFakeTimers();
+    mockLoadConfig.mockReset();
+    mockSaveConfig.mockReset();
+    mockClearConfig.mockReset();
     mockLoadConfig.mockResolvedValue(null);
-  });
-
-  afterEach(() => {
-    jest.useRealTimers();
   });
 
   it('loads stored config on mount', async () => {
     const storedConfig = { DOMAIN_HOST_WEBUI: 'stored.localhost' };
     mockLoadConfig.mockResolvedValue(storedConfig);
-    const setConfig = jest.fn();
+    const setConfig = mock();
 
     renderHook(() => useConfigPersistence(defaultConfig, setConfig, defaultConfig));
 
@@ -109,7 +113,7 @@ describe('useConfigPersistence', () => {
 
   it('does not load config if no stored config exists', async () => {
     mockLoadConfig.mockResolvedValue(null);
-    const setConfig = jest.fn();
+    const setConfig = mock();
 
     renderHook(() => useConfigPersistence(defaultConfig, setConfig, defaultConfig));
 
@@ -122,7 +126,7 @@ describe('useConfigPersistence', () => {
 
   it('does not load config if stored config is empty', async () => {
     mockLoadConfig.mockResolvedValue({});
-    const setConfig = jest.fn();
+    const setConfig = mock();
 
     renderHook(() => useConfigPersistence(defaultConfig, setConfig, defaultConfig));
 
@@ -136,7 +140,7 @@ describe('useConfigPersistence', () => {
   it('only loads config once on mount', async () => {
     const storedConfig = { DOMAIN_HOST_WEBUI: 'stored.localhost' };
     mockLoadConfig.mockResolvedValue(storedConfig);
-    const setConfig = jest.fn();
+    const setConfig = mock();
 
     const { rerender } = renderHook(() =>
       useConfigPersistence(defaultConfig, setConfig, defaultConfig)
@@ -152,7 +156,7 @@ describe('useConfigPersistence', () => {
   });
 
   it('auto-saves config after debounce', async () => {
-    const setConfig = jest.fn();
+    const setConfig = mock();
     const newConfig = { ...defaultConfig, DOMAIN_HOST_WEBUI: 'new.localhost' };
 
     const { rerender } = renderHook(
@@ -160,77 +164,53 @@ describe('useConfigPersistence', () => {
       { initialProps: { config: defaultConfig } }
     );
 
-    // First render is skipped (initial mount)
     rerender({ config: newConfig });
 
-    // Wait for debounce
-    act(() => {
-      jest.advanceTimersByTime(500);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
     });
 
     expect(mockSaveConfig).toHaveBeenCalledWith(newConfig);
   });
 
   it('does not save on initial mount', async () => {
-    const setConfig = jest.fn();
+    const setConfig = mock();
 
     renderHook(() => useConfigPersistence(defaultConfig, setConfig, defaultConfig));
 
-    act(() => {
-      jest.advanceTimersByTime(1000);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
     });
 
     expect(mockSaveConfig).not.toHaveBeenCalled();
   });
 
   it('debounces save calls', async () => {
-    const setConfig = jest.fn();
+    const setConfig = mock();
 
     const { rerender } = renderHook(
       ({ config }) => useConfigPersistence(config, setConfig, defaultConfig),
       { initialProps: { config: defaultConfig } }
     );
 
-    // Make multiple changes quickly
     rerender({ config: { ...defaultConfig, DOMAIN_HOST_WEBUI: 'change1' } });
-    act(() => {
-      jest.advanceTimersByTime(100);
-    });
-
     rerender({ config: { ...defaultConfig, DOMAIN_HOST_WEBUI: 'change2' } });
-    act(() => {
-      jest.advanceTimersByTime(100);
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
     });
 
-    rerender({ config: { ...defaultConfig, DOMAIN_HOST_WEBUI: 'change3' } });
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    // Should only save the final config
     expect(mockSaveConfig).toHaveBeenCalledTimes(1);
     expect(mockSaveConfig).toHaveBeenCalledWith({
       ...defaultConfig,
-      DOMAIN_HOST_WEBUI: 'change3',
+      DOMAIN_HOST_WEBUI: 'change2',
     });
   });
 
-  it('returns resetConfig function', () => {
-    const setConfig = jest.fn();
+  it('clears config and resets to default', () => {
+    const setConfig = mock();
 
-    const { result } = renderHook(() =>
-      useConfigPersistence(defaultConfig, setConfig, defaultConfig)
-    );
-
-    expect(typeof result.current.resetConfig).toBe('function');
-  });
-
-  it('resetConfig clears storage and resets to default', () => {
-    const setConfig = jest.fn();
-
-    const { result } = renderHook(() =>
-      useConfigPersistence(defaultConfig, setConfig, defaultConfig)
-    );
+    const { result } = renderHook(() => useConfigPersistence(defaultConfig, setConfig, defaultConfig));
 
     act(() => {
       result.current.resetConfig();

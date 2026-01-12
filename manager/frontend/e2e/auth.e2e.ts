@@ -1,4 +1,6 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect } from './fixtures';
+import { routeApi } from './test-utils';
+import type { Page } from '@playwright/test';
 
 // Helper to create a mock JWT token with embedded roles and permissions
 // JWT format: header.payload.signature (all base64url encoded)
@@ -42,25 +44,23 @@ const mockAuthResponse = (user = {}) => {
     exp: Math.floor(Date.now() / 1000) + 900, // Expires in 15 minutes
   });
   return {
-    data: {
-      access_token: token,
-      refresh_token: 'mock-refresh-token',
-      expires_in: 900,
-      user: {
-        id: 'user-1',
-        email: 'test@example.com',
-        email_verified: true,
-        display_name: 'Test User',
-        is_active: true,
-        is_admin: false,
-        created_at: '2024-01-01T00:00:00Z',
-        updated_at: '2024-01-01T00:00:00Z',
-        last_login_at: null,
-        ...user,
-      },
-      roles: ['user'],
-      permissions: userPermissions,
+    access_token: token,
+    refresh_token: 'mock-refresh-token',
+    expires_in: 900,
+    user: {
+      id: 'user-1',
+      email: 'test@example.com',
+      email_verified: true,
+      display_name: 'Test User',
+      is_active: true,
+      is_admin: false,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      last_login_at: null,
+      ...user,
     },
+    roles: ['user'],
+    permissions: userPermissions,
   };
 };
 
@@ -73,29 +73,27 @@ const mockAdminAuthResponse = () => {
     exp: Math.floor(Date.now() / 1000) + 900,
   });
   return {
-    data: {
-      access_token: token,
-      refresh_token: 'mock-refresh-token',
-      expires_in: 900,
-      user: {
-        id: 'admin-1',
-        email: 'admin@example.com',
-        email_verified: true,
-        display_name: 'Admin User',
-        is_active: true,
-        is_admin: true,
-        created_at: '2024-01-01T00:00:00Z',
-        updated_at: '2024-01-01T00:00:00Z',
-        last_login_at: null,
-      },
-      roles: ['admin', 'user'],
-      permissions: adminPermissions,
+    access_token: token,
+    refresh_token: 'mock-refresh-token',
+    expires_in: 900,
+    user: {
+      id: 'admin-1',
+      email: 'admin@example.com',
+      email_verified: true,
+      display_name: 'Admin User',
+      is_active: true,
+      is_admin: true,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+      last_login_at: null,
     },
+    roles: ['admin', 'user'],
+    permissions: adminPermissions,
   };
 };
 
 async function mockModelsAndBrowse(page: Page) {
-  await page.route('**/api/models*', (route) => {
+  await routeApi(page, '**/api/models*', (route) => {
     const url = new URL(route.request().url());
     const source = url.searchParams.get('source');
 
@@ -115,7 +113,7 @@ async function mockModelsAndBrowse(page: Page) {
     });
   });
 
-  await page.route('**/api/organizations', (route) => {
+  await routeApi(page, '**/api/organizations', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -135,7 +133,7 @@ async function mockModelsAndBrowse(page: Page) {
     });
   });
 
-  await page.route('**/api/organizations/*/workspaces', (route) => {
+  await routeApi(page, '**/api/organizations/*/workspaces', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -168,7 +166,7 @@ test.describe('Login Page', () => {
   test('displays login form with correct elements', async ({ page }) => {
     await page.goto('/login');
 
-    await expect(page.locator('h1')).toContainText('Zone');
+    await expect(page.locator('.zone-logo__text')).toContainText('Zone');
     await expect(page.locator('input[type="email"]')).toBeVisible();
     await expect(page.locator('input[type="password"]')).toBeVisible();
     await expect(page.locator('button[type="submit"]')).toHaveText('Sign In');
@@ -182,7 +180,7 @@ test.describe('Login Page', () => {
     await page.click('button[type="submit"]');
 
     // Validation errors appear as field-level errors
-    await expect(page.locator('.ui-form-field__error')).toBeVisible();
+    await expect(page.locator('[id$="-error"][role="alert"]')).toBeVisible();
   });
 
   test('shows validation error for empty password', async ({ page }) => {
@@ -192,11 +190,11 @@ test.describe('Login Page', () => {
     await page.click('button[type="submit"]');
 
     // Validation errors appear as field-level errors
-    await expect(page.locator('.ui-form-field__error')).toBeVisible();
+    await expect(page.locator('[id$="-error"][role="alert"]')).toBeVisible();
   });
 
   test('shows error for invalid credentials', async ({ page }) => {
-    await page.route('**/api/auth/login', (route) => {
+    await routeApi(page, '**/api/auth/login', (route) => {
       route.fulfill({
         status: 401,
         contentType: 'application/json',
@@ -213,7 +211,7 @@ test.describe('Login Page', () => {
   });
 
   test('shows loading state during authentication', async ({ page }) => {
-    await page.route('**/api/auth/login', async (route) => {
+    await routeApi(page, '**/api/auth/login', async (route) => {
       await new Promise(resolve => setTimeout(resolve, 500));
       route.fulfill({
         status: 200,
@@ -235,7 +233,7 @@ test.describe('Login Page', () => {
   });
 
   test('successful login redirects to home and stores tokens', async ({ page }) => {
-    await page.route('**/api/auth/login', (route) => {
+    await routeApi(page, '**/api/auth/login', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -270,7 +268,7 @@ test.describe('Login Page', () => {
   });
 
   test('can submit form with Enter key', async ({ page }) => {
-    await page.route('**/api/auth/login', (route) => {
+    await routeApi(page, '**/api/auth/login', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -298,7 +296,7 @@ test.describe('Register Page', () => {
   test('displays registration form with correct elements', async ({ page }) => {
     await page.goto('/register');
 
-    await expect(page.locator('h1')).toContainText('Zone');
+    await expect(page.locator('.zone-logo__text')).toContainText('Zone');
     await expect(page.locator('input[type="email"]')).toBeVisible();
     await expect(page.locator('input[type="text"][placeholder*="optional"]')).toBeVisible();
     await expect(page.locator('input[type="password"]').first()).toBeVisible();
@@ -314,7 +312,7 @@ test.describe('Register Page', () => {
     await page.fill('input[placeholder="Repeat your password"]', 'different123');
     await page.click('button[type="submit"]');
 
-    await expect(page.locator('.ui-form-field__error')).toContainText('Passwords do not match');
+    await expect(page.locator('[role="alert"]', { hasText: 'Passwords do not match' })).toBeVisible();
   });
 
   test('shows validation error for short password', async ({ page }) => {
@@ -325,11 +323,11 @@ test.describe('Register Page', () => {
     await page.fill('input[placeholder="Repeat your password"]', 'short');
     await page.click('button[type="submit"]');
 
-    await expect(page.locator('.ui-form-field__error')).toBeVisible();
+    await expect(page.locator('[id$="-error"][role="alert"]')).toBeVisible();
   });
 
   test('shows error for duplicate email', async ({ page }) => {
-    await page.route('**/api/auth/register', (route) => {
+    await routeApi(page, '**/api/auth/register', (route) => {
       route.fulfill({
         status: 400,
         contentType: 'application/json',
@@ -347,7 +345,7 @@ test.describe('Register Page', () => {
   });
 
   test('first user registration shows admin message', async ({ page }) => {
-    await page.route('**/api/auth/register', (route) => {
+    await routeApi(page, '**/api/auth/register', (route) => {
       route.fulfill({
         status: 201,
         contentType: 'application/json',
@@ -368,7 +366,7 @@ test.describe('Register Page', () => {
   });
 
   test('successful registration redirects to home', async ({ page }) => {
-    await page.route('**/api/auth/register', (route) => {
+    await routeApi(page, '**/api/auth/register', (route) => {
       route.fulfill({
         status: 201,
         contentType: 'application/json',
@@ -535,7 +533,7 @@ test.describe('Logout', () => {
 
     await mockModelsAndBrowse(page);
 
-    await page.route('**/api/auth/logout', (route) => {
+    await routeApi(page, '**/api/auth/logout', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -571,7 +569,7 @@ test.describe('Logout', () => {
 test.describe('Token Persistence', () => {
   test('persists authentication across page reloads', async ({ page }) => {
     // Login first
-    await page.route('**/api/auth/login', (route) => {
+    await routeApi(page, '**/api/auth/login', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -621,7 +619,7 @@ test.describe('Token Persistence', () => {
     await mockModelsAndBrowse(page);
 
     // Refresh also fails
-    await page.route('**/api/auth/refresh', (route) => {
+    await routeApi(page, '**/api/auth/refresh', (route) => {
       route.fulfill({ status: 401, body: 'Refresh token expired' });
     });
 
@@ -665,7 +663,7 @@ test.describe('Permission-Based UI', () => {
 
     await mockModelsAndBrowse(page);
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 

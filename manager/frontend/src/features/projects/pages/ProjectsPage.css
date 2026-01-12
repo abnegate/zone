@@ -524,3 +524,195 @@
     max-width: 150px;
   }
 }
+
+/* =============================================================================
+   Wizard Step Content Styles
+   ============================================================================= */
+
+.wizard-step-content {
+  min-height: 200px;
+}
+
+.wizard-step-intro {
+  margin: 0 0 var(--ui-space-5) 0;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-relaxed);
+}
+
+.wizard-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--ui-space-10);
+  color: var(--ui-text-muted);
+}
+
+.wizard-empty-state {
+  text-align: center;
+  padding: var(--ui-space-8);
+  color: var(--ui-text-muted);
+}
+
+.wizard-empty-state p {
+  margin: 0 0 var(--ui-space-2) 0;
+}
+
+.wizard-empty-hint {
+  font-size: var(--ui-text-sm);
+  opacity: 0.8;
+}
+
+/* Source Selection Grid */
+.source-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--ui-space-3);
+}
+
+.source-selection-option {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-3);
+  padding: var(--ui-space-4);
+  background: var(--ui-bg-surface);
+  border: 2px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.source-selection-option:hover {
+  border-color: var(--ui-border-strong);
+  background: var(--ui-bg-hover);
+}
+
+.source-selection-option.selected {
+  border-color: var(--ui-accent-500);
+  background: var(--ui-accent-muted);
+}
+
+.source-selection-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--ui-radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-muted);
+}
+
+.source-selection-icon.none {
+  background: var(--ui-bg-muted);
+}
+
+.source-selection-icon.github {
+  background: rgba(147, 51, 234, 0.15);
+  color: #9333ea;
+}
+
+.source-selection-icon.gitlab {
+  background: rgba(249, 115, 22, 0.15);
+  color: #f97316;
+}
+
+.source-selection-icon.filesystem {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.source-type-initial {
+  font-weight: 600;
+  font-size: var(--ui-text-lg);
+}
+
+.source-selection-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.source-selection-name {
+  font-weight: 600;
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-selection-desc {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+  text-transform: capitalize;
+}
+
+/* Status Selection Grid */
+.status-selection-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+}
+
+.status-selection-option {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-4);
+  padding: var(--ui-space-4);
+  background: var(--ui-bg-surface);
+  border: 2px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.status-selection-option:hover {
+  border-color: var(--ui-border-strong);
+  background: var(--ui-bg-hover);
+}
+
+.status-selection-option.selected {
+  border-color: var(--ui-accent-500);
+  background: var(--ui-accent-muted);
+}
+
+.status-indicator {
+  width: 16px;
+  height: 16px;
+  border-radius: var(--ui-radius-full);
+  flex-shrink: 0;
+}
+
+.status-indicator.status-active {
+  background: var(--ui-success-500);
+}
+
+.status-indicator.status-on_hold {
+  background: var(--ui-warning-500);
+}
+
+.status-indicator.status-cancelled {
+  background: var(--ui-error-500);
+}
+
+.status-selection-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+}
+
+.status-selection-name {
+  font-weight: 600;
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-primary);
+}
+
+.status-selection-desc {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+}

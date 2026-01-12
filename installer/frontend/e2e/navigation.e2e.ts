@@ -6,7 +6,7 @@ test.describe('Installer Navigation', () => {
   });
 
   test('displays installer form', async ({ page }) => {
-    await expect(page.locator('h1')).toContainText('Zone');
+    await expect(page.locator('.zone-logo__text')).toContainText('Zone');
   });
 
   test('shows step items', async ({ page }) => {

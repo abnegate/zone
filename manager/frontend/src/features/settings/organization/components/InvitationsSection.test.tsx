@@ -1,11 +1,28 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { InvitationsSection } from './InvitationsSection';
-import { client } from '../../../../api/client';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Invitation, Workspace } from '../types';
 
-jest.mock('../../../../api/client');
+const mockGetInvitations = mock();
+const mockCreateInvitation = mock();
+const mockRevokeInvitation = mock();
 
-const mockClient = client as jest.Mocked<typeof client>;
+mock.module('../../../../api/client', () => ({
+  client: {
+    getInvitations: mockGetInvitations,
+    createInvitation: mockCreateInvitation,
+    revokeInvitation: mockRevokeInvitation,
+  },
+}));
+
+let InvitationsSection: typeof import('./InvitationsSection').InvitationsSection;
+
+beforeAll(async () => {
+  ({ InvitationsSection } = await import('./InvitationsSection'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('InvitationsSection', () => {
   const orgId = 'org-123';
@@ -63,7 +80,7 @@ describe('InvitationsSection', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockClient.getInvitations.mockResolvedValue({ invitations: mockInvitations });
+    mockGetInvitations.mockResolvedValue({ invitations: mockInvitations });
   });
 
   it('renders loading state initially', () => {
@@ -75,7 +92,7 @@ describe('InvitationsSection', () => {
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
     await waitFor(() => {
-      expect(mockClient.getInvitations).toHaveBeenCalledWith(orgId);
+      expect(mockGetInvitations).toHaveBeenCalledWith(orgId);
     });
 
     expect(screen.getByText('invitee1@test.com')).toBeInTheDocument();
@@ -84,7 +101,7 @@ describe('InvitationsSection', () => {
   });
 
   it('displays empty state when no invitations', async () => {
-    mockClient.getInvitations.mockResolvedValue({ invitations: [] });
+    mockGetInvitations.mockResolvedValue({ invitations: [] });
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
@@ -96,7 +113,7 @@ describe('InvitationsSection', () => {
   });
 
   it('displays error message on fetch failure', async () => {
-    mockClient.getInvitations.mockRejectedValue(new Error('Network error'));
+    mockGetInvitations.mockRejectedValue(new Error('Network error'));
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
@@ -120,7 +137,7 @@ describe('InvitationsSection', () => {
   });
 
   it('submits org-only invitation', async () => {
-    mockClient.createInvitation.mockResolvedValue(mockInvitations[1]);
+    mockCreateInvitation.mockResolvedValue(mockInvitations[1]);
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
@@ -143,7 +160,7 @@ describe('InvitationsSection', () => {
     fireEvent.submit(screen.getByRole('button', { name: /send invitation/i }).closest('form')!);
 
     await waitFor(() => {
-      expect(mockClient.createInvitation).toHaveBeenCalledWith(orgId, {
+      expect(mockCreateInvitation).toHaveBeenCalledWith(orgId, {
         email: 'newuser@test.com',
         org_role: 'admin',
       });
@@ -153,11 +170,11 @@ describe('InvitationsSection', () => {
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: /invite member/i })).not.toBeInTheDocument();
     });
-    expect(mockClient.getInvitations).toHaveBeenCalledTimes(2);
+    expect(mockGetInvitations).toHaveBeenCalledTimes(2);
   });
 
   it('submits invitation with workspace', async () => {
-    mockClient.createInvitation.mockResolvedValue(mockInvitations[0]);
+    mockCreateInvitation.mockResolvedValue(mockInvitations[0]);
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
@@ -192,7 +209,7 @@ describe('InvitationsSection', () => {
     fireEvent.submit(screen.getByRole('button', { name: /send invitation/i }).closest('form')!);
 
     await waitFor(() => {
-      expect(mockClient.createInvitation).toHaveBeenCalledWith(orgId, {
+      expect(mockCreateInvitation).toHaveBeenCalledWith(orgId, {
         email: 'dev@test.com',
         org_role: 'member',
         workspace_id: 'ws-1',
@@ -202,7 +219,7 @@ describe('InvitationsSection', () => {
   });
 
   it('displays error when invitation creation fails', async () => {
-    mockClient.createInvitation.mockRejectedValue(new Error('Email already invited'));
+    mockCreateInvitation.mockRejectedValue(new Error('Email already invited'));
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
@@ -226,7 +243,7 @@ describe('InvitationsSection', () => {
   });
 
   it('revokes invitation when revoke button clicked', async () => {
-    mockClient.revokeInvitation.mockResolvedValue();
+    mockRevokeInvitation.mockResolvedValue();
     global.confirm = jest.fn(() => true);
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
@@ -241,11 +258,11 @@ describe('InvitationsSection', () => {
     expect(global.confirm).toHaveBeenCalledWith('Are you sure you want to revoke this invitation?');
 
     await waitFor(() => {
-      expect(mockClient.revokeInvitation).toHaveBeenCalledWith(orgId, 'inv-1');
+      expect(mockRevokeInvitation).toHaveBeenCalledWith(orgId, 'inv-1');
     });
 
     // Should reload invitations
-    expect(mockClient.getInvitations).toHaveBeenCalledTimes(2);
+    expect(mockGetInvitations).toHaveBeenCalledTimes(2);
   });
 
   it('does not revoke invitation when user cancels confirmation', async () => {
@@ -260,7 +277,7 @@ describe('InvitationsSection', () => {
     const revokeButtons = screen.getAllByRole('button', { name: /revoke/i });
     fireEvent.click(revokeButtons[0]);
 
-    expect(mockClient.revokeInvitation).not.toHaveBeenCalled();
+    expect(mockRevokeInvitation).not.toHaveBeenCalled();
   });
 
   it('displays expired invitation with visual indicator', async () => {
@@ -269,7 +286,7 @@ describe('InvitationsSection', () => {
       expires_at: '2023-01-01T00:00:00Z',
     };
 
-    mockClient.getInvitations.mockResolvedValue({ invitations: [expiredInvitation] });
+    mockGetInvitations.mockResolvedValue({ invitations: [expiredInvitation] });
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 

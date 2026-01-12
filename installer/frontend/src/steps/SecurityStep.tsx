@@ -1,23 +1,27 @@
 import type React from 'react';
+import { useFormContext } from 'react-hook-form';
 import { Button, Checkbox, InfoBox, Input } from '../components';
 import { useSecretGenerator } from '../hooks';
 import type { InstallerConfig } from '../types';
 
-interface SecurityStepProps {
-  config: InstallerConfig;
-  onChange: (key: keyof InstallerConfig, value: string) => void;
-  getFieldError: (field: string) => string | undefined;
-}
-
-export function SecurityStep({ config, onChange, getFieldError }: SecurityStepProps) {
+export function SecurityStep() {
+  const {
+    register,
+    setValue,
+    watch,
+    formState: { errors },
+  } = useFormContext<InstallerConfig>();
   const { generateSecret } = useSecretGenerator();
+  const httpRedirectEnabled = watch('SECURITY_HTTP_REDIRECT') === 'true';
+  const certificateEnabled = watch('SECURITY_GENERATE_CERTIFICATE') === 'true';
 
   const handleGenerateAll = () => {
-    onChange('SECURITY_LITELLM_MASTER_KEY', generateSecret());
-    onChange('SECURITY_LITELLM_SALT_KEY', generateSecret());
-    onChange('SECURITY_SEARXNG_SECRET_KEY', generateSecret());
-    onChange('SECURITY_MANAGER_API_KEY', generateSecret());
-    onChange('POSTGRES_PASSWORD', generateSecret());
+    const options = { shouldDirty: true, shouldValidate: true };
+    setValue('SECURITY_LITELLM_MASTER_KEY', generateSecret(), options);
+    setValue('SECURITY_LITELLM_SALT_KEY', generateSecret(), options);
+    setValue('SECURITY_SEARXNG_SECRET_KEY', generateSecret(), options);
+    setValue('SECURITY_MANAGER_API_KEY', generateSecret(), options);
+    setValue('POSTGRES_PASSWORD', generateSecret(), options);
   };
 
   return (
@@ -30,71 +34,78 @@ export function SecurityStep({ config, onChange, getFieldError }: SecurityStepPr
       <Input
         label="Authentication Realm"
         type="text"
-        value={config.SECURITY_BASICAUTH_REALM}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('SECURITY_BASICAUTH_REALM', e.target.value)
-        }
-        error={getFieldError('SECURITY_BASICAUTH_REALM')}
+        error={errors.SECURITY_BASICAUTH_REALM?.message}
+        {...register('SECURITY_BASICAUTH_REALM')}
       />
 
       <Input
         label="LiteLLM Master Key"
         type="text"
-        value={config.SECURITY_LITELLM_MASTER_KEY}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('SECURITY_LITELLM_MASTER_KEY', e.target.value)
+        onGenerate={() =>
+          setValue('SECURITY_LITELLM_MASTER_KEY', generateSecret(), {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
         }
-        onGenerate={() => onChange('SECURITY_LITELLM_MASTER_KEY', generateSecret())}
         className="font-mono"
-        error={getFieldError('SECURITY_LITELLM_MASTER_KEY')}
+        error={errors.SECURITY_LITELLM_MASTER_KEY?.message}
+        {...register('SECURITY_LITELLM_MASTER_KEY')}
       />
 
       <Input
         label="LiteLLM Salt Key"
         type="text"
-        value={config.SECURITY_LITELLM_SALT_KEY}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('SECURITY_LITELLM_SALT_KEY', e.target.value)
+        onGenerate={() =>
+          setValue('SECURITY_LITELLM_SALT_KEY', generateSecret(), {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
         }
-        onGenerate={() => onChange('SECURITY_LITELLM_SALT_KEY', generateSecret())}
         className="font-mono"
-        error={getFieldError('SECURITY_LITELLM_SALT_KEY')}
+        error={errors.SECURITY_LITELLM_SALT_KEY?.message}
+        {...register('SECURITY_LITELLM_SALT_KEY')}
       />
 
       <Input
         label="SearXNG Secret Key"
         type="text"
-        value={config.SECURITY_SEARXNG_SECRET_KEY}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('SECURITY_SEARXNG_SECRET_KEY', e.target.value)
+        onGenerate={() =>
+          setValue('SECURITY_SEARXNG_SECRET_KEY', generateSecret(), {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
         }
-        onGenerate={() => onChange('SECURITY_SEARXNG_SECRET_KEY', generateSecret())}
         className="font-mono"
-        error={getFieldError('SECURITY_SEARXNG_SECRET_KEY')}
+        error={errors.SECURITY_SEARXNG_SECRET_KEY?.message}
+        {...register('SECURITY_SEARXNG_SECRET_KEY')}
       />
 
       <Input
         label="Manager API Key"
         type="text"
-        value={config.SECURITY_MANAGER_API_KEY}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('SECURITY_MANAGER_API_KEY', e.target.value)
+        onGenerate={() =>
+          setValue('SECURITY_MANAGER_API_KEY', generateSecret(), {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
         }
-        onGenerate={() => onChange('SECURITY_MANAGER_API_KEY', generateSecret())}
         className="font-mono"
-        error={getFieldError('SECURITY_MANAGER_API_KEY')}
+        error={errors.SECURITY_MANAGER_API_KEY?.message}
+        {...register('SECURITY_MANAGER_API_KEY')}
       />
 
       <Input
         label="PostgreSQL Password"
         type="text"
-        value={config.POSTGRES_PASSWORD}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('POSTGRES_PASSWORD', e.target.value)
+        onGenerate={() =>
+          setValue('POSTGRES_PASSWORD', generateSecret(), {
+            shouldDirty: true,
+            shouldValidate: true,
+          })
         }
-        onGenerate={() => onChange('POSTGRES_PASSWORD', generateSecret())}
         className="font-mono"
-        error={getFieldError('POSTGRES_PASSWORD')}
+        error={errors.POSTGRES_PASSWORD?.message}
+        {...register('POSTGRES_PASSWORD')}
       />
 
       <Button variant="generate" className="w-full" onClick={handleGenerateAll}>
@@ -106,9 +117,12 @@ export function SecurityStep({ config, onChange, getFieldError }: SecurityStepPr
       <div className="form-field">
         <Checkbox
           label="Enable HTTPS redirect"
-          checked={config.SECURITY_HTTP_REDIRECT === 'true'}
+          checked={httpRedirectEnabled}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-            onChange('SECURITY_HTTP_REDIRECT', e.target.checked ? 'true' : 'false')
+            setValue('SECURITY_HTTP_REDIRECT', e.target.checked ? 'true' : 'false', {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
           }
         />
         <p className="help-text" style={{ marginLeft: '2.25rem' }}>
@@ -119,9 +133,12 @@ export function SecurityStep({ config, onChange, getFieldError }: SecurityStepPr
       <div className="form-field">
         <Checkbox
           label="Auto-generate TLS certificate (Let's Encrypt)"
-          checked={config.SECURITY_GENERATE_CERTIFICATE === 'true'}
+          checked={certificateEnabled}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-            onChange('SECURITY_GENERATE_CERTIFICATE', e.target.checked ? 'true' : 'false')
+            setValue('SECURITY_GENERATE_CERTIFICATE', e.target.checked ? 'true' : 'false', {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
           }
         />
         <p className="help-text" style={{ marginLeft: '2.25rem' }}>
@@ -129,7 +146,7 @@ export function SecurityStep({ config, onChange, getFieldError }: SecurityStepPr
         </p>
       </div>
 
-      {config.SECURITY_GENERATE_CERTIFICATE === 'true' && (
+      {certificateEnabled && (
         <InfoBox variant="info">
           Set your ACME email in Advanced settings for certificate notifications.
         </InfoBox>

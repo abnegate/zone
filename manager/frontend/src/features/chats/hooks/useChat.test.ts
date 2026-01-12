@@ -1,10 +1,28 @@
 import { renderHook, waitFor } from '@testing-library/react';
-
-import { useChat } from './useChat';
-import { chatsApi } from '../../../api/chats';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { ChatWithMessages, Message } from '../types';
 
-jest.mock('../../../api/chats');
+const mockGetChat = mock();
+const mockSendMessage = mock();
+const mockDeleteMessage = mock();
+
+mock.module('../../../api/chats', () => ({
+  chatsApi: {
+    getChat: mockGetChat,
+    sendMessage: mockSendMessage,
+    deleteMessage: mockDeleteMessage,
+  },
+}));
+
+let useChat: typeof import('./useChat').useChat;
+
+beforeAll(async () => {
+  ({ useChat } = await import('./useChat'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useChat', () => {
   const mockMessages: Message[] = [
@@ -39,7 +57,7 @@ describe('useChat', () => {
   });
 
   it('should fetch chat on mount', async () => {
-    (chatsApi.getChat as jest.Mock).mockResolvedValue(mockChat);
+    mockGetChat.mockResolvedValue(mockChat);
 
     const { result } = renderHook(() => useChat('1'));
 
@@ -51,12 +69,12 @@ describe('useChat', () => {
 
     expect(result.current.chat).toEqual(mockChat);
     expect(result.current.error).toBeNull();
-    expect(chatsApi.getChat).toHaveBeenCalledWith('1');
+    expect(mockGetChat).toHaveBeenCalledWith('1');
   });
 
   it('should handle errors when fetching chat', async () => {
     const error = new Error('Failed to fetch chat');
-    (chatsApi.getChat as jest.Mock).mockRejectedValue(error);
+    mockGetChat.mockRejectedValue(error);
 
     const { result } = renderHook(() => useChat('1'));
 
@@ -76,8 +94,8 @@ describe('useChat', () => {
       content: 'New message',
       created_at: '2024-01-01T00:02:00Z',
     };
-    (chatsApi.getChat as jest.Mock).mockResolvedValue(mockChat);
-    (chatsApi.sendMessage as jest.Mock).mockResolvedValue(newMessage);
+    mockGetChat.mockResolvedValue(mockChat);
+    mockSendMessage.mockResolvedValue(newMessage);
 
     const { result } = renderHook(() => useChat('1'));
 
@@ -88,7 +106,7 @@ describe('useChat', () => {
     const message = await result.current.sendMessage({ content: 'New message' });
 
     expect(message).toEqual(newMessage);
-    expect(chatsApi.sendMessage).toHaveBeenCalledWith('1', { content: 'New message' });
+    expect(mockSendMessage).toHaveBeenCalledWith('1', { content: 'New message' });
     await waitFor(() => {
       expect(result.current.chat?.messages).toHaveLength(3);
     });
@@ -96,8 +114,8 @@ describe('useChat', () => {
   });
 
   it('should delete a message', async () => {
-    (chatsApi.getChat as jest.Mock).mockResolvedValue(mockChat);
-    (chatsApi.deleteMessage as jest.Mock).mockResolvedValue(undefined);
+    mockGetChat.mockResolvedValue(mockChat);
+    mockDeleteMessage.mockResolvedValue(undefined);
 
     const { result } = renderHook(() => useChat('1'));
 
@@ -107,7 +125,7 @@ describe('useChat', () => {
 
     await result.current.deleteMessage('m1');
 
-    expect(chatsApi.deleteMessage).toHaveBeenCalledWith('1', 'm1');
+    expect(mockDeleteMessage).toHaveBeenCalledWith('1', 'm1');
     await waitFor(() => {
       expect(result.current.chat?.messages).toHaveLength(1);
     });
@@ -115,7 +133,7 @@ describe('useChat', () => {
   });
 
   it('should refresh chat', async () => {
-    (chatsApi.getChat as jest.Mock).mockResolvedValue(mockChat);
+    mockGetChat.mockResolvedValue(mockChat);
 
     const { result } = renderHook(() => useChat('1'));
 
@@ -136,7 +154,7 @@ describe('useChat', () => {
         },
       ],
     };
-    (chatsApi.getChat as jest.Mock).mockResolvedValue(updatedChat);
+    mockGetChat.mockResolvedValue(updatedChat);
 
     await result.current.refresh();
 
@@ -147,8 +165,8 @@ describe('useChat', () => {
 
   it('should handle sending message with error', async () => {
     const error = new Error('Failed to send message');
-    (chatsApi.getChat as jest.Mock).mockResolvedValue(mockChat);
-    (chatsApi.sendMessage as jest.Mock).mockRejectedValue(error);
+    mockGetChat.mockResolvedValue(mockChat);
+    mockSendMessage.mockRejectedValue(error);
 
     const { result } = renderHook(() => useChat('1'));
 
@@ -163,7 +181,7 @@ describe('useChat', () => {
   });
 
   it('should not fetch when chatId is null', async () => {
-    (chatsApi.getChat as jest.Mock).mockResolvedValue(mockChat);
+    mockGetChat.mockResolvedValue(mockChat);
 
     const { result } = renderHook(() => useChat(null));
 
@@ -172,6 +190,6 @@ describe('useChat', () => {
     });
 
     expect(result.current.chat).toBeNull();
-    expect(chatsApi.getChat).not.toHaveBeenCalled();
+    expect(mockGetChat).not.toHaveBeenCalled();
   });
 });

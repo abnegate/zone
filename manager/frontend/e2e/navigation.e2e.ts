@@ -1,13 +1,13 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 test.describe('Navigation', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
 
-    await page.route('**/api/chats*', (route) => {
+    await routeApi(page, '**/api/chats*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -19,7 +19,7 @@ test.describe('Navigation', () => {
       }
     });
 
-    await page.route('**/api/projects*', (route) => {
+    await routeApi(page, '**/api/projects*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -31,7 +31,7 @@ test.describe('Navigation', () => {
       }
     });
 
-    await page.route('**/api/tasks*', (route) => {
+    await routeApi(page, '**/api/tasks*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -43,7 +43,7 @@ test.describe('Navigation', () => {
       }
     });
 
-    await page.route('**/api/sources*', (route) => {
+    await routeApi(page, '**/api/sources*', (route) => {
       const url = new URL(route.request().url());
       if (url.pathname.endsWith('/types')) {
         route.fulfill({
@@ -65,7 +65,7 @@ test.describe('Navigation', () => {
       }
     });
 
-    await page.route('**/api/knowledge*', (route) => {
+    await routeApi(page, '**/api/knowledge*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -77,7 +77,7 @@ test.describe('Navigation', () => {
       }
     });
 
-    await page.route('**/api/context/search*', (route) => {
+    await routeApi(page, '**/api/context/search*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -86,7 +86,7 @@ test.describe('Navigation', () => {
     });
 
     // Mock organization members for organization settings
-    await page.route('**/api/organizations/*/members*', (route) => {
+    await routeApi(page, '**/api/organizations/*/members*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -95,7 +95,7 @@ test.describe('Navigation', () => {
     });
 
     // Mock organization invitations
-    await page.route('**/api/organizations/*/invitations*', (route) => {
+    await routeApi(page, '**/api/organizations/*/invitations*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -104,7 +104,7 @@ test.describe('Navigation', () => {
     });
 
     // Mock workspace members
-    await page.route('**/api/workspaces/*/members*', (route) => {
+    await routeApi(page, '**/api/workspaces/*/members*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',

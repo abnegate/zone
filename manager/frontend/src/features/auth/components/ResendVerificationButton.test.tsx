@@ -1,20 +1,30 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { client } from '../../../api/client';
-import ResendVerificationButton from './ResendVerificationButton';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Mock client
-jest.mock('../../../api/client', () => ({
+const mockResendVerification = mock();
+
+mock.module('../../../api/client', () => ({
   client: {
-    resendVerification: jest.fn(),
+    resendVerification: mockResendVerification,
   },
 }));
+
+let ResendVerificationButton: typeof import('./ResendVerificationButton').default;
+
+beforeAll(async () => {
+  ResendVerificationButton = (await import('./ResendVerificationButton')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('ResendVerificationButton', () => {
   const mockEmail = 'test@example.com';
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockResendVerification.mockReset();
   });
 
   describe('Rendering', () => {
@@ -28,13 +38,13 @@ describe('ResendVerificationButton', () => {
       render(<ResendVerificationButton email={mockEmail} />);
 
       const button = screen.getByRole('button', { name: /resend verification/i });
-      expect(button).toHaveClass('ui-btn--secondary');
+      expect(button.className).toContain('bg-[var(--ui-bg-surface)]');
     });
   });
 
   describe('Resend Verification', () => {
     it('calls resendVerification with email when clicked', async () => {
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Verification email sent',
       });
@@ -43,11 +53,11 @@ describe('ResendVerificationButton', () => {
 
       await userEvent.click(screen.getByRole('button', { name: /resend verification/i }));
 
-      expect(client.resendVerification).toHaveBeenCalledWith(mockEmail);
+      expect(mockResendVerification).toHaveBeenCalledWith(mockEmail);
     });
 
     it('shows loading state during resend', async () => {
-      (client.resendVerification as jest.Mock).mockImplementation(
+      mockResendVerification.mockImplementation(
         () => new Promise((resolve) => setTimeout(resolve, 1000))
       );
 
@@ -59,7 +69,7 @@ describe('ResendVerificationButton', () => {
     });
 
     it('shows success message after successful resend', async () => {
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Verification email sent',
       });
@@ -74,7 +84,7 @@ describe('ResendVerificationButton', () => {
     });
 
     it('disables button after successful resend', async () => {
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Verification email sent',
       });
@@ -89,7 +99,7 @@ describe('ResendVerificationButton', () => {
     });
 
     it('shows error message on resend failure', async () => {
-      (client.resendVerification as jest.Mock).mockRejectedValue(new Error('Rate limit exceeded'));
+      mockResendVerification.mockRejectedValue(new Error('Rate limit exceeded'));
 
       render(<ResendVerificationButton email={mockEmail} />);
 
@@ -101,7 +111,7 @@ describe('ResendVerificationButton', () => {
     });
 
     it('re-enables button after error', async () => {
-      (client.resendVerification as jest.Mock).mockRejectedValue(new Error('Server error'));
+      mockResendVerification.mockRejectedValue(new Error('Server error'));
 
       render(<ResendVerificationButton email={mockEmail} />);
 
@@ -113,7 +123,7 @@ describe('ResendVerificationButton', () => {
     });
 
     it('handles non-Error objects in catch block', async () => {
-      (client.resendVerification as jest.Mock).mockRejectedValue('String error');
+      mockResendVerification.mockRejectedValue('String error');
 
       render(<ResendVerificationButton email={mockEmail} />);
 
@@ -127,8 +137,8 @@ describe('ResendVerificationButton', () => {
 
   describe('Callback', () => {
     it('calls onSuccess callback after successful resend', async () => {
-      const onSuccess = jest.fn();
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      const onSuccess = mock();
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Sent',
       });
@@ -143,8 +153,8 @@ describe('ResendVerificationButton', () => {
     });
 
     it('does not call onSuccess on error', async () => {
-      const onSuccess = jest.fn();
-      (client.resendVerification as jest.Mock).mockRejectedValue(new Error('Failed'));
+      const onSuccess = mock();
+      mockResendVerification.mockRejectedValue(new Error('Failed'));
 
       render(<ResendVerificationButton email={mockEmail} onSuccess={onSuccess} />);
 
@@ -158,7 +168,7 @@ describe('ResendVerificationButton', () => {
     });
 
     it('does not crash when onSuccess is not provided', async () => {
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Sent',
       });
@@ -178,7 +188,7 @@ describe('ResendVerificationButton', () => {
       render(<ResendVerificationButton email={mockEmail} variant="primary" />);
 
       const button = screen.getByRole('button', { name: /resend verification/i });
-      expect(button).toHaveClass('ui-btn--primary');
+      expect(button.className).toContain('from-[var(--ui-accent-500)]');
     });
 
     it('accepts custom className prop', () => {

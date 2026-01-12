@@ -1,9 +1,10 @@
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { client } from '../../../api/client';
 import { useAuth } from '../../../features/auth';
 import { useProjects, useSyncConfigs } from '../hooks';
+import { CreateProjectWizard } from '../components';
 import type {
-  CreateProjectRequest,
   CreateSyncConfigRequest,
   Project,
   ProjectStatus,
@@ -11,9 +12,7 @@ import type {
   SyncProvider,
   UpdateProjectRequest,
 } from '../types';
-import type { Source } from '../../../types';
 import {
-  CreateProjectRequestSchema,
   CreateSyncConfigRequestSchema,
   UpdateProjectRequestSchema,
 } from '../schemas';
@@ -47,8 +46,14 @@ export default function ProjectsPage() {
     deleteProject: deleteProjectMutation,
   } = useProjects(statusFilter);
 
+  // Sources query
+  const { data: sources = [] } = useQuery({
+    queryKey: ['sources'],
+    queryFn: () => client.getSources(),
+    enabled: isAuthenticated
+  });
+
   // State
-  const [sources, setSources] = useState<Source[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -76,50 +81,12 @@ export default function ProjectsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
-  // Load sources separately
-  const loadSources = useCallback(async () => {
-    if (!isAuthenticated) return;
-    try {
-      const sourceList = await client.getSources();
-      setSources(sourceList);
-    } catch (err) {
-      console.error('Failed to load sources:', err);
-    }
-  }, [isAuthenticated]);
-
-  useEffect(() => {
-    loadSources();
-  }, [loadSources]);
-
-  const handleCreateProject = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!isAuthenticated) return;
-
-    const request: CreateProjectRequest = {
-      name: formName.trim(),
-      description: formDescription.trim() || undefined,
-      status: formStatus,
-      source_id: formSourceId || undefined,
-    };
-
-    const errors = getErrors(CreateProjectRequestSchema, request);
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-
-    setFieldErrors({});
-    setSubmitting(true);
-    try {
-      await createProjectMutation(request);
-      setShowCreateModal(false);
-      resetForm();
-    } catch (err) {
-      console.error('Failed to create project:', err);
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const handleProjectCreated = useCallback(
+    (_project: Project) => {
+      // Project is already added to the list by the hook
+    },
+    []
+  );
 
   const handleUpdateProject = async (e: FormEvent) => {
     e.preventDefault();
@@ -556,97 +523,13 @@ export default function ProjectsPage() {
         </div>
       )}
 
-      {/* Create Project Modal */}
-      {showCreateModal && (
-        <div className="modal">
-          <div
-            className="modal-backdrop"
-            onClick={() => setShowCreateModal(false)}
-            onKeyDown={(e) => e.key === 'Escape' && setShowCreateModal(false)}
-            role="button"
-            tabIndex={0}
-            aria-label="Close modal"
-          />
-          <div className="modal-content">
-            <h3>New Project</h3>
-            <form onSubmit={handleCreateProject}>
-              <div className="form-group">
-                <label htmlFor="project-name">Name</label>
-                <input
-                  id="project-name"
-                  type="text"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  placeholder="Project name"
-                  className={fieldErrors.name ? 'input-error' : ''}
-                />
-                {fieldErrors.name && <span className="field-error">{fieldErrors.name}</span>}
-              </div>
-              <div className="form-group">
-                <label htmlFor="project-description">Description</label>
-                <textarea
-                  id="project-description"
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                  placeholder="Optional description"
-                  rows={3}
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="project-status">Status</label>
-                <select
-                  id="project-status"
-                  value={formStatus}
-                  onChange={(e) => setFormStatus(e.target.value as ProjectStatus)}
-                >
-                  <option value="active">Active</option>
-                  <option value="on_hold">On Hold</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label htmlFor="project-source">Source (optional)</label>
-                <select
-                  id="project-source"
-                  value={formSourceId}
-                  onChange={(e) => setFormSourceId(e.target.value)}
-                >
-                  <option value="">No source</option>
-                  {sources
-                    .filter((s) => s.is_active)
-                    .map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.source_type})
-                      </option>
-                    ))}
-                </select>
-              </div>
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setShowCreateModal(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="btn btn-primary"
-                  disabled={submitting || !formName.trim()}
-                >
-                  {submitting ? (
-                    <>
-                      <span className="spinner" /> Creating...
-                    </>
-                  ) : (
-                    'Create Project'
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Create Project Wizard */}
+      <CreateProjectWizard
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        onCreated={handleProjectCreated}
+        createProject={createProjectMutation}
+      />
 
       {/* Edit Project Modal */}
       {showEditModal && selectedProject && (

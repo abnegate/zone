@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 // Mock data generators
 const generateMockOrganization = (
@@ -55,7 +55,7 @@ test.describe('Organizations & Context Switcher', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
     // Mock models endpoint
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -64,7 +64,7 @@ test.describe('Organizations & Context Switcher', () => {
     });
 
     // Mock organizations endpoint (needs * at end to match ?active=true query param)
-    await page.route('**/api/organizations?*', (route) => {
+    await routeApi(page, '**/api/organizations?*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -76,7 +76,7 @@ test.describe('Organizations & Context Switcher', () => {
       }
     });
     // Also match the path without query params
-    await page.route('**/api/organizations', (route) => {
+    await routeApi(page, '**/api/organizations', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -89,7 +89,7 @@ test.describe('Organizations & Context Switcher', () => {
     });
 
     // Mock workspaces endpoint - scoped by org (needs * at end to match ?active=true)
-    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+    await routeApi(page, '**/api/organizations/*/workspaces?*', (route) => {
       const url = new URL(route.request().url());
       const orgId = url.pathname.split('/')[3]; // /api/organizations/{orgId}/workspaces
 
@@ -107,7 +107,7 @@ test.describe('Organizations & Context Switcher', () => {
       }
     });
     // Also match the path without query params
-    await page.route('**/api/organizations/*/workspaces', (route) => {
+    await routeApi(page, '**/api/organizations/*/workspaces', (route) => {
       const url = new URL(route.request().url());
       const orgId = url.pathname.split('/')[3]; // /api/organizations/{orgId}/workspaces
 
@@ -417,14 +417,14 @@ test.describe('Organizations & Context Switcher', () => {
     test('shows message when no organizations exist', async ({ page }) => {
       await page.unroute('**/api/organizations?*');
       await page.unroute('**/api/organizations');
-      await page.route('**/api/organizations?*', (route) => {
+      await routeApi(page, '**/api/organizations?*', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({ success: true, organizations: [] }),
         });
       });
-      await page.route('**/api/organizations', (route) => {
+      await routeApi(page, '**/api/organizations', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -498,7 +498,7 @@ test.describe('Organizations & Context Switcher', () => {
       // Add delay to the organizations endpoint
       await page.unroute('**/api/organizations?*');
       await page.unroute('**/api/organizations');
-      await page.route('**/api/organizations?*', async (route) => {
+      await routeApi(page, '**/api/organizations?*', async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         route.fulfill({
           status: 200,
@@ -506,7 +506,7 @@ test.describe('Organizations & Context Switcher', () => {
           body: JSON.stringify({ success: true, organizations: mockOrgs }),
         });
       });
-      await page.route('**/api/organizations', async (route) => {
+      await routeApi(page, '**/api/organizations', async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         route.fulfill({
           status: 200,
@@ -531,7 +531,7 @@ test.describe('Organizations & Context Switcher', () => {
 test.describe('Organizations API', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -546,14 +546,14 @@ test.describe('Organizations API', () => {
   });
 
   test('handles API error when fetching organizations', async ({ page }) => {
-    await page.route('**/api/organizations?*', (route) => {
+    await routeApi(page, '**/api/organizations?*', (route) => {
       route.fulfill({
         status: 500,
         contentType: 'application/json',
         body: JSON.stringify({ success: false, error: 'Server error' }),
       });
     });
-    await page.route('**/api/organizations', (route) => {
+    await routeApi(page, '**/api/organizations', (route) => {
       route.fulfill({
         status: 500,
         contentType: 'application/json',
@@ -569,14 +569,14 @@ test.describe('Organizations API', () => {
   });
 
   test('handles API error when fetching workspaces', async ({ page }) => {
-    await page.route('**/api/organizations?*', (route) => {
+    await routeApi(page, '**/api/organizations?*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({ success: true, organizations: mockOrgs }),
       });
     });
-    await page.route('**/api/organizations', (route) => {
+    await routeApi(page, '**/api/organizations', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -584,14 +584,14 @@ test.describe('Organizations API', () => {
       });
     });
 
-    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+    await routeApi(page, '**/api/organizations/*/workspaces?*', (route) => {
       route.fulfill({
         status: 500,
         contentType: 'application/json',
         body: JSON.stringify({ success: false, error: 'Server error' }),
       });
     });
-    await page.route('**/api/organizations/*/workspaces', (route) => {
+    await routeApi(page, '**/api/organizations/*/workspaces', (route) => {
       route.fulfill({
         status: 500,
         contentType: 'application/json',

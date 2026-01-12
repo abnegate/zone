@@ -11,6 +11,10 @@ use common::create_test_pool;
 use zone_server::db::sessions;
 use zone_server::utils::crypto::hash_token;
 
+fn unique_token(prefix: &str) -> String {
+    format!("{}-{}", prefix, Uuid::new_v4())
+}
+
 /// Helper to create a test user with a unique email
 async fn create_test_user(pool: &sqlx::PgPool, prefix: &str) -> Uuid {
     let email = format!("{}-{}@test.com", prefix, Uuid::new_v4());
@@ -39,8 +43,8 @@ async fn test_create_session() {
         .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_create@test.com").await;
-    let token = "test_refresh_token_12345";
-    let token_hash = hash_token(token);
+    let token = unique_token("test_refresh_token_12345");
+    let token_hash = hash_token(&token);
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create session
@@ -85,8 +89,8 @@ async fn test_get_session_by_token() {
         .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_get@test.com").await;
-    let token = "test_refresh_token_get_12345";
-    let token_hash = hash_token(token);
+    let token = unique_token("test_refresh_token_get_12345");
+    let token_hash = hash_token(&token);
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create session
@@ -128,7 +132,7 @@ async fn test_get_session_by_token_not_found() {
         .await
         .expect("Failed to run migrations");
 
-    let token_hash = hash_token("nonexistent_token");
+    let token_hash = hash_token(&unique_token("nonexistent_token"));
 
     // Try to get non-existent session
     let result = sessions::get_session_by_token(&pool, &token_hash)
@@ -148,8 +152,8 @@ async fn test_update_last_active() {
         .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_active@test.com").await;
-    let token = "test_refresh_token_active_12345";
-    let token_hash = hash_token(token);
+    let token = unique_token("test_refresh_token_active_12345");
+    let token_hash = hash_token(&token);
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create session
@@ -201,8 +205,8 @@ async fn test_revoke_session() {
         .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_revoke@test.com").await;
-    let token = "test_refresh_token_revoke_12345";
-    let token_hash = hash_token(token);
+    let token = unique_token("test_refresh_token_revoke_12345");
+    let token_hash = hash_token(&token);
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create session
@@ -256,10 +260,11 @@ async fn test_revoke_all_user_sessions() {
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create multiple sessions for the user
+    let token1 = unique_token("token1");
     let session1 = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("token1"),
+        &hash_token(&token1),
         None,
         None,
         None,
@@ -268,10 +273,11 @@ async fn test_revoke_all_user_sessions() {
     .await
     .expect("Failed to create session 1");
 
+    let token2 = unique_token("token2");
     let session2 = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("token2"),
+        &hash_token(&token2),
         None,
         None,
         None,
@@ -280,10 +286,11 @@ async fn test_revoke_all_user_sessions() {
     .await
     .expect("Failed to create session 2");
 
+    let token3 = unique_token("token3");
     let session3 = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("token3"),
+        &hash_token(&token3),
         None,
         None,
         None,
@@ -332,10 +339,11 @@ async fn test_list_user_sessions() {
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create multiple sessions
+    let token1 = unique_token("list_token1");
     let session1 = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("list_token1"),
+        &hash_token(&token1),
         Some("192.168.1.1"),
         Some("Browser 1"),
         None,
@@ -344,10 +352,11 @@ async fn test_list_user_sessions() {
     .await
     .expect("Failed to create session 1");
 
+    let token2 = unique_token("list_token2");
     let session2 = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("list_token2"),
+        &hash_token(&token2),
         Some("192.168.1.2"),
         Some("Browser 2"),
         None,
@@ -389,10 +398,11 @@ async fn test_cleanup_expired_sessions() {
 
     // Create expired session
     let expired_at = Utc::now() - Duration::days(1);
+    let expired_token = unique_token("expired_token");
     let _expired_session = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("expired_token"),
+        &hash_token(&expired_token),
         None,
         None,
         None,
@@ -403,10 +413,11 @@ async fn test_cleanup_expired_sessions() {
 
     // Create valid session
     let valid_expires_at = Utc::now() + Duration::days(7);
+    let valid_token = unique_token("valid_token");
     let valid_session = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("valid_token"),
+        &hash_token(&valid_token),
         None,
         None,
         None,
@@ -423,13 +434,13 @@ async fn test_cleanup_expired_sessions() {
     assert!(deleted_count >= 1);
 
     // Verify expired session is deleted
-    let expired_result = sessions::get_session_by_token(&pool, &hash_token("expired_token"))
+    let expired_result = sessions::get_session_by_token(&pool, &hash_token(&expired_token))
         .await
         .expect("Query failed");
     assert!(expired_result.is_none());
 
     // Verify valid session still exists
-    let valid_result = sessions::get_session_by_token(&pool, &hash_token("valid_token"))
+    let valid_result = sessions::get_session_by_token(&pool, &hash_token(&valid_token))
         .await
         .expect("Query failed");
     assert!(valid_result.is_some());
@@ -455,10 +466,11 @@ async fn test_session_cascade_delete_on_user_deletion() {
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create session
+    let cascade_token = unique_token("cascade_token");
     let session = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("cascade_token"),
+        &hash_token(&cascade_token),
         None,
         None,
         None,
@@ -497,10 +509,11 @@ async fn test_list_active_sessions_only() {
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create active session
+    let active_token = unique_token("active_only_token1");
     let _active_session = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("active_only_token1"),
+        &hash_token(&active_token),
         None,
         None,
         None,
@@ -510,10 +523,11 @@ async fn test_list_active_sessions_only() {
     .expect("Failed to create active session");
 
     // Create revoked session
+    let revoked_token = unique_token("active_only_token2");
     let revoked_session = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("active_only_token2"),
+        &hash_token(&revoked_token),
         None,
         None,
         None,
@@ -557,10 +571,11 @@ async fn test_revoke_session_idempotent() {
     let expires_at = Utc::now() + Duration::days(7);
 
     // Create session
+    let token = unique_token("idempotent_token");
     let session = sessions::create_session(
         &pool,
         user_id,
-        &hash_token("idempotent_token"),
+        &hash_token(&token),
         None,
         None,
         None,

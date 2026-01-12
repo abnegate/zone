@@ -1,10 +1,6 @@
-import { test, expect, Page, BrowserContext } from '@playwright/test';
-import {
-  blockServiceWorker,
-  createMockJwt,
-  adminPermissions,
-  mockAdminUser,
-} from './test-utils';
+import { test, expect } from './fixtures';
+import type { Page, BrowserContext } from '@playwright/test';
+import { blockServiceWorker, createMockJwt, adminPermissions, mockAdminUser, routeApi } from './test-utils';
 
 // =============================================================================
 // Mock Data - Complete schemas matching API types
@@ -292,7 +288,7 @@ function isApiRequest(route: Parameters<Parameters<Page['route']>[1]>[0]): boole
 // Setup common API routes
 async function setupCommonRoutes(page: Page, populated: boolean = false) {
   // Organizations list
-  await page.route('**/api/organizations', (route) => {
+  await routeApi(page, '**/api/organizations', (route) => {
     if (!isApiRequest(route)) return route.continue();
     if (route.request().method() === 'GET') {
       route.fulfill({
@@ -306,7 +302,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Organization details
-  await page.route('**/api/organizations/*', (route) => {
+  await routeApi(page, '**/api/organizations/*', (route) => {
     if (!isApiRequest(route)) return route.continue();
     const url = route.request().url();
     if (url.includes('/workspaces') || url.includes('/members')) {
@@ -320,7 +316,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Workspaces for organization
-  await page.route('**/api/organizations/*/workspaces', (route) => {
+  await routeApi(page, '**/api/organizations/*/workspaces', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -330,7 +326,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Workspace details
-  await page.route('**/api/workspaces/*', (route) => {
+  await routeApi(page, '**/api/workspaces/*', (route) => {
     if (!isApiRequest(route)) return route.continue();
     const url = route.request().url();
     if (url.includes('/members')) return route.continue();
@@ -342,7 +338,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Organization members
-  await page.route('**/api/organizations/*/members**', (route) => {
+  await routeApi(page, '**/api/organizations/*/members**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -352,7 +348,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Workspace members
-  await page.route('**/api/workspaces/*/members**', (route) => {
+  await routeApi(page, '**/api/workspaces/*/members**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -362,7 +358,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Models
-  await page.route('**/api/models**', (route) => {
+  await routeApi(page, '**/api/models**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -372,7 +368,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Chats
-  await page.route('**/api/chats**', (route) => {
+  await routeApi(page, '**/api/chats**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -382,7 +378,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Projects
-  await page.route('**/api/projects**', (route) => {
+  await routeApi(page, '**/api/projects**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -392,7 +388,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Tasks
-  await page.route('**/api/tasks**', (route) => {
+  await routeApi(page, '**/api/tasks**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -402,7 +398,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Sources
-  await page.route('**/api/sources**', (route) => {
+  await routeApi(page, '**/api/sources**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -412,7 +408,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Knowledge/Wiki
-  await page.route('**/api/knowledge**', (route) => {
+  await routeApi(page, '**/api/knowledge**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -422,7 +418,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Sessions
-  await page.route('**/api/auth/sessions**', (route) => {
+  await routeApi(page, '**/api/auth/sessions**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -432,7 +428,7 @@ async function setupCommonRoutes(page: Page, populated: boolean = false) {
   });
 
   // Search
-  await page.route('**/api/search**', (route) => {
+  await routeApi(page, '**/api/search**', (route) => {
     if (!isApiRequest(route)) return route.continue();
     route.fulfill({
       status: 200,
@@ -475,7 +471,7 @@ test.describe('Screenshots - Public Pages', () => {
       localStorage.clear();
     });
     // Mock auth refresh to fail immediately so the page doesn't hang
-    await page.route('**/api/auth/refresh', (route) => {
+    await routeApi(page, '**/api/auth/refresh', (route) => {
       route.fulfill({
         status: 401,
         contentType: 'application/json',

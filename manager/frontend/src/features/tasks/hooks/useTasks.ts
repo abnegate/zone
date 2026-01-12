@@ -1,57 +1,46 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { tasksApi } from '../../../api/tasks';
-import type { Task, CreateTaskRequest, UpdateTaskRequest } from '../types';
+import type { CreateTaskRequest, UpdateTaskRequest } from '../types';
 
 export function useTasks(projectId?: string, status?: string) {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const queryKey = ['tasks', projectId, status];
 
-  const loadTasks = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await tasksApi.getTasks(projectId, status);
-      setTasks(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load tasks');
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId, status]);
+  const { data: tasks = [], isLoading: loading, error, refetch } = useQuery({
+    queryKey,
+    queryFn: () => tasksApi.getTasks(projectId, status),
+  });
 
-  useEffect(() => {
-    loadTasks();
-  }, [loadTasks]);
+  const createTaskMutation = useMutation({
+    mutationFn: (request: CreateTaskRequest) => tasksApi.createTask(request),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
 
-  const createTask = useCallback(async (request: CreateTaskRequest): Promise<Task> => {
-    const task = await tasksApi.createTask(request);
-    setTasks((prev) => [task, ...prev]);
-    return task;
-  }, []);
+  const updateTaskMutation = useMutation({
+    mutationFn: ({ id, request }: { id: string; request: UpdateTaskRequest }) =>
+      tasksApi.updateTask(id, request),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
 
-  const updateTask = useCallback(async (id: string, request: UpdateTaskRequest): Promise<Task> => {
-    const task = await tasksApi.updateTask(id, request);
-    setTasks((prev) => prev.map((t) => (t.id === id ? task : t)));
-    return task;
-  }, []);
-
-  const deleteTask = useCallback(async (id: string): Promise<void> => {
-    await tasksApi.deleteTask(id);
-    setTasks((prev) => prev.filter((t) => t.id !== id));
-  }, []);
-
-  const refetch = useCallback(() => {
-    loadTasks();
-  }, [loadTasks]);
+  const deleteTaskMutation = useMutation({
+    mutationFn: (id: string) => tasksApi.deleteTask(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
+  });
 
   return {
     tasks,
     loading,
-    error,
-    createTask,
-    updateTask,
-    deleteTask,
+    error: error instanceof Error ? error.message : error ? 'Failed to load tasks' : null,
+    createTask: createTaskMutation.mutateAsync,
+    updateTask: (id: string, request: UpdateTaskRequest) =>
+      updateTaskMutation.mutateAsync({ id, request }),
+    deleteTask: deleteTaskMutation.mutateAsync,
     refetch,
   };
 }

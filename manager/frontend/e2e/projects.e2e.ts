@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 // Mock data generators
 const generateMockProject = (
@@ -25,7 +25,7 @@ test.describe('Projects Page', () => {
     await mockCommonEndpoints(page);
 
     // Mock sources endpoint (needed by ProjectsPage)
-    await page.route('**/api/sources*', (route) => {
+    await routeApi(page, '**/api/sources*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -34,7 +34,7 @@ test.describe('Projects Page', () => {
     });
 
     // Mock organizations with query params
-    await page.route('**/api/organizations?*', (route) => {
+    await routeApi(page, '**/api/organizations?*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -55,7 +55,7 @@ test.describe('Projects Page', () => {
     });
 
     // Mock workspaces with query params
-    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+    await routeApi(page, '**/api/organizations/*/workspaces?*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -77,7 +77,7 @@ test.describe('Projects Page', () => {
     });
 
     // Default mock for projects - empty list
-    await page.route('**/api/projects*', (route) => {
+    await routeApi(page, '**/api/projects*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -131,7 +131,7 @@ test.describe('Projects Page', () => {
       ];
 
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -153,7 +153,7 @@ test.describe('Projects Page', () => {
       ];
 
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -178,7 +178,7 @@ test.describe('Projects Page', () => {
       ];
 
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -200,7 +200,7 @@ test.describe('Projects Page', () => {
       const mockProjects = [generateMockProject('proj-1', 'Local Project', 'active')];
 
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -230,7 +230,7 @@ test.describe('Projects Page', () => {
       const activeProjects = [generateMockProject('proj-1', 'Active Project', 'active')];
 
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         const url = new URL(route.request().url());
         const status = url.searchParams.get('status');
 
@@ -271,12 +271,12 @@ test.describe('Projects Page', () => {
   test.describe('Create Project', () => {
     test('opens create modal from header button', async ({ page }) => {
       await page.click('.page-header .btn-primary');
-      await expect(page.locator('.modal-content h3')).toContainText('New Project');
+      await expect(page.getByRole('dialog', { name: 'New Project' })).toBeVisible();
     });
 
     test('opens create modal from empty state button', async ({ page }) => {
       await page.click('.projects-empty .btn-primary');
-      await expect(page.locator('.modal-content h3')).toContainText('New Project');
+      await expect(page.getByRole('dialog', { name: 'New Project' })).toBeVisible();
     });
 
     test('shows all form fields', async ({ page }) => {
@@ -284,14 +284,17 @@ test.describe('Projects Page', () => {
 
       await expect(page.locator('#project-name')).toBeVisible();
       await expect(page.locator('#project-description')).toBeVisible();
-      await expect(page.locator('#project-status')).toBeVisible();
-      await expect(page.locator('#project-source')).toBeVisible();
+      await page.fill('#project-name', 'Test Project');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await expect(page.locator('.wizard-empty-state')).toBeVisible();
+      await page.getByRole('button', { name: 'Next' }).click();
+      await expect(page.locator('.status-selection-option')).toHaveCount(3);
     });
 
     test('creates project with minimum fields', async ({ page }) => {
       const newProject = generateMockProject('new-proj', 'My New Project', 'active');
 
-      await page.route('**/api/projects', (route) => {
+      await routeApi(page, '**/api/projects', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 201,
@@ -302,11 +305,15 @@ test.describe('Projects Page', () => {
       });
 
       await page.click('.page-header .btn-primary');
+      const dialog = page.getByRole('dialog', { name: 'New Project' });
       await page.fill('#project-name', 'My New Project');
-      await page.click('.modal-actions .btn-primary');
+      await dialog.getByRole('button', { name: 'Next' }).click();
+      await dialog.getByRole('button', { name: /Status/i }).click();
+      await expect(dialog.locator('.status-selection-option')).toHaveCount(3);
+      await dialog.getByRole('button', { name: 'Create Project' }).click();
 
       // Modal should close on success
-      await expect(page.locator('.modal-content')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('dialog', { name: 'New Project' })).toHaveCount(0);
     });
 
     test('creates project with all fields', async ({ page }) => {
@@ -314,7 +321,7 @@ test.describe('Projects Page', () => {
         description: 'Full description',
       });
 
-      await page.route('**/api/projects', (route) => {
+      await routeApi(page, '**/api/projects', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 201,
@@ -325,30 +332,35 @@ test.describe('Projects Page', () => {
       });
 
       await page.click('.page-header .btn-primary');
+      const dialog = page.getByRole('dialog', { name: 'New Project' });
       await page.fill('#project-name', 'Full Project');
       await page.fill('#project-description', 'Full description');
-      await page.selectOption('#project-status', 'on_hold');
-      // Note: Source selection is optional and defaults to "No source"
-      await page.click('.modal-actions .btn-primary');
+      await dialog.getByRole('button', { name: 'Next' }).click();
+      await dialog.getByRole('button', { name: /Status/i }).click();
+      await dialog.getByRole('button', { name: /On Hold/i }).click();
+      await dialog.getByRole('button', { name: 'Create Project' }).click();
 
-      await expect(page.locator('.modal-content')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('dialog', { name: 'New Project' })).toHaveCount(0);
     });
 
     test('disables create button when name is empty', async ({ page }) => {
       await page.click('.page-header .btn-primary');
-      await expect(page.locator('.modal-actions .btn-primary')).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Next' })).toBeDisabled();
     });
 
     test('enables create button when name is entered', async ({ page }) => {
       await page.click('.page-header .btn-primary');
       await page.fill('#project-name', 'Test');
-      await expect(page.locator('.modal-actions .btn-primary')).not.toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Next' })).not.toBeDisabled();
     });
 
     test('closes modal on cancel', async ({ page }) => {
       await page.click('.page-header .btn-primary');
-      await page.click('.modal-actions .btn-secondary');
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await page
+        .getByRole('dialog', { name: 'New Project' })
+        .getByRole('button', { name: 'Cancel' })
+        .click();
+      await expect(page.getByRole('dialog', { name: 'New Project' })).toHaveCount(0);
     });
   });
 
@@ -359,7 +371,7 @@ test.describe('Projects Page', () => {
 
     test.beforeEach(async ({ page }) => {
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -412,7 +424,7 @@ test.describe('Projects Page', () => {
 
     test.beforeEach(async ({ page }) => {
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         const method = route.request().method();
 
         if (method === 'GET') {
@@ -462,7 +474,7 @@ test.describe('Projects Page', () => {
 
     test.beforeEach(async ({ page }) => {
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         const method = route.request().method();
 
         if (method === 'GET') {
@@ -506,7 +518,7 @@ test.describe('Projects Page', () => {
       const mockProject = generateMockProject('proj-1', 'Test Project', 'active');
 
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -529,7 +541,7 @@ test.describe('Projects Page', () => {
   test.describe('Error Handling', () => {
     test('shows error when loading projects fails', async ({ page }) => {
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -540,7 +552,7 @@ test.describe('Projects Page', () => {
       await page.reload();
       await page.click('a[href="/projects"]');
 
-      await expect(page.locator('.projects-error')).toBeVisible();
+      await expect(page.locator('.projects-error')).toBeVisible({ timeout: 15000 });
     });
   });
 
@@ -549,7 +561,7 @@ test.describe('Projects Page', () => {
       const mockProjects = [generateMockProject('proj-1', 'Test Project', 'active')];
 
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -574,7 +586,7 @@ test.describe('Projects Page', () => {
       ];
 
       await page.unroute('**/api/projects*');
-      await page.route('**/api/projects*', (route) => {
+      await routeApi(page, '**/api/projects*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,

@@ -1,11 +1,24 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { knowledgeApi } from '../../../api/knowledge';
-import { useContextSearch } from './useContextSearch';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { SearchResult, SearchOptions } from '../types';
 
-jest.mock('../../../api/knowledge');
+const mockSearchContext = mock();
 
-const mockKnowledgeApi = knowledgeApi as jest.Mocked<typeof knowledgeApi>;
+mock.module('../../../api/knowledge', () => ({
+  knowledgeApi: {
+    searchContext: mockSearchContext,
+  },
+}));
+
+let useContextSearch: typeof import('./useContextSearch').useContextSearch;
+
+beforeAll(async () => {
+  ({ useContextSearch } = await import('./useContextSearch'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useContextSearch', () => {
   const mockResults: SearchResult[] = [
@@ -46,7 +59,7 @@ describe('useContextSearch', () => {
 
   describe('search', () => {
     it('should perform search with query', async () => {
-      mockKnowledgeApi.searchContext.mockResolvedValue({
+      mockSearchContext.mockResolvedValue({
         results: mockResults,
         total: 2,
       });
@@ -63,7 +76,7 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith(options);
+      expect(mockSearchContext).toHaveBeenCalledWith(options);
       expect(result.current.results).toEqual(mockResults);
       expect(result.current.total).toBe(2);
       expect(result.current.loading).toBe(false);
@@ -71,7 +84,7 @@ describe('useContextSearch', () => {
     });
 
     it('should set loading state during search', async () => {
-      mockKnowledgeApi.searchContext.mockImplementation(
+      mockSearchContext.mockImplementation(
         () =>
           new Promise((resolve) =>
             setTimeout(() => resolve({ results: mockResults, total: 2 }), 100)
@@ -98,7 +111,7 @@ describe('useContextSearch', () => {
     });
 
     it('should handle search error', async () => {
-      mockKnowledgeApi.searchContext.mockRejectedValue(new Error('Search failed'));
+      mockSearchContext.mockRejectedValue(new Error('Search failed'));
 
       const { result } = renderHook(() => useContextSearch());
 
@@ -117,7 +130,7 @@ describe('useContextSearch', () => {
     });
 
     it('should search with semantic mode', async () => {
-      mockKnowledgeApi.searchContext.mockResolvedValue({
+      mockSearchContext.mockResolvedValue({
         results: mockResults,
         total: 2,
       });
@@ -133,13 +146,13 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith(
+      expect(mockSearchContext).toHaveBeenCalledWith(
         expect.objectContaining({ mode: 'semantic' })
       );
     });
 
     it('should search with keyword mode', async () => {
-      mockKnowledgeApi.searchContext.mockResolvedValue({
+      mockSearchContext.mockResolvedValue({
         results: mockResults,
         total: 2,
       });
@@ -155,13 +168,13 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith(
+      expect(mockSearchContext).toHaveBeenCalledWith(
         expect.objectContaining({ mode: 'keyword' })
       );
     });
 
     it('should search with source filters', async () => {
-      mockKnowledgeApi.searchContext.mockResolvedValue({
+      mockSearchContext.mockResolvedValue({
         results: mockResults,
         total: 2,
       });
@@ -177,13 +190,13 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith(
+      expect(mockSearchContext).toHaveBeenCalledWith(
         expect.objectContaining({ source_ids: ['s1', 's2'] })
       );
     });
 
     it('should search with custom limit', async () => {
-      mockKnowledgeApi.searchContext.mockResolvedValue({
+      mockSearchContext.mockResolvedValue({
         results: mockResults,
         total: 2,
       });
@@ -199,13 +212,13 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith(
+      expect(mockSearchContext).toHaveBeenCalledWith(
         expect.objectContaining({ limit: 10 })
       );
     });
 
     it('should clear previous results on new search', async () => {
-      mockKnowledgeApi.searchContext.mockResolvedValueOnce({
+      mockSearchContext.mockResolvedValueOnce({
         results: mockResults,
         total: 2,
       });
@@ -219,7 +232,7 @@ describe('useContextSearch', () => {
       expect(result.current.results).toEqual(mockResults);
 
       const newResults = [mockResults[0]];
-      mockKnowledgeApi.searchContext.mockResolvedValueOnce({
+      mockSearchContext.mockResolvedValueOnce({
         results: newResults,
         total: 1,
       });
@@ -235,7 +248,7 @@ describe('useContextSearch', () => {
 
   describe('clear', () => {
     it('should clear search results', async () => {
-      mockKnowledgeApi.searchContext.mockResolvedValue({
+      mockSearchContext.mockResolvedValue({
         results: mockResults,
         total: 2,
       });

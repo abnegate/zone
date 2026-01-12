@@ -6,6 +6,7 @@ const baseURL = `http://localhost:${port}`;
 
 export default defineConfig({
   testDir: './e2e',
+  testMatch: '**/*.e2e.ts',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
@@ -33,7 +34,7 @@ export default defineConfig({
   webServer: {
     command: `PORT=${port} bun start`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: true,
     timeout: 120000,
   },
 });

@@ -1,10 +1,21 @@
 import { render, screen } from '@testing-library/react';
-import { useAuth } from '../../features/auth';
-import PermissionGate from './PermissionGate';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Mock the AuthContext
-jest.mock('../../features/auth');
-const mockUseAuth = useAuth as jest.MockedFunction<typeof useAuth>;
+const mockUseAuth = mock();
+
+mock.module('../../features/auth', () => ({
+  useAuth: mockUseAuth,
+}));
+
+let PermissionGate: typeof import('./PermissionGate').default;
+
+beforeAll(async () => {
+  PermissionGate = (await import('./PermissionGate')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 // Test components
 const ProtectedButton = () => <button data-testid="delete-button">Delete</button>;

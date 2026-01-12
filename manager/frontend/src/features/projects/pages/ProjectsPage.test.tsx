@@ -1,34 +1,48 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../../api/client';
-import { projectsApi } from '../../../api/projects';
+import { afterAll, mock, beforeEach, describe, it, expect } from 'bun:test';
 import type { Project } from '../types';
 import type { Source } from '../../../types';
+import type React from 'react';
 import ProjectsPage from './ProjectsPage';
 
-// Mock projects API
-jest.mock('../../../api/projects', () => ({
+// Create mock functions for the projects API
+const mockGetProjects = mock(() => Promise.resolve([] as Project[]));
+const mockCreateProject = mock(() => Promise.resolve({} as Project));
+const mockUpdateProject = mock(() => Promise.resolve({} as Project));
+const mockDeleteProject = mock(() => Promise.resolve());
+const mockGetSyncConfigs = mock(() => Promise.resolve([]));
+const mockCreateSyncConfig = mock(() => Promise.resolve({}));
+const mockDeleteSyncConfig = mock(() => Promise.resolve());
+
+// Create mock functions for the client
+const mockGetSources = mock(() => Promise.resolve([] as Source[]));
+const mockLinkSource = mock(() => Promise.resolve({} as Project));
+const mockUnlinkSource = mock(() => Promise.resolve({} as Project));
+
+// Mock projects API module
+mock.module('../../../api/projects', () => ({
   projectsApi: {
-    getProjects: jest.fn(),
-    createProject: jest.fn(),
-    updateProject: jest.fn(),
-    deleteProject: jest.fn(),
-    getSyncConfigs: jest.fn(),
-    createSyncConfig: jest.fn(),
-    deleteSyncConfig: jest.fn(),
+    getProjects: mockGetProjects,
+    createProject: mockCreateProject,
+    updateProject: mockUpdateProject,
+    deleteProject: mockDeleteProject,
+    getSyncConfigs: mockGetSyncConfigs,
+    createSyncConfig: mockCreateSyncConfig,
+    deleteSyncConfig: mockDeleteSyncConfig,
   },
 }));
 
-// Mock client (for sources)
-jest.mock('../../../api/client', () => ({
+// Mock client module
+mock.module('../../../api/client', () => ({
   client: {
-    getSources: jest.fn(),
-    linkSource: jest.fn(),
-    unlinkSource: jest.fn(),
+    getSources: mockGetSources,
+    linkSource: mockLinkSource,
+    unlinkSource: mockUnlinkSource,
   },
 }));
 
 // Mock useAuth
-jest.mock('../../../features/auth', () => ({
+mock.module('../../../features/auth', () => ({
   useAuth: () => ({
     isAuthenticated: true,
     user: { id: '1', email: 'test@test.com' },
@@ -37,16 +51,17 @@ jest.mock('../../../features/auth', () => ({
     hasPermission: () => true,
     hasAnyPermission: () => true,
     hasRole: () => true,
-    logout: jest.fn(),
-    login: jest.fn(),
-    register: jest.fn(),
-    setAccessToken: jest.fn(),
+    logout: mock(() => {}),
+    login: mock(() => {}),
+    register: mock(() => {}),
+    setAccessToken: mock(() => {}),
   }),
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-const mockProjectsApi = projectsApi as jest.Mocked<typeof projectsApi>;
-const mockClient = client as jest.Mocked<typeof client>;
+afterAll(() => {
+  mock.restore();
+});
 
 const mockProjects: Project[] = [
   {
@@ -90,20 +105,27 @@ const mockSources: Source[] = [
 
 describe('ProjectsPage', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockProjectsApi.getProjects.mockResolvedValue(mockProjects);
-    mockProjectsApi.getSyncConfigs.mockResolvedValue([]);
-    mockClient.getSources.mockResolvedValue(mockSources);
+    mockGetProjects.mockReset();
+    mockCreateProject.mockReset();
+    mockUpdateProject.mockReset();
+    mockDeleteProject.mockReset();
+    mockGetSyncConfigs.mockReset();
+    mockGetSources.mockReset();
+    mockLinkSource.mockReset();
+    mockUnlinkSource.mockReset();
+    mockGetProjects.mockImplementation(() => Promise.resolve(mockProjects));
+    mockGetSyncConfigs.mockImplementation(() => Promise.resolve([]));
+    mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
   });
 
   it('shows loading state', async () => {
-    mockProjectsApi.getProjects.mockImplementation(() => new Promise(() => {}));
+    mockGetProjects.mockImplementation(() => new Promise(() => {}));
     render(<ProjectsPage />);
     expect(screen.getByText('Loading projects...')).toBeInTheDocument();
   });
 
   it('shows error state', async () => {
-    mockProjectsApi.getProjects.mockRejectedValueOnce(new Error('Failed to load'));
+    mockGetProjects.mockImplementation(() => Promise.reject(new Error('Failed to load')));
     render(<ProjectsPage />);
     await waitFor(() => {
       expect(screen.getByText('Failed to load')).toBeInTheDocument();
@@ -111,7 +133,7 @@ describe('ProjectsPage', () => {
   });
 
   it('shows empty state', async () => {
-    mockProjectsApi.getProjects.mockResolvedValueOnce([]);
+    mockGetProjects.mockImplementation(() => Promise.resolve([]));
     render(<ProjectsPage />);
     await waitFor(() => {
       expect(screen.getByText('No projects yet')).toBeInTheDocument();
@@ -152,11 +174,11 @@ describe('ProjectsPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Active' }));
     await waitFor(() => {
-      expect(mockProjectsApi.getProjects).toHaveBeenCalledWith('active');
+      expect(mockGetProjects).toHaveBeenCalledWith('active');
     });
   });
 
-  it('opens create project modal', async () => {
+  it('opens create project wizard', async () => {
     render(<ProjectsPage />);
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '+ New Project' })).toBeInTheDocument();
@@ -166,7 +188,7 @@ describe('ProjectsPage', () => {
     expect(screen.getByRole('heading', { name: 'New Project' })).toBeInTheDocument();
   });
 
-  it('creates new project', async () => {
+  it('creates new project via wizard', async () => {
     const newProject: Project = {
       id: 'proj-3',
       name: 'New Project',
@@ -177,7 +199,7 @@ describe('ProjectsPage', () => {
       created_at: '2024-01-17T00:00:00Z',
       updated_at: '2024-01-17T00:00:00Z',
     };
-    mockProjectsApi.createProject.mockResolvedValueOnce(newProject);
+    mockCreateProject.mockImplementation(() => Promise.resolve(newProject));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -186,15 +208,31 @@ describe('ProjectsPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '+ New Project' }));
 
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New Project' } });
-    fireEvent.change(screen.getByLabelText('Description'), {
+    // Step 1: Project details
+    fireEvent.change(screen.getByLabelText('Project Name'), { target: { value: 'New Project' } });
+    fireEvent.change(screen.getByLabelText(/Description/), {
       target: { value: 'New description' },
     });
 
+    // Go to step 2 (source selection)
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 2: Skip source (select "No Source")
+    await waitFor(() => {
+      expect(screen.getByText('No Source')).toBeInTheDocument();
+    });
+
+    // Go to step 3 (status)
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 3: Status is active by default, complete the wizard
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Create Project' })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create Project' }));
 
     await waitFor(() => {
-      expect(mockProjectsApi.createProject).toHaveBeenCalledWith({
+      expect(mockCreateProject).toHaveBeenCalledWith({
         name: 'New Project',
         description: 'New description',
         status: 'active',
@@ -239,7 +277,7 @@ describe('ProjectsPage', () => {
       ...mockProjects[0],
       name: 'Updated Alpha',
     };
-    mockProjectsApi.updateProject.mockResolvedValueOnce(updatedProject);
+    mockUpdateProject.mockImplementation(() => Promise.resolve(updatedProject));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -256,7 +294,7 @@ describe('ProjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
 
     await waitFor(() => {
-      expect(mockProjectsApi.updateProject).toHaveBeenCalled();
+      expect(mockUpdateProject).toHaveBeenCalled();
     });
   });
 
@@ -276,7 +314,7 @@ describe('ProjectsPage', () => {
   });
 
   it('deletes project', async () => {
-    mockProjectsApi.deleteProject.mockResolvedValueOnce(undefined);
+    mockDeleteProject.mockImplementation(() => Promise.resolve(undefined));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -292,7 +330,7 @@ describe('ProjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete Project' }));
 
     await waitFor(() => {
-      expect(mockProjectsApi.deleteProject).toHaveBeenCalledWith('proj-1');
+      expect(mockDeleteProject).toHaveBeenCalledWith('proj-1');
     });
   });
 
@@ -335,7 +373,7 @@ describe('ProjectsPage', () => {
     });
   });
 
-  it('cancels create modal', async () => {
+  it('cancels create wizard', async () => {
     render(<ProjectsPage />);
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '+ New Project' })).toBeInTheDocument();
@@ -345,7 +383,9 @@ describe('ProjectsPage', () => {
     expect(screen.getByRole('heading', { name: 'New Project' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.queryByRole('heading', { name: 'New Project' })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'New Project' })).not.toBeInTheDocument();
+    });
   });
 
   it('handles keyboard navigation on project card', async () => {
@@ -394,7 +434,7 @@ describe('ProjectsPage', () => {
       ...mockProjects[1],
       source_id: 'src-1',
     };
-    mockClient.linkSource.mockResolvedValueOnce(updatedProject);
+    mockLinkSource.mockImplementation(() => Promise.resolve(updatedProject));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -413,7 +453,7 @@ describe('ProjectsPage', () => {
     fireEvent.click(linkButtons[linkButtons.length - 1]); // Click the submit button
 
     await waitFor(() => {
-      expect(mockClient.linkSource).toHaveBeenCalledWith('proj-2', 'src-1');
+      expect(mockLinkSource).toHaveBeenCalledWith('proj-2', 'src-1');
     });
   });
 
@@ -434,7 +474,7 @@ describe('ProjectsPage', () => {
       ...mockProjects[0],
       source_id: null,
     };
-    mockClient.unlinkSource.mockResolvedValueOnce(updatedProject);
+    mockUnlinkSource.mockImplementation(() => Promise.resolve(updatedProject));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -449,13 +489,12 @@ describe('ProjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Unlink' }));
 
     await waitFor(() => {
-      expect(mockClient.unlinkSource).toHaveBeenCalledWith('proj-1');
+      expect(mockUnlinkSource).toHaveBeenCalledWith('proj-1');
     });
   });
 
   it('handles create project error', async () => {
-    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
-    mockProjectsApi.createProject.mockRejectedValueOnce(new Error('Create failed'));
+    mockCreateProject.mockImplementation(() => Promise.reject(new Error('Create failed')));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -463,19 +502,28 @@ describe('ProjectsPage', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: '+ New Project' }));
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New Project' } });
+    fireEvent.change(screen.getByLabelText('Project Name'), { target: { value: 'New Project' } });
+
+    // Navigate through wizard steps
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => {
+      expect(screen.getByText('No Source')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Create Project' })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create Project' }));
 
     await waitFor(() => {
-      expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to create project:', expect.any(Error));
+      expect(screen.getByText('Create failed')).toBeInTheDocument();
     });
-
-    consoleErrorSpy.mockRestore();
   });
 
   it('handles update project error', async () => {
     const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
-    mockProjectsApi.updateProject.mockRejectedValueOnce(new Error('Update failed'));
+    mockUpdateProject.mockImplementation(() => Promise.reject(new Error('Update failed')));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -499,7 +547,7 @@ describe('ProjectsPage', () => {
 
   it('handles delete project error', async () => {
     const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
-    mockProjectsApi.deleteProject.mockRejectedValueOnce(new Error('Delete failed'));
+    mockDeleteProject.mockImplementation(() => Promise.reject(new Error('Delete failed')));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -522,14 +570,16 @@ describe('ProjectsPage', () => {
   });
 
   it('can create project from empty state', async () => {
-    mockProjectsApi.getProjects.mockResolvedValueOnce([]);
+    mockGetProjects.mockImplementation(() => Promise.resolve([]));
 
     render(<ProjectsPage />);
     await waitFor(() => {
       expect(screen.getByText('No projects yet')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Create Project' }));
+    // The empty state button opens the wizard
+    const createButtons = screen.getAllByRole('button', { name: /Create Project|New Project/i });
+    fireEvent.click(createButtons[0]);
     expect(screen.getByRole('heading', { name: 'New Project' })).toBeInTheDocument();
   });
 
@@ -547,7 +597,7 @@ describe('ProjectsPage', () => {
         updated_at: '2024-01-03T00:00:00Z',
       },
     ];
-    mockProjectsApi.getProjects.mockResolvedValueOnce(projectsWithOnHold);
+    mockGetProjects.mockImplementation(() => Promise.resolve(projectsWithOnHold));
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -557,7 +607,7 @@ describe('ProjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'On Hold' }));
 
     await waitFor(() => {
-      expect(mockProjectsApi.getProjects).toHaveBeenCalledWith('on_hold');
+      expect(mockGetProjects).toHaveBeenCalledWith('on_hold');
     });
   });
 
@@ -574,9 +624,11 @@ describe('ProjectsPage', () => {
         updated_at: '2024-01-04T00:00:00Z',
       },
     ];
-    mockProjectsApi.getProjects
-      .mockResolvedValueOnce(mockProjects)
-      .mockResolvedValueOnce(projectsWithCancelled);
+    let callCount = 0;
+    mockGetProjects.mockImplementation(() => {
+      callCount++;
+      return Promise.resolve(callCount === 1 ? mockProjects : projectsWithCancelled);
+    });
 
     render(<ProjectsPage />);
     await waitFor(() => {
@@ -586,7 +638,7 @@ describe('ProjectsPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancelled' }));
 
     await waitFor(() => {
-      expect(mockProjectsApi.getProjects).toHaveBeenCalledWith('cancelled');
+      expect(mockGetProjects).toHaveBeenCalledWith('cancelled');
     });
   });
 
