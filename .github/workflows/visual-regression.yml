@@ -62,7 +62,7 @@ jobs:
           cp screenshots/*.png screenshots-pr/
 
       - name: Download baseline screenshots
-        uses: dawidd6/action-download-artifact@v3
+        uses: dawidd6/action-download-artifact@v6
         with:
           workflow: visual-regression.yml
           branch: main
