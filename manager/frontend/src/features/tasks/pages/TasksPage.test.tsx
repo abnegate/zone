@@ -1,39 +1,74 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { tasksApi } from '../../../api/tasks';
-import { projectsApi } from '../../../api/projects';
-import { client } from '../../../api/client';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { afterAll, mock, beforeEach, describe, it, expect } from 'bun:test';
 import type { Task } from '../types';
 import type { Project } from '../../projects/types';
 import type { Source } from '../../../types';
 import TasksPage from './TasksPage';
 
+// Create mock functions for tasks API
+const mockGetTasks = mock(() => Promise.resolve([] as Task[]));
+const mockCreateTask = mock(() => Promise.resolve({} as Task));
+const mockDeleteTask = mock(() => Promise.resolve());
+const mockRunTask = mock(() => Promise.resolve({ run_id: 'run-1' }));
+const mockCancelTaskRun = mock(() => Promise.resolve());
+const mockCreateTaskWebSocket = mock(() => ({
+  onmessage: null,
+  onclose: null,
+  onerror: null,
+  close: mock(() => {}),
+}));
+
+// Create mock functions for projects API
+const mockGetProjects = mock(() => Promise.resolve([] as Project[]));
+
+// Create mock functions for client
+const mockGetSources = mock(() => Promise.resolve([] as Source[]));
+
 // Mock APIs
-jest.mock('../../../api/tasks', () => ({
+mock.module('../../../api/tasks', () => ({
   tasksApi: {
-    getTasks: jest.fn(),
-    createTask: jest.fn(),
-    deleteTask: jest.fn(),
-    runTask: jest.fn(),
-    cancelTaskRun: jest.fn(),
-    createTaskWebSocket: jest.fn(),
+    getTasks: mockGetTasks,
+    createTask: mockCreateTask,
+    deleteTask: mockDeleteTask,
+    runTask: mockRunTask,
+    cancelTaskRun: mockCancelTaskRun,
+    createTaskWebSocket: mockCreateTaskWebSocket,
   },
 }));
 
-jest.mock('../../../api/projects', () => ({
+mock.module('../../../api/projects', () => ({
   projectsApi: {
-    getProjects: jest.fn(),
+    getProjects: mockGetProjects,
   },
 }));
 
-jest.mock('../../../api/client', () => ({
+mock.module('../../../api/client', () => ({
   client: {
-    getSources: jest.fn(),
+    getSources: mockGetSources,
   },
 }));
 
-const mockTasksApi = tasksApi as jest.Mocked<typeof tasksApi>;
-const mockProjectsApi = projectsApi as jest.Mocked<typeof projectsApi>;
-const mockClient = client as jest.Mocked<typeof client>;
+afterAll(() => {
+  mock.restore();
+});
+
+const createQueryClient = () =>
+  new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+const renderTasksPage = () => {
+  const queryClient = createQueryClient();
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <TasksPage />
+    </QueryClientProvider>
+  );
+};
 
 const mockProjects: Project[] = [
   {
@@ -130,29 +165,34 @@ const mockTasks: Task[] = [
 
 describe('TasksPage', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockTasksApi.getTasks.mockResolvedValue(mockTasks);
-    mockProjectsApi.getProjects.mockResolvedValue(mockProjects);
-    mockClient.getSources.mockResolvedValue(mockSources);
-    window.confirm = jest.fn(() => true);
+    mockGetTasks.mockReset();
+    mockCreateTask.mockReset();
+    mockDeleteTask.mockReset();
+    mockRunTask.mockReset();
+    mockGetProjects.mockReset();
+    mockGetSources.mockReset();
+    mockGetTasks.mockImplementation(() => Promise.resolve(mockTasks));
+    mockGetProjects.mockImplementation(() => Promise.resolve(mockProjects));
+    mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
+    window.confirm = mock(() => true);
   });
 
   it('shows loading state with skeleton cards', async () => {
-    mockTasksApi.getTasks.mockImplementation(() => new Promise(() => {}));
-    render(<TasksPage />);
+    mockGetTasks.mockImplementation(() => new Promise(() => {}));
+    renderTasksPage();
     expect(document.querySelectorAll('.skeleton-card').length).toBe(4);
   });
 
   it('shows empty state when no tasks', async () => {
-    mockTasksApi.getTasks.mockResolvedValueOnce([]);
-    render(<TasksPage />);
+    mockGetTasks.mockImplementation(() => Promise.resolve([]));
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('No tasks found. Create a task to get started!')).toBeInTheDocument();
     });
   });
 
   it('renders tasks list', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
       expect(screen.getByText('Fix button styling')).toBeInTheDocument();
@@ -160,7 +200,7 @@ describe('TasksPage', () => {
   });
 
   it('renders page header', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Tasks' })).toBeInTheDocument();
     });
@@ -168,7 +208,7 @@ describe('TasksPage', () => {
   });
 
   it('displays task descriptions', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Add user authentication')).toBeInTheDocument();
       expect(screen.getByText('Update CSS for buttons')).toBeInTheDocument();
@@ -176,7 +216,7 @@ describe('TasksPage', () => {
   });
 
   it('displays task status badges', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('created')).toBeInTheDocument();
       expect(screen.getByText('complete')).toBeInTheDocument();
@@ -184,14 +224,14 @@ describe('TasksPage', () => {
   });
 
   it('displays agentic badge for agentic tasks', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Agentic')).toBeInTheDocument();
     });
   });
 
   it('displays project name for tasks', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -203,7 +243,7 @@ describe('TasksPage', () => {
   });
 
   it('displays task priority', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Priority: 1')).toBeInTheDocument();
       expect(screen.getByText('Priority: 3')).toBeInTheDocument();
@@ -211,14 +251,14 @@ describe('TasksPage', () => {
   });
 
   it('displays model name when available', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Model: gpt-4')).toBeInTheDocument();
     });
   });
 
   it('renders filter dropdowns', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Filter by project' })).toBeInTheDocument();
       expect(screen.getByRole('combobox', { name: 'Filter by status' })).toBeInTheDocument();
@@ -226,7 +266,7 @@ describe('TasksPage', () => {
   });
 
   it('filters by project', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Filter by project' })).toBeInTheDocument();
     });
@@ -236,12 +276,12 @@ describe('TasksPage', () => {
     });
 
     await waitFor(() => {
-      expect(mockTasksApi.getTasks).toHaveBeenCalledWith('proj-1', undefined);
+      expect(mockGetTasks).toHaveBeenCalledWith('proj-1', undefined);
     });
   });
 
   it('filters by status', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Filter by status' })).toBeInTheDocument();
     });
@@ -251,29 +291,29 @@ describe('TasksPage', () => {
     });
 
     await waitFor(() => {
-      expect(mockTasksApi.getTasks).toHaveBeenCalledWith(undefined, 'complete');
+      expect(mockGetTasks).toHaveBeenCalledWith(undefined, 'complete');
     });
   });
 
-  it('opens create task modal', async () => {
-    render(<TasksPage />);
+  it('opens create task wizard', async () => {
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
-    expect(screen.getByRole('heading', { name: 'Create New Task' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
   });
 
   it('disables new task button when no projects', async () => {
-    mockProjectsApi.getProjects.mockResolvedValueOnce([]);
-    render(<TasksPage />);
+    mockGetProjects.mockImplementation(() => Promise.resolve([]));
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '+ New Task' })).toBeDisabled();
     });
   });
 
-  it('creates a new task', async () => {
+  it('creates a new task via wizard', async () => {
     const newTask: Task = {
       id: 'task-3',
       project_id: 'proj-1',
@@ -299,46 +339,65 @@ describe('TasksPage', () => {
       created_at: '2024-01-13T00:00:00Z',
       updated_at: '2024-01-13T00:00:00Z',
     };
-    mockTasksApi.createTask.mockResolvedValueOnce(newTask);
+    mockCreateTask.mockImplementation(() => Promise.resolve(newTask));
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
 
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Project Alpha/i }));
+
+    // Step 1: Project selection
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 2: Task details
+    await waitFor(() => {
+      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+    });
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New Task' } });
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Task description' },
     });
 
+    // Go to step 3 (settings)
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 3: Submit
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Create Task' })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create Task' }));
 
     await waitFor(() => {
-      expect(mockTasksApi.createTask).toHaveBeenCalled();
+      expect(mockCreateTask).toHaveBeenCalled();
     });
   });
 
-  it('cancels create task modal', async () => {
-    render(<TasksPage />);
+  it('cancels create task wizard', async () => {
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '+ New Task' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
-    expect(screen.getByRole('heading', { name: 'Create New Task' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => {
-      expect(screen.queryByRole('heading', { name: 'Create New Task' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'New Task' })).not.toBeInTheDocument();
     });
   });
 
   it('deletes a task with confirmation', async () => {
-    mockTasksApi.deleteTask.mockResolvedValueOnce(undefined);
+    mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -348,14 +407,15 @@ describe('TasksPage', () => {
 
     expect(window.confirm).toHaveBeenCalled();
     await waitFor(() => {
-      expect(mockTasksApi.deleteTask).toHaveBeenCalledWith('task-1');
+      expect(mockDeleteTask).toHaveBeenCalledWith('task-1');
     });
   });
 
   it('cancels delete when confirm rejected', async () => {
-    (window.confirm as jest.Mock).mockReturnValueOnce(false);
+    const confirmMock = window.confirm as unknown as ReturnType<typeof mock>;
+    confirmMock.mockReturnValueOnce(false);
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -364,21 +424,21 @@ describe('TasksPage', () => {
     fireEvent.click(deleteButtons[0]);
 
     expect(window.confirm).toHaveBeenCalled();
-    expect(mockTasksApi.deleteTask).not.toHaveBeenCalled();
+    expect(mockDeleteTask).not.toHaveBeenCalled();
   });
 
   it('shows error when loading fails', async () => {
-    mockTasksApi.getTasks.mockRejectedValueOnce(new Error('Network error'));
-    render(<TasksPage />);
+    mockGetTasks.mockImplementation(() => Promise.reject(new Error('Network error')));
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Network error')).toBeInTheDocument();
     });
   });
 
   it('shows error when delete fails', async () => {
-    mockTasksApi.deleteTask.mockRejectedValueOnce(new Error('Delete failed'));
+    mockDeleteTask.mockImplementation(() => Promise.reject(new Error('Delete failed')));
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -392,7 +452,7 @@ describe('TasksPage', () => {
   });
 
   it('opens task execution view', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -404,7 +464,7 @@ describe('TasksPage', () => {
   });
 
   it('closes task execution view', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -421,14 +481,14 @@ describe('TasksPage', () => {
   });
 
   it('displays source name for agentic tasks', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repo')).toBeInTheDocument();
     });
   });
 
   it('shows agentic styling for agentic task cards', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -437,52 +497,82 @@ describe('TasksPage', () => {
     expect(agenticCard).toHaveClass('task-card-agentic');
   });
 
-  it('enables agentic mode in create modal', async () => {
-    render(<TasksPage />);
+  it('enables agentic mode in create wizard', async () => {
+    renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
     });
 
     fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Create New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
     });
 
-    // Find the agentic checkbox and click it
-    const checkbox = screen
-      .getByText(/Enable Agentic Mode/i)
-      .closest('label')
-      ?.querySelector('input');
-    expect(checkbox).not.toBeNull();
-    fireEvent.click(checkbox!);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Project Alpha/i }));
+
+    // Step 1: Select project, go to step 2
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 2: Fill in details
+    await waitFor(() => {
+      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Test Task' } });
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Test description' } });
+
+    // Go to step 3 (settings)
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 3: Find the agentic checkbox and click it
+    const checkbox = await screen.findByRole('checkbox', { name: /Enable Agentic Mode/i });
+    fireEvent.click(checkbox);
 
     expect(screen.getByLabelText('Code Source')).toBeInTheDocument();
   });
 
   it('shows project source info when agentic mode enabled', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
     });
 
     fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Create New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
     });
 
-    const checkbox = screen
-      .getByText(/Enable Agentic Mode/i)
-      .closest('label')
-      ?.querySelector('input');
-    fireEvent.click(checkbox!);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Project Alpha/i }));
+
+    // Step 1: Select project, go to step 2
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 2: Fill in details
+    await waitFor(() => {
+      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Test Task' } });
+    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Test description' } });
+
+    // Go to step 3 (settings)
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 3: Enable agentic mode
+    const checkbox = await screen.findByRole('checkbox', { name: /Enable Agentic Mode/i });
+    fireEvent.click(checkbox);
 
     expect(screen.getByText(/Project uses:/)).toBeInTheDocument();
   });
 
   it('displays status filter options', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Filter by status' })).toBeInTheDocument();
     });
@@ -499,12 +589,12 @@ describe('TasksPage', () => {
       onmessage: null as ((event: MessageEvent) => void) | null,
       onclose: null as (() => void) | null,
       onerror: null as ((error: Event) => void) | null,
-      close: jest.fn(),
+      close: mock(() => {}),
     };
-    mockTasksApi.runTask.mockResolvedValueOnce({ run_id: 'run-1' });
-    mockTasksApi.createTaskWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockRunTask.mockImplementation(() => Promise.resolve({ run_id: 'run-1' }));
+    mockCreateTaskWebSocket.mockImplementation(() => mockWs as unknown as WebSocket);
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -515,7 +605,7 @@ describe('TasksPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start Execution' }));
 
     await waitFor(() => {
-      expect(mockTasksApi.runTask).toHaveBeenCalledWith('task-1');
+      expect(mockRunTask).toHaveBeenCalledWith('task-1');
     });
   });
 
@@ -524,12 +614,12 @@ describe('TasksPage', () => {
       onmessage: null as ((event: MessageEvent) => void) | null,
       onclose: null as (() => void) | null,
       onerror: null as ((error: Event) => void) | null,
-      close: jest.fn(),
+      close: mock(() => {}),
     };
-    mockTasksApi.runTask.mockResolvedValueOnce({ run_id: 'run-1' });
-    mockTasksApi.createTaskWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockRunTask.mockImplementation(() => Promise.resolve({ run_id: 'run-1' }));
+    mockCreateTaskWebSocket.mockImplementation(() => mockWs as unknown as WebSocket);
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -539,28 +629,46 @@ describe('TasksPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start Execution' }));
 
     await waitFor(() => {
-      expect(mockTasksApi.createTaskWebSocket).toHaveBeenCalledWith('run-1');
+      expect(mockCreateTaskWebSocket).toHaveBeenCalledWith('run-1');
     });
   });
 
-  it('shows create error in modal', async () => {
-    mockTasksApi.createTask.mockRejectedValueOnce(new Error('Create failed'));
+  it('shows create error in wizard', async () => {
+    mockCreateTask.mockImplementation(() => Promise.reject(new Error('Create failed')));
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '+ New Task' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: '+ New Task' })).not.toBeDisabled();
     });
 
     fireEvent.click(screen.getByRole('button', { name: '+ New Task' }));
 
-    // Wait for modal to appear
+    // Wait for wizard to appear
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Create New Task' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
     });
 
+    // Step 1: Select project
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Project Alpha/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 2: Fill in details
+    await waitFor(() => {
+      expect(screen.getByLabelText('Title')).toBeInTheDocument();
+    });
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'New Task' } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Description' } });
 
+    // Go to step 3
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    // Step 3: Submit
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Create Task' })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Create Task' }));
 
     await waitFor(() => {
@@ -569,14 +677,14 @@ describe('TasksPage', () => {
   });
 
   it('displays PR status badge when PR exists', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('PR: merged')).toBeInTheDocument();
     });
   });
 
   it('displays PR link when pr_url exists', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       const prLink = screen.getByText('View Pull Request');
       expect(prLink).toBeInTheDocument();
@@ -587,7 +695,7 @@ describe('TasksPage', () => {
   });
 
   it('displays branch name when branch_name exists', async () => {
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Branch: feature/fix-button-styling')).toBeInTheDocument();
     });
@@ -595,9 +703,9 @@ describe('TasksPage', () => {
 
   it('does not display PR info when pr_url is null', async () => {
     // Override mockTasks to only include task without PR
-    mockTasksApi.getTasks.mockResolvedValueOnce([mockTasks[0]]);
+    mockGetTasks.mockImplementation(() => Promise.resolve([mockTasks[0]]));
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
@@ -622,9 +730,9 @@ describe('TasksPage', () => {
         pr_status: 'closed',
       },
     ];
-    mockTasksApi.getTasks.mockResolvedValueOnce(tasksWithPrStatuses);
+    mockGetTasks.mockImplementation(() => Promise.resolve(tasksWithPrStatuses));
 
-    render(<TasksPage />);
+    renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('PR: pending')).toBeInTheDocument();
       expect(screen.getByText('PR: open')).toBeInTheDocument();

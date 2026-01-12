@@ -1,9 +1,24 @@
-import { renderHook, waitFor, act } from '@testing-library/react';
-import { useChatSearch } from './useChatSearch';
-import { chatsApi } from '../../../api/chats';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { ChatSearchResult } from '../types';
 
-jest.mock('../../../api/chats');
+const mockSearchChatMessages = mock();
+
+mock.module('../../../api/chats', () => ({
+  chatsApi: {
+    searchChatMessages: mockSearchChatMessages,
+  },
+}));
+
+let useChatSearch: typeof import('./useChatSearch').useChatSearch;
+
+beforeAll(async () => {
+  ({ useChatSearch } = await import('./useChatSearch'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useChatSearch', () => {
   const mockSearchResults: ChatSearchResult[] = [
@@ -32,7 +47,7 @@ describe('useChatSearch', () => {
   });
 
   it('should not search on mount', () => {
-    (chatsApi.searchChatMessages as jest.Mock).mockResolvedValue({
+    mockSearchChatMessages.mockResolvedValue({
       results: mockSearchResults,
       total: 2,
     });
@@ -42,11 +57,11 @@ describe('useChatSearch', () => {
     expect(result.current.results).toEqual([]);
     expect(result.current.searching).toBe(false);
     expect(result.current.error).toBeNull();
-    expect(chatsApi.searchChatMessages).not.toHaveBeenCalled();
+    expect(mockSearchChatMessages).not.toHaveBeenCalled();
   });
 
   it('should search when search is called', async () => {
-    (chatsApi.searchChatMessages as jest.Mock).mockResolvedValue({
+    mockSearchChatMessages.mockResolvedValue({
       results: mockSearchResults,
       total: 2,
     });
@@ -64,11 +79,11 @@ describe('useChatSearch', () => {
     expect(result.current.results).toEqual(mockSearchResults);
     expect(result.current.total).toBe(2);
     expect(result.current.error).toBeNull();
-    expect(chatsApi.searchChatMessages).toHaveBeenCalledWith({ query: 'hello' });
+    expect(mockSearchChatMessages).toHaveBeenCalledWith({ query: 'hello' });
   });
 
   it('should search with chat_id filter', async () => {
-    (chatsApi.searchChatMessages as jest.Mock).mockResolvedValue({
+    mockSearchChatMessages.mockResolvedValue({
       results: [mockSearchResults[0]],
       total: 1,
     });
@@ -85,11 +100,11 @@ describe('useChatSearch', () => {
 
     expect(result.current.results).toEqual([mockSearchResults[0]]);
     expect(result.current.total).toBe(1);
-    expect(chatsApi.searchChatMessages).toHaveBeenCalledWith({ query: 'hello', chat_id: 'c1' });
+    expect(mockSearchChatMessages).toHaveBeenCalledWith({ query: 'hello', chat_id: 'c1' });
   });
 
   it('should search with limit', async () => {
-    (chatsApi.searchChatMessages as jest.Mock).mockResolvedValue({
+    mockSearchChatMessages.mockResolvedValue({
       results: [mockSearchResults[0]],
       total: 2,
     });
@@ -106,12 +121,12 @@ describe('useChatSearch', () => {
 
     expect(result.current.results).toEqual([mockSearchResults[0]]);
     expect(result.current.total).toBe(2);
-    expect(chatsApi.searchChatMessages).toHaveBeenCalledWith({ query: 'hello', limit: 1 });
+    expect(mockSearchChatMessages).toHaveBeenCalledWith({ query: 'hello', limit: 1 });
   });
 
   it('should handle errors when searching', async () => {
     const error = new Error('Search failed');
-    (chatsApi.searchChatMessages as jest.Mock).mockRejectedValue(error);
+    mockSearchChatMessages.mockRejectedValue(error);
 
     const { result } = renderHook(() => useChatSearch());
 
@@ -129,7 +144,7 @@ describe('useChatSearch', () => {
   });
 
   it('should clear search results', async () => {
-    (chatsApi.searchChatMessages as jest.Mock).mockResolvedValue({
+    mockSearchChatMessages.mockResolvedValue({
       results: mockSearchResults,
       total: 2,
     });
@@ -156,7 +171,7 @@ describe('useChatSearch', () => {
   });
 
   it('should not search with empty query', async () => {
-    (chatsApi.searchChatMessages as jest.Mock).mockResolvedValue({
+    mockSearchChatMessages.mockResolvedValue({
       results: mockSearchResults,
       total: 2,
     });
@@ -168,11 +183,11 @@ describe('useChatSearch', () => {
     });
 
     expect(result.current.searching).toBe(false);
-    expect(chatsApi.searchChatMessages).not.toHaveBeenCalled();
+    expect(mockSearchChatMessages).not.toHaveBeenCalled();
   });
 
   it('should handle multiple searches in sequence', async () => {
-    (chatsApi.searchChatMessages as jest.Mock)
+    mockSearchChatMessages
       .mockResolvedValueOnce({
         results: [mockSearchResults[0]],
         total: 1,

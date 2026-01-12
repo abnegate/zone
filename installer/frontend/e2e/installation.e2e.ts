@@ -29,7 +29,7 @@ test.describe('Installation Process', () => {
     await page.click('button:has-text("Install")');
 
     // Modal should appear immediately (before API response)
-    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
   });
 
   test('shows progress during installation', async ({ page }) => {
@@ -48,9 +48,9 @@ test.describe('Installation Process', () => {
     await page.click('button:has-text("Install")');
 
     // Wait for modal to appear first
-    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
     // Then check for progress bar (which has initial 0% width)
-    await expect(page.locator('.progress-bar-fill')).toBeVisible();
+    await expect(page.locator('.progress-bar-fill')).toHaveCount(1);
   });
 
   test('shows success message on completion', async ({ page }) => {
@@ -68,7 +68,7 @@ test.describe('Installation Process', () => {
     await page.click('button:has-text("Install")');
 
     // First verify modal opens
-    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
     // Then check for completion
     await expect(page.locator('text=Installation Complete')).toBeVisible({ timeout: 10000 });
   });
@@ -87,7 +87,7 @@ test.describe('Installation Process', () => {
     await page.click('button:has-text("Install")');
 
     // First verify modal opens
-    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
     // Then check for error
     await expect(page.locator('text=Installation Failed')).toBeVisible({ timeout: 10000 });
   });
@@ -105,10 +105,10 @@ test.describe('Installation Process', () => {
     });
 
     await page.click('button:has-text("Install")');
-    await expect(page.locator('.ui-modal-overlay')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
     await expect(page.locator('text=Installation Complete')).toBeVisible({ timeout: 10000 });
 
     await page.click('button:has-text("Close")');
-    await expect(page.locator('.ui-modal-overlay')).not.toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
   });
 });

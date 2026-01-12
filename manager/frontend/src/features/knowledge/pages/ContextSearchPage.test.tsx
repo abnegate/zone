@@ -1,13 +1,30 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { knowledgeApi } from '../../../api/knowledge';
-import { sourcesApi } from '../../../api/sources';
-import ContextSearchPage from './ContextSearchPage';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-jest.mock('../../../api/knowledge');
-jest.mock('../../../api/sources');
+const mockSearchContext = mock();
+const mockGetSources = mock();
 
-const mockKnowledgeApi = knowledgeApi as jest.Mocked<typeof knowledgeApi>;
-const mockSourcesApi = sourcesApi as jest.Mocked<typeof sourcesApi>;
+mock.module('../../../api/knowledge', () => ({
+  knowledgeApi: {
+    searchContext: mockSearchContext,
+  },
+}));
+
+mock.module('../../../api/sources', () => ({
+  sourcesApi: {
+    getSources: mockGetSources,
+  },
+}));
+
+let ContextSearchPage: typeof import('./ContextSearchPage').default;
+
+beforeAll(async () => {
+  ContextSearchPage = (await import('./ContextSearchPage')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('ContextSearchPage', () => {
   const mockSources = [
@@ -64,7 +81,7 @@ describe('ContextSearchPage', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockSourcesApi.getSources.mockResolvedValue(mockSources);
+    mockGetSources.mockResolvedValue(mockSources);
   });
 
   it('should render the search page', async () => {
@@ -75,7 +92,7 @@ describe('ContextSearchPage', () => {
     expect(screen.getByText('Search')).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(mockSourcesApi.getSources).toHaveBeenCalledWith(undefined, true);
+      expect(mockGetSources).toHaveBeenCalledWith(undefined, true);
     });
   });
 
@@ -89,7 +106,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should perform search with query', async () => {
-    mockKnowledgeApi.searchContext.mockResolvedValue({
+    mockSearchContext.mockResolvedValue({
       results: mockResults,
       total: 2,
     });
@@ -103,7 +120,7 @@ describe('ContextSearchPage', () => {
     fireEvent.click(searchButton);
 
     await waitFor(() => {
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith({
+      expect(mockSearchContext).toHaveBeenCalledWith({
         query: 'test query',
         mode: 'hybrid',
         source_ids: undefined,
@@ -125,7 +142,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should change search mode', async () => {
-    mockKnowledgeApi.searchContext.mockResolvedValue({ results: [], total: 0 });
+    mockSearchContext.mockResolvedValue({ results: [], total: 0 });
 
     render(<ContextSearchPage />);
 
@@ -139,14 +156,14 @@ describe('ContextSearchPage', () => {
     fireEvent.submit(input.closest('form')!);
 
     await waitFor(() => {
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith(
+      expect(mockSearchContext).toHaveBeenCalledWith(
         expect.objectContaining({ mode: 'semantic' })
       );
     });
   });
 
   it('should filter by selected sources', async () => {
-    mockKnowledgeApi.searchContext.mockResolvedValue({ results: [], total: 0 });
+    mockSearchContext.mockResolvedValue({ results: [], total: 0 });
 
     render(<ContextSearchPage />);
 
@@ -164,14 +181,14 @@ describe('ContextSearchPage', () => {
     fireEvent.submit(input.closest('form')!);
 
     await waitFor(() => {
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith(
+      expect(mockSearchContext).toHaveBeenCalledWith(
         expect.objectContaining({ source_ids: ['s1'] })
       );
     });
   });
 
   it('should display relevance scores', async () => {
-    mockKnowledgeApi.searchContext.mockResolvedValue({
+    mockSearchContext.mockResolvedValue({
       results: mockResults,
       total: 2,
     });
@@ -189,7 +206,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should display file metadata', async () => {
-    mockKnowledgeApi.searchContext.mockResolvedValue({
+    mockSearchContext.mockResolvedValue({
       results: mockResults,
       total: 2,
     });
@@ -207,7 +224,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should show empty state when no results', async () => {
-    mockKnowledgeApi.searchContext.mockResolvedValue({ results: [], total: 0 });
+    mockSearchContext.mockResolvedValue({ results: [], total: 0 });
 
     render(<ContextSearchPage />);
 
@@ -222,7 +239,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should show error message on search failure', async () => {
-    mockKnowledgeApi.searchContext.mockRejectedValue(new Error('Search failed'));
+    mockSearchContext.mockRejectedValue(new Error('Search failed'));
 
     render(<ContextSearchPage />);
 
@@ -243,7 +260,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should show loading state during search', async () => {
-    mockKnowledgeApi.searchContext.mockImplementation(
+    mockSearchContext.mockImplementation(
       () => new Promise((resolve) => setTimeout(() => resolve({ results: [], total: 0 }), 100))
     );
 
@@ -270,7 +287,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should trim whitespace from query', async () => {
-    mockKnowledgeApi.searchContext.mockResolvedValue({ results: [], total: 0 });
+    mockSearchContext.mockResolvedValue({ results: [], total: 0 });
 
     render(<ContextSearchPage />);
 
@@ -279,7 +296,7 @@ describe('ContextSearchPage', () => {
     fireEvent.submit(input.closest('form')!);
 
     await waitFor(() => {
-      expect(mockKnowledgeApi.searchContext).toHaveBeenCalledWith(
+      expect(mockSearchContext).toHaveBeenCalledWith(
         expect.objectContaining({ query: 'test query' })
       );
     });
@@ -302,7 +319,7 @@ describe('ContextSearchPage', () => {
   });
 
   it('should handle no sources available', async () => {
-    mockSourcesApi.getSources.mockResolvedValue([]);
+    mockGetSources.mockResolvedValue([]);
 
     render(<ContextSearchPage />);
 
@@ -324,7 +341,7 @@ describe('ContextSearchPage', () => {
       },
     ];
 
-    mockKnowledgeApi.searchContext.mockResolvedValue({
+    mockSearchContext.mockResolvedValue({
       results: xssResults,
       total: 1,
     });
@@ -356,7 +373,7 @@ describe('ContextSearchPage', () => {
       },
     ];
 
-    mockKnowledgeApi.searchContext.mockResolvedValue({
+    mockSearchContext.mockResolvedValue({
       results: regexResults,
       total: 1,
     });

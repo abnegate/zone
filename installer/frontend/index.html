@@ -53,11 +53,43 @@
         animation: spin 0.8s linear infinite;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
+      .boot-shell {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: flex-start;
+        padding: 56px;
+        gap: 12px;
+        background: radial-gradient(1200px 600px at 0% 0%, rgba(237, 122, 20, 0.12), transparent 60%);
+      }
+      .boot-eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-size: 12px;
+        color: #a1a1aa;
+      }
+      .boot-title {
+        font-size: 36px;
+        font-weight: 600;
+        margin: 0;
+      }
+      .boot-subtitle {
+        margin: 0;
+        color: #d4d4d8;
+        font-size: 16px;
+      }
     </style>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot-shell" role="status" aria-live="polite">
+        <div class="boot-eyebrow">Zone Installer</div>
+        <h1 class="boot-title">Preparing configuration wizard…</h1>
+        <p class="boot-subtitle">Loading the setup experience.</p>
+      </div>
+    </div>
     <script type="module" src="/src/index.tsx"></script>
   </body>
 </html>

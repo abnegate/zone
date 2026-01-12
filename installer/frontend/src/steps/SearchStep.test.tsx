@@ -1,4 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
 import { SearchStep } from './SearchStep';
 
@@ -65,159 +67,119 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   ...overrides,
 });
 
+const renderWithForm = (defaultValues: InstallerConfig) => {
+  let methods: UseFormReturn<InstallerConfig> | undefined;
+  const Wrapper = ({ children }: { children: ReactNode }) => {
+    const form = useForm<InstallerConfig>({ defaultValues });
+    methods = form;
+    return <FormProvider {...form}>{children}</FormProvider>;
+  };
+  const utils = render(<SearchStep />, { wrapper: Wrapper });
+  if (!methods) {
+    throw new Error('Form methods not initialized');
+  }
+  return { ...utils, methods };
+};
+
 describe('SearchStep', () => {
-  const onChange = jest.fn();
-  const getFieldError = jest.fn().mockReturnValue(undefined);
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
   it('renders step header', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText('Web Search')).toBeInTheDocument();
     expect(screen.getByText('Configure search integration')).toBeInTheDocument();
   });
 
   it('renders web search checkbox checked when enabled', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     const checkbox = screen.getByLabelText(/enable web search/i);
     expect(checkbox).toBeChecked();
   });
 
   it('renders web search checkbox unchecked when disabled', () => {
-    render(
-      <SearchStep
-        config={createMockConfig({ SEARCH_ENABLE_WEB_SEARCH: 'false' })}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    renderWithForm(createMockConfig({ SEARCH_ENABLE_WEB_SEARCH: 'false' }));
 
     const checkbox = screen.getByLabelText(/enable web search/i);
     expect(checkbox).not.toBeChecked();
   });
 
-  it('calls onChange when web search is toggled off', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('toggles web search setting', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.click(screen.getByLabelText(/enable web search/i));
-    expect(onChange).toHaveBeenCalledWith('SEARCH_ENABLE_WEB_SEARCH', 'false');
-  });
-
-  it('calls onChange when web search is toggled on', () => {
-    render(
-      <SearchStep
-        config={createMockConfig({ SEARCH_ENABLE_WEB_SEARCH: 'false' })}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    expect(methods.getValues('SEARCH_ENABLE_WEB_SEARCH')).toBe('false');
 
     fireEvent.click(screen.getByLabelText(/enable web search/i));
-    expect(onChange).toHaveBeenCalledWith('SEARCH_ENABLE_WEB_SEARCH', 'true');
+    expect(methods.getValues('SEARCH_ENABLE_WEB_SEARCH')).toBe('true');
   });
 
   it('renders results per query input with current value', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     const input = screen.getByLabelText(/results per query/i);
     expect(input).toHaveValue(5);
   });
 
-  it('calls onChange when results per query is changed', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('updates results per query', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.change(screen.getByLabelText(/results per query/i), {
       target: { value: '10' },
     });
 
-    expect(onChange).toHaveBeenCalledWith('SEARCH_RESULT_COUNT', '10');
+    expect(methods.getValues('SEARCH_RESULT_COUNT')).toBe('10');
   });
 
   it('renders concurrent requests input with current value', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     const input = screen.getByLabelText(/concurrent requests/i);
     expect(input).toHaveValue(8);
   });
 
-  it('calls onChange when concurrent requests is changed', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('updates concurrent requests', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.change(screen.getByLabelText(/concurrent requests/i), {
       target: { value: '16' },
     });
 
-    expect(onChange).toHaveBeenCalledWith('SEARCH_CONCURRENT_REQUESTS', '16');
+    expect(methods.getValues('SEARCH_CONCURRENT_REQUESTS')).toBe('16');
   });
 
   it('renders instance name input with current value', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     const input = screen.getByLabelText(/search instance name/i);
     expect(input).toHaveValue('my-searx');
   });
 
-  it('calls onChange when instance name is changed', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('updates instance name', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.change(screen.getByLabelText(/search instance name/i), {
       target: { value: 'new-instance' },
     });
 
-    expect(onChange).toHaveBeenCalledWith('SEARCH_SEARXNG_INSTANCE_NAME', 'new-instance');
+    expect(methods.getValues('SEARCH_SEARXNG_INSTANCE_NAME')).toBe('new-instance');
   });
 
   it('displays info box about VPN requirement', () => {
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText(/web search requires vpn/i)).toBeInTheDocument();
   });
 
-  it('displays error for results per query when provided', () => {
-    getFieldError.mockImplementation((field: string) =>
-      field === 'SEARCH_RESULT_COUNT' ? 'Invalid count' : undefined
-    );
+  it('displays error for results per query when provided', async () => {
+    const { methods } = renderWithForm(createMockConfig());
 
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    methods.setError('SEARCH_RESULT_COUNT', {
+      type: 'manual',
+      message: 'Must be between 1 and 20',
+    });
 
-    expect(screen.getByText('Invalid count')).toBeInTheDocument();
-  });
-
-  it('displays error for concurrent requests when provided', () => {
-    getFieldError.mockImplementation((field: string) =>
-      field === 'SEARCH_CONCURRENT_REQUESTS' ? 'Too many' : undefined
-    );
-
-    render(
-      <SearchStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    expect(screen.getByText('Too many')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('Must be between 1 and 20')).toBeInTheDocument();
+    });
   });
 });

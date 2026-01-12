@@ -1,9 +1,28 @@
 import { renderHook, waitFor } from '@testing-library/react';
-import { useSyncConfigs } from './useSyncConfigs';
-import { projectsApi } from '../../../api/projects';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { SyncConfig, CreateSyncConfigRequest } from '../types';
 
-jest.mock('../../../api/projects');
+const mockGetSyncConfigs = mock();
+const mockCreateSyncConfig = mock();
+const mockDeleteSyncConfig = mock();
+
+mock.module('../../../api/projects', () => ({
+  projectsApi: {
+    getSyncConfigs: mockGetSyncConfigs,
+    createSyncConfig: mockCreateSyncConfig,
+    deleteSyncConfig: mockDeleteSyncConfig,
+  },
+}));
+
+let useSyncConfigs: typeof import('./useSyncConfigs').useSyncConfigs;
+
+beforeAll(async () => {
+  ({ useSyncConfigs } = await import('./useSyncConfigs'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const mockSyncConfigs: SyncConfig[] = [
   {
@@ -32,7 +51,7 @@ describe('useSyncConfigs', () => {
   });
 
   it('should fetch sync configs on mount', async () => {
-    (projectsApi.getSyncConfigs as jest.Mock).mockResolvedValue(mockSyncConfigs);
+    mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
 
     const { result } = renderHook(() => useSyncConfigs('proj-1'));
 
@@ -44,12 +63,12 @@ describe('useSyncConfigs', () => {
 
     expect(result.current.configs).toEqual(mockSyncConfigs);
     expect(result.current.error).toBeNull();
-    expect(projectsApi.getSyncConfigs).toHaveBeenCalledWith('proj-1');
+    expect(mockGetSyncConfigs).toHaveBeenCalledWith('proj-1');
   });
 
   it('should handle fetch error', async () => {
     const error = new Error('Failed to fetch');
-    (projectsApi.getSyncConfigs as jest.Mock).mockRejectedValue(error);
+    mockGetSyncConfigs.mockRejectedValue(error);
 
     const { result } = renderHook(() => useSyncConfigs('proj-1'));
 
@@ -72,8 +91,8 @@ describe('useSyncConfigs', () => {
       created_at: '2024-01-03T00:00:00Z',
     };
 
-    (projectsApi.getSyncConfigs as jest.Mock).mockResolvedValue(mockSyncConfigs);
-    (projectsApi.createSyncConfig as jest.Mock).mockResolvedValue(newConfig);
+    mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
+    mockCreateSyncConfig.mockResolvedValue(newConfig);
 
     const { result } = renderHook(() => useSyncConfigs('proj-1'));
 
@@ -93,12 +112,12 @@ describe('useSyncConfigs', () => {
       expect(result.current.configs).toContainEqual(newConfig);
     });
 
-    expect(projectsApi.createSyncConfig).toHaveBeenCalledWith('proj-1', createRequest);
+    expect(mockCreateSyncConfig).toHaveBeenCalledWith('proj-1', createRequest);
   });
 
   it('should delete sync config', async () => {
-    (projectsApi.getSyncConfigs as jest.Mock).mockResolvedValue(mockSyncConfigs);
-    (projectsApi.deleteSyncConfig as jest.Mock).mockResolvedValue(undefined);
+    mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
+    mockDeleteSyncConfig.mockResolvedValue(undefined);
 
     const { result } = renderHook(() => useSyncConfigs('proj-1'));
 
@@ -112,11 +131,11 @@ describe('useSyncConfigs', () => {
       expect(result.current.configs).not.toContainEqual(mockSyncConfigs[0]);
     });
 
-    expect(projectsApi.deleteSyncConfig).toHaveBeenCalledWith('proj-1', '1');
+    expect(mockDeleteSyncConfig).toHaveBeenCalledWith('proj-1', '1');
   });
 
   it('should refetch sync configs', async () => {
-    (projectsApi.getSyncConfigs as jest.Mock).mockResolvedValue(mockSyncConfigs);
+    mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
 
     const { result } = renderHook(() => useSyncConfigs('proj-1'));
 
@@ -124,11 +143,11 @@ describe('useSyncConfigs', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(projectsApi.getSyncConfigs).toHaveBeenCalledTimes(1);
+    expect(mockGetSyncConfigs).toHaveBeenCalledTimes(1);
 
     await result.current.refetch();
 
-    expect(projectsApi.getSyncConfigs).toHaveBeenCalledTimes(2);
+    expect(mockGetSyncConfigs).toHaveBeenCalledTimes(2);
   });
 
   it('should not fetch if projectId is null', () => {
@@ -136,6 +155,6 @@ describe('useSyncConfigs', () => {
 
     expect(result.current.configs).toEqual([]);
     expect(result.current.loading).toBe(false);
-    expect(projectsApi.getSyncConfigs).not.toHaveBeenCalled();
+    expect(mockGetSyncConfigs).not.toHaveBeenCalled();
   });
 });

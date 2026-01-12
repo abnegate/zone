@@ -1,9 +1,37 @@
-import type { Page, BrowserContext } from '@playwright/test';
+import type { Page, BrowserContext, Route } from '@playwright/test';
 
 // Block service worker to allow Playwright route interception to work
 export async function blockServiceWorker(context: BrowserContext) {
   await context.route('**/service-worker.js', (route) => {
     route.fulfill({ status: 404, body: '' });
+  });
+}
+
+export async function routeApi(
+  page: Page,
+  url: string | RegExp,
+  handler: (route: Route) => Promise<void> | void
+) {
+  await page.route(url, (route) => {
+    const type = route.request().resourceType();
+    if (type !== 'xhr' && type !== 'fetch') {
+      return route.continue();
+    }
+    return handler(route);
+  });
+}
+
+export async function routeApiContext(
+  context: BrowserContext,
+  url: string | RegExp,
+  handler: (route: Route) => Promise<void> | void
+) {
+  await context.route(url, (route) => {
+    const type = route.request().resourceType();
+    if (type !== 'xhr' && type !== 'fetch') {
+      return route.continue();
+    }
+    return handler(route);
   });
 }
 
@@ -141,7 +169,7 @@ export async function setupAuth(page: Page, options?: { admin?: boolean }) {
 
 // Setup common API route mocks for models page
 export async function setupModelsMock(page: Page) {
-  await page.route('**/api/models*', (route) => {
+  await routeApi(page, '**/api/models*', (route) => {
     const url = new URL(route.request().url());
     const source = url.searchParams.get('source');
 

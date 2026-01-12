@@ -1,13 +1,8 @@
 import type React from 'react';
+import { useFormContext } from 'react-hook-form';
 import { Checkbox, InfoBox, Input, Select } from '../components';
 import { useSecretGenerator } from '../hooks';
 import type { InstallerConfig } from '../types';
-
-interface AdvancedStepProps {
-  config: InstallerConfig;
-  onChange: (key: keyof InstallerConfig, value: string) => void;
-  getFieldError: (field: string) => string | undefined;
-}
 
 const retentionOptions = [
   { value: '7d', label: '7 days' },
@@ -31,25 +26,41 @@ const smtpPortOptions = [
   { value: '2525', label: '2525 (Alternate)' },
 ];
 
-export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepProps) {
+export function AdvancedStep() {
+  const {
+    register,
+    setValue,
+    watch,
+    formState: { errors },
+  } = useFormContext<InstallerConfig>();
   const { generateSecret } = useSecretGenerator();
-  const monitoringEnabled = config.MONITORING_ENABLED === 'true';
-  const alertingEnabled = config.ALERT_ENABLED === 'true';
+  const monitoringEnabled = watch('MONITORING_ENABLED') === 'true';
+  const alertingEnabled = watch('ALERT_ENABLED') === 'true';
+  const grafanaPassword = watch('MONITORING_GRAFANA_ADMIN_PASSWORD');
 
   const handleMonitoringToggle = (checked: boolean) => {
-    onChange('MONITORING_ENABLED', checked ? 'true' : 'false');
+    setValue('MONITORING_ENABLED', checked ? 'true' : 'false', {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
     // Auto-generate password if enabling and password is empty
-    if (checked && !config.MONITORING_GRAFANA_ADMIN_PASSWORD) {
-      onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', generateSecret());
+    if (checked && !grafanaPassword) {
+      setValue('MONITORING_GRAFANA_ADMIN_PASSWORD', generateSecret(), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
     }
     // Disable alerting if monitoring is disabled
     if (!checked) {
-      onChange('ALERT_ENABLED', 'false');
+      setValue('ALERT_ENABLED', 'false', { shouldDirty: true, shouldValidate: true });
     }
   };
 
   const handleAlertingToggle = (checked: boolean) => {
-    onChange('ALERT_ENABLED', checked ? 'true' : 'false');
+    setValue('ALERT_ENABLED', checked ? 'true' : 'false', {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
   };
 
   return (
@@ -79,34 +90,30 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
           <Input
             label="Grafana Admin Username"
             type="text"
-            value={config.MONITORING_GRAFANA_ADMIN_USER}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('MONITORING_GRAFANA_ADMIN_USER', e.target.value)
-            }
-            error={getFieldError('MONITORING_GRAFANA_ADMIN_USER')}
+            error={errors.MONITORING_GRAFANA_ADMIN_USER?.message}
+            {...register('MONITORING_GRAFANA_ADMIN_USER')}
           />
 
           <Input
             label="Grafana Admin Password"
             type="text"
-            value={config.MONITORING_GRAFANA_ADMIN_PASSWORD}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', e.target.value)
+            onGenerate={() =>
+              setValue('MONITORING_GRAFANA_ADMIN_PASSWORD', generateSecret(), {
+                shouldDirty: true,
+                shouldValidate: true,
+              })
             }
-            onGenerate={() => onChange('MONITORING_GRAFANA_ADMIN_PASSWORD', generateSecret())}
             placeholder="Leave empty to auto-generate"
             className="font-mono"
-            error={getFieldError('MONITORING_GRAFANA_ADMIN_PASSWORD')}
+            error={errors.MONITORING_GRAFANA_ADMIN_PASSWORD?.message}
+            {...register('MONITORING_GRAFANA_ADMIN_PASSWORD')}
           />
 
           <Select
             label="Metrics Retention"
             options={retentionOptions}
-            value={config.MONITORING_RETENTION_TIME}
-            onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-              onChange('MONITORING_RETENTION_TIME', e.target.value)
-            }
             helpText="How long to keep metrics data"
+            {...register('MONITORING_RETENTION_TIME')}
           />
 
           <InfoBox variant="info">
@@ -144,80 +151,59 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
               <Input
                 label="Alert Recipients"
                 type="email"
-                value={config.ALERT_EMAIL_RECIPIENTS}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  onChange('ALERT_EMAIL_RECIPIENTS', e.target.value)
-                }
                 placeholder="admin@example.com"
                 helpText="Comma-separated list of email addresses"
-                error={getFieldError('ALERT_EMAIL_RECIPIENTS')}
+                error={errors.ALERT_EMAIL_RECIPIENTS?.message}
+                {...register('ALERT_EMAIL_RECIPIENTS')}
               />
 
               <Input
                 label="SMTP Host"
                 type="text"
-                value={config.ALERT_SMTP_HOST}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  onChange('ALERT_SMTP_HOST', e.target.value)
-                }
                 placeholder="smtp.gmail.com"
                 helpText="e.g., smtp.gmail.com, smtp.sendgrid.net"
-                error={getFieldError('ALERT_SMTP_HOST')}
+                error={errors.ALERT_SMTP_HOST?.message}
+                {...register('ALERT_SMTP_HOST')}
               />
 
               <Select
                 label="SMTP Port"
                 options={smtpPortOptions}
-                value={config.ALERT_SMTP_PORT}
-                onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                  onChange('ALERT_SMTP_PORT', e.target.value)
-                }
                 helpText="587 recommended for most providers"
+                {...register('ALERT_SMTP_PORT')}
               />
 
               <Input
                 label="SMTP Username"
                 type="text"
-                value={config.ALERT_SMTP_USER}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  onChange('ALERT_SMTP_USER', e.target.value)
-                }
                 placeholder="your-email@gmail.com"
-                error={getFieldError('ALERT_SMTP_USER')}
+                error={errors.ALERT_SMTP_USER?.message}
+                {...register('ALERT_SMTP_USER')}
               />
 
               <Input
                 label="SMTP Password"
                 type="password"
-                value={config.ALERT_SMTP_PASSWORD}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  onChange('ALERT_SMTP_PASSWORD', e.target.value)
-                }
                 placeholder="App password or API key"
                 helpText="For Gmail, use an App Password"
-                error={getFieldError('ALERT_SMTP_PASSWORD')}
+                error={errors.ALERT_SMTP_PASSWORD?.message}
+                {...register('ALERT_SMTP_PASSWORD')}
               />
 
               <Input
                 label="From Address"
                 type="email"
-                value={config.ALERT_SMTP_FROM_ADDRESS}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  onChange('ALERT_SMTP_FROM_ADDRESS', e.target.value)
-                }
                 placeholder="alerts@example.com"
-                error={getFieldError('ALERT_SMTP_FROM_ADDRESS')}
+                error={errors.ALERT_SMTP_FROM_ADDRESS?.message}
+                {...register('ALERT_SMTP_FROM_ADDRESS')}
               />
 
               <Input
                 label="From Name"
                 type="text"
-                value={config.ALERT_SMTP_FROM_NAME}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  onChange('ALERT_SMTP_FROM_NAME', e.target.value)
-                }
                 placeholder="Zone Alerts"
-                error={getFieldError('ALERT_SMTP_FROM_NAME')}
+                error={errors.ALERT_SMTP_FROM_NAME?.message}
+                {...register('ALERT_SMTP_FROM_NAME')}
               />
 
               <InfoBox variant="info">
@@ -234,46 +220,34 @@ export function AdvancedStep({ config, onChange, getFieldError }: AdvancedStepPr
       <Input
         label="Worker Count"
         type="number"
-        value={config.ADVANCED_LITELLM_WORKERS}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('ADVANCED_LITELLM_WORKERS', e.target.value)
-        }
         min={1}
         max={16}
         helpText="1-2 per CPU core recommended"
-        error={getFieldError('ADVANCED_LITELLM_WORKERS')}
+        error={errors.ADVANCED_LITELLM_WORKERS?.message}
+        {...register('ADVANCED_LITELLM_WORKERS')}
       />
 
       <Input
         label="Request Timeout (seconds)"
         type="number"
-        value={config.ADVANCED_LITELLM_REQUEST_TIMEOUT}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('ADVANCED_LITELLM_REQUEST_TIMEOUT', e.target.value)
-        }
         min={60}
         max={1800}
-        error={getFieldError('ADVANCED_LITELLM_REQUEST_TIMEOUT')}
+        error={errors.ADVANCED_LITELLM_REQUEST_TIMEOUT?.message}
+        {...register('ADVANCED_LITELLM_REQUEST_TIMEOUT')}
       />
 
       <Select
         label="Timezone"
         options={timezoneOptions}
-        value={config.ADVANCED_TZ}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-          onChange('ADVANCED_TZ', e.target.value)
-        }
+        {...register('ADVANCED_TZ')}
       />
 
       <Input
         label="ACME Email (for Let's Encrypt)"
         type="email"
-        value={config.ADVANCED_ACME_EMAIL}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-          onChange('ADVANCED_ACME_EMAIL', e.target.value)
-        }
         helpText="Required for automatic TLS certificates"
-        error={getFieldError('ADVANCED_ACME_EMAIL')}
+        error={errors.ADVANCED_ACME_EMAIL?.message}
+        {...register('ADVANCED_ACME_EMAIL')}
       />
 
       <InfoBox variant="success">Configuration complete. Click Install to proceed.</InfoBox>

@@ -1,21 +1,33 @@
-import type React from 'react';
-import { type FormEvent, useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Input } from '@zone/ui';
 import { useAuth } from '../hooks';
 import { LoginRequestSchema } from '../schemas';
-import { getErrors } from '../../../validation';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
 import './AuthPage.css';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import type { z } from 'zod';
+import { toast } from 'sonner';
+
+type LoginForm = z.infer<typeof LoginRequestSchema>;
 
 export default function LoginPage() {
   const navigate = useNavigate();
   const { login, isAuthenticated, isLoading: authLoading } = useAuth();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(false);
+  
+  const {
+    register,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+    setError
+  } = useForm<LoginForm>({
+    resolver: zodResolver(LoginRequestSchema),
+    defaultValues: {
+      email: '',
+      password: ''
+    }
+  });
 
   // Redirect if already authenticated
   useEffect(() => {
@@ -24,27 +36,15 @@ export default function LoginPage() {
     }
   }, [isAuthenticated, authLoading, navigate]);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    const formData = { email: email.trim(), password };
-    const errors = getErrors(LoginRequestSchema, formData);
-
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-
-    setFieldErrors({});
-    setLoading(true);
-    setError('');
-
+  const onSubmit = async (data: LoginForm) => {
     try {
-      await login({ email: email.trim(), password });
+      await login(data);
       navigate('/');
+      toast.success('Successfully logged in');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
-    } finally {
-      setLoading(false);
+      const message = err instanceof Error ? err.message : 'Login failed';
+      toast.error(message);
+      setError('root', { message });
     }
   };
 
@@ -67,34 +67,32 @@ export default function LoginPage() {
           <p>Sign in to your account</p>
         </div>
 
-        <form className="auth-form" onSubmit={handleSubmit}>
+        <form className="auth-form" onSubmit={handleSubmit(onSubmit)}>
           <Input
             label="Email"
             type="email"
             placeholder="you@example.com"
-            value={email}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)}
-            disabled={loading}
             autoFocus
             autoComplete="email"
-            error={fieldErrors.email}
+            error={errors.email?.message}
+            disabled={isSubmitting}
+            {...register('email')}
           />
 
           <Input
             label="Password"
             type="password"
             placeholder="Enter your password"
-            value={password}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
-            disabled={loading}
             autoComplete="current-password"
-            error={fieldErrors.password}
+            error={errors.password?.message}
+            disabled={isSubmitting}
+            {...register('password')}
           />
 
-          {error && <div className="auth-error">{error}</div>}
+          {errors.root && <div className="auth-error">{errors.root.message}</div>}
 
-          <Button type="submit" variant="primary" loading={loading} className="btn-block">
-            {loading ? 'Signing in...' : 'Sign In'}
+          <Button type="submit" variant="primary" loading={isSubmitting} className="btn-block">
+            {isSubmitting ? 'Signing in...' : 'Sign In'}
           </Button>
 
           <div className="auth-link" style={{ textAlign: 'center', marginTop: '0.5rem' }}>

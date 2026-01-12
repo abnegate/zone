@@ -1,5 +1,6 @@
-import { test, expect, type Page } from '@playwright/test';
-import { setupAuth, blockServiceWorker } from './test-utils';
+import { test, expect } from './fixtures';
+import type { Page } from '@playwright/test';
+import { setupAuth, blockServiceWorker, routeApi } from './test-utils';
 
 const mockInstalledModels = [
   {
@@ -28,7 +29,7 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
   const browseModels = options?.browseModels ?? mockBrowseModels;
 
   // Use glob pattern that matches any URL containing /api/models
-  await page.route('**/api/models**', (route) => {
+  await routeApi(page, '**/api/models**', (route) => {
     const url = route.request().url();
     const method = route.request().method();
 
@@ -59,7 +60,7 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
     }
   });
 
-  await page.route('**/api/organizations', (route) => {
+  await routeApi(page, '**/api/organizations', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -79,7 +80,7 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
     });
   });
 
-  await page.route('**/api/organizations/*/workspaces', (route) => {
+  await routeApi(page, '**/api/organizations/*/workspaces', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -162,7 +163,7 @@ test.describe('Models Page', () => {
 
     // Override route for filtered search
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       const method = route.request().method();
 
@@ -209,7 +210,7 @@ test.describe('Models Page', () => {
 
     // Override route for HuggingFace source
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       const method = route.request().method();
 
@@ -326,7 +327,7 @@ test.describe('Models Page', () => {
   test('refresh button reloads models list', async ({ page }) => {
     let requestCount = 0;
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && !url.includes('?')) {
         requestCount++;
@@ -349,7 +350,7 @@ test.describe('Models Page', () => {
   test('shows loading state while fetching models', async ({ page }) => {
     // Override route to add delay
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', async (route) => {
+    await routeApi(page, '**/api/models**', async (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && !url.includes('?')) {
         await new Promise(resolve => setTimeout(resolve, 300));
@@ -379,7 +380,7 @@ test.describe('Models Page', () => {
   test('shows error message when models API fails', async ({ page }) => {
     // Override route to return error
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && !url.includes('?')) {
         route.fulfill({ status: 500, body: 'Internal Server Error' });
@@ -396,7 +397,7 @@ test.describe('Models Page', () => {
 
   test('shows empty state when no models installed', async ({ page }) => {
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && !url.includes('?')) {
         route.fulfill({
@@ -427,7 +428,7 @@ test.describe('Models Page', () => {
 
     // Override route to return error for browse
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && url.includes('?')) {
         route.fulfill({ status: 500, body: 'Internal Server Error' });
@@ -459,7 +460,7 @@ test.describe('Models Page', () => {
     };
 
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && !url.includes('?')) {
         route.fulfill({
@@ -488,7 +489,7 @@ test.describe('Models Page', () => {
   test('shows delete button loading state', async ({ page }) => {
     let deleteResolved = false;
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', async (route) => {
+    await routeApi(page, '**/api/models**', async (route) => {
       const url = route.request().url();
       const method = route.request().method();
 
@@ -523,7 +524,7 @@ test.describe('Models Page', () => {
 
   test('handles delete API failure gracefully', async ({ page }) => {
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       const method = route.request().method();
 
@@ -559,7 +560,7 @@ test.describe('Models Page', () => {
     await switchToBrowseTab(page);
 
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && url.includes('?')) {
         route.fulfill({
@@ -589,7 +590,7 @@ test.describe('Models Page', () => {
     await switchToBrowseTab(page);
 
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && url.includes('?')) {
         const params = new URL(url).searchParams;
@@ -659,7 +660,7 @@ test.describe('Models Page', () => {
     ];
 
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && !url.includes('?')) {
         route.fulfill({
@@ -697,7 +698,7 @@ test.describe('Models Page', () => {
     ];
 
     await page.unroute('**/api/models**');
-    await page.route('**/api/models**', (route) => {
+    await routeApi(page, '**/api/models**', (route) => {
       const url = route.request().url();
       if (route.request().method() === 'GET' && url.includes('?')) {
         route.fulfill({

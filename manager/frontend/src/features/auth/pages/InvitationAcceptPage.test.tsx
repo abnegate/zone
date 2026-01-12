@@ -1,21 +1,38 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import InvitationAcceptPage from './InvitationAcceptPage';
-import { client } from '../../../api/client';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { InvitationDetails } from '../types';
 
-const mockNavigate = jest.fn();
+const mockNavigate = mock();
+const mockUseAuth = mock(() => ({ isAuthenticated: false }));
+const mockUseSearchParams = mock(() => [new URLSearchParams('?token=test-token')]);
+const mockGetInvitationByToken = mock();
+const mockAcceptInvitation = mock();
 
-jest.mock('../../../api/client');
-jest.mock('../hooks', () => ({
-  useAuth: () => ({ isAuthenticated: false }),
+mock.module('../../../api/client', () => ({
+  client: {
+    getInvitationByToken: mockGetInvitationByToken,
+    acceptInvitation: mockAcceptInvitation,
+  },
 }));
 
-jest.mock('react-router-dom', () => ({
+mock.module('../hooks', () => ({
+  useAuth: mockUseAuth,
+}));
+
+mock.module('react-router-dom', () => ({
   useNavigate: () => mockNavigate,
-  useSearchParams: () => [new URLSearchParams('?token=test-token')],
+  useSearchParams: () => mockUseSearchParams(),
 }));
 
-const mockClient = client as jest.Mocked<typeof client>;
+let InvitationAcceptPage: typeof import('./InvitationAcceptPage').default;
+
+beforeAll(async () => {
+  InvitationAcceptPage = (await import('./InvitationAcceptPage')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('InvitationAcceptPage', () => {
   const mockDetails: InvitationDetails = {
@@ -29,7 +46,13 @@ describe('InvitationAcceptPage', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockClient.getInvitationByToken.mockResolvedValue(mockDetails);
+    mockUseAuth.mockReset();
+    mockUseAuth.mockReturnValue({ isAuthenticated: false });
+    mockUseSearchParams.mockReset();
+    mockUseSearchParams.mockReturnValue([new URLSearchParams('?token=test-token')]);
+    mockGetInvitationByToken.mockReset();
+    mockAcceptInvitation.mockReset();
+    mockGetInvitationByToken.mockResolvedValue(mockDetails);
   });
 
   const renderPage = () => {
@@ -45,7 +68,7 @@ describe('InvitationAcceptPage', () => {
     renderPage();
 
     await waitFor(() => {
-      expect(mockClient.getInvitationByToken).toHaveBeenCalledWith('test-token');
+      expect(mockGetInvitationByToken).toHaveBeenCalledWith('test-token');
     });
 
     expect(screen.getByText("You've Been Invited!")).toBeInTheDocument();
@@ -60,7 +83,7 @@ describe('InvitationAcceptPage', () => {
       workspace_name: null,
       workspace_role: null,
     };
-    mockClient.getInvitationByToken.mockResolvedValue(orgOnlyDetails);
+    mockGetInvitationByToken.mockResolvedValue(orgOnlyDetails);
 
     renderPage();
 
@@ -110,17 +133,7 @@ describe('InvitationAcceptPage', () => {
   });
 
   it('displays accept button when authenticated', async () => {
-    jest.mock('../hooks', () => ({
-      useAuth: () => ({ isAuthenticated: true }),
-    }));
-
-    const { unmount } = renderPage();
-    unmount();
-
-    // Re-render with authenticated user
-    jest.doMock('../hooks', () => ({
-      useAuth: () => ({ isAuthenticated: true }),
-    }));
+    mockUseAuth.mockReturnValue({ isAuthenticated: true });
 
     renderPage();
 
@@ -128,30 +141,30 @@ describe('InvitationAcceptPage', () => {
       expect(screen.getByText("You've Been Invited!")).toBeInTheDocument();
     });
 
-    // When not authenticated, we should see auth buttons
-    // This test validates the current unauthenticated flow
-    expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /accept invitation/i })).toBeInTheDocument();
   });
 
   it('accepts invitation successfully when authenticated', async () => {
-    // Mock authenticated state
-    jest.resetModules();
-    jest.doMock('../hooks', () => ({
-      useAuth: () => ({ isAuthenticated: true }),
-    }));
+    mockUseAuth.mockReturnValue({ isAuthenticated: true });
+    mockAcceptInvitation.mockResolvedValue();
 
-    mockClient.acceptInvitation.mockResolvedValue();
+    renderPage();
 
-    const { unmount } = renderPage();
-    unmount();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /accept invitation/i })).toBeInTheDocument();
+    });
 
-    // For this test we'll just verify the mock was properly set up
-    // The actual acceptance flow requires the authenticated context
-    expect(mockClient.getInvitationByToken).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: /accept invitation/i }));
+
+    await waitFor(() => {
+      expect(mockAcceptInvitation).toHaveBeenCalledWith('test-token');
+    });
+
+    expect(mockNavigate).toHaveBeenCalledWith('/org-settings');
   });
 
   it('displays error when invitation fetch fails', async () => {
-    mockClient.getInvitationByToken.mockRejectedValue(new Error('Invitation not found'));
+    mockGetInvitationByToken.mockRejectedValue(new Error('Invitation not found'));
 
     renderPage();
 
@@ -164,21 +177,14 @@ describe('InvitationAcceptPage', () => {
   });
 
   it('displays error when token is missing', async () => {
-    jest.doMock('react-router-dom', () => ({
-      ...jest.requireActual('react-router-dom'),
-      useNavigate: () => mockNavigate,
-      useSearchParams: () => [new URLSearchParams('')],
-    }));
-
-    const { unmount } = renderPage();
-    unmount();
-
-    // Re-render with missing token
+    mockUseSearchParams.mockReturnValue([new URLSearchParams('')]);
     renderPage();
 
     await waitFor(() => {
       expect(screen.queryByText('Loading invitation...')).not.toBeInTheDocument();
     });
+
+    expect(screen.getByText('Invalid Invitation')).toBeInTheDocument();
   });
 
   it('displays expired message for expired invitations', async () => {
@@ -186,7 +192,7 @@ describe('InvitationAcceptPage', () => {
       ...mockDetails,
       expires_at: '2020-01-01T00:00:00Z',
     };
-    mockClient.getInvitationByToken.mockResolvedValue(expiredDetails);
+    mockGetInvitationByToken.mockResolvedValue(expiredDetails);
 
     renderPage();
 
@@ -235,7 +241,7 @@ describe('InvitationAcceptPage', () => {
   });
 
   it('navigates home when go to home button clicked on error', async () => {
-    mockClient.getInvitationByToken.mockRejectedValue(new Error('Not found'));
+    mockGetInvitationByToken.mockRejectedValue(new Error('Not found'));
 
     renderPage();
 
@@ -249,17 +255,13 @@ describe('InvitationAcceptPage', () => {
   });
 
   it('does not allow accepting expired invitation', async () => {
-    // Mock authenticated state
-    jest.resetModules();
-    jest.doMock('../hooks', () => ({
-      useAuth: () => ({ isAuthenticated: true }),
-    }));
+    mockUseAuth.mockReturnValue({ isAuthenticated: true });
 
     const expiredDetails: InvitationDetails = {
       ...mockDetails,
       expires_at: '2020-01-01T00:00:00Z',
     };
-    mockClient.getInvitationByToken.mockResolvedValue(expiredDetails);
+    mockGetInvitationByToken.mockResolvedValue(expiredDetails);
 
     const { unmount } = renderPage();
     unmount();

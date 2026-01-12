@@ -11,7 +11,7 @@ test.describe('Form Validation', () => {
     await page.click('text=Next');
 
     // Should stay on domain step with error
-    await expect(page.locator('.ui-form-field__error')).toBeVisible();
+    await expect(page.locator('[id$="-error"][role="alert"]')).toBeVisible();
     await expect(page.locator('h2')).toContainText('Domain Configuration');
   });
 
@@ -31,7 +31,7 @@ test.describe('Form Validation', () => {
     await masterKeyInput.fill('short');
     await page.click('text=Next');
 
-    await expect(page.locator('.ui-form-field__error').first()).toBeVisible();
+    await expect(page.locator('[id$="-error"][role="alert"]').first()).toBeVisible();
     await expect(page.locator('h2')).toContainText('Security');
   });
 

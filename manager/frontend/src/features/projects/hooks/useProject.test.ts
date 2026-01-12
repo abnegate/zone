@@ -1,9 +1,24 @@
 import { renderHook, waitFor } from '@testing-library/react';
-import { useProject } from './useProject';
-import { projectsApi } from '../../../api/projects';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Project } from '../types';
 
-jest.mock('../../../api/projects');
+const mockGetProject = mock();
+
+mock.module('../../../api/projects', () => ({
+  projectsApi: {
+    getProject: mockGetProject,
+  },
+}));
+
+let useProject: typeof import('./useProject').useProject;
+
+beforeAll(async () => {
+  ({ useProject } = await import('./useProject'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const mockProject: Project = {
   id: '1',
@@ -22,7 +37,7 @@ describe('useProject', () => {
   });
 
   it('should fetch project on mount', async () => {
-    (projectsApi.getProject as jest.Mock).mockResolvedValue(mockProject);
+    mockGetProject.mockResolvedValue(mockProject);
 
     const { result } = renderHook(() => useProject('1'));
 
@@ -34,12 +49,12 @@ describe('useProject', () => {
 
     expect(result.current.project).toEqual(mockProject);
     expect(result.current.error).toBeNull();
-    expect(projectsApi.getProject).toHaveBeenCalledWith('1');
+    expect(mockGetProject).toHaveBeenCalledWith('1');
   });
 
   it('should handle fetch error', async () => {
     const error = new Error('Project not found');
-    (projectsApi.getProject as jest.Mock).mockRejectedValue(error);
+    mockGetProject.mockRejectedValue(error);
 
     const { result } = renderHook(() => useProject('999'));
 
@@ -52,7 +67,7 @@ describe('useProject', () => {
   });
 
   it('should refetch project', async () => {
-    (projectsApi.getProject as jest.Mock).mockResolvedValue(mockProject);
+    mockGetProject.mockResolvedValue(mockProject);
 
     const { result } = renderHook(() => useProject('1'));
 
@@ -60,15 +75,15 @@ describe('useProject', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(projectsApi.getProject).toHaveBeenCalledTimes(1);
+    expect(mockGetProject).toHaveBeenCalledTimes(1);
 
     await result.current.refetch();
 
-    expect(projectsApi.getProject).toHaveBeenCalledTimes(2);
+    expect(mockGetProject).toHaveBeenCalledTimes(2);
   });
 
   it('should update local state when project is updated externally', async () => {
-    (projectsApi.getProject as jest.Mock).mockResolvedValue(mockProject);
+    mockGetProject.mockResolvedValue(mockProject);
 
     const { result } = renderHook(() => useProject('1'));
 
@@ -81,7 +96,7 @@ describe('useProject', () => {
       name: 'Updated Name',
     };
 
-    (projectsApi.getProject as jest.Mock).mockResolvedValue(updatedProject);
+    mockGetProject.mockResolvedValue(updatedProject);
 
     await result.current.refetch();
 
@@ -95,6 +110,6 @@ describe('useProject', () => {
 
     expect(result.current.project).toBeNull();
     expect(result.current.loading).toBe(false);
-    expect(projectsApi.getProject).not.toHaveBeenCalled();
+    expect(mockGetProject).not.toHaveBeenCalled();
   });
 });

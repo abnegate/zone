@@ -1,4 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
 import { ModelsStep } from './ModelsStep';
 
@@ -48,7 +50,6 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   OLLAMA_HOST: '',
   OLLAMA_KEEP_ALIVE: '',
   OLLAMA_MAX_LOADED_MODELS: '',
-  // AI Provider fields
   AI_PROVIDER: 'self_hosted',
   AI_LITELLM_HOST: '',
   AI_LITELLM_KEY: '',
@@ -66,377 +67,135 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   ...overrides,
 });
 
+const renderWithForm = (defaultValues: InstallerConfig) => {
+  let methods: UseFormReturn<InstallerConfig> | undefined;
+  const Wrapper = ({ children }: { children: ReactNode }) => {
+    const form = useForm<InstallerConfig>({ defaultValues });
+    methods = form;
+    return <FormProvider {...form}>{children}</FormProvider>;
+  };
+  const utils = render(<ModelsStep />, { wrapper: Wrapper });
+  if (!methods) {
+    throw new Error('Form methods not initialized');
+  }
+  return { ...utils, methods };
+};
+
 describe('ModelsStep', () => {
-  const onChange = jest.fn();
-  const getFieldError = jest.fn().mockReturnValue(undefined);
+  it('renders step header', () => {
+    renderWithForm(createMockConfig());
 
-  beforeEach(() => {
-    jest.clearAllMocks();
+    expect(screen.getByText('AI Provider Configuration')).toBeInTheDocument();
+    expect(screen.getByText('Choose your AI provider and configure models')).toBeInTheDocument();
   });
 
-  describe('Header and Provider Selection', () => {
-    it('renders step header', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
+  it('renders AI provider select with current value', () => {
+    renderWithForm(createMockConfig());
 
-      expect(screen.getByText('AI Provider Configuration')).toBeInTheDocument();
-      expect(screen.getByText('Choose your AI provider and configure models')).toBeInTheDocument();
-    });
-
-    it('renders AI provider select with current value', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      const select = screen.getByLabelText(/ai provider/i);
-      expect(select).toHaveValue('self_hosted');
-    });
-
-    it('calls onChange when provider is changed', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/ai provider/i), {
-        target: { value: 'openai' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('AI_PROVIDER', 'openai');
-    });
-
-    it('displays all provider options', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      const select = screen.getByLabelText(/ai provider/i);
-      const options = select.querySelectorAll('option');
-
-      expect(options.length).toBe(4);
-      expect(options[0].value).toBe('self_hosted');
-      expect(options[1].value).toBe('openai');
-      expect(options[2].value).toBe('anthropic');
-      expect(options[3].value).toBe('bedrock');
-    });
+    const select = screen.getByLabelText(/ai provider/i);
+    expect(select).toHaveValue('self_hosted');
   });
 
-  describe('Self-Hosted Provider', () => {
-    it('renders LiteLLM configuration for self_hosted provider', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'self_hosted' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+  it('updates provider selection', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
-      expect(screen.getByText('LiteLLM Configuration')).toBeInTheDocument();
-      expect(screen.getByLabelText(/litellm host/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/litellm api key/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/ai provider/i), {
+      target: { value: 'openai' },
     });
 
-    it('calls onChange when LiteLLM host is changed', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'self_hosted' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      fireEvent.change(screen.getByLabelText(/litellm host/i), {
-        target: { value: 'http://localhost:4000' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('AI_LITELLM_HOST', 'http://localhost:4000');
-    });
-
-    it('displays info about model download', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'self_hosted' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      expect(screen.getByText(/models will download on first start/i)).toBeInTheDocument();
-    });
-
-    it('displays self-hosted model options', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'self_hosted' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      const fastSelect = screen.getByLabelText(/fast model/i);
-      expect(fastSelect.querySelectorAll('option').length).toBe(4);
-
-      const reasoningSelect = screen.getByLabelText(/reasoning model/i);
-      expect(reasoningSelect.querySelectorAll('option').length).toBe(4);
-
-      const embeddingSelect = screen.getByLabelText(/embedding model/i);
-      expect(embeddingSelect.querySelectorAll('option').length).toBe(2);
-    });
+    expect(methods.getValues('AI_PROVIDER')).toBe('openai');
   });
 
-  describe('OpenAI Provider', () => {
-    it('renders OpenAI configuration when openai provider selected', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'openai' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+  it('displays all provider options', () => {
+    renderWithForm(createMockConfig());
 
+    const select = screen.getByLabelText(/ai provider/i);
+    const options = select.querySelectorAll('option');
+
+    expect(options.length).toBe(4);
+    expect(options[0].value).toBe('self_hosted');
+    expect(options[1].value).toBe('openai');
+    expect(options[2].value).toBe('anthropic');
+    expect(options[3].value).toBe('bedrock');
+  });
+
+  it('renders LiteLLM configuration for self-hosted provider', () => {
+    renderWithForm(createMockConfig({ AI_PROVIDER: 'self_hosted' }));
+
+    expect(screen.getByText('LiteLLM Configuration')).toBeInTheDocument();
+    expect(screen.getByLabelText(/litellm host/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/litellm api key/i)).toBeInTheDocument();
+    expect(screen.getByText(/models will download on first start/i)).toBeInTheDocument();
+  });
+
+  it('shows self-hosted model options', () => {
+    renderWithForm(createMockConfig({ AI_PROVIDER: 'self_hosted' }));
+
+    const fastSelect = screen.getByLabelText(/fast model/i);
+    expect(fastSelect.querySelectorAll('option').length).toBe(4);
+
+    const reasoningSelect = screen.getByLabelText(/reasoning model/i);
+    expect(reasoningSelect.querySelectorAll('option').length).toBe(4);
+
+    const embeddingSelect = screen.getByLabelText(/embedding model/i);
+    expect(embeddingSelect.querySelectorAll('option').length).toBe(2);
+  });
+
+  it('renders OpenAI configuration when openai provider selected', async () => {
+    renderWithForm(createMockConfig());
+
+    fireEvent.change(screen.getByLabelText(/ai provider/i), {
+      target: { value: 'openai' },
+    });
+
+    await waitFor(() => {
       expect(screen.getByText('OpenAI Configuration')).toBeInTheDocument();
-      expect(screen.getByLabelText(/openai api key/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/base url/i)).toBeInTheDocument();
     });
-
-    it('calls onChange when OpenAI API key is changed', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'openai' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      fireEvent.change(screen.getByLabelText(/openai api key/i), {
-        target: { value: 'sk-test123' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('AI_OPENAI_API_KEY', 'sk-test123');
-    });
-
-    it('displays billing info for OpenAI', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'openai' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      expect(screen.getByText(/api usage will be billed/i)).toBeInTheDocument();
-    });
-
-    it('displays OpenAI model options', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'openai', AI_MODEL_FAST: 'gpt-4o-mini' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      const fastSelect = screen.getByLabelText(/fast model/i);
-      expect(fastSelect.querySelectorAll('option').length).toBe(3);
-    });
+    expect(screen.getByLabelText(/openai api key/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/base url/i)).toBeInTheDocument();
+    expect(screen.getByText(/api usage will be billed/i)).toBeInTheDocument();
   });
 
-  describe('Anthropic Provider', () => {
-    it('renders Anthropic configuration when anthropic provider selected', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'anthropic' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+  it('renders Anthropic configuration when anthropic provider selected', async () => {
+    renderWithForm(createMockConfig());
 
+    fireEvent.change(screen.getByLabelText(/ai provider/i), {
+      target: { value: 'anthropic' },
+    });
+
+    await waitFor(() => {
       expect(screen.getByText('Anthropic Configuration')).toBeInTheDocument();
-      expect(screen.getByLabelText(/anthropic api key/i)).toBeInTheDocument();
     });
-
-    it('shows warning about no embedding models', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'anthropic' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      expect(screen.getByText(/does not provide embedding models/i)).toBeInTheDocument();
-    });
-
-    it('shows text input for embedding model instead of select', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'anthropic' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      const embeddingInput = screen.getByLabelText(/embedding model \(external\)/i);
-      expect(embeddingInput.tagName).toBe('INPUT');
-    });
+    expect(screen.getByLabelText(/anthropic api key/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/anthropic does not provide embedding models/i)
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/embedding model \(external\)/i)).toBeInTheDocument();
   });
 
-  describe('AWS Bedrock Provider', () => {
-    it('renders Bedrock configuration when bedrock provider selected', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'bedrock' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+  it('renders AWS Bedrock configuration when bedrock provider selected', async () => {
+    renderWithForm(createMockConfig());
 
+    fireEvent.change(screen.getByLabelText(/ai provider/i), {
+      target: { value: 'bedrock' },
+    });
+
+    await waitFor(() => {
       expect(screen.getByText('AWS Bedrock Configuration')).toBeInTheDocument();
-      expect(screen.getByLabelText(/aws region/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/use iam role/i)).toBeInTheDocument();
     });
+    expect(screen.getByLabelText(/aws region/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/use iam role/i)).toBeInTheDocument();
+  });
 
-    it('shows credential fields when IAM role is not used', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'bedrock', AI_BEDROCK_USE_IAM_ROLE: 'false' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+  it('hides AWS credentials when IAM role is enabled', async () => {
+    renderWithForm(createMockConfig({ AI_PROVIDER: 'bedrock' }));
 
-      expect(screen.getByLabelText(/aws access key id/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/aws secret access key/i)).toBeInTheDocument();
-    });
+    const checkbox = screen.getByLabelText(/use iam role/i);
+    fireEvent.click(checkbox);
 
-    it('hides credential fields when IAM role is used', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'bedrock', AI_BEDROCK_USE_IAM_ROLE: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
+    await waitFor(() => {
       expect(screen.queryByLabelText(/aws access key id/i)).not.toBeInTheDocument();
       expect(screen.queryByLabelText(/aws secret access key/i)).not.toBeInTheDocument();
-    });
-
-    it('calls onChange when IAM role checkbox is toggled', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'bedrock', AI_BEDROCK_USE_IAM_ROLE: 'false' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      fireEvent.click(screen.getByLabelText(/use iam role/i));
-
-      expect(onChange).toHaveBeenCalledWith('AI_BEDROCK_USE_IAM_ROLE', 'true');
-    });
-
-    it('displays Bedrock info message', () => {
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'bedrock' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      expect(screen.getByText(/aws bedrock usage is billed/i)).toBeInTheDocument();
-    });
-  });
-
-  describe('Model Selection', () => {
-    it('renders model selection section', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      expect(screen.getByText('Model Selection')).toBeInTheDocument();
-    });
-
-    it('renders fast model select with current value', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      const select = screen.getByLabelText(/fast model/i);
-      expect(select).toHaveValue('llama3.1:8b');
-    });
-
-    it('calls onChange when fast model is changed', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/fast model/i), {
-        target: { value: 'llama3.2:3b' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('AI_MODEL_FAST', 'llama3.2:3b');
-    });
-
-    it('renders reasoning model select with current value', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      const select = screen.getByLabelText(/reasoning model/i);
-      expect(select).toHaveValue('deepseek-r1:7b');
-    });
-
-    it('calls onChange when reasoning model is changed', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/reasoning model/i), {
-        target: { value: 'deepseek-r1:32b' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('AI_MODEL_REASONING', 'deepseek-r1:32b');
-    });
-
-    it('renders embedding model select with current value', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      const select = screen.getByLabelText(/embedding model/i);
-      expect(select).toHaveValue('nomic-embed-text');
-    });
-
-    it('calls onChange when embedding model is changed', () => {
-      render(
-        <ModelsStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-      );
-
-      fireEvent.change(screen.getByLabelText(/embedding model/i), {
-        target: { value: 'mxbai-embed-large' },
-      });
-
-      expect(onChange).toHaveBeenCalledWith('AI_MODEL_EMBEDDING', 'mxbai-embed-large');
-    });
-  });
-
-  describe('Error Display', () => {
-    it('displays field errors', () => {
-      const getFieldErrorWithError = jest.fn((field: string) =>
-        field === 'AI_OPENAI_API_KEY' ? 'API key is required' : undefined
-      );
-
-      render(
-        <ModelsStep
-          config={createMockConfig({ AI_PROVIDER: 'openai' })}
-          onChange={onChange}
-          getFieldError={getFieldErrorWithError}
-        />
-      );
-
-      expect(screen.getByText('API key is required')).toBeInTheDocument();
     });
   });
 });

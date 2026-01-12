@@ -1,69 +1,46 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { projectsApi } from '../../../api/projects';
-import type { SyncConfig, CreateSyncConfigRequest } from '../types';
+import type { CreateSyncConfigRequest } from '../types';
 
 export function useSyncConfigs(projectId: string | null) {
-  const [configs, setConfigs] = useState<SyncConfig[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const queryKey = ['syncConfigs', projectId];
 
-  const fetchSyncConfigs = useCallback(async () => {
-    if (!projectId) {
-      setConfigs([]);
-      setLoading(false);
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await projectsApi.getSyncConfigs(projectId);
-      setConfigs(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load sync configs');
-      setConfigs([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [projectId]);
-
-  useEffect(() => {
-    fetchSyncConfigs();
-  }, [fetchSyncConfigs]);
-
-  const createSyncConfig = useCallback(
-    async (request: CreateSyncConfigRequest): Promise<SyncConfig> => {
-      if (!projectId) {
-        throw new Error('Project ID is required');
-      }
-      const config = await projectsApi.createSyncConfig(projectId, request);
-      setConfigs((prev) => [...prev, config]);
-      return config;
+  const { data: configs = [], isLoading: loading, error, refetch } = useQuery({
+    queryKey,
+    queryFn: () => {
+        if (!projectId) return [];
+        return projectsApi.getSyncConfigs(projectId);
     },
-    [projectId]
-  );
+    enabled: !!projectId
+  });
 
-  const deleteSyncConfig = useCallback(
-    async (configId: string): Promise<void> => {
-      if (!projectId) {
-        throw new Error('Project ID is required');
-      }
-      await projectsApi.deleteSyncConfig(projectId, configId);
-      setConfigs((prev) => prev.filter((c) => c.id !== configId));
+  const createSyncConfigMutation = useMutation({
+    mutationFn: (request: CreateSyncConfigRequest) => {
+      if (!projectId) throw new Error('Project ID is required');
+      return projectsApi.createSyncConfig(projectId, request);
     },
-    [projectId]
-  );
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+    }
+  });
 
-  const refetch = useCallback(() => {
-    return fetchSyncConfigs();
-  }, [fetchSyncConfigs]);
+  const deleteSyncConfigMutation = useMutation({
+    mutationFn: (configId: string) => {
+      if (!projectId) throw new Error('Project ID is required');
+      return projectsApi.deleteSyncConfig(projectId, configId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+    }
+  });
 
   return {
     configs,
     loading,
-    error,
-    createSyncConfig,
-    deleteSyncConfig,
+    error: error instanceof Error ? error.message : error ? 'Failed to load sync configs' : null,
+    createSyncConfig: createSyncConfigMutation.mutateAsync,
+    deleteSyncConfig: deleteSyncConfigMutation.mutateAsync,
     refetch,
   };
 }

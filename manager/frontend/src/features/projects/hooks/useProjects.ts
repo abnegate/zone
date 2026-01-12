@@ -1,62 +1,49 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { projectsApi } from '../../../api/projects';
-import type { Project, CreateProjectRequest, UpdateProjectRequest, ProjectStatus } from '../types';
+import type { CreateProjectRequest, UpdateProjectRequest, ProjectStatus } from '../types';
 
 export function useProjects(statusFilter?: ProjectStatus | 'all') {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const queryKey = ['projects', statusFilter];
 
-  const fetchProjects = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
+  const { data: projects = [], isLoading: loading, error, refetch } = useQuery({
+    queryKey,
+    queryFn: () => {
       const status = statusFilter && statusFilter !== 'all' ? statusFilter : undefined;
-      const data = await projectsApi.getProjects(status);
-      setProjects(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load projects');
-      setProjects([]);
-    } finally {
-      setLoading(false);
+      return projectsApi.getProjects(status);
     }
-  }, [statusFilter]);
+  });
 
-  useEffect(() => {
-    fetchProjects();
-  }, [fetchProjects]);
+  const createProjectMutation = useMutation({
+    mutationFn: (request: CreateProjectRequest) => projectsApi.createProject(request),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    }
+  });
 
-  const createProject = useCallback(async (request: CreateProjectRequest): Promise<Project> => {
-    const project = await projectsApi.createProject(request);
-    setProjects((prev) => [project, ...prev]);
-    return project;
-  }, []);
+  const updateProjectMutation = useMutation({
+    mutationFn: ({ id, request }: { id: string; request: UpdateProjectRequest }) =>
+      projectsApi.updateProject(id, request),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    }
+  });
 
-  const updateProject = useCallback(
-    async (id: string, request: UpdateProjectRequest): Promise<Project> => {
-      const updated = await projectsApi.updateProject(id, request);
-      setProjects((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-      return updated;
-    },
-    []
-  );
-
-  const deleteProject = useCallback(async (id: string): Promise<void> => {
-    await projectsApi.deleteProject(id);
-    setProjects((prev) => prev.filter((p) => p.id !== id));
-  }, []);
-
-  const refetch = useCallback(() => {
-    return fetchProjects();
-  }, [fetchProjects]);
+  const deleteProjectMutation = useMutation({
+    mutationFn: (id: string) => projectsApi.deleteProject(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    }
+  });
 
   return {
     projects,
     loading,
-    error,
-    createProject,
-    updateProject,
-    deleteProject,
+    error: error instanceof Error ? error.message : error ? 'Failed to load projects' : null,
+    createProject: createProjectMutation.mutateAsync,
+    updateProject: (id: string, request: UpdateProjectRequest) => 
+        updateProjectMutation.mutateAsync({ id, request }),
+    deleteProject: deleteProjectMutation.mutateAsync,
     refetch,
   };
 }

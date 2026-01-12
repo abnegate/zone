@@ -1,12 +1,7 @@
 import type React from 'react';
+import { useFormContext } from 'react-hook-form';
 import { Checkbox, InfoBox, Input, Select } from '../components';
 import type { AiProvider, InstallerConfig } from '../types';
-
-interface ModelsStepProps {
-  config: InstallerConfig;
-  onChange: (key: keyof InstallerConfig, value: string) => void;
-  getFieldError: (field: string) => string | undefined;
-}
 
 const providerOptions: { value: AiProvider; label: string }[] = [
   { value: 'self_hosted', label: 'Self-Hosted (Ollama via LiteLLM)' },
@@ -95,10 +90,16 @@ const awsRegions = [
   { value: 'ap-southeast-2', label: 'Asia Pacific (Sydney)' },
 ];
 
-export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps) {
-  const provider = config.AI_PROVIDER as AiProvider;
+export function ModelsStep() {
+  const {
+    register,
+    setValue,
+    watch,
+    formState: { errors },
+  } = useFormContext<InstallerConfig>();
+  const provider = (watch('AI_PROVIDER') ?? 'self_hosted') as AiProvider;
   const providerModels = modelOptions[provider];
-  const useIamRole = config.AI_BEDROCK_USE_IAM_ROLE === 'true';
+  const useIamRole = watch('AI_BEDROCK_USE_IAM_ROLE') === 'true';
   const hasEmbeddingModels = providerModels.embedding.length > 0;
 
   return (
@@ -111,11 +112,8 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
       <Select
         label="AI Provider"
         options={providerOptions}
-        value={config.AI_PROVIDER}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-          onChange('AI_PROVIDER', e.target.value)
-        }
         helpText="Select your AI provider. Self-hosted uses local Ollama models."
+        {...register('AI_PROVIDER')}
       />
 
       {/* Self-hosted (Ollama via LiteLLM) settings */}
@@ -125,23 +123,17 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
           <Input
             label="LiteLLM Host"
             type="text"
-            value={config.AI_LITELLM_HOST}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('AI_LITELLM_HOST', e.target.value)
-            }
             placeholder="http://ollama:11434"
             helpText="URL of your Ollama/LiteLLM server"
-            error={getFieldError('AI_LITELLM_HOST')}
+            error={errors.AI_LITELLM_HOST?.message}
+            {...register('AI_LITELLM_HOST')}
           />
           <Input
             label="LiteLLM API Key (Optional)"
             type="password"
-            value={config.AI_LITELLM_KEY}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('AI_LITELLM_KEY', e.target.value)
-            }
             helpText="API key for LiteLLM if authentication is enabled"
-            error={getFieldError('AI_LITELLM_KEY')}
+            error={errors.AI_LITELLM_KEY?.message}
+            {...register('AI_LITELLM_KEY')}
           />
         </>
       )}
@@ -153,24 +145,18 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
           <Input
             label="OpenAI API Key"
             type="password"
-            value={config.AI_OPENAI_API_KEY}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('AI_OPENAI_API_KEY', e.target.value)
-            }
             placeholder="sk-..."
             helpText="Your OpenAI API key from platform.openai.com"
-            error={getFieldError('AI_OPENAI_API_KEY')}
+            error={errors.AI_OPENAI_API_KEY?.message}
+            {...register('AI_OPENAI_API_KEY')}
           />
           <Input
             label="Base URL (Optional)"
             type="text"
-            value={config.AI_OPENAI_BASE_URL}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('AI_OPENAI_BASE_URL', e.target.value)
-            }
             placeholder="https://api.openai.com/v1"
             helpText="Custom base URL for OpenAI-compatible APIs"
-            error={getFieldError('AI_OPENAI_BASE_URL')}
+            error={errors.AI_OPENAI_BASE_URL?.message}
+            {...register('AI_OPENAI_BASE_URL')}
           />
         </>
       )}
@@ -182,24 +168,18 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
           <Input
             label="Anthropic API Key"
             type="password"
-            value={config.AI_ANTHROPIC_API_KEY}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('AI_ANTHROPIC_API_KEY', e.target.value)
-            }
             placeholder="sk-ant-..."
             helpText="Your Anthropic API key from console.anthropic.com"
-            error={getFieldError('AI_ANTHROPIC_API_KEY')}
+            error={errors.AI_ANTHROPIC_API_KEY?.message}
+            {...register('AI_ANTHROPIC_API_KEY')}
           />
           <Input
             label="Base URL (Optional)"
             type="text"
-            value={config.AI_ANTHROPIC_BASE_URL}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('AI_ANTHROPIC_BASE_URL', e.target.value)
-            }
             placeholder="https://api.anthropic.com"
             helpText="Custom base URL for Anthropic-compatible APIs"
-            error={getFieldError('AI_ANTHROPIC_BASE_URL')}
+            error={errors.AI_ANTHROPIC_BASE_URL?.message}
+            {...register('AI_ANTHROPIC_BASE_URL')}
           />
           <InfoBox variant="warning">
             Anthropic does not provide embedding models. You will need to use a different provider
@@ -215,17 +195,17 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
           <Select
             label="AWS Region"
             options={awsRegions}
-            value={config.AI_BEDROCK_REGION}
-            onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-              onChange('AI_BEDROCK_REGION', e.target.value)
-            }
             helpText="Select the AWS region for Bedrock"
+            {...register('AI_BEDROCK_REGION')}
           />
           <Checkbox
             label="Use IAM Role"
             checked={useIamRole}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-              onChange('AI_BEDROCK_USE_IAM_ROLE', e.target.checked ? 'true' : 'false')
+              setValue('AI_BEDROCK_USE_IAM_ROLE', e.target.checked ? 'true' : 'false', {
+                shouldDirty: true,
+                shouldValidate: true,
+              })
             }
             helpText="Use IAM role from instance metadata (EC2/ECS). Uncheck to provide explicit credentials."
           />
@@ -234,23 +214,17 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
               <Input
                 label="AWS Access Key ID"
                 type="text"
-                value={config.AI_BEDROCK_ACCESS_KEY}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  onChange('AI_BEDROCK_ACCESS_KEY', e.target.value)
-                }
                 placeholder="AKIA..."
                 helpText="Your AWS access key ID"
-                error={getFieldError('AI_BEDROCK_ACCESS_KEY')}
+                error={errors.AI_BEDROCK_ACCESS_KEY?.message}
+                {...register('AI_BEDROCK_ACCESS_KEY')}
               />
               <Input
                 label="AWS Secret Access Key"
                 type="password"
-                value={config.AI_BEDROCK_SECRET_KEY}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  onChange('AI_BEDROCK_SECRET_KEY', e.target.value)
-                }
                 helpText="Your AWS secret access key"
-                error={getFieldError('AI_BEDROCK_SECRET_KEY')}
+                error={errors.AI_BEDROCK_SECRET_KEY?.message}
+                {...register('AI_BEDROCK_SECRET_KEY')}
               />
             </>
           )}
@@ -262,44 +236,32 @@ export function ModelsStep({ config, onChange, getFieldError }: ModelsStepProps)
       <Select
         label="Fast Model"
         options={providerModels.fast}
-        value={config.AI_MODEL_FAST}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-          onChange('AI_MODEL_FAST', e.target.value)
-        }
         helpText="For general queries and quick responses"
+        {...register('AI_MODEL_FAST')}
       />
 
       <Select
         label="Reasoning Model"
         options={providerModels.reasoning}
-        value={config.AI_MODEL_REASONING}
-        onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-          onChange('AI_MODEL_REASONING', e.target.value)
-        }
         helpText="For complex analysis and detailed reasoning"
+        {...register('AI_MODEL_REASONING')}
       />
 
       {hasEmbeddingModels ? (
         <Select
           label="Embedding Model"
           options={providerModels.embedding}
-          value={config.AI_MODEL_EMBEDDING}
-          onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-            onChange('AI_MODEL_EMBEDDING', e.target.value)
-          }
           helpText="For semantic routing and search"
+          {...register('AI_MODEL_EMBEDDING')}
         />
       ) : (
         <Input
           label="Embedding Model (External)"
           type="text"
-          value={config.AI_MODEL_EMBEDDING}
-          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-            onChange('AI_MODEL_EMBEDDING', e.target.value)
-          }
           placeholder="text-embedding-3-small"
           helpText="Enter an embedding model from another provider (e.g., OpenAI)"
-          error={getFieldError('AI_MODEL_EMBEDDING')}
+          error={errors.AI_MODEL_EMBEDDING?.message}
+          {...register('AI_MODEL_EMBEDDING')}
         />
       )}
 

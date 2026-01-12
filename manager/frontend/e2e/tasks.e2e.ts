@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi, routeApiContext } from './test-utils';
 
 // Mock data generators
 const generateMockProject = (id: string, name: string) => ({
@@ -135,14 +135,14 @@ test.describe('Tasks Page', () => {
     };
 
     // Mock organizations (with and without query params)
-    await page.route('**/api/organizations?*', (route) => {
+    await routeApi(page, '**/api/organizations?*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify(orgMock),
       });
     });
-    await page.route('**/api/organizations', (route) => {
+    await routeApi(page, '**/api/organizations', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -151,14 +151,14 @@ test.describe('Tasks Page', () => {
     });
 
     // Mock workspaces (with and without query params)
-    await page.route('**/api/organizations/*/workspaces?*', (route) => {
+    await routeApi(page, '**/api/organizations/*/workspaces?*', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify(workspaceMock),
       });
     });
-    await page.route('**/api/organizations/*/workspaces', (route) => {
+    await routeApi(page, '**/api/organizations/*/workspaces', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -167,7 +167,7 @@ test.describe('Tasks Page', () => {
     });
 
     // Mock projects endpoint
-    await page.route('**/api/projects*', (route) => {
+    await routeApi(page, '**/api/projects*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -178,7 +178,7 @@ test.describe('Tasks Page', () => {
     });
 
     // Mock sources endpoint
-    await page.route('**/api/sources*', (route) => {
+    await routeApi(page, '**/api/sources*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -189,7 +189,7 @@ test.describe('Tasks Page', () => {
     });
 
     // Default tasks mock - empty
-    await page.route('**/api/tasks*', (route) => {
+    await routeApi(page, '**/api/tasks*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,
@@ -240,7 +240,7 @@ test.describe('Tasks Page', () => {
       await page.unroute('**/api/tasks*');
 
       // Set up the tasks route at context level (takes precedence over page routes)
-      await context.route('**/api/tasks*', (route) => {
+      await routeApiContext(context, '**/api/tasks*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -296,7 +296,7 @@ test.describe('Tasks Page', () => {
     test('filters by project', async ({ context, page }) => {
       await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await context.route('**/api/tasks*', (route) => {
+      await routeApiContext(context, '**/api/tasks*', (route) => {
         const url = new URL(route.request().url());
         const projectId = url.searchParams.get('project_id');
 
@@ -329,7 +329,7 @@ test.describe('Tasks Page', () => {
     test('filters by status', async ({ context, page }) => {
       await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await context.route('**/api/tasks*', (route) => {
+      await routeApiContext(context, '**/api/tasks*', (route) => {
         const url = new URL(route.request().url());
         const status = url.searchParams.get('status');
 
@@ -364,38 +364,45 @@ test.describe('Tasks Page', () => {
     test('opens create modal from header button', async ({ page }) => {
       await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
-      await expect(page.locator('.modal-content h2')).toContainText('Create New Task');
+      await expect(page.getByRole('dialog', { name: 'New Task' })).toBeVisible();
     });
 
-    test('shows project dropdown with available projects', async ({ page }) => {
+    test('shows project selection options', async ({ page }) => {
       await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
 
-      const projectSelect = page.locator('#project');
-      await expect(projectSelect.locator('option')).toHaveCount(2);
-      await expect(projectSelect.locator('option').first()).toContainText('Frontend App');
+      await expect(page.locator('.project-selection-option')).toHaveCount(2);
+      await expect(page.locator('.project-selection-option').first()).toContainText('Frontend App');
     });
 
     test('shows all form fields', async ({ page }) => {
       await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
 
-      await expect(page.locator('#project')).toBeVisible();
-      await expect(page.locator('#title')).toBeVisible();
-      await expect(page.locator('#description')).toBeVisible();
-      await expect(page.locator('#criteria')).toBeVisible();
-      await expect(page.locator('#priority')).toBeVisible();
-      await expect(page.locator('#isAgentic')).toBeVisible();
+      await page.locator('.project-selection-option').first().click();
+      await page.getByRole('button', { name: 'Next' }).click();
+      await expect(page.locator('#task-title')).toBeVisible();
+      await expect(page.locator('#task-description')).toBeVisible();
+      await expect(page.locator('#task-criteria')).toBeVisible();
+
+      await page.fill('#task-title', 'Task title');
+      await page.fill('#task-description', 'Task description');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await expect(page.locator('.toggle-title')).toContainText('Enable Agentic Mode');
     });
 
     test('shows source dropdown when agentic mode enabled', async ({ page }) => {
       await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
 
-      // Enable agentic mode
-      await page.check('#isAgentic');
+      await page.locator('.project-selection-option').first().click();
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.fill('#task-title', 'Task title');
+      await page.fill('#task-description', 'Task description');
+      await page.getByRole('button', { name: 'Next' }).click();
 
-      await expect(page.locator('#sourceId')).toBeVisible();
+      await page.locator('.toggle-label').click();
+      await expect(page.locator('#task-source')).toBeVisible();
     });
 
     test('creates task successfully', async ({ context, page }) => {
@@ -406,7 +413,7 @@ test.describe('Tasks Page', () => {
       // Clear existing routes and add POST handler
       await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await context.route('**/api/tasks*', (route) => {
+      await routeApiContext(context, '**/api/tasks*', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 201,
@@ -426,15 +433,18 @@ test.describe('Tasks Page', () => {
 
       await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
-      await page.fill('#title', 'New Task');
-      await page.fill('#description', 'New task description');
-      await page.click('.form-actions .btn-primary');
+      await page.locator('.project-selection-option').first().click();
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.fill('#task-title', 'New Task');
+      await page.fill('#task-description', 'New task description');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.getByRole('button', { name: 'Create Task' }).click();
 
-      await expect(page.locator('.modal-content')).not.toBeVisible({ timeout: 5000 });
+      await expect(page.getByRole('dialog', { name: 'New Task' })).toHaveCount(0);
     });
 
     test('shows loading state during creation', async ({ page }) => {
-      await page.route('**/api/tasks', async (route) => {
+      await routeApi(page, '**/api/tasks', async (route) => {
         if (route.request().method() === 'POST') {
           await new Promise((resolve) => setTimeout(resolve, 500));
           route.fulfill({
@@ -452,15 +462,18 @@ test.describe('Tasks Page', () => {
       // Wait for button to be enabled (projects loaded)
       await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
-      await page.fill('#title', 'New Task');
-      await page.fill('#description', 'Description');
-      await page.click('.form-actions .btn-primary');
+      await page.locator('.project-selection-option').first().click();
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.fill('#task-title', 'New Task');
+      await page.fill('#task-description', 'Description');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.getByRole('button', { name: 'Create Task' }).click();
 
-      await expect(page.locator('.form-actions .btn-primary')).toContainText('Creating...');
+      await expect(page.getByRole('button', { name: 'Creating...' })).toBeVisible();
     });
 
     test('shows error when creation fails', async ({ page }) => {
-      await page.route('**/api/tasks', (route) => {
+      await routeApi(page, '**/api/tasks', (route) => {
         if (route.request().method() === 'POST') {
           route.fulfill({
             status: 400,
@@ -475,9 +488,12 @@ test.describe('Tasks Page', () => {
       // Wait for button to be enabled (projects loaded)
       await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
-      await page.fill('#title', 'New Task');
-      await page.fill('#description', 'Description');
-      await page.click('.form-actions .btn-primary');
+      await page.locator('.project-selection-option').first().click();
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.fill('#task-title', 'New Task');
+      await page.fill('#task-description', 'Description');
+      await page.getByRole('button', { name: 'Next' }).click();
+      await page.getByRole('button', { name: 'Create Task' }).click();
 
       await expect(page.locator('.form-error')).toBeVisible();
     });
@@ -485,9 +501,9 @@ test.describe('Tasks Page', () => {
     test('closes modal on cancel', async ({ page }) => {
       await expect(page.locator('.page-header .btn-primary')).toBeEnabled({ timeout: 10000 });
       await page.click('.page-header .btn-primary');
-      await page.click('.form-actions .btn-secondary');
+      await page.getByRole('button', { name: 'Cancel' }).click();
 
-      await expect(page.locator('.modal-content')).not.toBeVisible();
+      await expect(page.getByRole('dialog', { name: 'New Task' })).toHaveCount(0);
     });
   });
 
@@ -495,7 +511,7 @@ test.describe('Tasks Page', () => {
     test.beforeEach(async ({ context, page }) => {
       await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await context.route('**/api/tasks*', (route) => {
+      await routeApiContext(context, '**/api/tasks*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -535,7 +551,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('starts execution and shows progress', async ({ page }) => {
-      await page.route('**/api/tasks/task-1/start', (route) => {
+      await routeApi(page, '**/api/tasks/task-1/start', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -553,7 +569,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows progress bar after starting', async ({ page }) => {
-      await page.route('**/api/tasks/task-1/start', (route) => {
+      await routeApi(page, '**/api/tasks/task-1/start', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -568,7 +584,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows execution phases', async ({ page }) => {
-      await page.route('**/api/tasks/task-1/start', (route) => {
+      await routeApi(page, '**/api/tasks/task-1/start', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -584,7 +600,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows logs section after starting', async ({ page }) => {
-      await page.route('**/api/tasks/task-1/start', (route) => {
+      await routeApi(page, '**/api/tasks/task-1/start', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -604,7 +620,7 @@ test.describe('Tasks Page', () => {
       await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
 
-      await context.route('**/api/tasks*', (route) => {
+      await routeApiContext(context, '**/api/tasks*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -652,7 +668,7 @@ test.describe('Tasks Page', () => {
       await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
 
-      await context.route('**/api/tasks*', (route) => {
+      await routeApiContext(context, '**/api/tasks*', (route) => {
         if (route.request().method() === 'GET') {
           route.fulfill({
             status: 200,
@@ -687,7 +703,7 @@ test.describe('Tasks Page', () => {
     test('shows error when loading tasks fails', async ({ context, page }) => {
       await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await context.route('**/api/tasks*', (route) => {
+      await routeApiContext(context, '**/api/tasks*', (route) => {
         route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -700,7 +716,7 @@ test.describe('Tasks Page', () => {
       await page.goto('/tasks');
       await expect(page).toHaveURL('/tasks');
 
-      await expect(page.locator('.error-banner')).toBeVisible();
+      await expect(page.locator('.error-banner')).toBeVisible({ timeout: 15000 });
     });
   });
 
@@ -708,7 +724,7 @@ test.describe('Tasks Page', () => {
     test('shows skeleton cards while loading', async ({ context, page }) => {
       await context.unroute('**/api/tasks*');
       await page.unroute('**/api/tasks*');
-      await context.route('**/api/tasks*', async (route) => {
+      await routeApiContext(context, '**/api/tasks*', async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 500));
         route.fulfill({
           status: 200,
@@ -729,7 +745,7 @@ test.describe('Tasks Page', () => {
     test('new task button is disabled when no projects exist', async ({ context, page }) => {
       await context.unroute('**/api/projects*');
       await page.unroute('**/api/projects*');
-      await context.route('**/api/projects*', (route) => {
+      await routeApiContext(context, '**/api/projects*', (route) => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',

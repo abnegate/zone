@@ -585,7 +585,7 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
                     project: *project,
                     name: format!("Test {}", project.display_name()),
                     command: "bun".to_string(),
-                    args: vec!["test".to_string()],
+                    args: vec!["test".to_string(), "src".to_string()],
                     working_dir,
                 });
             }
@@ -620,7 +620,7 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
                         "-c".to_string(),
                         format!(
                             "cd {root} && docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres valkey && \
-                             sleep 3 && \
+                             until docker exec postgres pg_isready -U litellm > /dev/null 2>&1; do sleep 1; done && \
                              docker exec postgres psql -U litellm -d litellm -c \"CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres';\" 2>/dev/null || true && \
                              docker exec postgres psql -U postgres -c \"CREATE DATABASE zone_test;\" 2>/dev/null || true && \
                              cd {server_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test sqlx migrate run && \
@@ -738,7 +738,11 @@ fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig
                     project: *project,
                     name: format!("Coverage {}", project.display_name()),
                     command: "bun".to_string(),
-                    args: vec!["test".to_string(), "--coverage".to_string()],
+                    args: vec![
+                        "test".to_string(),
+                        "src".to_string(),
+                        "--coverage".to_string(),
+                    ],
                     working_dir,
                 });
             }
@@ -781,7 +785,7 @@ fn create_lighthouse_tasks(root: &PathBuf, target: LighthouseTarget) -> Vec<Task
             command: "bash".to_string(),
             args: vec![
                 "-c".to_string(),
-                "bun run build && bunx @lhci/cli autorun".to_string(),
+                "bun run build && bun run lighthouse".to_string(),
             ],
             working_dir,
         });

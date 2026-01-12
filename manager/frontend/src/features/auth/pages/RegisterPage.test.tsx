@@ -1,12 +1,13 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { BrowserRouter } from 'react-router-dom';
-import { useAuth } from '../hooks';
-import RegisterPage from './RegisterPage';
 
-// Mock useAuth
-jest.mock('../hooks');
-const mockUseAuth = useAuth as jest.MockedFunction<typeof useAuth>;
+const mockUseAuth = mock();
+
+mock.module('../hooks', () => ({
+  useAuth: mockUseAuth,
+}));
 
 // Mock useNavigate
 const mockNavigate = jest.fn();
@@ -17,6 +18,16 @@ jest.mock('react-router-dom', () => ({
   ),
   useNavigate: () => mockNavigate,
 }));
+
+let RegisterPage: typeof import('./RegisterPage').default;
+
+beforeAll(async () => {
+  RegisterPage = (await import('./RegisterPage')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const renderRegisterPage = () => {
   return render(

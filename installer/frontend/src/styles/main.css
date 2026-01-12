@@ -1,0 +1,8 @@
+@import "tailwindcss";
+@plugin "tailwindcss-animate";
+
+@theme {
+  /* Shadcn / Standard Mappings */
+  --color-background: #f8fafc;
+  --color-foreground: #0f172a;
+}

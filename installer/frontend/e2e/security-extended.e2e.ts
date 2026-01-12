@@ -150,7 +150,7 @@ test.describe('Security Step Extended', () => {
 
       await page.click('text=Next');
 
-      await expect(page.locator('.ui-form-field__error').first()).toBeVisible();
+      await expect(page.locator('[id$="-error"][role="alert"]').first()).toBeVisible();
       await expect(page.locator('h2')).toContainText('Security'); // Still on security step
     });
 

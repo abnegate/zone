@@ -1,9 +1,10 @@
 import { render } from '@testing-library/react';
-import App from './App';
+import type { ReactNode } from 'react';
+import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 
-// Mock all the contexts and providers
-jest.mock('./features/auth', () => ({
-  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+mock.module('./features/auth', () => ({
+  AuthProvider: ({ children }: { children: ReactNode }) => children,
+  useAuth: () => ({ isAuthenticated: false }),
   LoginPage: () => <div>Login Page</div>,
   RegisterPage: () => <div>Register Page</div>,
   EmailVerificationPage: () => <div>Email Verification Page</div>,
@@ -11,66 +12,66 @@ jest.mock('./features/auth', () => ({
   ResetPasswordPage: () => <div>Reset Password Page</div>,
   InvitationAcceptPage: () => <div>Invitation Accept Page</div>,
   SessionsPage: () => <div>Sessions Page</div>,
+  VerificationPendingBanner: () => <div>Verification Pending Banner</div>,
+  ResendVerificationButton: () => <button type="button">Resend Verification</button>,
 }));
 
-jest.mock('./shared/context/ThemeContext', () => ({
-  ThemeProvider: ({ children }: { children: React.ReactNode }) => children,
+mock.module('./shared/context', () => ({
+  ThemeProvider: ({ children }: { children: ReactNode }) => children,
+  WorkspaceProvider: ({ children }: { children: ReactNode }) => children,
 }));
 
-jest.mock('./shared/context/WorkspaceContext', () => ({
-  WorkspaceProvider: ({ children }: { children: React.ReactNode }) => children,
+mock.module('./shared/components', () => ({
+  Layout: () => <div data-testid="layout">Layout</div>,
+  Sidebar: () => <div data-testid="sidebar">Sidebar</div>,
+  ContextSwitcher: () => <div data-testid="context-switcher">ContextSwitcher</div>,
+  ProtectedRoute: ({ children }: { children: ReactNode }) => <>{children}</>,
+  PermissionGate: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 
-// Mock the Layout component to avoid complex rendering
-jest.mock('./shared/components/Layout/Layout', () => {
-  return function MockLayout() {
-    return <div data-testid="layout">Layout</div>;
-  };
-});
-
-// Mock ProtectedRoute to just render children
-jest.mock('./shared/components/ProtectedRoute', () => {
-  return function MockProtectedRoute({ children }: { children: React.ReactNode }) {
-    return <>{children}</>;
-  };
-});
-
-// Mock pages
-jest.mock('./pages/UnauthorizedPage', () => () => (
-  <div data-testid="unauthorized-page">Unauthorized</div>
-));
-jest.mock('./features/models', () => ({
+mock.module('./features/models', () => ({
   ModelsPage: () => <div data-testid="models-page">Models</div>,
 }));
-jest.mock('./features/chats', () => ({
+
+mock.module('./features/chats', () => ({
   ChatsPage: () => <div data-testid="chats-page">Chats</div>,
 }));
-jest.mock('./features/projects', () => ({
+
+mock.module('./features/projects', () => ({
   ProjectsPage: () => <div data-testid="projects-page">Projects</div>,
 }));
-jest.mock('./features/tasks', () => ({
+
+mock.module('./features/tasks', () => ({
   TasksPage: () => <div data-testid="tasks-page">Tasks</div>,
 }));
-jest.mock('./features/sources', () => ({
+
+mock.module('./features/sources', () => ({
   SourcesPage: () => <div data-testid="sources-page">Sources</div>,
 }));
-jest.mock('./features/knowledge', () => ({
+
+mock.module('./features/knowledge', () => ({
   WikiPage: () => <div data-testid="wiki-page">Wiki</div>,
   ContextSearchPage: () => <div data-testid="context-search-page">ContextSearch</div>,
 }));
-jest.mock('./features/settings/workspace/pages/WorkspaceSettingsPage', () => ({
-  __esModule: true,
-  default: () => <div data-testid="settings-page">Settings</div>,
+
+mock.module('./features/settings', () => ({
+  OrgSettingsPage: () => <div data-testid="org-settings-page">OrgSettings</div>,
+  WorkspaceSettingsPage: () => <div data-testid="settings-page">Settings</div>,
 }));
-jest.mock('./features/settings/organization/pages/OrgSettingsPage', () => ({
-  __esModule: true,
-  default: () => <div data-testid="org-settings-page">OrgSettings</div>,
-}));
+
+let App: typeof import('./App').default;
+
+beforeAll(async () => {
+  App = (await import('./App')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('App', () => {
   it('renders without crashing', () => {
     render(<App />);
-    // Just verify it rendered without errors
     expect(document.body).toBeInTheDocument();
   });
 });

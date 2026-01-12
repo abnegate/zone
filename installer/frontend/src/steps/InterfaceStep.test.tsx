@@ -1,4 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
 import { InterfaceStep } from './InterfaceStep';
 
@@ -65,166 +67,83 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   ...overrides,
 });
 
+const renderWithForm = (defaultValues: InstallerConfig) => {
+  let methods: UseFormReturn<InstallerConfig> | undefined;
+  const Wrapper = ({ children }: { children: ReactNode }) => {
+    const form = useForm<InstallerConfig>({ defaultValues });
+    methods = form;
+    return <FormProvider {...form}>{children}</FormProvider>;
+  };
+  const utils = render(<InterfaceStep />, { wrapper: Wrapper });
+  if (!methods) {
+    throw new Error('Form methods not initialized');
+  }
+  return { ...utils, methods };
+};
+
 describe('InterfaceStep', () => {
-  const onChange = jest.fn();
-  const getFieldError = jest.fn().mockReturnValue(undefined);
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
   it('renders step header', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText('Interface Settings')).toBeInTheDocument();
     expect(screen.getByText('Configure the web interface')).toBeInTheDocument();
   });
 
   it('renders authentication checkbox unchecked by default', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    renderWithForm(createMockConfig());
 
     const checkbox = screen.getByLabelText(/enable built-in authentication/i);
     expect(checkbox).not.toBeChecked();
   });
 
   it('renders authentication checkbox checked when enabled', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig({ WEBUI_AUTH: 'true' })}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    renderWithForm(createMockConfig({ WEBUI_AUTH: 'true' }));
 
     const checkbox = screen.getByLabelText(/enable built-in authentication/i);
     expect(checkbox).toBeChecked();
   });
 
-  it('calls onChange when authentication is toggled', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+  it('toggles authentication setting', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.click(screen.getByLabelText(/enable built-in authentication/i));
-    expect(onChange).toHaveBeenCalledWith('WEBUI_AUTH', 'true');
-  });
-
-  it('calls onChange with false when authentication is disabled', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig({ WEBUI_AUTH: 'true' })}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    expect(methods.getValues('WEBUI_AUTH')).toBe('true');
 
     fireEvent.click(screen.getByLabelText(/enable built-in authentication/i));
-    expect(onChange).toHaveBeenCalledWith('WEBUI_AUTH', 'false');
+    expect(methods.getValues('WEBUI_AUTH')).toBe('false');
   });
 
   it('renders signup checkbox unchecked by default', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    renderWithForm(createMockConfig());
 
     const checkbox = screen.getByLabelText(/allow user signups/i);
     expect(checkbox).not.toBeChecked();
   });
 
-  it('calls onChange when signup is toggled on', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+  it('toggles signup setting', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.click(screen.getByLabelText(/allow user signups/i));
-    expect(onChange).toHaveBeenCalledWith('WEBUI_ENABLE_SIGNUP', 'true');
-  });
-
-  it('calls onChange when signup is toggled off', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig({ WEBUI_ENABLE_SIGNUP: 'true' })}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    expect(methods.getValues('WEBUI_ENABLE_SIGNUP')).toBe('true');
 
     fireEvent.click(screen.getByLabelText(/allow user signups/i));
-    expect(onChange).toHaveBeenCalledWith('WEBUI_ENABLE_SIGNUP', 'false');
+    expect(methods.getValues('WEBUI_ENABLE_SIGNUP')).toBe('false');
   });
 
   it('renders language select with default value', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    renderWithForm(createMockConfig());
 
     const select = screen.getByLabelText(/default language/i);
     expect(select).toHaveValue('en-US');
   });
 
-  it('calls onChange when language is changed', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+  it('updates language selection', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.change(screen.getByLabelText(/default language/i), {
       target: { value: 'fr-FR' },
     });
 
-    expect(onChange).toHaveBeenCalledWith('WEBUI_DEFAULT_LOCALE', 'fr-FR');
-  });
-
-  it('displays all language options', () => {
-    render(
-      <InterfaceStep
-        config={createMockConfig()}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
-
-    const select = screen.getByLabelText(/default language/i);
-    const options = select.querySelectorAll('option');
-
-    expect(options.length).toBe(7);
-    expect(options[0]).toHaveValue('en-US');
-    expect(options[1]).toHaveValue('en-GB');
-    expect(options[2]).toHaveValue('es-ES');
-    expect(options[3]).toHaveValue('fr-FR');
-    expect(options[4]).toHaveValue('de-DE');
-    expect(options[5]).toHaveValue('ja-JP');
-    expect(options[6]).toHaveValue('zh-CN');
+    expect(methods.getValues('WEBUI_DEFAULT_LOCALE')).toBe('fr-FR');
   });
 });

@@ -1,6 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { useAuth } from '../../features/auth';
-import ProtectedRoute from './ProtectedRoute';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Mock react-router-dom
 let mockCurrentRoute = '/';
@@ -15,8 +14,21 @@ jest.mock('react-router-dom', () => ({
 }));
 
 // Mock the AuthContext
-jest.mock('../../features/auth');
-const mockUseAuth = useAuth as jest.MockedFunction<typeof useAuth>;
+const mockUseAuth = mock();
+
+mock.module('../../features/auth', () => ({
+  useAuth: mockUseAuth,
+}));
+
+let ProtectedRoute: typeof import('./ProtectedRoute').default;
+
+beforeAll(async () => {
+  ProtectedRoute = (await import('./ProtectedRoute')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 // Test components
 const ProtectedContent = () => <div data-testid="protected-content">Protected Content</div>;

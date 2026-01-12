@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 const generateMockModels = (count: number, startId = 0) => {
   return Array.from({ length: count }, (_, i) => ({
@@ -29,7 +29,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const manyModels = generateMockModels(100);
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -62,7 +62,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     let page2 = generateMockModels(20, 20);
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -104,7 +104,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const models = generateMockModels(20);
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', async (route) => {
+    await routeApi(page, '**/api/models*', async (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -144,7 +144,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const filteredModels = [allModels[0]];
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -203,7 +203,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     ];
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -252,7 +252,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const models = generateMockModels(20);
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -289,7 +289,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const models = generateMockModels(5);
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -323,7 +323,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     const models = generateMockModels(3);
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
       const method = route.request().method();
@@ -391,7 +391,7 @@ test.describe('Browse Models - Source Tab Switching', () => {
   test('clicking source tabs sends correct source parameter', async ({ page }) => {
     const requests: string[] = [];
 
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
       if (source) requests.push(source);
@@ -455,7 +455,7 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     };
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -504,7 +504,7 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     };
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -555,7 +555,7 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     };
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -617,7 +617,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
     };
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -666,7 +666,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
     };
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -695,7 +695,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
     });
 
     // Mock the model info endpoint
-    await page.route('**/api/models/modelscope/**', (route) => {
+    await routeApi(page, '**/api/models/modelscope/**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -729,7 +729,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
     };
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -757,7 +757,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
       }
     });
 
-    await page.route('**/api/models/modelscope/**', (route) => {
+    await routeApi(page, '**/api/models/modelscope/**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -785,7 +785,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
     };
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -813,7 +813,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
       }
     });
 
-    await page.route('**/api/models/modelscope/**', (route) => {
+    await routeApi(page, '**/api/models/modelscope/**', (route) => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -842,7 +842,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
     }));
 
     await page.unroute('**/api/models*');
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
 
@@ -897,7 +897,7 @@ test.describe('Browse Models - ModelScope Specific', () => {
       url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
     };
 
-    await page.route('**/api/models*', (route) => {
+    await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
       const method = route.request().method();

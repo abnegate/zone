@@ -1,7 +1,10 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { tasksApi } from '../../../api/tasks';
 import type { Task } from '../types';
 import { useTasks } from './useTasks';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 jest.mock('../../../api/tasks', () => ({
   tasksApi: {
@@ -13,6 +16,18 @@ jest.mock('../../../api/tasks', () => ({
 }));
 
 const mockTasksApi = tasksApi as jest.Mocked<typeof tasksApi>;
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 const mockTask: Task = {
   id: 'task-1',
@@ -43,12 +58,14 @@ const mockTask: Task = {
 describe('useTasks', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockTasksApi.getTasks.mockResolvedValue([]);
   });
 
   it('loads tasks on mount', async () => {
     mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
+    const wrapper = createWrapper();
 
-    const { result } = renderHook(() => useTasks());
+    const { result } = renderHook(() => useTasks(), { wrapper });
 
     expect(result.current.loading).toBe(true);
 
@@ -63,8 +80,9 @@ describe('useTasks', () => {
 
   it('loads tasks with filters', async () => {
     mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
+    const wrapper = createWrapper();
 
-    const { result } = renderHook(() => useTasks('proj-1', 'created'));
+    const { result } = renderHook(() => useTasks('proj-1', 'created'), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -75,8 +93,9 @@ describe('useTasks', () => {
 
   it('handles load error', async () => {
     mockTasksApi.getTasks.mockRejectedValueOnce(new Error('Network error'));
+    const wrapper = createWrapper();
 
-    const { result } = renderHook(() => useTasks());
+    const { result } = renderHook(() => useTasks(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -89,9 +108,11 @@ describe('useTasks', () => {
   it('creates a task', async () => {
     mockTasksApi.getTasks.mockResolvedValueOnce([]);
     const newTask = { ...mockTask, id: 'task-2', title: 'New Task' };
+    mockTasksApi.getTasks.mockResolvedValueOnce([newTask]);
     mockTasksApi.createTask.mockResolvedValueOnce(newTask);
+    const wrapper = createWrapper();
 
-    const { result } = renderHook(() => useTasks());
+    const { result } = renderHook(() => useTasks(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -108,15 +129,19 @@ describe('useTasks', () => {
     });
 
     expect(mockTasksApi.createTask).toHaveBeenCalledWith(request);
-    expect(result.current.tasks).toEqual([newTask]);
+    await waitFor(() => {
+      expect(result.current.tasks).toEqual([newTask]);
+    });
   });
 
   it('updates a task', async () => {
     mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
     const updatedTask = { ...mockTask, title: 'Updated Task' };
+    mockTasksApi.getTasks.mockResolvedValueOnce([updatedTask]);
     mockTasksApi.updateTask.mockResolvedValueOnce(updatedTask);
+    const wrapper = createWrapper();
 
-    const { result } = renderHook(() => useTasks());
+    const { result } = renderHook(() => useTasks(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -128,14 +153,18 @@ describe('useTasks', () => {
     });
 
     expect(mockTasksApi.updateTask).toHaveBeenCalledWith('task-1', request);
-    expect(result.current.tasks[0].title).toBe('Updated Task');
+    await waitFor(() => {
+      expect(result.current.tasks[0].title).toBe('Updated Task');
+    });
   });
 
   it('deletes a task', async () => {
     mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
+    mockTasksApi.getTasks.mockResolvedValueOnce([]);
     mockTasksApi.deleteTask.mockResolvedValueOnce();
+    const wrapper = createWrapper();
 
-    const { result } = renderHook(() => useTasks());
+    const { result } = renderHook(() => useTasks(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -146,13 +175,16 @@ describe('useTasks', () => {
     });
 
     expect(mockTasksApi.deleteTask).toHaveBeenCalledWith('task-1');
-    expect(result.current.tasks).toEqual([]);
+    await waitFor(() => {
+      expect(result.current.tasks).toEqual([]);
+    });
   });
 
   it('refetches tasks', async () => {
     mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
+    const wrapper = createWrapper();
 
-    const { result } = renderHook(() => useTasks());
+    const { result } = renderHook(() => useTasks(), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -171,11 +203,15 @@ describe('useTasks', () => {
 
   it('reloads when filters change', async () => {
     mockTasksApi.getTasks.mockResolvedValue([mockTask]);
+    const wrapper = createWrapper();
 
     const { rerender } = renderHook(
       ({ projectId, status }: { projectId?: string; status?: string }) =>
         useTasks(projectId, status),
-      { initialProps: { projectId: 'proj-1', status: undefined as string | undefined } }
+      {
+        initialProps: { projectId: 'proj-1', status: undefined as string | undefined },
+        wrapper,
+      }
     );
 
     await waitFor(() => {

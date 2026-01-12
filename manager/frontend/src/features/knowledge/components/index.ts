@@ -1,2 +1,1 @@
-// Component exports will be added here as needed
-export {};
+export { CreateKnowledgeWizard } from './CreateKnowledgeWizard';

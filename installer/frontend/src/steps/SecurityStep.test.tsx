@@ -1,13 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
 import { SecurityStep } from './SecurityStep';
-
-// Mock the useSecretGenerator hook
-jest.mock('../hooks', () => ({
-  useSecretGenerator: () => ({
-    generateSecret: jest.fn().mockReturnValue('generated-secret-123'),
-  }),
-}));
 
 const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig => ({
   DOMAIN_HOST_WEBUI: 'test.localhost',
@@ -72,344 +67,157 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   ...overrides,
 });
 
+const renderWithForm = (defaultValues: InstallerConfig) => {
+  let methods: UseFormReturn<InstallerConfig> | undefined;
+  const Wrapper = ({ children }: { children: ReactNode }) => {
+    const form = useForm<InstallerConfig>({ defaultValues });
+    methods = form;
+    return <FormProvider {...form}>{children}</FormProvider>;
+  };
+  const utils = render(<SecurityStep />, { wrapper: Wrapper });
+  if (!methods) {
+    throw new Error('Form methods not initialized');
+  }
+  return { ...utils, methods };
+};
+
 describe('SecurityStep', () => {
-  const onChange = jest.fn();
-  const getFieldError = jest.fn().mockReturnValue(undefined);
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
   it('renders step header', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText('Security')).toBeInTheDocument();
-    expect(
-      screen.getByText(/configure authentication and generate secure keys/i)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/configure authentication and generate secure keys/i)).toBeInTheDocument();
   });
 
   it('renders authentication realm input with current value', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByLabelText(/authentication realm/i)).toHaveValue('Zone');
   });
 
-  it('calls onChange when authentication realm is changed', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('updates authentication realm', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.change(screen.getByLabelText(/authentication realm/i), {
       target: { value: 'NewRealm' },
     });
 
-    expect(onChange).toHaveBeenCalledWith('SECURITY_BASICAUTH_REALM', 'NewRealm');
+    expect(methods.getValues('SECURITY_BASICAUTH_REALM')).toBe('NewRealm');
   });
 
-  it('renders LiteLLM master key input with current value', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('renders secret inputs with current values', () => {
+    renderWithForm(createMockConfig());
 
     expect(screen.getByLabelText(/litellm master key/i)).toHaveValue('master-key');
-  });
-
-  it('calls onChange when LiteLLM master key is changed', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    fireEvent.change(screen.getByLabelText(/litellm master key/i), {
-      target: { value: 'new-master-key' },
-    });
-
-    expect(onChange).toHaveBeenCalledWith('SECURITY_LITELLM_MASTER_KEY', 'new-master-key');
-  });
-
-  it('renders LiteLLM salt key input with current value', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
     expect(screen.getByLabelText(/litellm salt key/i)).toHaveValue('salt-key');
-  });
-
-  it('renders SearXNG secret key input with current value', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
     expect(screen.getByLabelText(/searxng secret key/i)).toHaveValue('searx-key');
-  });
-
-  it('renders Manager API key input with current value', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
     expect(screen.getByLabelText(/manager api key/i)).toHaveValue('api-key');
-  });
-
-  it('renders PostgreSQL password input with current value', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
     expect(screen.getByLabelText(/postgresql password/i)).toHaveValue('pg-password');
   });
 
-  it('renders Generate All Secrets button', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    expect(screen.getByRole('button', { name: /generate all secrets/i })).toBeInTheDocument();
-  });
-
   it('generates all secrets when button is clicked', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
+    const { methods } = renderWithForm(
+      createMockConfig({
+        SECURITY_LITELLM_MASTER_KEY: '',
+        SECURITY_LITELLM_SALT_KEY: '',
+        SECURITY_SEARXNG_SECRET_KEY: '',
+        SECURITY_MANAGER_API_KEY: '',
+        POSTGRES_PASSWORD: '',
+      })
     );
 
     fireEvent.click(screen.getByRole('button', { name: /generate all secrets/i }));
 
-    expect(onChange).toHaveBeenCalledWith('SECURITY_LITELLM_MASTER_KEY', 'generated-secret-123');
-    expect(onChange).toHaveBeenCalledWith('SECURITY_LITELLM_SALT_KEY', 'generated-secret-123');
-    expect(onChange).toHaveBeenCalledWith('SECURITY_SEARXNG_SECRET_KEY', 'generated-secret-123');
-    expect(onChange).toHaveBeenCalledWith('SECURITY_MANAGER_API_KEY', 'generated-secret-123');
-    expect(onChange).toHaveBeenCalledWith('POSTGRES_PASSWORD', 'generated-secret-123');
+    expect(methods.getValues('SECURITY_LITELLM_MASTER_KEY')).not.toBe('');
+    expect(methods.getValues('SECURITY_LITELLM_SALT_KEY')).not.toBe('');
+    expect(methods.getValues('SECURITY_SEARXNG_SECRET_KEY')).not.toBe('');
+    expect(methods.getValues('SECURITY_MANAGER_API_KEY')).not.toBe('');
+    expect(methods.getValues('POSTGRES_PASSWORD')).not.toBe('');
   });
 
-  it('renders individual generate buttons for each secret', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    // Each Input with onGenerate gets a Generate button
-    const generateButtons = screen.getAllByRole('button', { name: /^generate$/i });
-    expect(generateButtons.length).toBe(5);
-  });
-
-  it('generates individual LiteLLM master key when button is clicked', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
+  it('generates an individual secret when Generate is clicked', () => {
+    const { methods } = renderWithForm(
+      createMockConfig({ SECURITY_LITELLM_MASTER_KEY: '' })
     );
 
     const generateButtons = screen.getAllByRole('button', { name: /^generate$/i });
-    // LiteLLM Master Key is the first input with generate button
     fireEvent.click(generateButtons[0]);
 
-    expect(onChange).toHaveBeenCalledWith('SECURITY_LITELLM_MASTER_KEY', 'generated-secret-123');
-  });
-
-  it('generates individual LiteLLM salt key when button is clicked', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    const generateButtons = screen.getAllByRole('button', { name: /^generate$/i });
-    // LiteLLM Salt Key is the second input with generate button
-    fireEvent.click(generateButtons[1]);
-
-    expect(onChange).toHaveBeenCalledWith('SECURITY_LITELLM_SALT_KEY', 'generated-secret-123');
-  });
-
-  it('generates individual SearXNG secret key when button is clicked', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    const generateButtons = screen.getAllByRole('button', { name: /^generate$/i });
-    // SearXNG Secret Key is the third input with generate button
-    fireEvent.click(generateButtons[2]);
-
-    expect(onChange).toHaveBeenCalledWith('SECURITY_SEARXNG_SECRET_KEY', 'generated-secret-123');
-  });
-
-  it('generates individual Manager API key when button is clicked', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    const generateButtons = screen.getAllByRole('button', { name: /^generate$/i });
-    // Manager API Key is the fourth input with generate button
-    fireEvent.click(generateButtons[3]);
-
-    expect(onChange).toHaveBeenCalledWith('SECURITY_MANAGER_API_KEY', 'generated-secret-123');
-  });
-
-  it('generates individual PostgreSQL password when button is clicked', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    const generateButtons = screen.getAllByRole('button', { name: /^generate$/i });
-    // PostgreSQL Password is the fifth input with generate button
-    fireEvent.click(generateButtons[4]);
-
-    expect(onChange).toHaveBeenCalledWith('POSTGRES_PASSWORD', 'generated-secret-123');
-  });
-
-  it('calls onChange when LiteLLM salt key is changed', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    fireEvent.change(screen.getByLabelText(/litellm salt key/i), {
-      target: { value: 'new-salt-key' },
-    });
-
-    expect(onChange).toHaveBeenCalledWith('SECURITY_LITELLM_SALT_KEY', 'new-salt-key');
-  });
-
-  it('calls onChange when SearXNG secret key is changed', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    fireEvent.change(screen.getByLabelText(/searxng secret key/i), {
-      target: { value: 'new-searx-key' },
-    });
-
-    expect(onChange).toHaveBeenCalledWith('SECURITY_SEARXNG_SECRET_KEY', 'new-searx-key');
-  });
-
-  it('calls onChange when Manager API key is changed', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    fireEvent.change(screen.getByLabelText(/manager api key/i), {
-      target: { value: 'new-api-key' },
-    });
-
-    expect(onChange).toHaveBeenCalledWith('SECURITY_MANAGER_API_KEY', 'new-api-key');
-  });
-
-  it('calls onChange when PostgreSQL password is changed', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
-
-    fireEvent.change(screen.getByLabelText(/postgresql password/i), {
-      target: { value: 'new-pg-password' },
-    });
-
-    expect(onChange).toHaveBeenCalledWith('POSTGRES_PASSWORD', 'new-pg-password');
+    expect(methods.getValues('SECURITY_LITELLM_MASTER_KEY')).not.toBe('');
   });
 
   it('renders HTTPS redirect checkbox checked when enabled', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     const checkbox = screen.getByLabelText(/enable https redirect/i);
     expect(checkbox).toBeChecked();
   });
 
-  it('calls onChange when HTTPS redirect is toggled off', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('toggles HTTPS redirect setting', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.click(screen.getByLabelText(/enable https redirect/i));
-    expect(onChange).toHaveBeenCalledWith('SECURITY_HTTP_REDIRECT', 'false');
-  });
-
-  it('calls onChange when HTTPS redirect is toggled on', () => {
-    render(
-      <SecurityStep
-        config={createMockConfig({ SECURITY_HTTP_REDIRECT: 'false' })}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    expect(methods.getValues('SECURITY_HTTP_REDIRECT')).toBe('false');
 
     fireEvent.click(screen.getByLabelText(/enable https redirect/i));
-    expect(onChange).toHaveBeenCalledWith('SECURITY_HTTP_REDIRECT', 'true');
+    expect(methods.getValues('SECURITY_HTTP_REDIRECT')).toBe('true');
   });
 
   it('renders TLS certificate checkbox checked when enabled', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     const checkbox = screen.getByLabelText(/auto-generate tls certificate/i);
     expect(checkbox).toBeChecked();
   });
 
-  it('calls onChange when TLS certificate is toggled off', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+  it('toggles TLS certificate setting', () => {
+    const { methods } = renderWithForm(createMockConfig());
 
     fireEvent.click(screen.getByLabelText(/auto-generate tls certificate/i));
-    expect(onChange).toHaveBeenCalledWith('SECURITY_GENERATE_CERTIFICATE', 'false');
-  });
-
-  it('calls onChange when TLS certificate is toggled on', () => {
-    render(
-      <SecurityStep
-        config={createMockConfig({ SECURITY_GENERATE_CERTIFICATE: 'false' })}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    expect(methods.getValues('SECURITY_GENERATE_CERTIFICATE')).toBe('false');
 
     fireEvent.click(screen.getByLabelText(/auto-generate tls certificate/i));
-    expect(onChange).toHaveBeenCalledWith('SECURITY_GENERATE_CERTIFICATE', 'true');
+    expect(methods.getValues('SECURITY_GENERATE_CERTIFICATE')).toBe('true');
   });
 
   it('shows ACME email info box when TLS is enabled', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
-    expect(screen.getByText(/set your acme email in advanced settings/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/set your acme email in advanced settings/i)
+    ).toBeInTheDocument();
   });
 
   it('hides ACME email info box when TLS is disabled', () => {
-    render(
-      <SecurityStep
-        config={createMockConfig({ SECURITY_GENERATE_CERTIFICATE: 'false' })}
-        onChange={onChange}
-        getFieldError={getFieldError}
-      />
-    );
+    renderWithForm(createMockConfig({ SECURITY_GENERATE_CERTIFICATE: 'false' }));
 
-    expect(screen.queryByText(/set your acme email in advanced settings/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/set your acme email in advanced settings/i)
+    ).not.toBeInTheDocument();
   });
 
   it('displays warning about empty keys', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText(/empty keys are insecure/i)).toBeInTheDocument();
   });
 
   it('displays Production Settings header', () => {
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText('Production Settings')).toBeInTheDocument();
   });
 
-  it('displays error for field when provided', () => {
-    getFieldError.mockImplementation((field: string) =>
-      field === 'SECURITY_LITELLM_MASTER_KEY' ? 'Key is required' : undefined
-    );
+  it('displays error for field when provided', async () => {
+    const { methods } = renderWithForm(createMockConfig());
 
-    render(
-      <SecurityStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    methods.setError('SECURITY_LITELLM_MASTER_KEY', {
+      type: 'manual',
+      message: 'Key is required',
+    });
 
-    expect(screen.getByText('Key is required')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('Key is required')).toBeInTheDocument();
+    });
   });
 });

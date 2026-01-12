@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { projectsApi } from '../../../api/projects';
+import { useQuery } from '@tanstack/react-query';
 import { client } from '../../../api/client';
 import { useTasks } from '../hooks';
+import { useProjects } from '../../projects/hooks';
 import { tasksApi } from '../../../api/tasks';
-import type { CreateTaskRequest, Task, TaskProgressMessage } from '../types';
-import type { Project } from '../../projects/types';
-import type { Source } from '../../../types';
-import { CreateTaskRequestSchema } from '../schemas';
-import { getErrors } from '../../../validation';
+import { CreateTaskWizard } from '../components';
+import type { Task, TaskProgressMessage } from '../types';
 import './TasksPage.css';
 
 // Note: Using client.getSources() since there's no sources feature API yet.
@@ -246,213 +244,6 @@ function TaskExecutionView({ task, onClose }: TaskExecutionViewProps) {
   );
 }
 
-interface CreateTaskModalProps {
-  projects: Project[];
-  sources: Source[];
-  onClose: () => void;
-  onCreated: (task: Task) => void;
-  createTask: (request: CreateTaskRequest) => Promise<Task>;
-}
-
-function CreateTaskModal({
-  projects,
-  sources,
-  onClose,
-  onCreated,
-  createTask: createTaskMutation,
-}: CreateTaskModalProps) {
-  const [projectId, setProjectId] = useState(projects[0]?.id || '');
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [criteria, setCriteria] = useState('');
-  const [priority, setPriority] = useState(1);
-  const [isAgentic, setIsAgentic] = useState(false);
-  const [sourceId, setSourceId] = useState<string>('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-
-  // Get selected project to show its linked source
-  const selectedProject = projects.find((p) => p.id === projectId);
-  const projectSource = sources.find((s) => s.id === selectedProject?.source_id);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    const request: CreateTaskRequest = {
-      project_id: projectId,
-      title,
-      description,
-      priority,
-      is_agentic: isAgentic,
-    };
-    if (criteria) {
-      request.acceptance_criteria = criteria;
-    }
-    if (isAgentic && sourceId) {
-      request.source_id = sourceId;
-    }
-
-    const errors = getErrors(CreateTaskRequestSchema, request);
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-
-    setFieldErrors({});
-    setLoading(true);
-    setError(null);
-
-    try {
-      const task = await createTaskMutation(request);
-      onCreated(task);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create task');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="modal-overlay">
-      <div className="modal-content">
-        <header className="modal-header">
-          <h2>Create New Task</h2>
-          <button type="button" onClick={onClose} className="close-btn" aria-label="Close">
-            &times;
-          </button>
-        </header>
-
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label htmlFor="project">Project</label>
-            <select
-              id="project"
-              value={projectId}
-              onChange={(e) => setProjectId(e.target.value)}
-              required
-            >
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="title">Title</label>
-            <input
-              type="text"
-              id="title"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="What needs to be done?"
-              className={fieldErrors.title ? 'input-error' : ''}
-            />
-            {fieldErrors.title && <span className="field-error">{fieldErrors.title}</span>}
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="description">Description</label>
-            <textarea
-              id="description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Detailed description of the task..."
-              rows={4}
-              className={fieldErrors.description ? 'input-error' : ''}
-            />
-            {fieldErrors.description && (
-              <span className="field-error">{fieldErrors.description}</span>
-            )}
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="criteria">Acceptance Criteria (optional)</label>
-            <textarea
-              id="criteria"
-              value={criteria}
-              onChange={(e) => setCriteria(e.target.value)}
-              placeholder="How will we know when this task is complete?"
-              rows={3}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="priority">Priority (1-5)</label>
-            <input
-              type="number"
-              id="priority"
-              value={priority}
-              onChange={(e) => setPriority(Number.parseInt(e.target.value, 10))}
-              min={1}
-              max={5}
-            />
-          </div>
-
-          <div className="form-group form-checkbox">
-            <label htmlFor="isAgentic">
-              <input
-                type="checkbox"
-                id="isAgentic"
-                checked={isAgentic}
-                onChange={(e) => setIsAgentic(e.target.checked)}
-              />
-              Enable Agentic Mode
-            </label>
-            <span className="form-hint">
-              Allow this task to autonomously read/write code and query the knowledge base
-            </span>
-          </div>
-
-          {isAgentic && (
-            <div className="form-group">
-              <label htmlFor="sourceId">Code Source</label>
-              <select id="sourceId" value={sourceId} onChange={(e) => setSourceId(e.target.value)}>
-                <option value="">
-                  {projectSource
-                    ? `Use project source (${projectSource.name})`
-                    : 'Select a source...'}
-                </option>
-                {sources
-                  .filter((s) => s.is_active)
-                  .map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name} ({s.source_type})
-                    </option>
-                  ))}
-              </select>
-              {projectSource && (
-                <span className="form-hint">
-                  Project uses: {projectSource.name} ({projectSource.source_type})
-                </span>
-              )}
-              {!projectSource && sources.length === 0 && (
-                <span className="form-hint form-hint-warning">
-                  No sources configured. Add one in Sources page.
-                </span>
-              )}
-            </div>
-          )}
-
-          {error && <div className="form-error">{error}</div>}
-
-          <div className="form-actions">
-            <button type="button" onClick={onClose} className="btn btn-secondary">
-              Cancel
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={loading}>
-              {loading ? 'Creating...' : 'Create Task'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
 export default function TasksPage() {
   const [filterProject, setFilterProject] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<string>('');
@@ -465,32 +256,15 @@ export default function TasksPage() {
     deleteTask: deleteTaskMutation,
   } = useTasks(filterProject || undefined, filterStatus || undefined);
 
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [sources, setSources] = useState<Source[]>([]);
+  const { projects, loading: projectsLoading } = useProjects('all');
+  const { data: sources = [] } = useQuery({
+    queryKey: ['sources'],
+    queryFn: () => client.getSources(),
+  });
+
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [projectsLoading, setProjectsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const loadData = async () => {
-      setProjectsLoading(true);
-      setError(null);
-      try {
-        const [projectsData, sourcesData] = await Promise.all([
-          projectsApi.getProjects(),
-          client.getSources(),
-        ]);
-        setProjects(projectsData);
-        setSources(sourcesData);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load data');
-      } finally {
-        setProjectsLoading(false);
-      }
-    };
-    loadData();
-  }, []);
 
   const handleTaskCreated = async (_task: Task) => {
     // Task is already added to the list by the createTask hook
@@ -651,15 +425,14 @@ export default function TasksPage() {
         </div>
       )}
 
-      {showCreateModal && projects.length > 0 && (
-        <CreateTaskModal
-          projects={projects}
-          sources={sources}
-          onClose={() => setShowCreateModal(false)}
-          onCreated={handleTaskCreated}
-          createTask={createTask}
-        />
-      )}
+      <CreateTaskWizard
+        isOpen={showCreateModal && projects.length > 0}
+        onClose={() => setShowCreateModal(false)}
+        onCreated={handleTaskCreated}
+        createTask={createTask}
+        projects={projects}
+        sources={sources}
+      />
 
       {selectedTask && (
         <TaskExecutionView task={selectedTask} onClose={() => setSelectedTask(null)} />

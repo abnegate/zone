@@ -32,7 +32,7 @@ describe('auth API', () => {
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ data: mockResponse }),
+        json: () => Promise.resolve(mockResponse),
       });
 
       const result = await login({ email: 'test@test.com', password: 'password' });
@@ -91,7 +91,7 @@ describe('auth API', () => {
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ data: mockResponse }),
+        json: () => Promise.resolve(mockResponse),
       });
 
       const result = await register({
@@ -162,7 +162,7 @@ describe('auth API', () => {
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve({ data: mockResponse }),
+        json: () => Promise.resolve(mockResponse),
       });
 
       const result = await refreshToken('old-refresh-token');

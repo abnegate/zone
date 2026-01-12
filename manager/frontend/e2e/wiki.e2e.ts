@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker } from './test-utils';
+import { blockServiceWorker, routeApi } from './test-utils';
 
 test.describe('Wiki Page', () => {
   test.beforeEach(async ({ context, page }) => {
@@ -23,10 +23,10 @@ test.describe('Wiki Page', () => {
         },
       ],
     };
-    await page.route('**/api/organizations?*', (route) =>
+    await routeApi(page, '**/api/organizations?*', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(orgMock) })
     );
-    await page.route('**/api/organizations', (route) =>
+    await routeApi(page, '**/api/organizations', (route) =>
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(orgMock) })
     );
 
@@ -45,14 +45,14 @@ test.describe('Wiki Page', () => {
         },
       ],
     };
-    await page.route('**/api/organizations/*/workspaces?*', (route) =>
+    await routeApi(page, '**/api/organizations/*/workspaces?*', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify(workspaceMock),
       })
     );
-    await page.route('**/api/organizations/*/workspaces', (route) =>
+    await routeApi(page, '**/api/organizations/*/workspaces', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -60,7 +60,7 @@ test.describe('Wiki Page', () => {
       })
     );
 
-    await page.route('**/api/knowledge*', (route) => {
+    await routeApi(page, '**/api/knowledge*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
           status: 200,

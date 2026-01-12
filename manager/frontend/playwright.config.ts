@@ -1,7 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
 // Allow configurable port for running alongside other services
-const port = process.env.PLAYWRIGHT_PORT || process.env.PORT || '3000';
+const defaultPort = '3001';
+const port = process.env.PLAYWRIGHT_PORT || process.env.PORT || defaultPort;
 const baseURL = `http://localhost:${port}`;
 
 // Allow running specific browser via environment variable (for CI matrix)
@@ -70,6 +71,7 @@ const coverageReporter: Parameters<typeof defineConfig>[0]['reporter'] = [
 
 export default defineConfig({
   testDir: './e2e',
+  testMatch: '**/*.e2e.ts',
   fullyParallel: !collectCoverage, // Run sequentially when collecting coverage
   forbidOnly: !!process.env.CI,
   retries: process.env.CI && !collectCoverage ? 3 : 0,
@@ -84,9 +86,9 @@ export default defineConfig({
     ? [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]
     : projects,
   webServer: {
-    command: 'bun start',
+    command: `bun start -- --port ${port}`,
     url: baseURL,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: true,
     timeout: 120000,
   },
 });

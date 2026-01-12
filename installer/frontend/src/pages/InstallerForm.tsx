@@ -1,10 +1,9 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useForm, FormProvider } from 'react-hook-form';
 import { Button, InfoBox, Modal, StatusLog, StepPills, ZoneLogo } from '../components';
 import {
-  useConfigPersistence,
   useInstallation,
   useKeyboardNavigation,
-  useValidation,
 } from '../hooks';
 import {
   AdvancedStep,
@@ -17,7 +16,8 @@ import {
 } from '../steps';
 import type { InstallerConfig } from '../types';
 import { STEPS } from '../types';
-import type { StepSchemaKey } from '../validation/schemas';
+import { StepSchemas, type StepSchemaKey } from '../validation/schemas';
+import { loadConfig, saveConfig } from '../utils/crypto';
 
 const DEFAULT_CONFIG: InstallerConfig = {
   // Domain
@@ -102,55 +102,82 @@ const DEFAULT_CONFIG: InstallerConfig = {
 
 export default function InstallerForm() {
   const [currentStep, setCurrentStep] = useState(1);
-  const [config, setConfig] = useState<InstallerConfig>(DEFAULT_CONFIG);
   const [showModal, setShowModal] = useState(false);
+
+  const methods = useForm<InstallerConfig>({
+    defaultValues: DEFAULT_CONFIG,
+    mode: 'onChange',
+  });
+
+  // Persistence
+  useEffect(() => {
+    loadConfig().then((stored) => {
+      if (stored && Object.keys(stored).length > 0) {
+        methods.reset({ ...DEFAULT_CONFIG, ...stored });
+      }
+    });
+  }, [methods]);
+
+  useEffect(() => {
+    const subscription = methods.watch((value) => {
+      if (value) saveConfig(value as InstallerConfig);
+    });
+    return () => subscription.unsubscribe();
+  }, [methods]);
 
   const { isInstalling, progress, statusLines, isComplete, error, install, reset } =
     useInstallation();
 
-  const { validateStep, getFieldError, clearErrors } = useValidation();
-  useConfigPersistence(config, setConfig, DEFAULT_CONFIG);
-
   const totalSteps = STEPS.length;
-
-  const handleChange = useCallback((key: keyof InstallerConfig, value: string) => {
-    setConfig((prev) => ({ ...prev, [key]: value }));
-  }, []);
 
   const handleNext = useCallback(() => {
     const stepId = STEPS[currentStep - 1].id as StepSchemaKey;
-    if (!validateStep(stepId, config)) {
+    const schema = StepSchemas[stepId];
+    const result = schema.safeParse(methods.getValues());
+
+    if (!result.success) {
+      result.error.issues.forEach((issue) => {
+        methods.setError(issue.path[0] as keyof InstallerConfig, { message: issue.message });
+      });
       return;
     }
-    clearErrors();
+
+    methods.clearErrors();
     if (currentStep < totalSteps) {
       setCurrentStep((prev) => prev + 1);
     }
-  }, [currentStep, totalSteps, config, validateStep, clearErrors]);
+  }, [currentStep, totalSteps, methods]);
 
   const handlePrevious = useCallback(() => {
     if (currentStep > 1) {
-      clearErrors();
+      methods.clearErrors();
       setCurrentStep((prev) => prev - 1);
     }
-  }, [currentStep, clearErrors]);
+  }, [currentStep, methods]);
 
   const handleStepClick = useCallback(
     (step: number) => {
-      clearErrors();
+      methods.clearErrors();
       setCurrentStep(step);
     },
-    [clearErrors]
+    [methods]
   );
 
   const handleInstall = useCallback(() => {
     const stepId = STEPS[currentStep - 1].id as StepSchemaKey;
-    if (!validateStep(stepId, config)) {
+    const schema = StepSchemas[stepId];
+    const result = schema.safeParse(methods.getValues());
+
+    if (!result.success) {
+      result.error.issues.forEach((issue) => {
+        methods.setError(issue.path[0] as keyof InstallerConfig, { message: issue.message });
+      });
       return;
     }
+
     setShowModal(true);
-    install(config);
-  }, [currentStep, config, install, validateStep]);
+    install(methods.getValues());
+  }, [currentStep, methods, install]);
 
   const handleCloseModal = useCallback(() => {
     setShowModal(false);
@@ -168,25 +195,19 @@ export default function InstallerForm() {
   const renderStep = () => {
     switch (currentStep) {
       case 1:
-        return <DomainStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
+        return <DomainStep />;
       case 2:
-        return (
-          <SecurityStep config={config} onChange={handleChange} getFieldError={getFieldError} />
-        );
+        return <SecurityStep />;
       case 3:
-        return <ModelsStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
+        return <ModelsStep />;
       case 4:
-        return (
-          <InterfaceStep config={config} onChange={handleChange} getFieldError={getFieldError} />
-        );
+        return <InterfaceStep />;
       case 5:
-        return <SearchStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
+        return <SearchStep />;
       case 6:
-        return <VPNStep config={config} onChange={handleChange} getFieldError={getFieldError} />;
+        return <VPNStep />;
       case 7:
-        return (
-          <AdvancedStep config={config} onChange={handleChange} getFieldError={getFieldError} />
-        );
+        return <AdvancedStep />;
       default:
         return null;
     }
@@ -203,25 +224,27 @@ export default function InstallerForm() {
       </aside>
 
       <main className="installer-main">
-        <div className="card">
-          {renderStep()}
+        <FormProvider {...methods}>
+            <div className="card">
+            {renderStep()}
 
-          <div className="nav-buttons">
-            <Button variant="secondary" onClick={handlePrevious} disabled={currentStep === 1}>
-              Previous
-            </Button>
+            <div className="nav-buttons">
+                <Button variant="secondary" onClick={handlePrevious} disabled={currentStep === 1}>
+                Previous
+                </Button>
 
-            {currentStep < totalSteps ? (
-              <Button variant="primary" onClick={handleNext}>
-                Next
-              </Button>
-            ) : (
-              <Button variant="primary" onClick={handleInstall}>
-                Install
-              </Button>
-            )}
-          </div>
-        </div>
+                {currentStep < totalSteps ? (
+                <Button variant="primary" onClick={handleNext}>
+                    Next
+                </Button>
+                ) : (
+                <Button variant="primary" onClick={handleInstall}>
+                    Install
+                </Button>
+                )}
+            </div>
+            </div>
+        </FormProvider>
       </main>
 
       <Modal

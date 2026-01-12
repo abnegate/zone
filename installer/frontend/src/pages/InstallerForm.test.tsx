@@ -1,10 +1,22 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import InstallerForm from './InstallerForm';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Mock the hooks
-jest.mock('../hooks', () => ({
+const mockGenerateSecret = mock(() => 'generated-secret');
+const mockInstall = mock();
+const mockResetInstall = mock();
+const mockValidateStep = mock(() => true);
+const mockGetFieldError = mock(() => undefined);
+const mockClearErrors = mock();
+const mockResetConfig = mock();
+const mockUseKeyboardNavigation = mock();
+const mockLoadConfig = mock(() => Promise.resolve(null));
+const mockSaveConfig = mock(() => Promise.resolve(undefined));
+const mockClearConfig = mock();
+const passSchema = { safeParse: () => ({ success: true, data: {} }) };
+
+mock.module('../hooks', () => ({
   useSecretGenerator: () => ({
-    generateSecret: jest.fn().mockReturnValue('generated-secret'),
+    generateSecret: mockGenerateSecret,
   }),
   useInstallation: () => ({
     isInstalling: false,
@@ -12,29 +24,65 @@ jest.mock('../hooks', () => ({
     statusLines: [],
     isComplete: false,
     error: null,
-    install: jest.fn(),
-    reset: jest.fn(),
+    install: mockInstall,
+    reset: mockResetInstall,
   }),
   useValidation: () => ({
-    validateStep: jest.fn().mockReturnValue(true),
-    getFieldError: jest.fn().mockReturnValue(undefined),
-    clearErrors: jest.fn(),
+    validateStep: mockValidateStep,
+    getFieldError: mockGetFieldError,
+    clearErrors: mockClearErrors,
   }),
-  useConfigPersistence: jest.fn().mockReturnValue({ resetConfig: jest.fn() }),
-  useKeyboardNavigation: jest.fn(),
+  useConfigPersistence: () => ({ resetConfig: mockResetConfig }),
+  useKeyboardNavigation: mockUseKeyboardNavigation,
 }));
 
-// Mock crypto utilities
-jest.mock('../utils/crypto', () => ({
-  loadConfig: jest.fn().mockResolvedValue(null),
-  saveConfig: jest.fn().mockResolvedValue(undefined),
-  clearConfig: jest.fn(),
+mock.module('../utils/crypto', () => ({
+  loadConfig: mockLoadConfig,
+  saveConfig: mockSaveConfig,
+  clearConfig: mockClearConfig,
   SENSITIVE_FIELDS: [],
 }));
 
+mock.module('../validation/schemas', () => ({
+  StepSchemas: {
+    domain: passSchema,
+    security: passSchema,
+    models: passSchema,
+    interface: passSchema,
+    search: passSchema,
+    vpn: passSchema,
+    advanced: passSchema,
+  },
+}));
+
+let InstallerForm: typeof import('./InstallerForm').default;
+
+beforeAll(async () => {
+  InstallerForm = (await import('./InstallerForm')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
+
 describe('InstallerForm', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGenerateSecret.mockReset();
+    mockGenerateSecret.mockReturnValue('generated-secret');
+    mockInstall.mockReset();
+    mockResetInstall.mockReset();
+    mockValidateStep.mockReset();
+    mockValidateStep.mockReturnValue(true);
+    mockGetFieldError.mockReset();
+    mockGetFieldError.mockReturnValue(undefined);
+    mockClearErrors.mockReset();
+    mockResetConfig.mockReset();
+    mockUseKeyboardNavigation.mockReset();
+    mockLoadConfig.mockReset();
+    mockLoadConfig.mockResolvedValue(null);
+    mockSaveConfig.mockReset();
+    mockSaveConfig.mockResolvedValue(undefined);
+    mockClearConfig.mockReset();
   });
 
   it('renders the installer layout', () => {
@@ -76,13 +124,11 @@ describe('InstallerForm', () => {
   it('navigates to previous step when Previous is clicked', async () => {
     render(<InstallerForm />);
 
-    // Go to step 2
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
       expect(screen.getByRole('heading', { level: 2, name: 'Security' })).toBeInTheDocument();
     });
 
-    // Go back to step 1
     fireEvent.click(screen.getByRole('button', { name: /previous/i }));
     await waitFor(() => {
       expect(screen.getByText('Domain Configuration')).toBeInTheDocument();
@@ -102,7 +148,6 @@ describe('InstallerForm', () => {
   it('shows Install button on last step', async () => {
     render(<InstallerForm />);
 
-    // Navigate through all steps
     for (let i = 0; i < 6; i++) {
       fireEvent.click(screen.getByRole('button', { name: /next/i }));
     }
@@ -121,7 +166,6 @@ describe('InstallerForm', () => {
   it('navigates to clicked step in step pills', async () => {
     render(<InstallerForm />);
 
-    // Click on Models step (step 3)
     fireEvent.click(screen.getByText('Models'));
 
     await waitFor(() => {
@@ -132,7 +176,6 @@ describe('InstallerForm', () => {
   it('renders all steps when navigating', async () => {
     render(<InstallerForm />);
 
-    // Step 1: Domain
     expect(screen.getByText('Domain Configuration')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
@@ -179,7 +222,7 @@ describe('InstallerForm', () => {
 
     const sidebar = document.querySelector('.installer-sidebar');
     expect(sidebar).toBeInTheDocument();
-    expect(sidebar?.querySelector('h1')).toHaveTextContent('Zone');
+    expect(sidebar).toHaveTextContent('Zone');
   });
 
   it('renders main content area with card', () => {

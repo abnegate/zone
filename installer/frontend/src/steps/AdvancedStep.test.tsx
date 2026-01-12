@@ -1,13 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
 import { AdvancedStep } from './AdvancedStep';
-
-// Mock the useSecretGenerator hook
-jest.mock('../hooks', () => ({
-  useSecretGenerator: () => ({
-    generateSecret: jest.fn().mockReturnValue('generated-secret-456'),
-  }),
-}));
 
 const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig => ({
   DOMAIN_HOST_WEBUI: 'test.localhost',
@@ -72,18 +67,26 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   ...overrides,
 });
 
+const renderWithForm = (defaultValues: InstallerConfig) => {
+  let methods: UseFormReturn<InstallerConfig> | undefined;
+  const Wrapper = ({ children }: { children: ReactNode }) => {
+    const form = useForm<InstallerConfig>({ defaultValues });
+    methods = form;
+    return <FormProvider {...form}>{children}</FormProvider>;
+  };
+
+  const utils = render(<AdvancedStep />, { wrapper: Wrapper });
+
+  if (!methods) {
+    throw new Error('Form methods not initialized');
+  }
+
+  return { ...utils, methods };
+};
+
 describe('AdvancedStep', () => {
-  const onChange = jest.fn();
-  const getFieldError = jest.fn().mockReturnValue(undefined);
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
   it('renders step header', () => {
-    render(
-      <AdvancedStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText('Advanced Settings')).toBeInTheDocument();
     expect(screen.getByText(/performance tuning and system configuration/i)).toBeInTheDocument();
@@ -91,26 +94,14 @@ describe('AdvancedStep', () => {
 
   describe('Monitoring section', () => {
     it('renders monitoring checkbox unchecked by default', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig());
 
       const checkbox = screen.getByLabelText(/enable prometheus \+ grafana monitoring/i);
       expect(checkbox).not.toBeChecked();
     });
 
     it('shows monitoring fields when monitoring is enabled', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
 
       expect(screen.getByLabelText(/grafana admin username/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/grafana admin password/i)).toBeInTheDocument();
@@ -118,13 +109,7 @@ describe('AdvancedStep', () => {
     });
 
     it('hides monitoring fields when monitoring is disabled', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig());
 
       expect(screen.queryByLabelText(/grafana admin username/i)).not.toBeInTheDocument();
       expect(screen.queryByLabelText(/grafana admin password/i)).not.toBeInTheDocument();
@@ -132,134 +117,71 @@ describe('AdvancedStep', () => {
     });
 
     it('enables monitoring and generates password when toggled on with empty password', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      const { methods } = renderWithForm(createMockConfig());
 
       fireEvent.click(screen.getByLabelText(/enable prometheus \+ grafana monitoring/i));
 
-      expect(onChange).toHaveBeenCalledWith('MONITORING_ENABLED', 'true');
-      expect(onChange).toHaveBeenCalledWith(
-        'MONITORING_GRAFANA_ADMIN_PASSWORD',
-        'generated-secret-456'
-      );
+      const passwordInput = screen.getByLabelText(/grafana admin password/i);
+      expect(passwordInput).not.toHaveValue('');
+      expect(methods.getValues('MONITORING_ENABLED')).toBe('true');
     });
 
-    it('does not regenerate password when toggled on if password exists', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_GRAFANA_ADMIN_PASSWORD: 'existing-pw' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
+    it('does not override existing Grafana password when toggled on', () => {
+      renderWithForm(
+        createMockConfig({ MONITORING_GRAFANA_ADMIN_PASSWORD: 'existing-pw' })
       );
 
       fireEvent.click(screen.getByLabelText(/enable prometheus \+ grafana monitoring/i));
 
-      expect(onChange).toHaveBeenCalledWith('MONITORING_ENABLED', 'true');
-      expect(onChange).not.toHaveBeenCalledWith(
-        'MONITORING_GRAFANA_ADMIN_PASSWORD',
-        expect.anything()
-      );
+      expect(screen.getByLabelText(/grafana admin password/i)).toHaveValue('existing-pw');
     });
 
     it('disables alerting when monitoring is disabled', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
+      const { methods } = renderWithForm(
+        createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'true' })
       );
 
       fireEvent.click(screen.getByLabelText(/enable prometheus \+ grafana monitoring/i));
 
-      expect(onChange).toHaveBeenCalledWith('MONITORING_ENABLED', 'false');
-      expect(onChange).toHaveBeenCalledWith('ALERT_ENABLED', 'false');
+      expect(methods.getValues('ALERT_ENABLED')).toBe('false');
     });
 
-    it('displays Grafana admin username value', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
-
-      expect(screen.getByLabelText(/grafana admin username/i)).toHaveValue('admin');
-    });
-
-    it('calls onChange when Grafana username is changed', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+    it('updates Grafana admin username', () => {
+      renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
 
       fireEvent.change(screen.getByLabelText(/grafana admin username/i), {
         target: { value: 'newadmin' },
       });
 
-      expect(onChange).toHaveBeenCalledWith('MONITORING_GRAFANA_ADMIN_USER', 'newadmin');
+      expect(screen.getByLabelText(/grafana admin username/i)).toHaveValue('newadmin');
     });
 
     it('displays retention select with current value', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
 
       expect(screen.getByLabelText(/metrics retention/i)).toHaveValue('15d');
     });
 
-    it('calls onChange when retention is changed', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+    it('updates retention selection', () => {
+      const { methods } = renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
 
       fireEvent.change(screen.getByLabelText(/metrics retention/i), {
         target: { value: '30d' },
       });
 
-      expect(onChange).toHaveBeenCalledWith('MONITORING_RETENTION_TIME', '30d');
+      expect(methods.getValues('MONITORING_RETENTION_TIME')).toBe('30d');
     });
   });
 
   describe('Alerting section', () => {
     it('shows alerting checkbox when monitoring is enabled', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
 
       expect(screen.getByLabelText(/enable email alerts/i)).toBeInTheDocument();
     });
 
     it('shows alert fields when alerting is enabled', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'true' }));
 
       expect(screen.getByLabelText(/alert recipients/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/smtp host/i)).toBeInTheDocument();
@@ -271,237 +193,158 @@ describe('AdvancedStep', () => {
     });
 
     it('hides alert fields when alerting is disabled', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'false' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'false' }));
 
       expect(screen.queryByLabelText(/alert recipients/i)).not.toBeInTheDocument();
       expect(screen.queryByLabelText(/smtp host/i)).not.toBeInTheDocument();
     });
 
-    it('calls onChange when alerting is toggled on', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+    it('toggles alerting on and off', () => {
+      const { methods } = renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
 
       fireEvent.click(screen.getByLabelText(/enable email alerts/i));
-      expect(onChange).toHaveBeenCalledWith('ALERT_ENABLED', 'true');
-    });
-
-    it('calls onChange when alerting is toggled off', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      expect(methods.getValues('ALERT_ENABLED')).toBe('true');
 
       fireEvent.click(screen.getByLabelText(/enable email alerts/i));
-      expect(onChange).toHaveBeenCalledWith('ALERT_ENABLED', 'false');
+      expect(methods.getValues('ALERT_ENABLED')).toBe('false');
     });
 
-    it('calls onChange when alert fields are changed', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'true' })}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
+    it('updates alert fields', () => {
+      const { methods } = renderWithForm(
+        createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'true' })
       );
 
       fireEvent.change(screen.getByLabelText(/alert recipients/i), {
         target: { value: 'test@example.com' },
       });
-      expect(onChange).toHaveBeenCalledWith('ALERT_EMAIL_RECIPIENTS', 'test@example.com');
+      expect(methods.getValues('ALERT_EMAIL_RECIPIENTS')).toBe('test@example.com');
 
       fireEvent.change(screen.getByLabelText(/smtp host/i), {
         target: { value: 'smtp.gmail.com' },
       });
-      expect(onChange).toHaveBeenCalledWith('ALERT_SMTP_HOST', 'smtp.gmail.com');
+      expect(methods.getValues('ALERT_SMTP_HOST')).toBe('smtp.gmail.com');
 
       fireEvent.change(screen.getByLabelText(/smtp port/i), {
         target: { value: '465' },
       });
-      expect(onChange).toHaveBeenCalledWith('ALERT_SMTP_PORT', '465');
+      expect(methods.getValues('ALERT_SMTP_PORT')).toBe('465');
 
       fireEvent.change(screen.getByLabelText(/smtp username/i), {
         target: { value: 'user@gmail.com' },
       });
-      expect(onChange).toHaveBeenCalledWith('ALERT_SMTP_USER', 'user@gmail.com');
+      expect(methods.getValues('ALERT_SMTP_USER')).toBe('user@gmail.com');
 
       fireEvent.change(screen.getByLabelText(/smtp password/i), {
         target: { value: 'app-password' },
       });
-      expect(onChange).toHaveBeenCalledWith('ALERT_SMTP_PASSWORD', 'app-password');
+      expect(methods.getValues('ALERT_SMTP_PASSWORD')).toBe('app-password');
 
       fireEvent.change(screen.getByLabelText(/from address/i), {
         target: { value: 'alerts@zone.io' },
       });
-      expect(onChange).toHaveBeenCalledWith('ALERT_SMTP_FROM_ADDRESS', 'alerts@zone.io');
+      expect(methods.getValues('ALERT_SMTP_FROM_ADDRESS')).toBe('alerts@zone.io');
 
       fireEvent.change(screen.getByLabelText(/from name/i), {
         target: { value: 'Zone Alerts' },
       });
-      expect(onChange).toHaveBeenCalledWith('ALERT_SMTP_FROM_NAME', 'Zone Alerts');
+      expect(methods.getValues('ALERT_SMTP_FROM_NAME')).toBe('Zone Alerts');
     });
   });
 
   describe('Performance section', () => {
     it('renders worker count input with current value', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig());
 
       expect(screen.getByLabelText(/worker count/i)).toHaveValue(4);
     });
 
-    it('calls onChange when worker count is changed', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+    it('updates worker count', () => {
+      const { methods } = renderWithForm(createMockConfig());
 
       fireEvent.change(screen.getByLabelText(/worker count/i), {
         target: { value: '8' },
       });
 
-      expect(onChange).toHaveBeenCalledWith('ADVANCED_LITELLM_WORKERS', '8');
+      expect(methods.getValues('ADVANCED_LITELLM_WORKERS')).toBe('8');
     });
 
     it('renders request timeout input with current value', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig());
 
       expect(screen.getByLabelText(/request timeout/i)).toHaveValue(600);
     });
 
-    it('calls onChange when request timeout is changed', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+    it('updates request timeout', () => {
+      const { methods } = renderWithForm(createMockConfig());
 
       fireEvent.change(screen.getByLabelText(/request timeout/i), {
         target: { value: '300' },
       });
 
-      expect(onChange).toHaveBeenCalledWith('ADVANCED_LITELLM_REQUEST_TIMEOUT', '300');
+      expect(methods.getValues('ADVANCED_LITELLM_REQUEST_TIMEOUT')).toBe('300');
     });
 
     it('renders timezone select with current value', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig());
 
       expect(screen.getByLabelText(/timezone/i)).toHaveValue('UTC');
     });
 
-    it('calls onChange when timezone is changed', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+    it('updates timezone', () => {
+      const { methods } = renderWithForm(createMockConfig());
 
       fireEvent.change(screen.getByLabelText(/timezone/i), {
         target: { value: 'America/New_York' },
       });
 
-      expect(onChange).toHaveBeenCalledWith('ADVANCED_TZ', 'America/New_York');
+      expect(methods.getValues('ADVANCED_TZ')).toBe('America/New_York');
     });
 
     it('renders ACME email input with current value', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+      renderWithForm(createMockConfig());
 
       expect(screen.getByLabelText(/acme email/i)).toHaveValue('admin@example.com');
     });
 
-    it('calls onChange when ACME email is changed', () => {
-      render(
-        <AdvancedStep
-          config={createMockConfig()}
-          onChange={onChange}
-          getFieldError={getFieldError}
-        />
-      );
+    it('updates ACME email', () => {
+      const { methods } = renderWithForm(createMockConfig());
 
       fireEvent.change(screen.getByLabelText(/acme email/i), {
         target: { value: 'new@example.com' },
       });
 
-      expect(onChange).toHaveBeenCalledWith('ADVANCED_ACME_EMAIL', 'new@example.com');
+      expect(methods.getValues('ADVANCED_ACME_EMAIL')).toBe('new@example.com');
     });
   });
 
   it('displays completion info box', () => {
-    render(
-      <AdvancedStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText(/configuration complete/i)).toBeInTheDocument();
   });
 
   it('displays Monitoring section header', () => {
-    render(
-      <AdvancedStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText('Monitoring')).toBeInTheDocument();
   });
 
   it('displays Performance section header', () => {
-    render(
-      <AdvancedStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    renderWithForm(createMockConfig());
 
     expect(screen.getByText('Performance')).toBeInTheDocument();
   });
 
-  it('displays field errors when provided', () => {
-    getFieldError.mockImplementation((field: string) =>
-      field === 'ADVANCED_LITELLM_WORKERS' ? 'Must be between 1 and 16' : undefined
-    );
+  it('displays field errors when provided', async () => {
+    const { methods } = renderWithForm(createMockConfig());
 
-    render(
-      <AdvancedStep config={createMockConfig()} onChange={onChange} getFieldError={getFieldError} />
-    );
+    methods.setError('ADVANCED_LITELLM_WORKERS', {
+      type: 'manual',
+      message: 'Must be between 1 and 16',
+    });
 
-    expect(screen.getByText('Must be between 1 and 16')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('Must be between 1 and 16')).toBeInTheDocument();
+    });
   });
 });

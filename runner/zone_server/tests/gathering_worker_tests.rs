@@ -7,6 +7,7 @@
 
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio::time::{Duration, sleep, timeout};
 use uuid::Uuid;
 use zone_context::adapters::{AdapterRegistry, TextAdapter};
 use zone_context::context::ContextService;
@@ -139,28 +140,29 @@ async fn test_execute_gathering_persists_events() {
     // When: Execute gathering
     gathering::execute_gathering(&state, gathering_id, workspace_id, vec![source_id], false).await;
 
-    // Allow async event persistence to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Then: Events should be persisted
-    let events = gathering_events::get_events_since(&pool, gathering_id, None, None)
-        .await
-        .expect("Failed to get events");
+    // Then: Events should be persisted (poll until started + terminal events show up)
+    let events = timeout(Duration::from_secs(2), async {
+        loop {
+            let events = gathering_events::get_events_since(&pool, gathering_id, None, None)
+                .await
+                .expect("Failed to get events");
+            let has_started = events.iter().any(|e| e.event_type == "started");
+            let has_terminal = events
+                .iter()
+                .any(|e| e.event_type == "completed" || e.event_type == "failed");
+            if has_started && has_terminal {
+                break events;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Timed out waiting for gathering events");
 
     assert!(
         !events.is_empty(),
         "Should have persisted at least one event"
     );
-
-    // Should have a started event
-    let has_started = events.iter().any(|e| e.event_type == "started");
-    assert!(has_started, "Should have a started event");
-
-    // Should have a completed or failed event
-    let has_terminal = events
-        .iter()
-        .any(|e| e.event_type == "completed" || e.event_type == "failed");
-    assert!(has_terminal, "Should have a terminal event");
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-import { renderHook } from '@testing-library/react';
+import { fireEvent, renderHook } from '@testing-library/react';
 import { useKeyboardNavigation } from './useKeyboardNavigation';
 
 describe('useKeyboardNavigation', () => {
@@ -10,6 +10,8 @@ describe('useKeyboardNavigation', () => {
   });
 
   it('calls onNext when ArrowRight is pressed and not at last step', () => {
+    const addEventListenerSpy = jest.spyOn(document, 'addEventListener');
+
     renderHook(() =>
       useKeyboardNavigation({
         currentStep: 1,
@@ -19,9 +21,13 @@ describe('useKeyboardNavigation', () => {
       })
     );
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    const handler = addEventListenerSpy.mock.calls.find(([eventName]) => eventName === 'keydown')?.[1];
+    if (typeof handler === 'function') {
+      handler(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    }
 
     expect(onNext).toHaveBeenCalled();
+    addEventListenerSpy.mockRestore();
   });
 
   it('does not call onNext when at last step', () => {
@@ -34,12 +40,14 @@ describe('useKeyboardNavigation', () => {
       })
     );
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    fireEvent.keyDown(document.body, { key: 'ArrowRight' });
 
     expect(onNext).not.toHaveBeenCalled();
   });
 
   it('calls onPrevious when ArrowLeft is pressed and not at first step', () => {
+    const addEventListenerSpy = jest.spyOn(document, 'addEventListener');
+
     renderHook(() =>
       useKeyboardNavigation({
         currentStep: 2,
@@ -49,9 +57,13 @@ describe('useKeyboardNavigation', () => {
       })
     );
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    const handler = addEventListenerSpy.mock.calls.find(([eventName]) => eventName === 'keydown')?.[1];
+    if (typeof handler === 'function') {
+      handler(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    }
 
     expect(onPrevious).toHaveBeenCalled();
+    addEventListenerSpy.mockRestore();
   });
 
   it('does not call onPrevious when at first step', () => {
@@ -64,7 +76,7 @@ describe('useKeyboardNavigation', () => {
       })
     );
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    fireEvent.keyDown(document.body, { key: 'ArrowLeft' });
 
     expect(onPrevious).not.toHaveBeenCalled();
   });
@@ -80,8 +92,8 @@ describe('useKeyboardNavigation', () => {
       })
     );
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    fireEvent.keyDown(document.body, { key: 'ArrowRight' });
+    fireEvent.keyDown(document.body, { key: 'ArrowLeft' });
 
     expect(onNext).not.toHaveBeenCalled();
     expect(onPrevious).not.toHaveBeenCalled();
@@ -101,9 +113,7 @@ describe('useKeyboardNavigation', () => {
     document.body.appendChild(input);
     input.focus();
 
-    const event = new KeyboardEvent('keydown', { key: 'ArrowRight' });
-    Object.defineProperty(event, 'target', { value: input });
-    document.dispatchEvent(event);
+    fireEvent.keyDown(input, { key: 'ArrowRight' });
 
     expect(onNext).not.toHaveBeenCalled();
 
@@ -124,9 +134,7 @@ describe('useKeyboardNavigation', () => {
     document.body.appendChild(select);
     select.focus();
 
-    const event = new KeyboardEvent('keydown', { key: 'ArrowRight' });
-    Object.defineProperty(event, 'target', { value: select });
-    document.dispatchEvent(event);
+    fireEvent.keyDown(select, { key: 'ArrowRight' });
 
     expect(onNext).not.toHaveBeenCalled();
 
@@ -147,9 +155,7 @@ describe('useKeyboardNavigation', () => {
     document.body.appendChild(textarea);
     textarea.focus();
 
-    const event = new KeyboardEvent('keydown', { key: 'ArrowLeft' });
-    Object.defineProperty(event, 'target', { value: textarea });
-    document.dispatchEvent(event);
+    fireEvent.keyDown(textarea, { key: 'ArrowLeft' });
 
     expect(onPrevious).not.toHaveBeenCalled();
 
@@ -166,10 +172,10 @@ describe('useKeyboardNavigation', () => {
       })
     );
 
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' }));
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+    fireEvent.keyDown(document.body, { key: 'Enter' });
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    fireEvent.keyDown(document.body, { key: 'ArrowUp' });
+    fireEvent.keyDown(document.body, { key: 'ArrowDown' });
 
     expect(onNext).not.toHaveBeenCalled();
     expect(onPrevious).not.toHaveBeenCalled();
