@@ -10,7 +10,8 @@ use super::DbResult;
 #[derive(Debug, Clone)]
 pub struct TaskRow {
     pub id: Uuid,
-    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub project_ids: Vec<Uuid>,    // Associated projects via task_projects join table
     pub title: String,
     pub description: String,
     pub acceptance_criteria: Option<String>,
@@ -22,7 +23,6 @@ pub struct TaskRow {
     pub github_repo_url: Option<String>,
     pub source_id: Option<Uuid>,
     pub source_ids: Option<Vec<Uuid>>,
-    pub workspace_id: Option<Uuid>,
     pub worker_id: Option<String>,
     pub queued_at: Option<NaiveDateTime>,
     pub started_at: Option<NaiveDateTime>,
@@ -63,12 +63,13 @@ pub struct TaskRunLogRow {
     pub created_at: Option<NaiveDateTime>,
 }
 
-/// Helper macro to map a row to TaskRow
+/// Helper macro to map a row to TaskRow (project_ids populated separately from join table)
 macro_rules! map_task_row {
     ($r:expr) => {
         TaskRow {
             id: $r.id,
-            project_id: $r.project_id,
+            workspace_id: $r.workspace_id,
+            project_ids: Vec::new(), // Populated separately from task_projects join table
             title: $r.title,
             description: $r.description,
             acceptance_criteria: $r.acceptance_criteria,
@@ -80,7 +81,6 @@ macro_rules! map_task_row {
             github_repo_url: $r.github_repo_url,
             source_id: $r.source_id,
             source_ids: $r.source_ids,
-            workspace_id: $r.workspace_id,
             worker_id: $r.worker_id,
             queued_at: $r.queued_at,
             started_at: $r.started_at,
@@ -95,88 +95,167 @@ macro_rules! map_task_row {
     };
 }
 
-/// List tasks with optional filters
+/// Get project IDs for a task from the join table
+pub async fn get_task_project_ids(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<Uuid>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT project_id FROM task_projects WHERE task_id = $1
+        "#,
+        task_id
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|r| r.project_id).collect())
+}
+
+/// Add project associations to a task
+pub async fn add_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[Uuid]) -> DbResult<()> {
+    for project_id in project_ids {
+        sqlx::query!(
+            r#"
+            INSERT INTO task_projects (task_id, project_id)
+            VALUES ($1, $2)
+            ON CONFLICT (task_id, project_id) DO NOTHING
+            "#,
+            task_id,
+            project_id
+        )
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Remove project associations from a task
+pub async fn remove_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[Uuid]) -> DbResult<()> {
+    for project_id in project_ids {
+        sqlx::query!(
+            r#"
+            DELETE FROM task_projects WHERE task_id = $1 AND project_id = $2
+            "#,
+            task_id,
+            project_id
+        )
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Set the exact project associations for a task (replaces existing)
+pub async fn set_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[Uuid]) -> DbResult<()> {
+    // Delete all existing associations
+    sqlx::query!(
+        r#"DELETE FROM task_projects WHERE task_id = $1"#,
+        task_id
+    )
+    .execute(pool)
+    .await?;
+
+    // Add new associations
+    add_task_projects(pool, task_id, project_ids).await
+}
+
+/// List tasks with optional filters (workspace_id is required)
 pub async fn list_tasks(
     pool: &PgPool,
+    workspace_id: Uuid,
     project_id: Option<Uuid>,
     status: Option<&str>,
 ) -> DbResult<Vec<TaskRow>> {
-    match (project_id, status) {
+    let mut tasks = match (project_id, status) {
         (Some(pid), Some(s)) => {
+            // Filter by project via join table
             let rows = sqlx::query!(
                 r#"
-                SELECT id, project_id, title, description, acceptance_criteria, status, priority,
-                       model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                       pr_url, branch_name, pr_status, pr_created_at
-                FROM tasks
-                WHERE project_id = $1 AND status = $2
-                ORDER BY created_at DESC
+                SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,
+                       t.model_name, t.dependencies, t.is_agentic, t.github_repo_url, t.source_id, t.source_ids,
+                       t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,
+                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at
+                FROM tasks t
+                INNER JOIN task_projects tp ON t.id = tp.task_id
+                WHERE t.workspace_id = $1 AND tp.project_id = $2 AND t.status = $3
+                ORDER BY t.created_at DESC
                 "#,
+                workspace_id,
                 pid,
                 s
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_task_row!(r)).collect())
+            rows.into_iter().map(|r| map_task_row!(r)).collect::<Vec<_>>()
         }
         (Some(pid), None) => {
+            // Filter by project via join table
             let rows = sqlx::query!(
                 r#"
-                SELECT id, project_id, title, description, acceptance_criteria, status, priority,
-                       model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                       workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                       pr_url, branch_name, pr_status, pr_created_at
-                FROM tasks
-                WHERE project_id = $1
-                ORDER BY created_at DESC
+                SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,
+                       t.model_name, t.dependencies, t.is_agentic, t.github_repo_url, t.source_id, t.source_ids,
+                       t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,
+                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at
+                FROM tasks t
+                INNER JOIN task_projects tp ON t.id = tp.task_id
+                WHERE t.workspace_id = $1 AND tp.project_id = $2
+                ORDER BY t.created_at DESC
                 "#,
+                workspace_id,
                 pid
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_task_row!(r)).collect())
+            rows.into_iter().map(|r| map_task_row!(r)).collect::<Vec<_>>()
         }
         (None, Some(s)) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, project_id, title, description, acceptance_criteria, status, priority,
+                SELECT id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                        workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                        pr_url, branch_name, pr_status, pr_created_at
                 FROM tasks
-                WHERE status = $1
+                WHERE workspace_id = $1 AND status = $2
                 ORDER BY created_at DESC
                 "#,
+                workspace_id,
                 s
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_task_row!(r)).collect())
+            rows.into_iter().map(|r| map_task_row!(r)).collect::<Vec<_>>()
         }
         (None, None) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, project_id, title, description, acceptance_criteria, status, priority,
+                SELECT id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                        workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                        pr_url, branch_name, pr_status, pr_created_at
                 FROM tasks
+                WHERE workspace_id = $1
                 ORDER BY created_at DESC
-                "#
+                "#,
+                workspace_id
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_task_row!(r)).collect())
+            rows.into_iter().map(|r| map_task_row!(r)).collect::<Vec<_>>()
         }
+    };
+
+    // Populate project_ids for each task
+    for task in &mut tasks {
+        task.project_ids = get_task_project_ids(pool, task.id).await?;
     }
+
+    Ok(tasks)
 }
 
 /// Get task by ID
 pub async fn get_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
     let row = sqlx::query!(
         r#"
-        SELECT id, project_id, title, description, acceptance_criteria, status, priority,
+        SELECT id, title, description, acceptance_criteria, status, priority,
                model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                pr_url, branch_name, pr_status, pr_created_at
@@ -188,13 +267,21 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_task_row!(r)))
+    match row {
+        Some(r) => {
+            let mut task = map_task_row!(r);
+            task.project_ids = get_task_project_ids(pool, task.id).await?;
+            Ok(Some(task))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Create a new task
 pub async fn create_task(
     pool: &PgPool,
-    project_id: Uuid,
+    workspace_id: Uuid,
+    project_ids: &[Uuid],
     title: &str,
     description: &str,
     acceptance_criteria: Option<&str>,
@@ -203,14 +290,14 @@ pub async fn create_task(
 ) -> DbResult<TaskRow> {
     let row = sqlx::query!(
         r#"
-        INSERT INTO tasks (project_id, title, description, acceptance_criteria, priority, is_agentic)
+        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic)
         VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
+        RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at
         "#,
-        project_id,
+        workspace_id,
         title,
         description,
         acceptance_criteria,
@@ -220,7 +307,15 @@ pub async fn create_task(
     .fetch_one(pool)
     .await?;
 
-    Ok(map_task_row!(row))
+    let mut task = map_task_row!(row);
+
+    // Add project associations if any
+    if !project_ids.is_empty() {
+        add_task_projects(pool, task.id, project_ids).await?;
+        task.project_ids = project_ids.to_vec();
+    }
+
+    Ok(task)
 }
 
 /// Update a task
@@ -232,6 +327,7 @@ pub async fn update_task(
     acceptance_criteria: Option<&str>,
     status: Option<&str>,
     priority: Option<i32>,
+    project_ids: Option<&[Uuid]>,
 ) -> DbResult<Option<TaskRow>> {
     let row = sqlx::query!(
         r#"
@@ -243,7 +339,7 @@ pub async fn update_task(
             priority = COALESCE($6, priority),
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
+        RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at
@@ -258,7 +354,22 @@ pub async fn update_task(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_task_row!(r)))
+    match row {
+        Some(r) => {
+            let mut task = map_task_row!(r);
+
+            // Update project associations if provided
+            if let Some(pids) = project_ids {
+                set_task_projects(pool, id, pids).await?;
+                task.project_ids = pids.to_vec();
+            } else {
+                task.project_ids = get_task_project_ids(pool, task.id).await?;
+            }
+
+            Ok(Some(task))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Delete a task
@@ -279,7 +390,7 @@ pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
             queued_at = NOW(),
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
+        RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at
@@ -289,7 +400,14 @@ pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_task_row!(r)))
+    match row {
+        Some(r) => {
+            let mut task = map_task_row!(r);
+            task.project_ids = get_task_project_ids(pool, task.id).await?;
+            Ok(Some(task))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Create a new task run
@@ -538,7 +656,7 @@ pub async fn update_task_pr(
             pr_created_at = NOW(),
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
+        RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at
@@ -551,7 +669,14 @@ pub async fn update_task_pr(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_task_row!(r)))
+    match row {
+        Some(r) => {
+            let mut task = map_task_row!(r);
+            task.project_ids = get_task_project_ids(pool, task.id).await?;
+            Ok(Some(task))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Update task branch name (for when branch is created before PR)
@@ -567,7 +692,7 @@ pub async fn update_task_branch(
             pr_status = 'pending',
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, project_id, title, description, acceptance_criteria, status, priority,
+        RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
                   pr_url, branch_name, pr_status, pr_created_at
@@ -578,5 +703,12 @@ pub async fn update_task_branch(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_task_row!(r)))
+    match row {
+        Some(r) => {
+            let mut task = map_task_row!(r);
+            task.project_ids = get_task_project_ids(pool, task.id).await?;
+            Ok(Some(task))
+        }
+        None => Ok(None),
+    }
 }

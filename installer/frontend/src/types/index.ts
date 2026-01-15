@@ -86,22 +86,76 @@ export type StepId = 'domain' | 'security' | 'models' | 'interface' | 'search' |
 export interface Step {
   id: StepId;
   label: string;
+  title: string;
+  description: string;
+  sidebarDescription: string;
   number: number;
 }
 
 export const STEPS: Step[] = [
-  { id: 'domain', label: 'Domain', number: 1 },
-  { id: 'security', label: 'Security', number: 2 },
-  { id: 'models', label: 'Models', number: 3 },
-  { id: 'interface', label: 'Interface', number: 4 },
-  { id: 'search', label: 'Search', number: 5 },
-  { id: 'vpn', label: 'VPN', number: 6 },
-  { id: 'advanced', label: 'Advanced', number: 7 },
+  {
+    id: 'domain',
+    label: 'Domain',
+    title: 'Domain Configuration',
+    description: 'Configure hostnames for your services',
+    sidebarDescription: 'Configure your domain settings',
+    number: 1,
+  },
+  {
+    id: 'security',
+    label: 'Security',
+    title: 'Security',
+    description: 'Configure authentication and generate secure keys',
+    sidebarDescription: 'Set up authentication and keys',
+    number: 2,
+  },
+  {
+    id: 'models',
+    label: 'Models',
+    title: 'AI Provider Configuration',
+    description: 'Choose your AI provider and configure models',
+    sidebarDescription: 'Choose your AI models',
+    number: 3,
+  },
+  {
+    id: 'interface',
+    label: 'Interface',
+    title: 'Interface Settings',
+    description: 'Configure the web interface',
+    sidebarDescription: 'Customize the web interface',
+    number: 4,
+  },
+  {
+    id: 'search',
+    label: 'Search',
+    title: 'Web Search',
+    description: 'Configure search integration',
+    sidebarDescription: 'Configure search settings',
+    number: 5,
+  },
+  {
+    id: 'vpn',
+    label: 'VPN',
+    title: 'VPN Configuration',
+    description: 'Optional: Configure VPN for private web search',
+    sidebarDescription: 'Set up VPN connection',
+    number: 6,
+  },
+  {
+    id: 'advanced',
+    label: 'Advanced',
+    title: 'Advanced Settings',
+    description: 'Performance tuning and system configuration',
+    sidebarDescription: 'Fine-tune advanced options',
+    number: 7,
+  },
 ];
 
 export interface InstallProgress {
   progress: number;
-  message: string;
+  status: string;
+  id?: string;
+  state?: 'in-progress' | 'success' | 'error' | 'retry' | 'normal';
   complete?: boolean;
   error?: boolean;
 }

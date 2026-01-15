@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { KnowledgeEntry } from '../types';
 import { useKnowledge } from '../hooks';
 import { CreateKnowledgeWizard } from '../components';
+import { Button, Badge, Tabs, TabsList, TabsTrigger, EmptyState } from '@zone/ui';
 import './WikiPage.css';
 
 type FilterType = 'all' | 'text' | 'url';
@@ -70,14 +71,14 @@ export default function WikiPage() {
 
   return (
     <div className="page wiki-page">
-      <div className="wiki-header">
+      <header className="flex justify-between items-start mb-6">
         <div>
-          <h1>Knowledge Base</h1>
-          <p className="wiki-subtitle">
+          <h1 className="text-2xl font-semibold text-foreground">Knowledge Base</h1>
+          <p className="text-muted-foreground mt-1">
             Manage documentation, links, and content for your AI models
           </p>
         </div>
-        <div className="wiki-actions">
+        <div className="flex items-center gap-3">
           <div className="wiki-search">
             <svg
               className="wiki-search-icon"
@@ -101,63 +102,23 @@ export default function WikiPage() {
               aria-label="Search knowledge"
             />
           </div>
-          <button
-            type="button"
-            className="add-knowledge-btn"
-            onClick={() => setShowCreateWizard(true)}
-          >
-            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 4v16m8-8H4"
-              />
-            </svg>
-            Add Knowledge
-          </button>
+          <Button onClick={() => setShowCreateWizard(true)}>
+            + Add Knowledge
+          </Button>
         </div>
-      </div>
+      </header>
 
-      <div className="wiki-filters">
-        <button
-          type="button"
-          className={`filter-btn ${filterType === 'all' ? 'active' : ''}`}
-          onClick={() => setFilterType('all')}
-        >
-          All
-        </button>
-        <button
-          type="button"
-          className={`filter-btn ${filterType === 'text' ? 'active' : ''}`}
-          onClick={() => setFilterType('text')}
-        >
-          Text
-        </button>
-        <button
-          type="button"
-          className={`filter-btn ${filterType === 'url' ? 'active' : ''}`}
-          onClick={() => setFilterType('url')}
-        >
-          URL
-        </button>
-      </div>
+      <Tabs value={filterType} onValueChange={(v) => setFilterType(v as FilterType)} className="mb-6">
+        <TabsList>
+          <TabsTrigger value="all">All</TabsTrigger>
+          <TabsTrigger value="text">Text</TabsTrigger>
+          <TabsTrigger value="url">URL</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
-      {error && (
-        <div className="alert alert-error" role="alert">
-          {error}
-        </div>
-      )}
-
-      {deleteError && (
-        <div className="alert alert-error" role="alert">
-          {deleteError}
-        </div>
-      )}
-
-      {refreshError && (
-        <div className="alert alert-error" role="alert">
-          {refreshError}
+      {(error || deleteError || refreshError) && (
+        <div className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive mb-4">
+          {error || deleteError || refreshError}
         </div>
       )}
 
@@ -166,45 +127,27 @@ export default function WikiPage() {
           <p>Loading knowledge...</p>
         </div>
       ) : filteredEntries.length === 0 ? (
-        <div className="wiki-empty">
-          <svg
-            className="wiki-empty-icon"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-            aria-hidden="true"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={1.5}
-              d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
-            />
-          </svg>
-          <h2>No knowledge entries found</h2>
-          <p>
-            {searchQuery || filterType !== 'all'
-              ? 'Try adjusting your filters or search query'
-              : 'Get started by adding your first knowledge entry'}
-          </p>
-          {!searchQuery && filterType === 'all' && (
-            <button
-              type="button"
-              className="add-knowledge-btn"
-              onClick={() => setShowCreateWizard(true)}
+        <EmptyState
+          icon={
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              width="48"
+              height="48"
             >
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 4v16m8-8H4"
-                />
-              </svg>
-              Add Your First Entry
-            </button>
-          )}
-        </div>
+              <path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            </svg>
+          }
+          title="No knowledge entries found"
+          description={
+            searchQuery || filterType !== 'all'
+              ? 'Try adjusting your filters or search query'
+              : 'Add your first knowledge entry to build your knowledge base'
+          }
+          action={!searchQuery && filterType === 'all' ? <Button onClick={() => setShowCreateWizard(true)}>Add Entry</Button> : undefined}
+        />
       ) : (
         <div className="knowledge-grid">
           {filteredEntries.map((entry) => (
@@ -223,7 +166,7 @@ export default function WikiPage() {
             >
               <div className="knowledge-card-header">
                 <h3 className="knowledge-card-title">{entry.title}</h3>
-                <span className={`knowledge-type-badge ${entry.type}`}>{entry.type}</span>
+                <Badge variant={entry.type === 'url' ? 'info' : 'secondary'}>{entry.type}</Badge>
               </div>
 
               {entry.type === 'url' && (
@@ -339,11 +282,11 @@ export default function WikiPage() {
             aria-modal="true"
           >
             <div className="modal-header">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+              <div className="flex items-center gap-3">
                 <h2>{selectedEntry.title}</h2>
-                <span className={`knowledge-type-badge ${selectedEntry.type}`}>
+                <Badge variant={selectedEntry.type === 'url' ? 'info' : 'secondary'}>
                   {selectedEntry.type}
-                </span>
+                </Badge>
               </div>
               <button
                 type="button"
@@ -411,25 +354,24 @@ export default function WikiPage() {
             </div>
             <div className="modal-footer">
               {selectedEntry.type === 'url' && (
-                <button
-                  type="button"
-                  className="btn btn-secondary"
+                <Button
+                  variant="secondary"
                   onClick={() => handleRefreshKnowledge(selectedEntry.id)}
                   disabled={refreshing === selectedEntry.id}
+                  loading={refreshing === selectedEntry.id}
                 >
                   {refreshing === selectedEntry.id ? 'Refreshing...' : 'Refresh Content'}
-                </button>
+                </Button>
               )}
-              <button
-                type="button"
-                className="btn btn-secondary"
+              <Button
+                variant="destructive"
                 onClick={() => {
                   handleDeleteKnowledge(selectedEntry.id);
                   setSelectedEntry(null);
                 }}
               >
                 Delete
-              </button>
+              </Button>
             </div>
           </div>
         </div>

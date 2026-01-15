@@ -54,11 +54,19 @@ pub async fn create_pr_for_task(
         }
     };
 
-    // Get project to find GitHub repo info
-    let project = match projects::get_project(state.db(), task.project_id).await {
+    // Get first associated project to find GitHub repo info
+    let project_id = match task.project_ids.first() {
+        Some(id) => *id,
+        None => {
+            tracing::info!("No project associated with task {}", task_id);
+            return PrCreationResult::NoRepository;
+        }
+    };
+
+    let project = match projects::get_project(state.db(), project_id).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            return PrCreationResult::Error(format!("Project {} not found", task.project_id));
+            return PrCreationResult::Error(format!("Project {} not found", project_id));
         }
         Err(e) => {
             return PrCreationResult::Error(format!("Failed to get project: {}", e));
@@ -71,7 +79,7 @@ pub async fn create_pr_for_task(
         None => {
             tracing::info!(
                 "No GitHub repository configured for project {}",
-                task.project_id
+                project_id
             );
             return PrCreationResult::NoRepository;
         }
@@ -82,7 +90,7 @@ pub async fn create_pr_for_task(
         None => {
             tracing::warn!(
                 "No GitHub access token configured for project {}",
-                task.project_id
+                project_id
             );
             return PrCreationResult::Error("No GitHub access token configured".to_string());
         }

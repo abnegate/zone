@@ -5,10 +5,10 @@ FROM oven/bun:1-alpine AS ui-builder
 
 WORKDIR /ui
 
-COPY packages/ui/package.json ./
+COPY --chown=bun:bun packages/ui/package.json ./
 RUN bun install --frozen-lockfile || bun install
 
-COPY packages/ui/ ./
+COPY --chown=bun:bun packages/ui/ ./
 RUN bun run build
 
 # =============================================================================
@@ -18,7 +18,7 @@ FROM oven/bun:1-alpine AS deps
 
 WORKDIR /app
 
-COPY manager/frontend/package.json ./package.json.orig
+COPY --chown=bun:bun manager/frontend/package.json ./package.json.orig
 RUN sed 's/"@zone\/ui": "\*",//' package.json.orig > package.json && \
     bun install --frozen-lockfile || bun install
 
@@ -29,17 +29,18 @@ FROM oven/bun:1-alpine AS builder
 
 WORKDIR /app
 
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/package.json ./
+COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
+COPY --from=deps --chown=bun:bun /app/package.json ./
 
 COPY --from=ui-builder /ui/dist /ui/dist
 COPY --from=ui-builder /ui/package.json /ui/package.json
+COPY --from=ui-builder /ui/node_modules /ui/node_modules
 
 RUN bun add /ui
 
-COPY manager/frontend/tsconfig.json manager/frontend/vite.config.ts manager/frontend/index.html ./
+COPY --chown=bun:bun manager/frontend/tsconfig.json manager/frontend/vite.config.ts manager/frontend/index.html ./
 
-COPY manager/frontend/src ./src
+COPY --chown=bun:bun manager/frontend/src ./src
 
 RUN bun run build
 

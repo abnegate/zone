@@ -26,9 +26,9 @@ impl ErrorResponse {
     }
 }
 
-/// Project response
+/// Project data
 #[derive(Debug, Serialize)]
-pub struct ProjectResponse {
+pub struct ProjectData {
     id: Uuid,
     workspace_id: Option<Uuid>,
     source_id: Option<Uuid>,
@@ -38,7 +38,19 @@ pub struct ProjectResponse {
     github_repo_url: Option<String>,
 }
 
-impl From<projects::ProjectRow> for ProjectResponse {
+/// Single project response
+#[derive(Debug, Serialize)]
+pub struct ProjectResponse {
+    project: ProjectData,
+}
+
+/// Projects list response
+#[derive(Debug, Serialize)]
+pub struct ProjectsListResponse {
+    projects: Vec<ProjectData>,
+}
+
+impl From<projects::ProjectRow> for ProjectData {
     fn from(row: projects::ProjectRow) -> Self {
         Self {
             id: row.id,
@@ -48,6 +60,14 @@ impl From<projects::ProjectRow> for ProjectResponse {
             description: row.description,
             status: row.status,
             github_repo_url: row.github_repo_url,
+        }
+    }
+}
+
+impl From<projects::ProjectRow> for ProjectResponse {
+    fn from(row: projects::ProjectRow) -> Self {
+        Self {
+            project: ProjectData::from(row),
         }
     }
 }
@@ -123,12 +143,9 @@ pub async fn list(
     }
 
     match projects::list_projects(state.db(), query.workspace_id, query.status.as_deref()).await {
-        Ok(projs) => Json(
-            projs
-                .into_iter()
-                .map(ProjectResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(projs) => Json(ProjectsListResponse {
+            projects: projs.into_iter().map(ProjectData::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);

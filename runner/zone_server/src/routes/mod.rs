@@ -172,8 +172,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/projects/{id}/github",
             post(projects::link_github).delete(projects::unlink_github),
         )
-        // Tasks
-        .route("/api/tasks", get(tasks::list).post(tasks::create))
+        // Tasks (workspace-scoped)
+        .route(
+            "/api/workspaces/{workspace_id}/tasks",
+            get(tasks::list).post(tasks::create),
+        )
         .route(
             "/api/tasks/{id}",
             get(tasks::get).put(tasks::update).delete(tasks::delete),

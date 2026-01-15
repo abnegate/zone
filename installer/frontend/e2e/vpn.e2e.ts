@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { selectOption } from './helpers';
 
 test.describe('VPN Configuration', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     // Navigate to VPN step (step 6)
-    await page.click('.stepper-item:nth-child(6) .stepper-button');
-    await expect(page.locator('h2')).toContainText('VPN Configuration');
+    await page.click('[data-step="6"]');
+    await expect(page.getByRole('heading', { name: 'VPN Configuration' })).toBeVisible();
   });
 
   test('displays VPN provider selection', async ({ page }) => {
@@ -23,8 +24,7 @@ test.describe('VPN Configuration', () => {
   });
 
   test('switches to WireGuard and shows different fields', async ({ page }) => {
-    const protocolSelect = page.getByLabel('Protocol');
-    await protocolSelect.selectOption('wireguard');
+    await selectOption(page, 'Protocol', 'WireGuard');
 
     // Should now show WireGuard-specific fields
     await expect(page.getByLabel('Private Key')).toBeVisible();
@@ -38,12 +38,11 @@ test.describe('VPN Configuration', () => {
   test('can select different VPN providers', async ({ page }) => {
     const providerSelect = page.getByLabel('VPN Provider');
 
-    // Test selecting each provider
-    const providers = ['surfshark', 'nordvpn', 'expressvpn', 'protonvpn', 'mullvad'];
+    const providers = ['Surfshark', 'NordVPN', 'ExpressVPN', 'ProtonVPN', 'Mullvad'];
 
     for (const provider of providers) {
-      await providerSelect.selectOption(provider);
-      await expect(providerSelect).toHaveValue(provider);
+      await selectOption(page, 'VPN Provider', provider);
+      await expect(providerSelect).toHaveText(provider);
     }
   });
 
@@ -66,7 +65,7 @@ test.describe('VPN Configuration', () => {
   });
 
   test('can fill WireGuard configuration', async ({ page }) => {
-    await page.getByLabel('Protocol').selectOption('wireguard');
+    await selectOption(page, 'Protocol', 'WireGuard');
 
     const privateKeyInput = page.getByLabel('Private Key');
     const addressesInput = page.getByLabel('Addresses');
@@ -99,12 +98,12 @@ test.describe('VPN Configuration', () => {
 
   test('switching protocol preserves provider selection', async ({ page }) => {
     // Select a specific provider
-    await page.getByLabel('VPN Provider').selectOption('mullvad');
+    await selectOption(page, 'VPN Provider', 'Mullvad');
 
     // Switch protocol
-    await page.getByLabel('Protocol').selectOption('wireguard');
+    await selectOption(page, 'Protocol', 'WireGuard');
 
     // Provider should still be mullvad
-    await expect(page.getByLabel('VPN Provider')).toHaveValue('mullvad');
+    await expect(page.getByLabel('VPN Provider')).toHaveText('Mullvad');
   });
 });

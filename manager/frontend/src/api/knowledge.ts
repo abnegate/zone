@@ -49,8 +49,8 @@ class KnowledgeApi {
   // Knowledge Base API
   // =============================================================================
 
-  async getKnowledge(workspaceId?: string): Promise<KnowledgeResponse> {
-    const params = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
+  async getKnowledge(workspaceId: string): Promise<KnowledgeResponse> {
+    const params = `?workspace_id=${encodeURIComponent(workspaceId)}`;
     const response = await fetch(`${API_BASE}/api/knowledge${params}`, {
       headers: this.getHeaders(),
     });
@@ -103,7 +103,8 @@ class KnowledgeApi {
 
   async searchContext(options: SearchOptions): Promise<SearchResponse> {
     const params = new URLSearchParams();
-    params.set('query', options.query);
+    params.set('workspace_id', options.workspace_id);
+    params.set('q', options.query);
     if (options.mode) params.set('mode', options.mode);
     if (options.source_ids && options.source_ids.length > 0) {
       options.source_ids.forEach((id) => params.append('source_ids', id));

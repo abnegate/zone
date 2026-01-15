@@ -1,8 +1,5 @@
-@import "tailwindcss";
-@plugin "tailwindcss-animate";
+@config "../../tailwind.config.ts";
+@source "../**/*.{ts,tsx}";
+@source "../../../../packages/ui/src/**/*.{ts,tsx}";
 
-@theme {
-  /* Shadcn / Standard Mappings */
-  --color-background: #f8fafc;
-  --color-foreground: #0f172a;
-}
+@import "@zone/ui/styles/globals.css";

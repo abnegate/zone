@@ -159,6 +159,18 @@ impl From<chats::MessageRow> for MessageResponse {
     }
 }
 
+/// Chats list response
+#[derive(Debug, Serialize)]
+pub struct ChatsListResponse {
+    chats: Vec<ChatResponse>,
+}
+
+/// Messages list response
+#[derive(Debug, Serialize)]
+pub struct MessagesListResponse {
+    messages: Vec<MessageResponse>,
+}
+
 /// Query parameters for listing chats
 #[derive(Debug, Deserialize)]
 pub struct ListChatsQuery {
@@ -200,12 +212,9 @@ pub async fn list(
     }
 
     match chats::list_chats(state.db(), Some(query.workspace_id), query.archived).await {
-        Ok(items) => Json(
-            items
-                .into_iter()
-                .map(ChatResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(items) => Json(ChatsListResponse {
+            chats: items.into_iter().map(ChatResponse::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
@@ -423,11 +432,9 @@ pub async fn list_messages(
     }
 
     match chats::list_messages(state.db(), id).await {
-        Ok(msgs) => Json(
-            msgs.into_iter()
-                .map(MessageResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(msgs) => Json(MessagesListResponse {
+            messages: msgs.into_iter().map(MessageResponse::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
@@ -572,6 +579,13 @@ impl From<message_embeddings::MessageSearchResult> for MessageSearchResponse {
     }
 }
 
+/// Message search results list response
+#[derive(Debug, Serialize)]
+pub struct MessageSearchListResponse {
+    results: Vec<MessageSearchResponse>,
+    total: usize,
+}
+
 /// GET /api/chats/search
 ///
 /// Search messages by semantic similarity across chat history.
@@ -685,8 +699,9 @@ pub async fn search_messages(
                 .into_iter()
                 .map(MessageSearchResponse::from)
                 .collect();
+            let total = response.len();
 
-            Json(response).into_response()
+            Json(MessageSearchListResponse { results: response, total }).into_response()
         }
         Err(e) => {
             tracing::error!("Database error during message search: {}", e);

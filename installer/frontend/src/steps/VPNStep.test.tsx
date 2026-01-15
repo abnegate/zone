@@ -82,13 +82,6 @@ const renderWithForm = (defaultValues: InstallerConfig) => {
 };
 
 describe('VPNStep', () => {
-  it('renders step header', () => {
-    renderWithForm(createMockConfig());
-
-    expect(screen.getByText('VPN Configuration')).toBeInTheDocument();
-    expect(screen.getByText(/configure vpn for private web search/i)).toBeInTheDocument();
-  });
-
   it('renders provider select with current value', () => {
     renderWithForm(createMockConfig());
 

@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { sourcesApi } from '../../../api/sources';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Source, SourceType, CreateSourceRequest, UpdateSourceRequest } from '../types';
 import type { SourceVerifyResponse } from '../schemas';
 
@@ -28,14 +29,21 @@ export function useSources(options: UseSourcesOptions = {}): UseSourcesResult {
   const [sources, setSources] = useState<Source[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
 
   const { type, activeOnly = false } = options;
 
   const loadSources = useCallback(async () => {
+    if (!workspaceId) {
+      setSources([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const data = await sourcesApi.getSources(type, activeOnly);
+      const data = await sourcesApi.getSources(workspaceId, type, activeOnly);
       setSources(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load sources');
@@ -43,39 +51,43 @@ export function useSources(options: UseSourcesOptions = {}): UseSourcesResult {
     } finally {
       setLoading(false);
     }
-  }, [type, activeOnly]);
+  }, [workspaceId, type, activeOnly]);
 
   useEffect(() => {
     loadSources();
   }, [loadSources]);
 
   const createSource = useCallback(async (request: CreateSourceRequest): Promise<Source> => {
-    const newSource = await sourcesApi.createSource(request);
+    if (!workspaceId) throw new Error('No workspace selected');
+    const newSource = await sourcesApi.createSource(workspaceId, request);
     setSources((prev) => [newSource, ...prev]);
     return newSource;
-  }, []);
+  }, [workspaceId]);
 
   const updateSource = useCallback(
     async (id: string, request: UpdateSourceRequest): Promise<Source> => {
-      const updatedSource = await sourcesApi.updateSource(id, request);
+      if (!workspaceId) throw new Error('No workspace selected');
+      const updatedSource = await sourcesApi.updateSource(workspaceId, id, request);
       setSources((prev) => prev.map((s) => (s.id === id ? updatedSource : s)));
       return updatedSource;
     },
-    []
+    [workspaceId]
   );
 
   const deleteSource = useCallback(async (id: string): Promise<void> => {
-    await sourcesApi.deleteSource(id);
+    if (!workspaceId) throw new Error('No workspace selected');
+    await sourcesApi.deleteSource(workspaceId, id);
     setSources((prev) => prev.filter((s) => s.id !== id));
-  }, []);
+  }, [workspaceId]);
 
   const verifySource = useCallback(async (id: string): Promise<SourceVerifyResponse> => {
-    const result = await sourcesApi.verifySource(id);
+    if (!workspaceId) throw new Error('No workspace selected');
+    const result = await sourcesApi.verifySource(workspaceId, id);
     // Refresh the source to get updated verification status
-    const updatedSource = await sourcesApi.getSource(id);
+    const updatedSource = await sourcesApi.getSource(workspaceId, id);
     setSources((prev) => prev.map((s) => (s.id === id ? updatedSource : s)));
     return result;
-  }, []);
+  }, [workspaceId]);
 
   const refresh = useCallback(async () => {
     await loadSources();

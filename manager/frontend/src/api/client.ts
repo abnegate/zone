@@ -153,8 +153,8 @@ class Client {
   // Chats API (delegates to chatsApi)
   // =============================================================================
 
-  async getChats(archived?: boolean): Promise<Chat[]> {
-    return chatsApi.getChats(archived);
+  async getChats(workspaceId: string, archived?: boolean): Promise<Chat[]> {
+    return chatsApi.getChats(workspaceId, archived);
   }
 
   async getChat(id: string): Promise<ChatWithMessages> {
@@ -201,8 +201,8 @@ class Client {
   // Projects API (delegates to projectsApi)
   // =============================================================================
 
-  async getProjects(status?: string): Promise<Project[]> {
-    return projectsApi.getProjects(status);
+  async getProjects(workspaceId: string, status?: string): Promise<Project[]> {
+    return projectsApi.getProjects(workspaceId, status);
   }
 
   async getProject(id: string): Promise<Project> {
@@ -259,16 +259,16 @@ class Client {
   // Tasks API (delegates to tasksApi)
   // =============================================================================
 
-  async getTasks(projectId?: string, status?: string) {
-    return tasksApi.getTasks(projectId, status);
+  async getTasks(workspaceId: string, projectId?: string, status?: string) {
+    return tasksApi.getTasks(workspaceId, projectId, status);
   }
 
   async getTask(id: string) {
     return tasksApi.getTask(id);
   }
 
-  async createTask(request: import('../features/tasks/types').CreateTaskRequest) {
-    return tasksApi.createTask(request);
+  async createTask(workspaceId: string, request: import('../features/tasks/types').CreateTaskRequest) {
+    return tasksApi.createTask(workspaceId, request);
   }
 
   async updateTask(id: string, request: import('../features/tasks/types').UpdateTaskRequest) {
@@ -311,28 +311,32 @@ class Client {
     return sourcesApi.getSourceTypes();
   }
 
-  async getSources(type?: SourceType, activeOnly = false): Promise<Source[]> {
-    return sourcesApi.getSources(type, activeOnly);
+  async getSources(workspaceId: string, type?: SourceType, activeOnly = false): Promise<Source[]> {
+    return sourcesApi.getSources(workspaceId, type, activeOnly);
   }
 
-  async getSource(id: string): Promise<Source> {
-    return sourcesApi.getSource(id);
+  async getSource(workspaceId: string, id: string): Promise<Source> {
+    return sourcesApi.getSource(workspaceId, id);
   }
 
-  async createSource(request: CreateSourceRequest): Promise<Source> {
-    return sourcesApi.createSource(request);
+  async createSource(workspaceId: string, request: CreateSourceRequest): Promise<Source> {
+    return sourcesApi.createSource(workspaceId, request);
   }
 
-  async updateSource(id: string, request: UpdateSourceRequest): Promise<Source> {
-    return sourcesApi.updateSource(id, request);
+  async updateSource(workspaceId: string, id: string, request: UpdateSourceRequest): Promise<Source> {
+    return sourcesApi.updateSource(workspaceId, id, request);
   }
 
-  async deleteSource(id: string): Promise<void> {
-    return sourcesApi.deleteSource(id);
+  async deleteSource(workspaceId: string, id: string): Promise<void> {
+    return sourcesApi.deleteSource(workspaceId, id);
   }
 
-  async verifySource(id: string): Promise<SourceVerifyResponse> {
-    return sourcesApi.verifySource(id);
+  async verifySource(workspaceId: string, id: string): Promise<SourceVerifyResponse> {
+    return sourcesApi.verifySource(workspaceId, id);
+  }
+
+  async reindexSource(workspaceId: string, id: string): Promise<void> {
+    return sourcesApi.reindexSource(workspaceId, id);
   }
 
   // =============================================================================
@@ -469,9 +473,9 @@ class Client {
   // Workspace Theme API (nested under organizations/workspaces)
   // =============================================================================
 
-  async getWorkspaceTheme(orgId: string, wsId: string): Promise<WorkspaceTheme> {
+  async getWorkspaceTheme(_orgId: string, wsId: string): Promise<WorkspaceTheme> {
     const response = await fetch(
-      `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/theme`,
+      `${API_BASE}/api/workspaces/${wsId}/theme`,
       { headers: this.getHeaders() }
     );
     if (!response.ok) {
@@ -482,12 +486,12 @@ class Client {
   }
 
   async updateWorkspaceTheme(
-    orgId: string,
+    _orgId: string,
     wsId: string,
     request: UpdateWorkspaceThemeRequest
   ): Promise<WorkspaceTheme> {
     const response = await fetch(
-      `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/theme`,
+      `${API_BASE}/api/workspaces/${wsId}/theme`,
       {
         method: 'PUT',
         headers: this.getHeaders(),
@@ -501,9 +505,9 @@ class Client {
     return data.theme;
   }
 
-  async resetWorkspaceTheme(orgId: string, wsId: string): Promise<WorkspaceTheme> {
+  async resetWorkspaceTheme(_orgId: string, wsId: string): Promise<WorkspaceTheme> {
     const response = await fetch(
-      `${API_BASE}/api/organizations/${orgId}/workspaces/${wsId}/settings/theme`,
+      `${API_BASE}/api/workspaces/${wsId}/theme`,
       {
         method: 'DELETE',
         headers: this.getHeaders(),
@@ -1084,7 +1088,7 @@ class Client {
   // =============================================================================
 
   async getKnowledge(workspaceId?: string) {
-    return knowledgeApi.getKnowledge(workspaceId);
+    return knowledgeApi.getKnowledge(workspaceId || '00000000-0000-0000-0000-000000000001');
   }
 
   async createKnowledge(request: CreateKnowledgeRequest) {

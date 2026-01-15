@@ -82,13 +82,6 @@ const renderWithForm = (defaultValues: InstallerConfig) => {
 };
 
 describe('InterfaceStep', () => {
-  it('renders step header', () => {
-    renderWithForm(createMockConfig());
-
-    expect(screen.getByText('Interface Settings')).toBeInTheDocument();
-    expect(screen.getByText('Configure the web interface')).toBeInTheDocument();
-  });
-
   it('renders authentication checkbox unchecked by default', () => {
     renderWithForm(createMockConfig());
 

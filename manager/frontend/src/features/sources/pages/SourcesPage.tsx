@@ -1,31 +1,40 @@
 import { useState } from 'react';
-import { Button } from '../../../components';
+import { Button, Badge, EmptyState } from '@zone/ui';
 import { useSources } from '../hooks';
-import {
-  getSourceBadgeColor,
-  getSourceLabel,
-} from '../config';
+import { getSourceLabel } from '../config';
 import type { Source, SourceType } from '../types';
 import { CreateSourceWizard } from '../components/CreateSourceWizard';
 import './SourcesPage.css';
 
+const sourceTypeVariants: Record<SourceType, 'default' | 'secondary' | 'info' | 'success' | 'warning' | 'destructive'> = {
+  github: 'default',
+  gitlab: 'warning',
+  filesystem: 'info',
+  slack: 'secondary',
+  discord: 'secondary',
+  ical: 'success',
+  imap: 'secondary',
+  web: 'info',
+  text: 'secondary',
+};
+
 function SourceTypeBadge({ type }: { type: SourceType }) {
   return (
-    <span className={`source-type-badge ${getSourceBadgeColor(type)}`}>{getSourceLabel(type)}</span>
+    <Badge variant={sourceTypeVariants[type] || 'secondary'}>{getSourceLabel(type)}</Badge>
   );
 }
 
 function SourceStatusBadge({ source }: { source: Source }) {
   if (!source.is_active) {
-    return <span className="source-status-badge badge-gray">Inactive</span>;
+    return <Badge variant="secondary">Inactive</Badge>;
   }
   if (source.last_error) {
-    return <span className="source-status-badge badge-red">Error</span>;
+    return <Badge variant="destructive">Error</Badge>;
   }
   if (source.last_verified_at) {
-    return <span className="source-status-badge badge-green">Verified</span>;
+    return <Badge variant="success">Verified</Badge>;
   }
-  return <span className="source-status-badge badge-yellow">Unverified</span>;
+  return <Badge variant="warning">Unverified</Badge>;
 }
 
 export default function SourcesPage() {
@@ -80,17 +89,21 @@ export default function SourcesPage() {
 
   return (
     <div className="page sources-page">
-      <header className="page-header">
-        <div className="header-content">
-          <h1>Sources</h1>
-          <p className="subtitle">Connect repositories, calendars, email, and other data sources</p>
+      <header className="flex justify-between items-start mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold text-foreground">Sources</h1>
+          <p className="text-muted-foreground mt-1">Connect repositories, calendars, email, and other data sources</p>
         </div>
-        <Button variant="primary" onClick={() => setShowCreateModal(true)}>
+        <Button onClick={() => setShowCreateModal(true)}>
           + Add Source
         </Button>
       </header>
 
-      {displayError && <div className="error-banner">{displayError}</div>}
+      {displayError && (
+        <div className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive mb-4">
+          {displayError}
+        </div>
+      )}
 
       {loading ? (
         <div className="sources-list">
@@ -110,12 +123,24 @@ export default function SourcesPage() {
           ))}
         </div>
       ) : sources.length === 0 ? (
-        <div className="empty-state">
-          <p>No sources configured. Add a source to get started!</p>
-          <p className="empty-hint">
-            Sources can be code repositories, calendars, email inboxes, web URLs, or text content.
-          </p>
-        </div>
+        <EmptyState
+          icon={
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              width="48"
+              height="48"
+            >
+              <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              <path d="M12 11v6m-3-3h6" />
+            </svg>
+          }
+          title="No sources configured"
+          description="Add code repositories, calendars, email inboxes, web URLs, or text content"
+          action={<Button onClick={() => setShowCreateModal(true)}>Add Source</Button>}
+        />
       ) : (
         <div className="sources-list">
           {sources.map((source) => (
@@ -150,18 +175,20 @@ export default function SourcesPage() {
               <div className="source-actions">
                 <Button
                   variant="secondary"
+                  size="sm"
                   onClick={() => handleVerify(source.id)}
                   loading={verifying === source.id}
                 >
                   {verifying === source.id ? 'Verifying...' : 'Verify'}
                 </Button>
                 <Button
-                  variant={source.is_active ? 'secondary' : 'primary'}
+                  variant={source.is_active ? 'secondary' : 'default'}
+                  size="sm"
                   onClick={() => handleToggleActive(source)}
                 >
                   {source.is_active ? 'Disable' : 'Enable'}
                 </Button>
-                <Button variant="danger" onClick={() => handleDelete(source.id)}>
+                <Button variant="destructive" size="sm" onClick={() => handleDelete(source.id)}>
                   Delete
                 </Button>
               </div>

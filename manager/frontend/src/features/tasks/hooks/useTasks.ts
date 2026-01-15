@@ -1,18 +1,30 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { tasksApi } from '../../../api/tasks';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { CreateTaskRequest, UpdateTaskRequest } from '../types';
 
 export function useTasks(projectId?: string, status?: string) {
   const queryClient = useQueryClient();
-  const queryKey = ['tasks', projectId, status];
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
+  const queryKey = ['tasks', workspaceId, projectId, status];
 
   const { data: tasks = [], isLoading: loading, error, refetch } = useQuery({
     queryKey,
-    queryFn: () => tasksApi.getTasks(projectId, status),
+    queryFn: () => {
+      if (!workspaceId) {
+        return [];
+      }
+      return tasksApi.getTasks(workspaceId, projectId, status);
+    },
+    enabled: !!workspaceId,
   });
 
   const createTaskMutation = useMutation({
-    mutationFn: (request: CreateTaskRequest) => tasksApi.createTask(request),
+    mutationFn: (request: CreateTaskRequest) => {
+      if (!workspaceId) throw new Error('No workspace selected');
+      return tasksApi.createTask(workspaceId, request);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
     },

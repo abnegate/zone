@@ -71,6 +71,65 @@
   --text-tertiary: var(--ui-text-muted);
   --primary: var(--ui-accent-500);
   --primary-light: rgba(237, 122, 20, 0.12);
+
+  /* Legacy variable mappings for TasksPage and other pages */
+  --bg-primary: var(--ui-bg-base);
+  --bg-secondary: var(--ui-bg-elevated);
+  --border-color: var(--ui-border);
+  --text-muted: var(--ui-text-muted);
+  --font-size-xs: var(--ui-text-xs);
+  --font-size-sm: var(--ui-text-sm);
+  --font-size-md: var(--ui-text-base);
+  --font-size-lg: var(--ui-text-lg);
+  --font-mono: var(--ui-font-mono);
+  --radius-full: 9999px;
+
+  /* Color scales - Gray */
+  --gray-50: #fafafa;
+  --gray-100: #27272a;
+  --gray-200: #3f3f46;
+  --gray-300: #52525b;
+  --gray-400: #71717a;
+  --gray-500: #a1a1aa;
+  --gray-600: #d4d4d8;
+  --gray-700: #e4e4e7;
+  --gray-800: #f4f4f5;
+  --gray-900: #18181b;
+
+  /* Color scales - Blue */
+  --blue-50: rgba(59, 130, 246, 0.1);
+  --blue-100: rgba(59, 130, 246, 0.2);
+  --blue-400: #60a5fa;
+  --blue-500: #3b82f6;
+  --blue-600: #2563eb;
+  --blue-700: #1d4ed8;
+
+  /* Color scales - Green */
+  --green-50: rgba(34, 197, 94, 0.1);
+  --green-100: rgba(34, 197, 94, 0.2);
+  --green-500: #22c55e;
+  --green-600: #16a34a;
+  --green-700: #15803d;
+
+  /* Color scales - Red */
+  --red-100: rgba(239, 68, 68, 0.2);
+  --red-400: #f87171;
+  --red-600: #dc2626;
+  --red-700: #b91c1c;
+
+  /* Color scales - Yellow */
+  --yellow-100: rgba(234, 179, 8, 0.2);
+  --yellow-400: #facc15;
+  --yellow-600: #ca8a04;
+  --yellow-800: #854d0e;
+
+  /* Color scales - Purple */
+  --purple-50: rgba(168, 85, 247, 0.1);
+  --purple-100: rgba(168, 85, 247, 0.2);
+  --purple-300: #c084fc;
+  --purple-400: #a855f7;
+  --purple-500: #a855f7;
+  --purple-700: #7c3aed;
 }
 
 /* Light theme - Map to UI variables */
@@ -94,4 +153,63 @@
   --text-tertiary: var(--ui-text-muted);
   --primary: var(--ui-accent-500);
   --primary-light: rgba(237, 122, 20, 0.12);
+
+  /* Legacy variable mappings for TasksPage and other pages */
+  --bg-primary: var(--ui-bg-base);
+  --bg-secondary: var(--ui-bg-elevated);
+  --border-color: var(--ui-border);
+  --text-muted: var(--ui-text-muted);
+  --font-size-xs: var(--ui-text-xs);
+  --font-size-sm: var(--ui-text-sm);
+  --font-size-md: var(--ui-text-base);
+  --font-size-lg: var(--ui-text-lg);
+  --font-mono: var(--ui-font-mono);
+  --radius-full: 9999px;
+
+  /* Color scales - Gray (light theme) */
+  --gray-50: #fafafa;
+  --gray-100: #f4f4f5;
+  --gray-200: #e4e4e7;
+  --gray-300: #d4d4d8;
+  --gray-400: #a1a1aa;
+  --gray-500: #71717a;
+  --gray-600: #52525b;
+  --gray-700: #3f3f46;
+  --gray-800: #27272a;
+  --gray-900: #18181b;
+
+  /* Color scales - Blue */
+  --blue-50: rgba(59, 130, 246, 0.1);
+  --blue-100: rgba(59, 130, 246, 0.15);
+  --blue-400: #60a5fa;
+  --blue-500: #3b82f6;
+  --blue-600: #2563eb;
+  --blue-700: #1d4ed8;
+
+  /* Color scales - Green */
+  --green-50: rgba(34, 197, 94, 0.1);
+  --green-100: rgba(34, 197, 94, 0.15);
+  --green-500: #22c55e;
+  --green-600: #16a34a;
+  --green-700: #15803d;
+
+  /* Color scales - Red */
+  --red-100: rgba(239, 68, 68, 0.15);
+  --red-400: #f87171;
+  --red-600: #dc2626;
+  --red-700: #b91c1c;
+
+  /* Color scales - Yellow */
+  --yellow-100: rgba(234, 179, 8, 0.15);
+  --yellow-400: #facc15;
+  --yellow-600: #ca8a04;
+  --yellow-800: #854d0e;
+
+  /* Color scales - Purple */
+  --purple-50: rgba(168, 85, 247, 0.1);
+  --purple-100: rgba(168, 85, 247, 0.15);
+  --purple-300: #c084fc;
+  --purple-400: #a855f7;
+  --purple-500: #a855f7;
+  --purple-700: #7c3aed;
 }

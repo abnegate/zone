@@ -4,10 +4,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 const mockGenerateSecret = mock(() => 'generated-secret');
 const mockInstall = mock();
 const mockResetInstall = mock();
-const mockValidateStep = mock(() => true);
-const mockGetFieldError = mock(() => undefined);
-const mockClearErrors = mock();
-const mockResetConfig = mock();
 const mockUseKeyboardNavigation = mock();
 const mockLoadConfig = mock(() => Promise.resolve(null));
 const mockSaveConfig = mock(() => Promise.resolve(undefined));
@@ -18,6 +14,9 @@ mock.module('../hooks', () => ({
   useSecretGenerator: () => ({
     generateSecret: mockGenerateSecret,
   }),
+}));
+
+mock.module('../hooks/useInstallation', () => ({
   useInstallation: () => ({
     isInstalling: false,
     progress: 0,
@@ -27,12 +26,9 @@ mock.module('../hooks', () => ({
     install: mockInstall,
     reset: mockResetInstall,
   }),
-  useValidation: () => ({
-    validateStep: mockValidateStep,
-    getFieldError: mockGetFieldError,
-    clearErrors: mockClearErrors,
-  }),
-  useConfigPersistence: () => ({ resetConfig: mockResetConfig }),
+}));
+
+mock.module('../hooks/useKeyboardNavigation', () => ({
   useKeyboardNavigation: mockUseKeyboardNavigation,
 }));
 
@@ -55,6 +51,10 @@ mock.module('../validation/schemas', () => ({
   },
 }));
 
+mock.module('@hookform/resolvers/zod', () => ({
+  zodResolver: () => async () => ({ values: {}, errors: {} }),
+}));
+
 let InstallerForm: typeof import('./InstallerForm').default;
 
 beforeAll(async () => {
@@ -71,12 +71,6 @@ describe('InstallerForm', () => {
     mockGenerateSecret.mockReturnValue('generated-secret');
     mockInstall.mockReset();
     mockResetInstall.mockReset();
-    mockValidateStep.mockReset();
-    mockValidateStep.mockReturnValue(true);
-    mockGetFieldError.mockReset();
-    mockGetFieldError.mockReturnValue(undefined);
-    mockClearErrors.mockReset();
-    mockResetConfig.mockReset();
     mockUseKeyboardNavigation.mockReset();
     mockLoadConfig.mockReset();
     mockLoadConfig.mockResolvedValue(null);
@@ -95,7 +89,7 @@ describe('InstallerForm', () => {
   it('renders first step (Domain) by default', () => {
     render(<InstallerForm />);
 
-    expect(screen.getByText('Domain Configuration')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Domain Configuration' })).toBeInTheDocument();
   });
 
   it('renders navigation buttons', () => {
@@ -117,7 +111,7 @@ describe('InstallerForm', () => {
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { level: 2, name: 'Security' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument();
     });
   });
 
@@ -126,12 +120,12 @@ describe('InstallerForm', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
-      expect(screen.getByRole('heading', { level: 2, name: 'Security' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: /previous/i }));
     await waitFor(() => {
-      expect(screen.getByText('Domain Configuration')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Domain Configuration' })).toBeInTheDocument();
     });
   });
 
@@ -169,58 +163,50 @@ describe('InstallerForm', () => {
     fireEvent.click(screen.getByText('Models'));
 
     await waitFor(() => {
-      expect(screen.getByText('AI Provider Configuration')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'AI Provider Configuration' })).toBeInTheDocument();
     });
   });
 
   it('renders all steps when navigating', async () => {
     render(<InstallerForm />);
 
-    expect(screen.getByText('Domain Configuration')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Domain Configuration' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
-      expect(screen.getByRole('heading', { level: 2, name: 'Security' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
-      expect(
-        screen.getByRole('heading', { level: 2, name: 'AI Provider Configuration' })
-      ).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'AI Provider Configuration' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
-      expect(
-        screen.getByRole('heading', { level: 2, name: 'Interface Settings' })
-      ).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Interface Settings' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
-      expect(screen.getByRole('heading', { level: 2, name: 'Web Search' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Web Search' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
-      expect(
-        screen.getByRole('heading', { level: 2, name: 'VPN Configuration' })
-      ).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'VPN Configuration' })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
-      expect(
-        screen.getByRole('heading', { level: 2, name: 'Advanced Settings' })
-      ).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Advanced Settings' })).toBeInTheDocument();
     });
   });
 
   it('renders sidebar with Zone header', () => {
     render(<InstallerForm />);
 
-    const sidebar = document.querySelector('.installer-sidebar');
+    const sidebar = screen.getByTestId('installer-sidebar');
     expect(sidebar).toBeInTheDocument();
     expect(sidebar).toHaveTextContent('Zone');
   });
@@ -228,7 +214,7 @@ describe('InstallerForm', () => {
   it('renders main content area with card', () => {
     render(<InstallerForm />);
 
-    expect(document.querySelector('.installer-main')).toBeInTheDocument();
-    expect(document.querySelector('.card')).toBeInTheDocument();
+    expect(screen.getByTestId('installer-main')).toBeInTheDocument();
+    expect(screen.getByTestId('installer-card')).toBeInTheDocument();
   });
 });

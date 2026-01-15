@@ -66,6 +66,7 @@ export function CreateKnowledgeWizard({
 
   const handleComplete = useCallback(async () => {
     const request: CreateKnowledgeRequest = {
+      workspace_id: '00000000-0000-0000-0000-000000000001',
       title: title.trim(),
       type,
       content: content.trim(),

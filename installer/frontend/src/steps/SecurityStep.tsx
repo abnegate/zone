@@ -1,6 +1,14 @@
 import type React from 'react';
 import { useFormContext } from 'react-hook-form';
-import { Button, Checkbox, InfoBox, Input } from '../components';
+import {
+  AlertDescription,
+  AlertTitle,
+  Button,
+  Checkbox,
+  InfoBox,
+  Input,
+  SectionHeader,
+} from '../components';
 import { useSecretGenerator } from '../hooks';
 import type { InstallerConfig } from '../types';
 
@@ -14,6 +22,26 @@ export function SecurityStep() {
   const { generateSecret } = useSecretGenerator();
   const httpRedirectEnabled = watch('SECURITY_HTTP_REDIRECT') === 'true';
   const certificateEnabled = watch('SECURITY_GENERATE_CERTIFICATE') === 'true';
+  const [
+    litellmMasterKey,
+    litellmSaltKey,
+    searxngSecretKey,
+    managerApiKey,
+    postgresPassword,
+  ] = watch([
+    'SECURITY_LITELLM_MASTER_KEY',
+    'SECURITY_LITELLM_SALT_KEY',
+    'SECURITY_SEARXNG_SECRET_KEY',
+    'SECURITY_MANAGER_API_KEY',
+    'POSTGRES_PASSWORD',
+  ]);
+  const hasEmptySecrets = [
+    litellmMasterKey,
+    litellmSaltKey,
+    searxngSecretKey,
+    managerApiKey,
+    postgresPassword,
+  ].some((value) => !value?.trim());
 
   const handleGenerateAll = () => {
     const options = { shouldDirty: true, shouldValidate: true };
@@ -25,99 +53,96 @@ export function SecurityStep() {
   };
 
   return (
-    <div className="step-content">
-      <div className="step-header">
-        <h2>Security</h2>
-        <p>Configure authentication and generate secure keys</p>
+    <div className="space-y-6">
+      <div className="space-y-4">
+        <Input
+          label="Authentication Realm"
+          type="text"
+          error={errors.SECURITY_BASICAUTH_REALM?.message}
+          {...register('SECURITY_BASICAUTH_REALM')}
+        />
+
+        <Input
+          label="LiteLLM Master Key"
+          type="text"
+          onGenerate={() =>
+            setValue('SECURITY_LITELLM_MASTER_KEY', generateSecret(), {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
+          }
+          className="font-mono"
+          error={errors.SECURITY_LITELLM_MASTER_KEY?.message}
+          {...register('SECURITY_LITELLM_MASTER_KEY')}
+        />
+
+        <Input
+          label="LiteLLM Salt Key"
+          type="text"
+          onGenerate={() =>
+            setValue('SECURITY_LITELLM_SALT_KEY', generateSecret(), {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
+          }
+          className="font-mono"
+          error={errors.SECURITY_LITELLM_SALT_KEY?.message}
+          {...register('SECURITY_LITELLM_SALT_KEY')}
+        />
+
+        <Input
+          label="SearXNG Secret Key"
+          type="text"
+          onGenerate={() =>
+            setValue('SECURITY_SEARXNG_SECRET_KEY', generateSecret(), {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
+          }
+          className="font-mono"
+          error={errors.SECURITY_SEARXNG_SECRET_KEY?.message}
+          {...register('SECURITY_SEARXNG_SECRET_KEY')}
+        />
+
+        <Input
+          label="Manager API Key"
+          type="text"
+          onGenerate={() =>
+            setValue('SECURITY_MANAGER_API_KEY', generateSecret(), {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
+          }
+          className="font-mono"
+          error={errors.SECURITY_MANAGER_API_KEY?.message}
+          {...register('SECURITY_MANAGER_API_KEY')}
+        />
+
+        <Input
+          label="PostgreSQL Password"
+          type="text"
+          onGenerate={() =>
+            setValue('POSTGRES_PASSWORD', generateSecret(), {
+              shouldDirty: true,
+              shouldValidate: true,
+            })
+          }
+          className="font-mono"
+          error={errors.POSTGRES_PASSWORD?.message}
+          {...register('POSTGRES_PASSWORD')}
+        />
       </div>
 
-      <Input
-        label="Authentication Realm"
-        type="text"
-        error={errors.SECURITY_BASICAUTH_REALM?.message}
-        {...register('SECURITY_BASICAUTH_REALM')}
-      />
-
-      <Input
-        label="LiteLLM Master Key"
-        type="text"
-        onGenerate={() =>
-          setValue('SECURITY_LITELLM_MASTER_KEY', generateSecret(), {
-            shouldDirty: true,
-            shouldValidate: true,
-          })
-        }
-        className="font-mono"
-        error={errors.SECURITY_LITELLM_MASTER_KEY?.message}
-        {...register('SECURITY_LITELLM_MASTER_KEY')}
-      />
-
-      <Input
-        label="LiteLLM Salt Key"
-        type="text"
-        onGenerate={() =>
-          setValue('SECURITY_LITELLM_SALT_KEY', generateSecret(), {
-            shouldDirty: true,
-            shouldValidate: true,
-          })
-        }
-        className="font-mono"
-        error={errors.SECURITY_LITELLM_SALT_KEY?.message}
-        {...register('SECURITY_LITELLM_SALT_KEY')}
-      />
-
-      <Input
-        label="SearXNG Secret Key"
-        type="text"
-        onGenerate={() =>
-          setValue('SECURITY_SEARXNG_SECRET_KEY', generateSecret(), {
-            shouldDirty: true,
-            shouldValidate: true,
-          })
-        }
-        className="font-mono"
-        error={errors.SECURITY_SEARXNG_SECRET_KEY?.message}
-        {...register('SECURITY_SEARXNG_SECRET_KEY')}
-      />
-
-      <Input
-        label="Manager API Key"
-        type="text"
-        onGenerate={() =>
-          setValue('SECURITY_MANAGER_API_KEY', generateSecret(), {
-            shouldDirty: true,
-            shouldValidate: true,
-          })
-        }
-        className="font-mono"
-        error={errors.SECURITY_MANAGER_API_KEY?.message}
-        {...register('SECURITY_MANAGER_API_KEY')}
-      />
-
-      <Input
-        label="PostgreSQL Password"
-        type="text"
-        onGenerate={() =>
-          setValue('POSTGRES_PASSWORD', generateSecret(), {
-            shouldDirty: true,
-            shouldValidate: true,
-          })
-        }
-        className="font-mono"
-        error={errors.POSTGRES_PASSWORD?.message}
-        {...register('POSTGRES_PASSWORD')}
-      />
-
-      <Button variant="generate" className="w-full" onClick={handleGenerateAll}>
+      <Button variant="secondary" className="w-full" onClick={handleGenerateAll}>
         Generate All Secrets
       </Button>
 
-      <h3 className="section-header">Production Settings</h3>
-
-      <div className="form-field">
+      <div className="space-y-3">
+        <SectionHeader title="Production Settings" />
         <Checkbox
           label="Enable HTTPS redirect"
           checked={httpRedirectEnabled}
+          helpText="Redirect HTTP to HTTPS (requires valid TLS certificate)"
           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
             setValue('SECURITY_HTTP_REDIRECT', e.target.checked ? 'true' : 'false', {
               shouldDirty: true,
@@ -125,15 +150,10 @@ export function SecurityStep() {
             })
           }
         />
-        <p className="help-text" style={{ marginLeft: '2.25rem' }}>
-          Redirect HTTP to HTTPS (requires valid TLS certificate)
-        </p>
-      </div>
-
-      <div className="form-field">
         <Checkbox
           label="Auto-generate TLS certificate (Let's Encrypt)"
           checked={certificateEnabled}
+          helpText="Requires public domain and ports 80/443 accessible"
           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
             setValue('SECURITY_GENERATE_CERTIFICATE', e.target.checked ? 'true' : 'false', {
               shouldDirty: true,
@@ -141,22 +161,24 @@ export function SecurityStep() {
             })
           }
         />
-        <p className="help-text" style={{ marginLeft: '2.25rem' }}>
-          Requires public domain and ports 80/443 accessible
-        </p>
       </div>
 
       {certificateEnabled && (
         <InfoBox variant="info">
-          Set your ACME email in Advanced settings for certificate notifications.
+          <AlertDescription>
+            Set your ACME email in Advanced settings for certificate notifications.
+          </AlertDescription>
         </InfoBox>
       )}
 
-      <div className="mt-md">
+      {hasEmptySecrets && (
         <InfoBox variant="warning">
-          <strong>Note:</strong> Empty keys are insecure. Generate new keys for production use.
+          <AlertTitle>Note</AlertTitle>
+          <AlertDescription>
+            Empty keys are insecure. Generate new keys for production use.
+          </AlertDescription>
         </InfoBox>
-      </div>
+      )}
     </div>
   );
 }

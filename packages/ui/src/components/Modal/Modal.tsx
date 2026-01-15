@@ -1,102 +1,42 @@
-import React, { forwardRef, useEffect } from 'react';
-import { cva, type VariantProps } from 'class-variance-authority';
+import React from 'react';
 import { cn } from '../../lib/utils';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '../Dialog';
 
-const overlayVariants = cva([
-  'fixed inset-0 z-50',
-  'flex items-center justify-center',
-  'bg-[var(--ui-overlay-medium)]',
-  'backdrop-blur-sm',
-  'animate-in fade-in duration-200',
-]);
-
-const modalVariants = cva(
-  [
-    'relative',
-    'bg-[var(--ui-bg-elevated)]',
-    'border border-[var(--ui-border)]',
-    'rounded-[var(--ui-radius-xl)]',
-    'shadow-[var(--ui-shadow-xl)]',
-    'p-[var(--ui-space-6)]',
-    'max-h-[85vh] overflow-auto',
-    'animate-in zoom-in-95 fade-in duration-200',
-  ],
-  {
-    variants: {
-      size: {
-        sm: 'w-full max-w-sm',
-        md: 'w-full max-w-md',
-        lg: 'w-full max-w-lg',
-        xl: 'w-full max-w-xl',
-        full: 'w-full max-w-[90vw]',
-      },
-    },
-    defaultVariants: {
-      size: 'md',
-    },
-  }
-);
-
-const titleVariants = cva([
-  'text-[var(--ui-text-lg)] font-semibold',
-  'text-[var(--ui-text-primary)]',
-  'mb-[var(--ui-space-4)]',
-]);
-
-export interface ModalProps
-  extends Omit<React.HTMLAttributes<HTMLDivElement>, 'title'>,
-    VariantProps<typeof modalVariants> {
+export interface ModalProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'title'> {
   isOpen: boolean;
   onClose?: () => void;
   title: string;
+  size?: 'sm' | 'md' | 'lg' | 'xl' | 'full';
 }
 
-const Modal = forwardRef<HTMLDivElement, ModalProps>(
-  ({ isOpen, onClose, title, children, className, size, ...props }, ref) => {
-    useEffect(() => {
-      const handleEscape = (e: KeyboardEvent) => {
-        if (e.key === 'Escape' && onClose) {
-          onClose();
-        }
-      };
+const SIZE_CLASS_MAP: Record<NonNullable<ModalProps['size']>, string> = {
+  sm: 'max-w-sm',
+  md: 'max-w-md',
+  lg: 'max-w-lg',
+  xl: 'max-w-xl',
+  full: 'max-w-[90vw]',
+};
 
-      if (isOpen) {
-        document.addEventListener('keydown', handleEscape);
-        document.body.style.overflow = 'hidden';
-      }
-
-      return () => {
-        document.removeEventListener('keydown', handleEscape);
-        document.body.style.overflow = '';
-      };
-    }, [isOpen, onClose]);
-
-    if (!isOpen) return null;
-
+const Modal = React.forwardRef<HTMLDivElement, ModalProps>(
+  ({ isOpen, onClose, title, size = 'md', children, className, ...props }, ref) => {
     return (
-      <div
-        className={cn(overlayVariants())}
-        onClick={onClose}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="modal-title"
-      >
-        <div
-          ref={ref}
-          className={cn(modalVariants({ size, className }))}
-          onClick={e => e.stopPropagation()}
-          {...props}
-        >
-          <h3 id="modal-title" className={cn(titleVariants())}>
-            {title}
-          </h3>
+      <Dialog open={isOpen} onOpenChange={(open) => (!open ? onClose?.() : undefined)}>
+        <DialogContent ref={ref} className={cn(SIZE_CLASS_MAP[size], className)} {...props}>
+          <DialogHeader>
+            <DialogTitle>{title}</DialogTitle>
+          </DialogHeader>
           {children}
-        </div>
-      </div>
+        </DialogContent>
+      </Dialog>
     );
   }
 );
 
 Modal.displayName = 'Modal';
 
-export { Modal, modalVariants };
+export { Modal };

@@ -59,13 +59,13 @@ class SourcesApi {
     return data.types;
   }
 
-  async getSources(type?: SourceType, activeOnly = false): Promise<Source[]> {
+  async getSources(workspaceId: string, type?: SourceType, activeOnly = false): Promise<Source[]> {
     const params = new URLSearchParams();
-    if (type) params.set('type', type);
-    if (activeOnly) params.set('active', 'true');
+    if (type) params.set('source_type', type);
+    if (activeOnly) params.set('is_active', 'true');
     const query = params.toString() ? `?${params}` : '';
 
-    const response = await fetch(`${API_BASE}/api/sources${query}`, {
+    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources${query}`, {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
@@ -76,8 +76,8 @@ class SourcesApi {
     return data.sources;
   }
 
-  async getSource(id: string): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/sources/${encodeURIComponent(id)}`, {
+  async getSource(workspaceId: string, id: string): Promise<Source> {
+    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`, {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
@@ -88,8 +88,8 @@ class SourcesApi {
     return data.source;
   }
 
-  async createSource(request: CreateSourceRequest): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/sources`, {
+  async createSource(workspaceId: string, request: CreateSourceRequest): Promise<Source> {
+    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources`, {
       method: 'POST',
       headers: this.getHeaders(),
       body: JSON.stringify(request),
@@ -102,9 +102,9 @@ class SourcesApi {
     return data.source;
   }
 
-  async updateSource(id: string, request: UpdateSourceRequest): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/sources/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
+  async updateSource(workspaceId: string, id: string, request: UpdateSourceRequest): Promise<Source> {
+    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`, {
+      method: 'PUT',
       headers: this.getHeaders(),
       body: JSON.stringify(request),
     });
@@ -116,8 +116,8 @@ class SourcesApi {
     return data.source;
   }
 
-  async deleteSource(id: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/sources/${encodeURIComponent(id)}`, {
+  async deleteSource(workspaceId: string, id: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
@@ -127,8 +127,8 @@ class SourcesApi {
     }
   }
 
-  async verifySource(id: string): Promise<SourceVerifyResponse> {
-    const response = await fetch(`${API_BASE}/api/sources/${encodeURIComponent(id)}/verify`, {
+  async verifySource(workspaceId: string, id: string): Promise<SourceVerifyResponse> {
+    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}/verify`, {
       method: 'POST',
       headers: this.getHeaders(),
     });
@@ -137,6 +137,17 @@ class SourcesApi {
       throw new Error(errorData.message || `Failed to verify source: ${response.status}`);
     }
     return parse(SourceVerifyResponseSchema, await response.json());
+  }
+
+  async reindexSource(workspaceId: string, id: string): Promise<void> {
+    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}/reindex`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to reindex source: ${response.status}`);
+    }
   }
 }
 

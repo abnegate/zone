@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { sourcesApi } from '../../../api/sources';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Source } from '../../sources/types';
 import type { SearchMode } from '../types';
 import { useContextSearch } from '../hooks';
@@ -12,6 +13,8 @@ export default function ContextSearchPage() {
   const [sources, setSources] = useState<Source[]>([]);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(true);
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
 
   const { results, total, loading, error, search } = useContextSearch();
 
@@ -19,9 +22,14 @@ export default function ContextSearchPage() {
     let mounted = true;
 
     const loadSources = async () => {
+      if (!workspaceId) {
+        setSources([]);
+        setSourcesLoading(false);
+        return;
+      }
       try {
         setSourcesLoading(true);
-        const data = await sourcesApi.getSources(undefined, true); // Only active sources
+        const data = await sourcesApi.getSources(workspaceId, undefined, true); // Only active sources
         if (mounted) {
           setSources(data);
         }
@@ -41,7 +49,7 @@ export default function ContextSearchPage() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [workspaceId]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();

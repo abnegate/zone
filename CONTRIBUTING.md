@@ -54,14 +54,7 @@ Be respectful, professional, and constructive in all interactions. We aim to mai
 
 ### Local Development Environment
 
-1. **Copy example configuration**
-
-   ```bash
-   cp .env.example .env
-   cp docker-compose.override.yml.example docker-compose.override.yml
-   ```
-
-2. **Configure for development**
+1. **Configure for development**
 
    Edit `.env` with local development values:
 
@@ -70,13 +63,13 @@ Be respectful, professional, and constructive in all interactions. We aim to mai
    ADVANCED_LITELLM_WORKERS=2  # Lower for dev
    ```
 
-3. **Generate test credentials**
+2. **Generate test credentials**
 
    ```bash
    ./scripts/setup.sh
    ```
 
-4. **Start development stack**
+3. **Start development stack**
 
    ```bash
    make dev

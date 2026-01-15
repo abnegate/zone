@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { sourcesApi } from '../../../api/sources';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Source, UpdateSourceRequest } from '../types';
 import type { SourceVerifyResponse } from '../schemas';
 
@@ -21,9 +22,11 @@ export function useSource(id: string | null): UseSourceResult {
   const [source, setSource] = useState<Source | null>(null);
   const [loading, setLoading] = useState(!!id);
   const [error, setError] = useState<string | null>(null);
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
 
   const loadSource = useCallback(async () => {
-    if (!id) {
+    if (!id || !workspaceId) {
       setLoading(false);
       return;
     }
@@ -31,7 +34,7 @@ export function useSource(id: string | null): UseSourceResult {
     setLoading(true);
     setError(null);
     try {
-      const data = await sourcesApi.getSource(id);
+      const data = await sourcesApi.getSource(workspaceId, id);
       setSource(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load source');
@@ -39,7 +42,7 @@ export function useSource(id: string | null): UseSourceResult {
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, workspaceId]);
 
   useEffect(() => {
     loadSource();
@@ -48,21 +51,23 @@ export function useSource(id: string | null): UseSourceResult {
   const updateSource = useCallback(
     async (request: UpdateSourceRequest): Promise<Source> => {
       if (!id) throw new Error('No source ID provided');
-      const updatedSource = await sourcesApi.updateSource(id, request);
+      if (!workspaceId) throw new Error('No workspace selected');
+      const updatedSource = await sourcesApi.updateSource(workspaceId, id, request);
       setSource(updatedSource);
       return updatedSource;
     },
-    [id]
+    [id, workspaceId]
   );
 
   const verifySource = useCallback(async (): Promise<SourceVerifyResponse> => {
     if (!id) throw new Error('No source ID provided');
-    const result = await sourcesApi.verifySource(id);
+    if (!workspaceId) throw new Error('No workspace selected');
+    const result = await sourcesApi.verifySource(workspaceId, id);
     // Refresh the source to get updated verification status
-    const updatedSource = await sourcesApi.getSource(id);
+    const updatedSource = await sourcesApi.getSource(workspaceId, id);
     setSource(updatedSource);
     return result;
-  }, [id]);
+  }, [id, workspaceId]);
 
   const refresh = useCallback(async () => {
     await loadSource();

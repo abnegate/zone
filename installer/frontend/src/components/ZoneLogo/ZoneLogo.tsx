@@ -1,5 +1,3 @@
-import './ZoneLogo.css';
-
 interface ZoneLogoProps {
   size?: 'sm' | 'md' | 'lg';
   showText?: boolean;
@@ -11,31 +9,34 @@ export default function ZoneLogo({ size = 'md', showText = true }: ZoneLogoProps
     md: 32,
     lg: 48,
   };
+  const textSizeMap = {
+    sm: 'text-base',
+    md: 'text-lg',
+    lg: 'text-2xl',
+  };
 
   const iconSize = sizeMap[size];
 
   return (
-    <div className={`zone-logo zone-logo--${size}`}>
+    <div className="flex items-center gap-2">
       <svg
         width={iconSize}
         height={iconSize}
         viewBox="0 0 100 100"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
-        className="zone-logo__icon"
+        className="shrink-0 text-foreground"
         aria-hidden="true"
       >
-        <defs>
-          <linearGradient id="zone-logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#667eea" />
-            <stop offset="100%" stopColor="#764ba2" />
-          </linearGradient>
-        </defs>
-        <circle cx="50" cy="50" r="42" stroke="url(#zone-logo-grad)" strokeWidth="1.5" fill="none" />
-        <circle cx="50" cy="50" r="24" stroke="url(#zone-logo-grad)" strokeWidth="2.5" fill="none" />
-        <circle cx="50" cy="50" r="8" fill="url(#zone-logo-grad)" />
+        <circle cx="50" cy="50" r="42" stroke="currentColor" strokeWidth="1.5" fill="none" opacity="0.45" />
+        <circle cx="50" cy="50" r="24" stroke="currentColor" strokeWidth="2.5" fill="none" opacity="0.75" />
+        <circle cx="50" cy="50" r="8" fill="currentColor" />
       </svg>
-      {showText && <span className="zone-logo__text">Zone</span>}
+      {showText && (
+        <span className={`${textSizeMap[size]} font-semibold tracking-tight text-foreground`}>
+          Zone
+        </span>
+      )}
     </div>
   );
 }

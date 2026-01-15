@@ -1,16 +1,17 @@
 import { test, expect } from '@playwright/test';
+import { selectOption } from './helpers';
 
 test.describe('AI Provider Configuration', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     // Navigate to Models step (step 3)
-    await page.click('.stepper-item:nth-child(3) .stepper-button');
-    await expect(page.locator('h2')).toContainText('AI Provider Configuration');
+    await page.click('[data-step="3"]');
+    await expect(page.getByRole('heading', { name: 'AI Provider Configuration' })).toBeVisible();
   });
 
   test('displays default self-hosted provider', async ({ page }) => {
-    const providerSelect = page.locator('select').first();
-    await expect(providerSelect).toHaveValue('self_hosted');
+    const providerSelect = page.getByLabel('AI Provider');
+    await expect(providerSelect).toHaveText(/Self-Hosted/i);
   });
 
   test('shows LiteLLM configuration for self-hosted', async ({ page }) => {
@@ -20,7 +21,7 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('switches to OpenAI provider and shows API key field', async ({ page }) => {
-    await page.selectOption('select', 'openai');
+    await selectOption(page, 'AI Provider', 'OpenAI');
 
     await expect(page.getByText('OpenAI Configuration')).toBeVisible();
     await expect(page.getByLabel('OpenAI API Key')).toBeVisible();
@@ -28,7 +29,7 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('switches to Anthropic provider and shows warning about embeddings', async ({ page }) => {
-    await page.selectOption('select', 'anthropic');
+    await selectOption(page, 'AI Provider', 'Anthropic');
 
     await expect(page.getByText('Anthropic Configuration')).toBeVisible();
     await expect(page.getByLabel('Anthropic API Key')).toBeVisible();
@@ -36,7 +37,7 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('switches to AWS Bedrock and shows region selector', async ({ page }) => {
-    await page.selectOption('select', 'bedrock');
+    await selectOption(page, 'AI Provider', 'AWS Bedrock');
 
     await expect(page.getByText('AWS Bedrock Configuration')).toBeVisible();
     await expect(page.getByLabel('AWS Region')).toBeVisible();
@@ -44,7 +45,7 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('Bedrock shows credential fields when IAM role unchecked', async ({ page }) => {
-    await page.selectOption('select', 'bedrock');
+    await selectOption(page, 'AI Provider', 'AWS Bedrock');
 
     // By default, IAM role should be unchecked, showing credential fields
     const iamCheckbox = page.getByLabel('Use IAM Role');
@@ -59,7 +60,7 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('Bedrock hides credential fields when IAM role checked', async ({ page }) => {
-    await page.selectOption('select', 'bedrock');
+    await selectOption(page, 'AI Provider', 'AWS Bedrock');
 
     const iamCheckbox = page.getByLabel('Use IAM Role');
     if (!(await iamCheckbox.isChecked())) {
@@ -77,17 +78,13 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('model options change when provider changes', async ({ page }) => {
-    // Get initial fast model value (self-hosted)
     const fastModelSelect = page.getByLabel('Fast Model');
-    const initialValue = await fastModelSelect.inputValue();
-    expect(initialValue).toContain('llama');
+    await expect(fastModelSelect).toHaveText(/llama/i);
 
-    // Switch to OpenAI
-    await page.selectOption('select', 'openai');
+    await selectOption(page, 'AI Provider', 'OpenAI');
 
-    // Fast model should now show GPT models
-    const newValue = await fastModelSelect.inputValue();
-    expect(newValue).toContain('gpt');
+    await fastModelSelect.click();
+    await expect(page.getByRole('option', { name: /GPT-4o Mini/i })).toBeVisible();
   });
 
   test('shows info box about model downloads for self-hosted', async ({ page }) => {
@@ -95,12 +92,12 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('shows API billing info for OpenAI', async ({ page }) => {
-    await page.selectOption('select', 'openai');
+    await selectOption(page, 'AI Provider', 'OpenAI');
     await expect(page.getByText('API usage will be billed')).toBeVisible();
   });
 
   test('shows Bedrock billing info', async ({ page }) => {
-    await page.selectOption('select', 'bedrock');
+    await selectOption(page, 'AI Provider', 'AWS Bedrock');
     await expect(page.getByText('AWS Bedrock usage is billed')).toBeVisible();
   });
 
@@ -113,7 +110,7 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('can fill OpenAI API key', async ({ page }) => {
-    await page.selectOption('select', 'openai');
+    await selectOption(page, 'AI Provider', 'OpenAI');
 
     const apiKeyInput = page.getByLabel('OpenAI API Key');
     await apiKeyInput.fill('sk-test-key-12345');
@@ -122,16 +119,15 @@ test.describe('AI Provider Configuration', () => {
   });
 
   test('can select different AWS region', async ({ page }) => {
-    await page.selectOption('select', 'bedrock');
+    await selectOption(page, 'AI Provider', 'AWS Bedrock');
 
     const regionSelect = page.getByLabel('AWS Region');
-    await regionSelect.selectOption('eu-west-1');
-
-    await expect(regionSelect).toHaveValue('eu-west-1');
+    await selectOption(page, 'AWS Region', 'Europe (Ireland)');
+    await expect(regionSelect).toHaveText('Europe (Ireland)');
   });
 
   test('Anthropic shows external embedding model input', async ({ page }) => {
-    await page.selectOption('select', 'anthropic');
+    await selectOption(page, 'AI Provider', 'Anthropic');
 
     // Anthropic has no embedding models, so it shows an input instead of select
     await expect(page.getByLabel('Embedding Model (External)')).toBeVisible();

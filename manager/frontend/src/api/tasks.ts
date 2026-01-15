@@ -44,15 +44,18 @@ class TasksApi {
     return headers;
   }
 
-  async getTasks(projectId?: string, status?: string): Promise<Task[]> {
+  async getTasks(workspaceId: string, projectId?: string, status?: string): Promise<Task[]> {
     const params = new URLSearchParams();
     if (projectId) params.set('project_id', projectId);
     if (status) params.set('status', status);
     const query = params.toString() ? `?${params}` : '';
 
-    const response = await fetch(`${API_BASE}/api/tasks${query}`, {
-      headers: this.getHeaders(),
-    });
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/tasks${query}`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
     if (!response.ok) {
       const errorData = await parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to fetch tasks: ${response.status}`);
@@ -73,12 +76,15 @@ class TasksApi {
     return data.task;
   }
 
-  async createTask(request: CreateTaskRequest): Promise<Task> {
-    const response = await fetch(`${API_BASE}/api/tasks`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
+  async createTask(workspaceId: string, request: CreateTaskRequest): Promise<Task> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/tasks`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
     if (!response.ok) {
       const errorData = await parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to create task: ${response.status}`);
@@ -89,7 +95,7 @@ class TasksApi {
 
   async updateTask(id: string, request: UpdateTaskRequest): Promise<Task> {
     const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
+      method: 'PUT',
       headers: this.getHeaders(),
       body: JSON.stringify(request),
     });

@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
-import { Button, Modal } from '../../../components';
+import { Button, Modal, Tabs, TabsList, TabsTrigger, Badge, EmptyState } from '@zone/ui';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
@@ -119,29 +119,21 @@ export default function ModelsPage() {
 
   return (
     <div className="page models-page">
-      <header className="page-header">
-        <h1>Models</h1>
-        <p className="subtitle">Manage your Ollama models</p>
+      <header className="mb-6">
+        <h1 className="text-2xl font-semibold text-foreground">Models</h1>
+        <p className="text-muted-foreground mt-1">Manage your Ollama models</p>
       </header>
 
       {/* Main Tabs */}
-      <div className="main-tabs">
-        <button
-          className={`main-tab ${activeTab === 'installed' ? 'active' : ''}`}
-          onClick={() => setActiveTab('installed')}
-          type="button"
-        >
-          Installed
-          {models.length > 0 && <span className="tab-badge">{models.length}</span>}
-        </button>
-        <button
-          className={`main-tab ${activeTab === 'browse' ? 'active' : ''}`}
-          onClick={() => setActiveTab('browse')}
-          type="button"
-        >
-          Browse
-        </button>
-      </div>
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Tab)} className="mb-6">
+        <TabsList>
+          <TabsTrigger value="installed" className="gap-2">
+            Installed
+            {models.length > 0 && <Badge variant="secondary">{models.length}</Badge>}
+          </TabsTrigger>
+          <TabsTrigger value="browse">Browse</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       {/* Installed Tab Content */}
       {activeTab === 'installed' && (
@@ -164,7 +156,6 @@ export default function ModelsPage() {
                 />
                 <Button
                   type="submit"
-                  variant="primary"
                   loading={pull.pulling}
                   disabled={!modelInput.trim()}
                 >
@@ -223,7 +214,7 @@ export default function ModelsPage() {
           <section className="card">
             <div className="card-header">
               <h2>Installed Models</h2>
-              <button className="btn btn-icon" onClick={refresh} title="Refresh" type="button">
+              <Button variant="ghost" size="icon" onClick={refresh} title="Refresh">
                 <svg
                   viewBox="0 0 24 24"
                   fill="none"
@@ -235,7 +226,7 @@ export default function ModelsPage() {
                 >
                   <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                 </svg>
-              </button>
+              </Button>
             </div>
 
             {modelsLoading ? (
@@ -243,9 +234,42 @@ export default function ModelsPage() {
                 <span className="spinner" /> Loading models...
               </div>
             ) : modelsError ? (
-              <div className="error-placeholder">{modelsError}</div>
+              <EmptyState
+                icon={
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    width="48"
+                    height="48"
+                    className="text-destructive"
+                  >
+                    <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                }
+                title="Cannot connect to Ollama"
+                description="Unable to fetch models. Make sure Ollama is running and accessible."
+                action={<Button onClick={refresh} variant="secondary">Retry</Button>}
+              />
             ) : models.length === 0 ? (
-              <div className="empty-placeholder">No models installed</div>
+              <EmptyState
+                icon={
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    width="48"
+                    height="48"
+                  >
+                    <path d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+                  </svg>
+                }
+                title="No models installed"
+                description="Browse and install models to get started"
+                action={<Button onClick={() => setActiveTab('browse')}>Browse Models</Button>}
+              />
             ) : (
               <div className="models-list">
                 {models.map((model) => (
@@ -394,7 +418,7 @@ export default function ModelsPage() {
             Cancel
           </Button>
           <Button
-            variant="danger"
+            variant="destructive"
             onClick={() => deleteConfirm && handleDelete(deleteConfirm)}
             loading={deleting !== null}
           >
@@ -461,7 +485,7 @@ export default function ModelsPage() {
                 </div>
                 <div className="modal-actions">
                   <Button
-                    variant="danger"
+                    variant="destructive"
                     onClick={() => {
                       setDetailsModel(null);
                       setDeleteConfirm(detailsModel.name);
@@ -579,7 +603,7 @@ export default function ModelsPage() {
                 )}
 
                 <div className="modal-actions">
-                  <Button variant="primary" onClick={() => handleInstall(detailsModel)}>
+                  <Button onClick={() => handleInstall(detailsModel)}>
                     Install Model
                   </Button>
                 </div>

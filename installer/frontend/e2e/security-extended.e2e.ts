@@ -4,8 +4,8 @@ test.describe('Security Step Extended', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     // Navigate to Security step (step 2)
-    await page.click('.stepper-item:nth-child(2) .stepper-button');
-    await expect(page.locator('h2')).toContainText('Security');
+    await page.click('[data-step="2"]');
+    await expect(page.getByRole('heading', { name: 'Security' })).toBeVisible();
   });
 
   test.describe('Authentication Fields', () => {
@@ -151,7 +151,7 @@ test.describe('Security Step Extended', () => {
       await page.click('text=Next');
 
       await expect(page.locator('[id$="-error"][role="alert"]').first()).toBeVisible();
-      await expect(page.locator('h2')).toContainText('Security'); // Still on security step
+      await expect(page.getByRole('heading', { name: 'Security' })).toBeVisible();
     });
 
     test('valid keys allow navigation to next step', async ({ page }) => {
@@ -161,7 +161,7 @@ test.describe('Security Step Extended', () => {
       await page.click('text=Next');
 
       // Should have navigated to the next step (Models)
-      await expect(page.locator('h2')).toContainText('AI Provider Configuration');
+      await expect(page.getByRole('heading', { name: 'AI Provider Configuration' })).toBeVisible();
     });
   });
 });

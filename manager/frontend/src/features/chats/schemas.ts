@@ -28,6 +28,8 @@ export const ChatWithMessagesSchema = ChatSchema.extend({
 });
 
 export const CreateChatRequestSchema = z.object({
+  workspace_id: z.string().min(1, 'Workspace is required'),
+  title: z.string().min(1, 'Title is required'),
   model_name: z.string().min(1, 'Model is required'),
   first_message: z.string().optional(),
 });

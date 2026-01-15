@@ -53,17 +53,18 @@
    ============================================================================= */
 
 .page {
-  max-width: 1200px;
-  margin: 0 auto;
+  width: 100%;
   animation: ui-fade-up var(--ui-duration-normal) var(--ui-ease-out);
 }
 
-.page--full {
-  max-width: none;
+.page--constrained {
+  max-width: 1200px;
+  margin: 0 auto;
 }
 
 .page--narrow {
   max-width: 720px;
+  margin: 0 auto;
 }
 
 .page-header {

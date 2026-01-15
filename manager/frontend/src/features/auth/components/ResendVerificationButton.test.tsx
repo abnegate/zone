@@ -38,7 +38,7 @@ describe('ResendVerificationButton', () => {
       render(<ResendVerificationButton email={mockEmail} />);
 
       const button = screen.getByRole('button', { name: /resend verification/i });
-      expect(button.className).toContain('bg-[var(--ui-bg-surface)]');
+      expect(button.className).toContain('bg-secondary');
     });
   });
 
@@ -188,7 +188,7 @@ describe('ResendVerificationButton', () => {
       render(<ResendVerificationButton email={mockEmail} variant="primary" />);
 
       const button = screen.getByRole('button', { name: /resend verification/i });
-      expect(button.className).toContain('from-[var(--ui-accent-500)]');
+      expect(button.className).toContain('bg-primary');
     });
 
     it('accepts custom className prop', () => {

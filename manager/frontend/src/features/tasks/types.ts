@@ -6,16 +6,17 @@ export type PrStatus = 'pending' | 'open' | 'merged' | 'closed';
 
 export interface Task {
   id: string;
-  project_id: string;
+  workspace_id: string;
+  project_ids: string[];
   title: string;
   description: string;
   acceptance_criteria: string | null;
   status: TaskStatus;
-  priority: number;
+  priority: number | null;
   model_name: string | null;
   dependencies: string[];
-  created_at: string;
-  updated_at: string;
+  created_at: string | null;
+  updated_at: string | null;
   started_at: string | null;
   completed_at: string | null;
   /** Whether this task uses agentic tools (file read/write, KB search, etc.) */
@@ -62,7 +63,7 @@ export interface TaskRunLog {
 }
 
 export interface CreateTaskRequest {
-  project_id: string;
+  project_ids?: string[];
   title: string;
   description: string;
   acceptance_criteria?: string;
@@ -87,6 +88,7 @@ export interface UpdateTaskRequest {
   priority?: number;
   model_name?: string;
   dependencies?: string[];
+  project_ids?: string[];
   /** Whether this task should use agentic tools */
   is_agentic?: boolean;
   /** @deprecated Use source_id or source_ids instead */

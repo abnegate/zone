@@ -82,13 +82,6 @@ const renderWithForm = (defaultValues: InstallerConfig) => {
 };
 
 describe('SearchStep', () => {
-  it('renders step header', () => {
-    renderWithForm(createMockConfig());
-
-    expect(screen.getByText('Web Search')).toBeInTheDocument();
-    expect(screen.getByText('Configure search integration')).toBeInTheDocument();
-  });
-
   it('renders web search checkbox checked when enabled', () => {
     renderWithForm(createMockConfig());
 

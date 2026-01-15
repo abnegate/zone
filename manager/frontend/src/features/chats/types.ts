@@ -26,6 +26,8 @@ export interface ChatWithMessages extends Chat {
 }
 
 export interface CreateChatRequest {
+  workspace_id: string;
+  title: string;
   model_name: string;
   first_message?: string;
 }

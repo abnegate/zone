@@ -5,10 +5,10 @@ FROM oven/bun:1-alpine AS ui-builder
 
 WORKDIR /ui
 
-COPY packages/ui/package.json ./
+COPY --chown=bun:bun packages/ui/package.json ./
 RUN bun install
 
-COPY packages/ui/ ./
+COPY --chown=bun:bun packages/ui/ ./
 RUN bun run build
 
 # =============================================================================
@@ -18,7 +18,7 @@ FROM oven/bun:1-alpine AS frontend-deps
 
 WORKDIR /frontend
 
-COPY installer/frontend/package.json ./
+COPY --chown=bun:bun installer/frontend/package.json ./
 RUN sed -i 's/"@zone\/ui": "\*",//' package.json && bun install
 
 # =============================================================================
@@ -28,16 +28,18 @@ FROM oven/bun:1-alpine AS frontend-builder
 
 WORKDIR /frontend
 
-COPY --from=frontend-deps /frontend/node_modules ./node_modules
-COPY --from=frontend-deps /frontend/package.json ./
+COPY --from=frontend-deps --chown=bun:bun /frontend/node_modules ./node_modules
+COPY --from=frontend-deps --chown=bun:bun /frontend/package.json ./
 
-COPY --from=ui-builder /ui/dist /ui/dist
-COPY --from=ui-builder /ui/package.json /ui/package.json
+COPY --from=ui-builder --chown=bun:bun /ui/dist /ui/dist
+COPY --from=ui-builder --chown=bun:bun /ui/package.json /ui/package.json
+COPY --from=ui-builder --chown=bun:bun /ui/node_modules /ui/node_modules
 RUN bun add /ui
 
-COPY installer/frontend/tsconfig.json installer/frontend/vite.config.ts installer/frontend/index.html ./
+COPY installer/frontend/tsconfig.json installer/frontend/vite.config.ts installer/frontend/index.html installer/frontend/tailwind.config.ts ./
 
-COPY installer/frontend/src ./src
+COPY --chown=bun:bun installer/frontend/src ./src
+COPY --chown=bun:bun packages/ui/src /packages/ui/src
 
 RUN bun run build
 
@@ -90,7 +92,7 @@ RUN cargo build --release --package zone_installer
 # =============================================================================
 FROM alpine:3.21 AS runtime
 
-RUN apk add --no-cache apache2-utils ca-certificates
+RUN apk add --no-cache apache2-utils ca-certificates docker-cli docker-cli-compose
 
 RUN addgroup -S appuser && adduser -S -G appuser -s /sbin/nologin appuser
 
