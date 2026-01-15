@@ -1,7 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { WorkspaceMembersSection } from '../components';
-import { Button } from '@zone/ui';
+import { Button, Tabs, TabsList, TabsTrigger, TabsContent } from '@zone/ui';
 import { useAuth } from '../../../auth';
 import { useTheme } from '../../../../shared/context/ThemeContext';
 import type {
@@ -328,49 +328,22 @@ export default function WorkspaceSettingsPage() {
         <h1 className="page-title">Workspace Settings</h1>
       </div>
 
-      {/* Tabs */}
-      <div className="tabs-container" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === 'theme'}
-          className={`tab ${activeTab === 'theme' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('theme')}
-        >
-          Theme
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === 'ai'}
-          className={`tab ${activeTab === 'ai' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('ai')}
-        >
-          AI Settings
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === 'members'}
-          className={`tab ${activeTab === 'members' ? 'tab-active' : ''}`}
-          onClick={() => setActiveTab('members')}
-        >
-          Members
-        </button>
-      </div>
-
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
 
-      {/* Members Tab */}
-      {activeTab === 'members' && (
-        <WorkspaceMembersSection workspaceId={DEFAULT_WS_ID} orgId={DEFAULT_ORG_ID} />
-      )}
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Tab)}>
+        <TabsList>
+          <TabsTrigger value="theme">Theme</TabsTrigger>
+          <TabsTrigger value="ai">AI Settings</TabsTrigger>
+          <TabsTrigger value="members">Members</TabsTrigger>
+        </TabsList>
 
-      {/* Theme & AI Settings Tabs */}
-      {(activeTab === 'theme' || activeTab === 'ai') && (
-        <form onSubmit={handleSave} className="settings-form">
-          {activeTab === 'theme' && (
+        <TabsContent value="members">
+          <WorkspaceMembersSection workspaceId={DEFAULT_WS_ID} orgId={DEFAULT_ORG_ID} />
+        </TabsContent>
+
+        <TabsContent value="theme">
+          <form onSubmit={handleSave} className="settings-form">
             <section className="settings-section">
               <h2 className="section-title">Theme Configuration</h2>
 
@@ -539,9 +512,21 @@ export default function WorkspaceSettingsPage() {
                 </div>
               </div>
             </section>
-          )}
 
-          {activeTab === 'ai' && (
+            {/* Actions */}
+            <div className="settings-actions">
+              <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
+                Reset to Defaults
+              </Button>
+              <Button type="submit" loading={saving} variant="primary">
+                {saving ? 'Saving...' : 'Save Changes'}
+              </Button>
+            </div>
+          </form>
+        </TabsContent>
+
+        <TabsContent value="ai">
+          <form onSubmit={handleSave} className="settings-form">
             <section className="settings-section">
               <h2 className="section-title">AI Provider Settings</h2>
 
@@ -856,19 +841,19 @@ export default function WorkspaceSettingsPage() {
                 </div>
               )}
             </section>
-          )}
 
-          {/* Actions */}
-          <div className="settings-actions">
-            <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
-              Reset to Defaults
-            </Button>
-            <Button type="submit" loading={saving} variant="primary">
-              {saving ? 'Saving...' : 'Save Changes'}
-            </Button>
-          </div>
-        </form>
-      )}
+            {/* Actions */}
+            <div className="settings-actions">
+              <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
+                Reset to Defaults
+              </Button>
+              <Button type="submit" loading={saving} variant="primary">
+                {saving ? 'Saving...' : 'Save Changes'}
+              </Button>
+            </div>
+          </form>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

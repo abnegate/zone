@@ -4,8 +4,8 @@ test.describe('Search Configuration', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     // Navigate to Search step (step 5)
-    await page.click('.stepper-item:nth-child(5) .stepper-button');
-    await expect(page.locator('h2')).toContainText('Web Search');
+    await page.click('[data-step="5"]');
+    await expect(page.getByRole('heading', { name: 'Web Search' })).toBeVisible();
   });
 
   test('displays web search toggle', async ({ page }) => {

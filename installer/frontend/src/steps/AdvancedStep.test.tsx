@@ -85,13 +85,6 @@ const renderWithForm = (defaultValues: InstallerConfig) => {
 };
 
 describe('AdvancedStep', () => {
-  it('renders step header', () => {
-    renderWithForm(createMockConfig());
-
-    expect(screen.getByText('Advanced Settings')).toBeInTheDocument();
-    expect(screen.getByText(/performance tuning and system configuration/i)).toBeInTheDocument();
-  });
-
   describe('Monitoring section', () => {
     it('renders monitoring checkbox unchecked by default', () => {
       renderWithForm(createMockConfig());

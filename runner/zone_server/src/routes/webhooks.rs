@@ -517,6 +517,7 @@ async fn process_webhook_event(
         None, // acceptance_criteria
         status,
         None, // priority
+        None, // project_ids
     )
     .await?;
 

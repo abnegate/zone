@@ -5,6 +5,7 @@ import { useTasks } from '../hooks';
 import { useProjects } from '../../projects/hooks';
 import { tasksApi } from '../../../api/tasks';
 import { CreateTaskWizard } from '../components';
+import { Button, Badge, EmptyState } from '@zone/ui';
 import type { Task, TaskProgressMessage } from '../types';
 import './TasksPage.css';
 
@@ -23,29 +24,29 @@ const PHASES: Record<string, { name: string; progress: number }> = {
 };
 
 function TaskStatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    created: 'badge-gray',
-    queued: 'badge-blue',
-    in_progress: 'badge-yellow',
-    blocked: 'badge-red',
-    review: 'badge-purple',
-    complete: 'badge-green',
+  const variants: Record<string, 'secondary' | 'info' | 'warning' | 'destructive' | 'default' | 'success'> = {
+    created: 'secondary',
+    queued: 'info',
+    in_progress: 'warning',
+    blocked: 'destructive',
+    review: 'default',
+    complete: 'success',
   };
   return (
-    <span className={`task-status-badge ${colors[status] || 'badge-gray'}`}>
+    <Badge variant={variants[status] || 'secondary'}>
       {status.replace('_', ' ')}
-    </span>
+    </Badge>
   );
 }
 
 function PrStatusBadge({ status }: { status: 'pending' | 'open' | 'merged' | 'closed' }) {
-  const colors: Record<string, string> = {
-    pending: 'badge-gray',
-    open: 'badge-green',
-    merged: 'badge-purple',
-    closed: 'badge-red',
+  const variants: Record<string, 'secondary' | 'success' | 'default' | 'destructive'> = {
+    pending: 'secondary',
+    open: 'success',
+    merged: 'default',
+    closed: 'destructive',
   };
-  return <span className={`pr-status-badge ${colors[status] || 'badge-gray'}`}>PR: {status}</span>;
+  return <Badge variant={variants[status] || 'secondary'}>PR: {status}</Badge>;
 }
 
 function TaskProgressBar({ progress, phase }: { progress: number; phase: string | null }) {
@@ -167,9 +168,11 @@ function TaskExecutionView({ task, onClose }: TaskExecutionViewProps) {
       <div className="task-execution-modal">
         <header className="task-execution-header">
           <h2>{task.title}</h2>
-          <button type="button" onClick={onClose} className="close-btn" aria-label="Close">
-            &times;
-          </button>
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="20" height="20">
+              <path d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </Button>
         </header>
 
         <div className="task-execution-content">
@@ -180,19 +183,19 @@ function TaskExecutionView({ task, onClose }: TaskExecutionViewProps) {
 
           <div className="execution-controls">
             {status === 'idle' && (
-              <button type="button" onClick={startExecution} className="btn btn-primary">
+              <Button onClick={startExecution}>
                 Start Execution
-              </button>
+              </Button>
             )}
             {status === 'running' && (
-              <button type="button" onClick={stopExecution} className="btn btn-danger">
+              <Button variant="destructive" onClick={stopExecution}>
                 Stop Execution
-              </button>
+              </Button>
             )}
             {(status === 'complete' || status === 'error') && (
-              <button type="button" onClick={startExecution} className="btn btn-primary">
+              <Button onClick={startExecution}>
                 Run Again
-              </button>
+              </Button>
             )}
           </div>
 
@@ -259,7 +262,7 @@ export default function TasksPage() {
   const { projects, loading: projectsLoading } = useProjects('all');
   const { data: sources = [] } = useQuery({
     queryKey: ['sources'],
-    queryFn: () => client.getSources(),
+    queryFn: () => client.getSources('00000000-0000-0000-0000-000000000001'),
   });
 
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
@@ -283,29 +286,33 @@ export default function TasksPage() {
   const loading = tasksLoading || projectsLoading;
   const displayError = tasksError || error;
 
-  const getProjectName = (projectId: string) => {
-    const project = projects.find((p) => p.id === projectId);
-    return project?.name || 'Unknown Project';
+  const getProjectNames = (projectIds: string[]) => {
+    if (!projectIds || projectIds.length === 0) return 'No projects';
+    return projectIds
+      .map((id) => projects.find((p) => p.id === id)?.name || 'Unknown')
+      .join(', ');
   };
 
   return (
     <div className="page tasks-page">
-      <header className="page-header">
-        <div className="header-content">
-          <h1>Tasks</h1>
-          <p className="subtitle">Autonomous agent workflows</p>
+      <header className="flex justify-between items-start mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold text-foreground">Tasks</h1>
+          <p className="text-muted-foreground mt-1">Autonomous agent workflows</p>
         </div>
-        <button
-          type="button"
-          className="btn btn-primary"
+        <Button
           onClick={() => setShowCreateModal(true)}
           disabled={loading || projects.length === 0}
         >
           + New Task
-        </button>
+        </Button>
       </header>
 
-      {displayError && <div className="error-banner">{displayError}</div>}
+      {displayError && (
+        <div className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive mb-4">
+          {displayError}
+        </div>
+      )}
 
       <div className="filters">
         <select
@@ -360,9 +367,24 @@ export default function TasksPage() {
           ))}
         </div>
       ) : tasks.length === 0 ? (
-        <div className="empty-state">
-          <p>No tasks found. Create a task to get started!</p>
-        </div>
+        <EmptyState
+          icon={
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              width="48"
+              height="48"
+            >
+              <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+              <path d="M9 12l2 2 4-4" />
+            </svg>
+          }
+          title="No tasks yet"
+          description="Create your first task to automate your workflow"
+          action={<Button onClick={() => setShowCreateModal(true)}>Create Task</Button>}
+        />
       ) : (
         <div className="tasks-list">
           {tasks.map((task) => (
@@ -378,7 +400,7 @@ export default function TasksPage() {
                   {task.pr_status && <PrStatusBadge status={task.pr_status} />}
                 </div>
               </div>
-              <p className="task-project">{getProjectName(task.project_id)}</p>
+              <p className="task-project">{getProjectNames(task.project_ids)}</p>
               <p className="task-description">{task.description}</p>
               {task.pr_url && (
                 <div className="task-pr-info">
@@ -396,7 +418,7 @@ export default function TasksPage() {
                 </div>
               )}
               <div className="task-meta">
-                <span className="task-priority">Priority: {task.priority}</span>
+                <span className="task-priority">Priority: {task.priority ?? 'N/A'}</span>
                 {task.model_name && <span className="task-model">Model: {task.model_name}</span>}
                 {task.is_agentic && task.source_id && (
                   <span className="task-source">
@@ -405,20 +427,12 @@ export default function TasksPage() {
                 )}
               </div>
               <div className="task-actions">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => setSelectedTask(task)}
-                >
+                <Button size="sm" onClick={() => setSelectedTask(task)}>
                   Execute
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  onClick={() => handleDeleteTask(task.id)}
-                >
+                </Button>
+                <Button variant="destructive" size="sm" onClick={() => handleDeleteTask(task.id)}>
                   Delete
-                </button>
+                </Button>
               </div>
             </div>
           ))}

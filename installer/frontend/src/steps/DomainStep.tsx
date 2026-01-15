@@ -9,12 +9,7 @@ export function DomainStep() {
   } = useFormContext<InstallerConfig>();
 
   return (
-    <div className="step-content">
-      <div className="step-header">
-        <h2>Domain Configuration</h2>
-        <p>Configure hostnames for your services</p>
-      </div>
-
+    <div className="space-y-6">
       <Input
         label="Web Interface Hostname"
         type="text"

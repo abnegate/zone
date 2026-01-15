@@ -4,7 +4,8 @@ import { RetryError, withRetry } from '../utils/retry';
 
 interface StatusLine {
   message: string;
-  type?: 'normal' | 'success' | 'error' | 'retry';
+  type?: 'normal' | 'success' | 'error' | 'retry' | 'in-progress';
+  id?: string;
 }
 
 interface InstallationState {
@@ -16,7 +17,7 @@ interface InstallationState {
   retryCount: number;
 }
 
-const INSTALL_TIMEOUT = 120000; // 2 minutes
+const INSTALL_TIMEOUT = 1200000; // 20 minutes
 const MAX_RETRIES = 3;
 
 export function useInstallation() {
@@ -30,16 +31,25 @@ export function useInstallation() {
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const statusLinesRef = useRef<StatusLine[]>([]);
 
   const install = useCallback(async (config: InstallerConfig) => {
     // Cancel any existing installation
     abortControllerRef.current?.abort();
     abortControllerRef.current = new AbortController();
 
+    const initialLines = [
+      {
+        id: 'prepare',
+        message: 'Preparing installation...',
+        type: 'in-progress',
+      },
+    ];
+    statusLinesRef.current = initialLines;
     setState({
       isInstalling: true,
       progress: 0,
-      statusLines: [{ message: 'Preparing installation...' }],
+      statusLines: initialLines,
       isComplete: false,
       error: null,
       retryCount: 0,
@@ -65,7 +75,28 @@ export function useInstallation() {
           }
 
           const decoder = new TextDecoder();
-          const newStatusLines: StatusLine[] = [];
+          let hasFinalizedPrepare = false;
+
+          const updateLines = (line: StatusLine) => {
+            const current = statusLinesRef.current;
+            let next: StatusLine[] = [];
+
+            if (line.id) {
+              const index = current.findIndex((item) => item.id === line.id);
+              next =
+                index >= 0
+                  ? current.map((item, i) => (i === index ? line : item))
+                  : [...current, line];
+            } else {
+              next = [...current, line];
+            }
+
+            statusLinesRef.current = next;
+            setState((prev) => ({
+              ...prev,
+              statusLines: next,
+            }));
+          };
 
           while (true) {
             const { done, value } = await reader.read();
@@ -81,19 +112,36 @@ export function useInstallation() {
                 const data = JSON.parse(line);
 
                 if (data.status) {
-                  const isSuccess = data.status.includes('✓');
-                  newStatusLines.push({
-                    message: data.status,
-                    type: isSuccess ? 'success' : 'normal',
-                  });
+                  const statusText = typeof data.status === 'string' ? data.status : String(data.status);
+                  const cleanStatus = statusText.replace(/^[\u2713\u2717]\s*/, '');
+                  const stateValue = typeof data.state === 'string' ? data.state : undefined;
+                  let lineType: StatusLine['type'] = 'success';
 
-                  setState((prev) => ({
-                    ...prev,
-                    statusLines: [...newStatusLines],
-                  }));
+                  if (stateValue === 'in-progress') {
+                    lineType = 'in-progress';
+                  } else if (stateValue === 'retry') {
+                    lineType = 'retry';
+                  } else if (stateValue === 'error' || data.error) {
+                    lineType = 'error';
+                  }
+
+                  if (!hasFinalizedPrepare) {
+                    hasFinalizedPrepare = true;
+                    updateLines({
+                      id: 'prepare',
+                      message: 'Preparation complete',
+                      type: 'success',
+                    });
+                  }
+
+                  updateLines({
+                    id: typeof data.id === 'string' ? data.id : undefined,
+                    message: cleanStatus,
+                    type: lineType,
+                  });
                 }
 
-                if (data.progress) {
+                if (typeof data.progress === 'number') {
                   setState((prev) => ({
                     ...prev,
                     progress: data.progress,
@@ -109,17 +157,19 @@ export function useInstallation() {
                 }
 
                 if (data.error) {
-                  throw new Error(data.error);
+                  const message =
+                    typeof data.error === 'string'
+                      ? data.error
+                      : typeof data.status === 'string'
+                        ? data.status
+                        : 'Installation failed';
+                  throw new Error(message);
                 }
               } catch (e) {
                 // Handle non-JSON lines (but rethrow actual errors)
                 if (e instanceof Error && e.message !== line.trim()) {
                   if (line.trim() && !line.includes('{')) {
-                    newStatusLines.push({ message: line });
-                    setState((prev) => ({
-                      ...prev,
-                      statusLines: [...newStatusLines],
-                    }));
+                    updateLines({ message: line });
                   }
                 } else {
                   throw e;
@@ -132,16 +182,18 @@ export function useInstallation() {
           maxAttempts: MAX_RETRIES,
           timeout: INSTALL_TIMEOUT,
           onRetry: (attempt, error) => {
+            const nextLines = [
+              ...statusLinesRef.current,
+              {
+                message: `Retry ${attempt}/${MAX_RETRIES}: ${error.message}`,
+                type: 'retry' as const,
+              },
+            ];
+            statusLinesRef.current = nextLines;
             setState((prev) => ({
               ...prev,
               retryCount: attempt,
-              statusLines: [
-                ...prev.statusLines,
-                {
-                  message: `Retry ${attempt}/${MAX_RETRIES}: ${error.message}`,
-                  type: 'retry',
-                },
-              ],
+              statusLines: nextLines,
             }));
           },
         }
@@ -164,6 +216,7 @@ export function useInstallation() {
 
   const cancel = useCallback(() => {
     abortControllerRef.current?.abort();
+    statusLinesRef.current = [];
     setState((prev) => ({
       ...prev,
       isInstalling: false,
@@ -173,6 +226,7 @@ export function useInstallation() {
 
   const reset = useCallback(() => {
     abortControllerRef.current?.abort();
+    statusLinesRef.current = [];
     setState({
       isInstalling: false,
       progress: 0,

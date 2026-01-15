@@ -75,7 +75,7 @@ pub async fn list(
 
 /// List models from local Ollama installation
 async fn list_ollama_models(state: AppState) -> axum::response::Response {
-    let ollama_host = &state.config().litellm_host;
+    let ollama_host = &state.config().ollama_host;
 
     // Try to fetch from Ollama API
     let client = reqwest::Client::new();
@@ -213,7 +213,7 @@ pub async fn get(
     _auth: AuthUser,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let ollama_host = &state.config().litellm_host;
+    let ollama_host = &state.config().ollama_host;
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/show", ollama_host);
@@ -273,7 +273,7 @@ pub async fn delete(
     _auth: AuthUser,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let ollama_host = &state.config().litellm_host;
+    let ollama_host = &state.config().ollama_host;
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/delete", ollama_host);

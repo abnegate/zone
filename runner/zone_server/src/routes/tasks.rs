@@ -29,8 +29,15 @@ impl ErrorResponse {
 /// Task response
 #[derive(Debug, Serialize)]
 pub struct TaskResponse {
+    task: TaskData,
+}
+
+/// Task data
+#[derive(Debug, Serialize)]
+pub struct TaskData {
     id: Uuid,
-    project_id: Uuid,
+    workspace_id: Uuid,
+    project_ids: Vec<Uuid>,
     title: String,
     description: String,
     acceptance_criteria: Option<String>,
@@ -39,11 +46,18 @@ pub struct TaskResponse {
     is_agentic: bool,
 }
 
-impl From<tasks::TaskRow> for TaskResponse {
+/// Tasks list response
+#[derive(Debug, Serialize)]
+pub struct TasksListResponse {
+    tasks: Vec<TaskData>,
+}
+
+impl From<tasks::TaskRow> for TaskData {
     fn from(row: tasks::TaskRow) -> Self {
         Self {
             id: row.id,
-            project_id: row.project_id,
+            workspace_id: row.workspace_id,
+            project_ids: row.project_ids,
             title: row.title,
             description: row.description,
             acceptance_criteria: row.acceptance_criteria,
@@ -54,9 +68,23 @@ impl From<tasks::TaskRow> for TaskResponse {
     }
 }
 
+impl From<tasks::TaskRow> for TaskResponse {
+    fn from(row: tasks::TaskRow) -> Self {
+        Self {
+            task: TaskData::from(row),
+        }
+    }
+}
+
 /// Task run response
 #[derive(Debug, Serialize)]
 pub struct TaskRunResponse {
+    run: TaskRunData,
+}
+
+/// Task run data
+#[derive(Debug, Serialize)]
+pub struct TaskRunData {
     id: Uuid,
     task_id: Uuid,
     status: String,
@@ -65,7 +93,13 @@ pub struct TaskRunResponse {
     error_message: Option<String>,
 }
 
-impl From<tasks::TaskRunRow> for TaskRunResponse {
+/// Task runs list response
+#[derive(Debug, Serialize)]
+pub struct TaskRunsListResponse {
+    runs: Vec<TaskRunData>,
+}
+
+impl From<tasks::TaskRunRow> for TaskRunData {
     fn from(row: tasks::TaskRunRow) -> Self {
         Self {
             id: row.id,
@@ -78,9 +112,23 @@ impl From<tasks::TaskRunRow> for TaskRunResponse {
     }
 }
 
+impl From<tasks::TaskRunRow> for TaskRunResponse {
+    fn from(row: tasks::TaskRunRow) -> Self {
+        Self {
+            run: TaskRunData::from(row),
+        }
+    }
+}
+
 /// Task run log response
 #[derive(Debug, Serialize)]
 pub struct TaskRunLogResponse {
+    log: TaskRunLogData,
+}
+
+/// Task run log data
+#[derive(Debug, Serialize)]
+pub struct TaskRunLogData {
     id: Uuid,
     phase: String,
     agent_type: String,
@@ -88,7 +136,13 @@ pub struct TaskRunLogResponse {
     message: String,
 }
 
-impl From<tasks::TaskRunLogRow> for TaskRunLogResponse {
+/// Task run logs list response
+#[derive(Debug, Serialize)]
+pub struct TaskRunLogsListResponse {
+    logs: Vec<TaskRunLogData>,
+}
+
+impl From<tasks::TaskRunLogRow> for TaskRunLogData {
     fn from(row: tasks::TaskRunLogRow) -> Self {
         Self {
             id: row.id,
@@ -96,6 +150,14 @@ impl From<tasks::TaskRunLogRow> for TaskRunLogResponse {
             agent_type: row.agent_type,
             log_level: row.log_level,
             message: row.message,
+        }
+    }
+}
+
+impl From<tasks::TaskRunLogRow> for TaskRunLogResponse {
+    fn from(row: tasks::TaskRunLogRow) -> Self {
+        Self {
+            log: TaskRunLogData::from(row),
         }
     }
 }
@@ -110,7 +172,8 @@ pub struct ListTasksQuery {
 /// Create task request
 #[derive(Debug, Deserialize)]
 pub struct CreateTaskRequest {
-    project_id: Uuid,
+    #[serde(default)]
+    project_ids: Vec<Uuid>,
     title: String,
     description: String,
     acceptance_criteria: Option<String>,
@@ -126,21 +189,20 @@ pub struct UpdateTaskRequest {
     acceptance_criteria: Option<String>,
     status: Option<String>,
     priority: Option<i32>,
+    project_ids: Option<Vec<Uuid>>,
 }
 
-/// GET /api/tasks
+/// GET /api/workspaces/:workspace_id/tasks
 pub async fn list(
     State(state): State<AppState>,
     _auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
-    match tasks::list_tasks(state.db(), query.project_id, query.status.as_deref()).await {
-        Ok(items) => Json(
-            items
-                .into_iter()
-                .map(TaskResponse::from)
-                .collect::<Vec<_>>(),
-        )
+    match tasks::list_tasks(state.db(), workspace_id, query.project_id, query.status.as_deref()).await {
+        Ok(items) => Json(TasksListResponse {
+            tasks: items.into_iter().map(TaskData::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
@@ -153,15 +215,17 @@ pub async fn list(
     }
 }
 
-/// POST /api/tasks
+/// POST /api/workspaces/:workspace_id/tasks
 pub async fn create(
     State(state): State<AppState>,
     _auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
     Json(req): Json<CreateTaskRequest>,
 ) -> impl IntoResponse {
     match tasks::create_task(
         state.db(),
-        req.project_id,
+        workspace_id,
+        &req.project_ids,
         &req.title,
         &req.description,
         req.acceptance_criteria.as_deref(),
@@ -221,6 +285,7 @@ pub async fn update(
         req.acceptance_criteria.as_deref(),
         req.status.as_deref(),
         req.priority,
+        req.project_ids.as_deref(),
     )
     .await
     {
@@ -296,11 +361,9 @@ pub async fn list_runs(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     match tasks::list_task_runs(state.db(), id).await {
-        Ok(runs) => Json(
-            runs.into_iter()
-                .map(TaskRunResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(runs) => Json(TaskRunsListResponse {
+            runs: runs.into_iter().map(TaskRunData::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
@@ -398,11 +461,9 @@ pub async fn get_run_logs(
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
     match tasks::get_task_run_logs(state.db(), run_id).await {
-        Ok(logs) => Json(
-            logs.into_iter()
-                .map(TaskRunLogResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(logs) => Json(TaskRunLogsListResponse {
+            logs: logs.into_iter().map(TaskRunLogData::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);

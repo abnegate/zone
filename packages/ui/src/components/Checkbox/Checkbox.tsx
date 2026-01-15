@@ -1,76 +1,89 @@
-import React, { forwardRef } from 'react';
-import { cva, type VariantProps } from 'class-variance-authority';
+import React, { forwardRef, useCallback } from 'react';
+import * as CheckboxPrimitive from '@radix-ui/react-checkbox';
 import { cn } from '../../lib/utils';
-
-const checkboxVariants = cva(
-  [
-    'peer shrink-0',
-    'w-[18px] h-[18px]',
-    'appearance-none cursor-pointer',
-    'bg-[var(--ui-bg-elevated)]',
-    'border border-[var(--ui-border)] rounded-[var(--ui-radius-sm)]',
-    'transition-all duration-[var(--ui-duration-fast)] ease-out',
-    'focus:outline-none focus:ring-2 focus:ring-[var(--ui-accent-muted)] focus:ring-offset-1',
-    'checked:bg-[var(--ui-accent-500)] checked:border-[var(--ui-accent-500)]',
-    'checked:bg-[url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'white\' stroke-width=\'3\' stroke-linecap=\'round\' stroke-linejoin=\'round\'%3E%3Cpolyline points=\'20 6 9 17 4 12\'%3E%3C/polyline%3E%3C/svg%3E")] checked:bg-center checked:bg-no-repeat checked:bg-[length:12px_12px]',
-    'disabled:opacity-50 disabled:cursor-not-allowed',
-  ],
-  {
-    variants: {
-      size: {
-        sm: 'w-4 h-4 checked:bg-[length:10px_10px]',
-        md: 'w-[18px] h-[18px]',
-        lg: 'w-5 h-5 checked:bg-[length:14px_14px]',
-      },
-    },
-    defaultVariants: {
-      size: 'md',
-    },
-  }
-);
-
-const labelVariants = cva([
-  'flex items-center gap-[var(--ui-space-2)] cursor-pointer',
-  'text-[var(--ui-text-sm)]',
-  'text-[var(--ui-text-primary)]',
-  'select-none',
-]);
-
-const helpTextVariants = cva([
-  'mt-[var(--ui-space-1)]',
-  'ml-[calc(18px+var(--ui-space-2))]',
-  'text-[var(--ui-text-xs)]',
-  'text-[var(--ui-text-muted)]',
-]);
+import { Label } from '../Label';
 
 export interface CheckboxProps
-  extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type' | 'size'>,
-    VariantProps<typeof checkboxVariants> {
-  label: string;
+  extends Omit<
+    React.ComponentPropsWithoutRef<typeof CheckboxPrimitive.Root>,
+    'checked' | 'defaultChecked' | 'onCheckedChange' | 'onChange'
+  > {
+  label?: string;
   helpText?: string;
+  checked?: boolean;
+  defaultChecked?: boolean;
+  onChange?: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  onCheckedChange?: (checked: boolean) => void;
 }
 
-const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(
-  ({ label, helpText, id, className, size, ...props }, ref) => {
-    const checkboxId = id || label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const Checkbox = forwardRef<React.ElementRef<typeof CheckboxPrimitive.Root>, CheckboxProps>(
+  (
+    {
+      label,
+      helpText,
+      id,
+      className,
+      checked,
+      defaultChecked,
+      disabled,
+      name,
+      value,
+      onChange,
+      onCheckedChange,
+      ...props
+    },
+    ref
+  ) => {
+    const checkboxId =
+      id || (label ? label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') : undefined);
+
+    const handleCheckedChange = useCallback(
+      (nextChecked: boolean | 'indeterminate') => {
+        const resolvedChecked = nextChecked === true;
+        onCheckedChange?.(resolvedChecked);
+        if (onChange) {
+          const syntheticEvent = {
+            target: { checked: resolvedChecked, name, value },
+            currentTarget: { checked: resolvedChecked, name, value },
+          } as React.ChangeEvent<HTMLInputElement>;
+          onChange(syntheticEvent);
+        }
+      },
+      [name, onChange, onCheckedChange, value]
+    );
 
     return (
-      <div className="flex flex-col">
-        <label className={cn(labelVariants())} htmlFor={checkboxId}>
-          <input
+      <div className="ui-checkbox-wrapper">
+        <div className="ui-checkbox-row">
+          <CheckboxPrimitive.Root
             ref={ref}
-            type="checkbox"
             id={checkboxId}
-            className={cn(checkboxVariants({ size, className }))}
+            className={cn('ui-checkbox', className)}
+            checked={checked}
+            defaultChecked={defaultChecked}
+            disabled={disabled}
+            name={name}
+            value={value}
+            onCheckedChange={handleCheckedChange}
             {...props}
-          />
-          <span>{label}</span>
-        </label>
-        {helpText && (
-          <p className={cn(helpTextVariants())}>
-            {helpText}
-          </p>
-        )}
+          >
+            <CheckboxPrimitive.Indicator className="ui-checkbox-indicator">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="ui-checkbox-icon"
+              >
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            </CheckboxPrimitive.Indicator>
+          </CheckboxPrimitive.Root>
+          {label && <Label htmlFor={checkboxId}>{label}</Label>}
+        </div>
+        {helpText && <p className="ui-checkbox-help-text">{helpText}</p>}
       </div>
     );
   }
@@ -78,4 +91,4 @@ const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(
 
 Checkbox.displayName = 'Checkbox';
 
-export { Checkbox, checkboxVariants };
+export { Checkbox };

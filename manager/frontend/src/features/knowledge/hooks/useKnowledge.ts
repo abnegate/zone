@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
 import { knowledgeApi } from '../../../api/knowledge';
-import type { CreateKnowledgeRequest, KnowledgeEntry } from '../types';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import type { KnowledgeEntry } from '../types';
 
-export function useKnowledge(workspaceId?: string) {
+export function useKnowledge() {
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<string | null>(null);
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
 
   const loadEntries = useCallback(async () => {
+    if (!workspaceId) {
+      setEntries([]);
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       setError(null);
@@ -26,12 +34,13 @@ export function useKnowledge(workspaceId?: string) {
   }, [loadEntries]);
 
   const createEntry = useCallback(
-    async (request: CreateKnowledgeRequest): Promise<KnowledgeEntry> => {
-      const newEntry = await knowledgeApi.createKnowledge(request);
+    async (request: Omit<import('../types').CreateKnowledgeRequest, 'workspace_id'>): Promise<KnowledgeEntry> => {
+      if (!workspaceId) throw new Error('No workspace selected');
+      const newEntry = await knowledgeApi.createKnowledge({ ...request, workspace_id: workspaceId });
       setEntries((prev) => [newEntry, ...prev]);
       return newEntry;
     },
-    []
+    [workspaceId]
   );
 
   const deleteEntry = useCallback(async (id: string): Promise<void> => {

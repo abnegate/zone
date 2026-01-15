@@ -1,6 +1,7 @@
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { client } from '../../api/client';
 import type { Organization, Workspace } from '../../types';
+import { useAuth } from '../../features/auth';
 
 interface WorkspaceContextType {
   organizations: Organization[];
@@ -21,6 +22,7 @@ const ORG_STORAGE_KEY = 'manager_current_org';
 const WS_STORAGE_KEY = 'manager_current_workspace';
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
+  const { isAuthenticated, isLoading: authLoading } = useAuth();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [currentOrganization, setCurrentOrgState] = useState<Organization | null>(null);
@@ -87,10 +89,23 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(WS_STORAGE_KEY, ws.id);
   }, []);
 
-  // Load organizations on mount
+  // Load organizations when auth is ready and user is authenticated
   useEffect(() => {
+    if (authLoading) {
+      return; // Wait for auth to finish loading
+    }
+    if (!isAuthenticated) {
+      // Not authenticated - clear state and stop loading
+      setOrganizations([]);
+      setWorkspaces([]);
+      setCurrentOrgState(null);
+      setCurrentWsState(null);
+      setLoading(false);
+      return;
+    }
+    // Authenticated - load organizations
     refreshOrganizations().finally(() => setLoading(false));
-  }, [refreshOrganizations]);
+  }, [authLoading, isAuthenticated, refreshOrganizations]);
 
   // Load workspaces when organization changes
   useEffect(() => {

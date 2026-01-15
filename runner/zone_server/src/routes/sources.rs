@@ -123,6 +123,24 @@ pub struct VerificationResponse {
     pub error: Option<String>,
 }
 
+/// Sources list response
+#[derive(Debug, Serialize)]
+pub struct SourcesListResponse {
+    sources: Vec<SourceResponse>,
+}
+
+/// Single source response wrapper
+#[derive(Debug, Serialize)]
+pub struct SingleSourceResponse {
+    source: SourceResponse,
+}
+
+/// Source types list response
+#[derive(Debug, Serialize)]
+pub struct SourceTypesListResponse {
+    types: Vec<SourceTypeInfo>,
+}
+
 impl SourceResponse {
     /// Create a SourceResponse from a SourceRow with index status
     async fn from_row(state: &AppState, row: sources::SourceRow) -> Self {
@@ -256,7 +274,7 @@ pub async fn list(
     {
         Ok(items) => {
             let responses = SourceResponse::from_rows(&state, items).await;
-            Json(responses).into_response()
+            Json(SourcesListResponse { sources: responses }).into_response()
         }
         Err(e) => {
             tracing::error!(workspace_id = %workspace_id, error = %e, "Database error listing sources");
@@ -882,5 +900,5 @@ pub async fn list_types(_auth: AuthUser) -> impl IntoResponse {
         },
     ];
 
-    Json(types)
+    Json(SourceTypesListResponse { types })
 }

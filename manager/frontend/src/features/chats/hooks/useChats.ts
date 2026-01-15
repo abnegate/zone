@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { chatsApi } from '../../../api/chats';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Chat, CreateChatRequest } from '../types';
 
 export interface UseChatsOptions {
@@ -8,22 +9,29 @@ export interface UseChatsOptions {
 
 export function useChats(options: UseChatsOptions = {}) {
   const { archived = false } = options;
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchChats = useCallback(async () => {
+    if (!workspaceId) {
+      setChats([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const data = await chatsApi.getChats(archived);
+      const data = await chatsApi.getChats(workspaceId, archived);
       setChats(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch chats');
     } finally {
       setLoading(false);
     }
-  }, [archived]);
+  }, [workspaceId, archived]);
 
   useEffect(() => {
     fetchChats();

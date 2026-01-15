@@ -110,6 +110,21 @@ enum Commands {
         #[arg(long, short, value_enum)]
         project: Option<Vec<Project>>,
     },
+    /// Database development utilities
+    Db {
+        #[command(subcommand)]
+        command: DbCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbCommands {
+    /// Regenerate SQLx offline query cache
+    Prepare,
+    /// Apply database migrations
+    Migrate,
+    /// Reset database (drop, recreate, and migrate)
+    Reset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1565,6 +1580,104 @@ async fn run_simple(tasks: Vec<TaskConfig>) -> Result<bool> {
     Ok(failed == 0)
 }
 
+async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> Result<()> {
+    match command {
+        DbCommands::Prepare => {
+            println!("{} Regenerating SQLx offline cache...", "→".cyan());
+
+            let zone_server_dir = root.join("runner/zone_server");
+            if !zone_server_dir.exists() {
+                return Err(anyhow::anyhow!(
+                    "zone_server directory not found at {:?}",
+                    zone_server_dir
+                ));
+            }
+
+            // Check if cargo-sqlx is installed
+            let check = Command::new("cargo")
+                .args(["sqlx", "--version"])
+                .output()?;
+
+            if !check.status.success() {
+                println!("{} cargo-sqlx not found, installing...", "→".yellow());
+                let install = Command::new("cargo")
+                    .args(["install", "sqlx-cli", "--no-default-features", "--features", "postgres"])
+                    .status()?;
+
+                if !install.success() {
+                    return Err(anyhow::anyhow!("Failed to install sqlx-cli"));
+                }
+            }
+
+            let status = Command::new("cargo")
+                .args(["sqlx", "prepare"])
+                .current_dir(&zone_server_dir)
+                .status()?;
+
+            if !status.success() {
+                return Err(anyhow::anyhow!("cargo sqlx prepare failed"));
+            }
+
+            println!("{} SQLx offline cache regenerated successfully", "✓".green().bold());
+            println!("{}", "  Don't forget to commit the .sqlx directory!".dimmed());
+        }
+        DbCommands::Migrate => {
+            println!("{} Applying database migrations...", "→".cyan());
+
+            let migration_file = root.join("runner/zone_server/migrations/001_initial_schema.sql");
+            if !migration_file.exists() {
+                return Err(anyhow::anyhow!(
+                    "Migration file not found: {:?}",
+                    migration_file
+                ));
+            }
+
+            let status = Command::new("docker")
+                .args(["exec", "-i", "postgres", "psql", "-U", "litellm", "-d", "manager"])
+                .stdin(std::fs::File::open(&migration_file)?)
+                .status()?;
+
+            if !status.success() {
+                return Err(anyhow::anyhow!("Migration failed"));
+            }
+
+            println!("{} Migrations applied successfully", "✓".green().bold());
+        }
+        DbCommands::Reset => {
+            println!("{} Resetting database...", "→".cyan());
+
+            // Drop database
+            let _ = Command::new("docker")
+                .args(["exec", "postgres", "psql", "-U", "litellm", "-c", "DROP DATABASE IF EXISTS manager;"])
+                .status();
+
+            // Create database
+            let create = Command::new("docker")
+                .args(["exec", "postgres", "psql", "-U", "litellm", "-c", "CREATE DATABASE manager;"])
+                .status()?;
+
+            if !create.success() {
+                return Err(anyhow::anyhow!("Failed to create database"));
+            }
+
+            // Apply migrations
+            let migration_file = root.join("runner/zone_server/migrations/001_initial_schema.sql");
+            let status = Command::new("docker")
+                .args(["exec", "-i", "postgres", "psql", "-U", "litellm", "-d", "manager"])
+                .stdin(std::fs::File::open(&migration_file)?)
+                .status()?;
+
+            if !status.success() {
+                return Err(anyhow::anyhow!("Migration failed"));
+            }
+
+            println!("{} Database reset complete", "✓".green().bold());
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1624,6 +1737,9 @@ async fn main() -> Result<()> {
             ui,
         } => create_e2e_tasks(&root, &get_projects(project.clone()), *headed, *ui),
         Commands::Audit { project } => create_audit_tasks(&root, &get_projects(project.clone())),
+        Commands::Db { command } => {
+            return run_db_command(&root, &command, cli.simple).await;
+        }
     };
 
     if tasks.is_empty() {

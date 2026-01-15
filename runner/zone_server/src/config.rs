@@ -23,6 +23,8 @@ pub struct Config {
     pub litellm_host: String,
     /// LiteLLM API key
     pub litellm_key: String,
+    /// Ollama host URL (for model management)
+    pub ollama_host: String,
     /// Encryption key for source credentials (must be at least 32 characters)
     pub encryption_key: String,
     /// CORS allowed origins (comma-separated, default: *)
@@ -112,6 +114,8 @@ impl Config {
                 .map_err(|_| ConfigError::Missing("LITELLM_HOST"))?,
             litellm_key: env::var("LITELLM_KEY")
                 .map_err(|_| ConfigError::Missing("LITELLM_KEY"))?,
+            ollama_host: env::var("OLLAMA_HOST")
+                .unwrap_or_else(|_| "http://ollama:11434".to_string()),
             encryption_key,
             cors_origins,
             cors_allow_credentials,
@@ -133,6 +137,7 @@ impl std::fmt::Debug for Config {
             .field("jwt_refresh_lifetime", &self.jwt_refresh_lifetime)
             .field("litellm_host", &self.litellm_host)
             .field("litellm_key", &"[REDACTED]")
+            .field("ollama_host", &self.ollama_host)
             .field("encryption_key", &"[REDACTED]")
             .field("cors_origins", &self.cors_origins)
             .field("cors_allow_credentials", &self.cors_allow_credentials)
@@ -169,6 +174,7 @@ mod tests {
             jwt_refresh_lifetime: 604800,
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
+            ollama_host: "http://localhost:11434".to_string(),
             encryption_key: "12345678901234567890123456789012".to_string(),
             cors_origins: vec!["*".to_string()],
             cors_allow_credentials: false,

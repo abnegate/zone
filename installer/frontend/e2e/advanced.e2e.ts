@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { selectOption } from './helpers';
 
 test.describe('Advanced Settings', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     // Navigate to Advanced step (step 7 - last step)
-    await page.click('.stepper-item:nth-child(7) .stepper-button');
-    await expect(page.locator('h2')).toContainText('Advanced Settings');
+    await page.click('[data-step="7"]');
+    await expect(page.getByRole('heading', { name: 'Advanced Settings' })).toBeVisible();
   });
 
   test.describe('Monitoring Section', () => {
@@ -57,11 +58,11 @@ test.describe('Advanced Settings', () => {
       await page.getByLabel('Enable Prometheus + Grafana monitoring').check();
 
       const retentionSelect = page.getByLabel('Metrics Retention');
-      const options = ['7d', '15d', '30d', '90d'];
+      const options = ['7 days', '15 days', '30 days', '90 days'];
 
       for (const option of options) {
-        await retentionSelect.selectOption(option);
-        await expect(retentionSelect).toHaveValue(option);
+        await selectOption(page, 'Metrics Retention', option);
+        await expect(retentionSelect).toHaveText(option);
       }
     });
 
@@ -116,7 +117,7 @@ test.describe('Advanced Settings', () => {
 
       await page.getByLabel('Alert Recipients').fill('admin@example.com');
       await page.getByLabel('SMTP Host').fill('smtp.gmail.com');
-      await page.getByLabel('SMTP Port').selectOption('587');
+      await selectOption(page, 'SMTP Port', '587 (Submission)');
       await page.getByLabel('SMTP Username').fill('user@gmail.com');
       await page.getByLabel('SMTP Password').fill('app-password');
       await page.getByLabel('From Address').fill('alerts@example.com');
@@ -124,7 +125,7 @@ test.describe('Advanced Settings', () => {
 
       await expect(page.getByLabel('Alert Recipients')).toHaveValue('admin@example.com');
       await expect(page.getByLabel('SMTP Host')).toHaveValue('smtp.gmail.com');
-      await expect(page.getByLabel('SMTP Port')).toHaveValue('587');
+      await expect(page.getByLabel('SMTP Port')).toHaveText('587 (Submission)');
     });
 
     test('shows alert types info', async ({ page }) => {
@@ -178,11 +179,11 @@ test.describe('Advanced Settings', () => {
     test('can select different timezones', async ({ page }) => {
       const tzSelect = page.getByLabel('Timezone');
 
-      await tzSelect.selectOption('America/New_York');
-      await expect(tzSelect).toHaveValue('America/New_York');
+      await selectOption(page, 'Timezone', 'America/New_York');
+      await expect(tzSelect).toHaveText('America/New_York');
 
-      await tzSelect.selectOption('Asia/Tokyo');
-      await expect(tzSelect).toHaveValue('Asia/Tokyo');
+      await selectOption(page, 'Timezone', 'Asia/Tokyo');
+      await expect(tzSelect).toHaveText('Asia/Tokyo');
     });
   });
 

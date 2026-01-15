@@ -12,7 +12,7 @@ test.describe('Form Validation', () => {
 
     // Should stay on domain step with error
     await expect(page.locator('[id$="-error"][role="alert"]')).toBeVisible();
-    await expect(page.locator('h2')).toContainText('Domain Configuration');
+    await expect(page.getByRole('heading', { name: 'Domain Configuration' })).toBeVisible();
   });
 
   test('accepts valid hostname', async ({ page }) => {
@@ -20,24 +20,24 @@ test.describe('Form Validation', () => {
     await input.fill('myzone.example.com');
     await page.click('text=Next');
 
-    await expect(page.locator('h2')).toContainText('Security');
+    await expect(page.getByRole('heading', { name: 'Security' })).toBeVisible();
   });
 
   test('shows error for short security keys', async ({ page }) => {
     // Go to security step via step pill
-    await page.click('.stepper-item:nth-child(2) .stepper-button');
+    await page.click('[data-step="2"]');
 
     const masterKeyInput = page.locator('input#litellm-master-key');
     await masterKeyInput.fill('short');
     await page.click('text=Next');
 
     await expect(page.locator('[id$="-error"][role="alert"]').first()).toBeVisible();
-    await expect(page.locator('h2')).toContainText('Security');
+    await expect(page.getByRole('heading', { name: 'Security' })).toBeVisible();
   });
 
   test('validates email format in advanced step', async ({ page }) => {
     // Navigate to advanced step via step pill
-    await page.click('.stepper-item:nth-child(7) .stepper-button');
+    await page.click('[data-step="7"]');
 
     const emailInput = page.getByLabel("ACME Email (for Let's Encrypt)");
     await emailInput.clear();
@@ -52,6 +52,6 @@ test.describe('Form Validation', () => {
     // Check for validation error - use getByText as it's more specific
     await expect(page.getByText('Invalid email address')).toBeVisible({ timeout: 5000 });
     // Verify we're still on the Advanced step (not in modal)
-    await expect(page.locator('h2')).toContainText('Advanced Settings');
+    await expect(page.getByRole('heading', { name: 'Advanced Settings' })).toBeVisible();
   });
 });

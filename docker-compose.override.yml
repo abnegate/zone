@@ -1,5 +1,0 @@
-# Development overrides - expose postgres port for local development
-services:
-  postgres:
-    ports:
-      - "15432:5432"

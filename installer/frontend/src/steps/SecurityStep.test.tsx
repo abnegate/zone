@@ -82,13 +82,6 @@ const renderWithForm = (defaultValues: InstallerConfig) => {
 };
 
 describe('SecurityStep', () => {
-  it('renders step header', () => {
-    renderWithForm(createMockConfig());
-
-    expect(screen.getByText('Security')).toBeInTheDocument();
-    expect(screen.getByText(/configure authentication and generate secure keys/i)).toBeInTheDocument();
-  });
-
   it('renders authentication realm input with current value', () => {
     renderWithForm(createMockConfig());
 
@@ -196,10 +189,18 @@ describe('SecurityStep', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('displays warning about empty keys', () => {
-    renderWithForm(createMockConfig());
+  it('displays warning about empty keys when a secret is missing', () => {
+    renderWithForm(createMockConfig({ SECURITY_LITELLM_MASTER_KEY: '' }));
 
     expect(screen.getByText(/empty keys are insecure/i)).toBeInTheDocument();
+  });
+
+  it('hides warning about empty keys when all secrets are provided', () => {
+    renderWithForm(createMockConfig());
+
+    expect(
+      screen.queryByText(/empty keys are insecure/i)
+    ).not.toBeInTheDocument();
   });
 
   it('displays Production Settings header', () => {

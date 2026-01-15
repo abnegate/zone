@@ -5,6 +5,7 @@ import type { Task } from '../types';
 import { useTasks } from './useTasks';
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
+import { WorkspaceProvider } from '../../../shared/context/WorkspaceContext';
 
 jest.mock('../../../api/tasks', () => ({
   tasksApi: {
@@ -17,6 +18,14 @@ jest.mock('../../../api/tasks', () => ({
 
 const mockTasksApi = tasksApi as jest.Mocked<typeof tasksApi>;
 
+const mockWorkspace = {
+  id: 'workspace-1',
+  name: 'Test Workspace',
+  organization_id: 'org-1',
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
+};
+
 const createWrapper = () => {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -26,12 +35,17 @@ const createWrapper = () => {
   });
 
   return ({ children }: { children: ReactNode }) =>
-    createElement(QueryClientProvider, { client: queryClient }, children);
+    createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      createElement(WorkspaceProvider, { initialWorkspace: mockWorkspace }, children)
+    );
 };
 
 const mockTask: Task = {
   id: 'task-1',
-  project_id: 'proj-1',
+  workspace_id: 'workspace-1',
+  project_ids: ['proj-1'],
   title: 'Test Task',
   description: 'Test description',
   acceptance_criteria: null,
@@ -75,7 +89,7 @@ describe('useTasks', () => {
 
     expect(result.current.tasks).toEqual([mockTask]);
     expect(result.current.error).toBeNull();
-    expect(mockTasksApi.getTasks).toHaveBeenCalledWith(undefined, undefined);
+    expect(mockTasksApi.getTasks).toHaveBeenCalledWith('workspace-1', undefined, undefined);
   });
 
   it('loads tasks with filters', async () => {
@@ -88,7 +102,7 @@ describe('useTasks', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(mockTasksApi.getTasks).toHaveBeenCalledWith('proj-1', 'created');
+    expect(mockTasksApi.getTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', 'created');
   });
 
   it('handles load error', async () => {
@@ -119,7 +133,7 @@ describe('useTasks', () => {
     });
 
     const request = {
-      project_id: 'proj-1',
+      project_ids: ['proj-1'],
       title: 'New Task',
       description: 'Description',
     };
@@ -128,7 +142,7 @@ describe('useTasks', () => {
       await result.current.createTask(request);
     });
 
-    expect(mockTasksApi.createTask).toHaveBeenCalledWith(request);
+    expect(mockTasksApi.createTask).toHaveBeenCalledWith('workspace-1', request);
     await waitFor(() => {
       expect(result.current.tasks).toEqual([newTask]);
     });
@@ -215,13 +229,13 @@ describe('useTasks', () => {
     );
 
     await waitFor(() => {
-      expect(mockTasksApi.getTasks).toHaveBeenCalledWith('proj-1', undefined);
+      expect(mockTasksApi.getTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', undefined);
     });
 
     rerender({ projectId: 'proj-1', status: 'created' });
 
     await waitFor(() => {
-      expect(mockTasksApi.getTasks).toHaveBeenCalledWith('proj-1', 'created');
+      expect(mockTasksApi.getTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', 'created');
     });
   });
 });

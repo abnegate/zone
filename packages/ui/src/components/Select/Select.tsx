@@ -1,74 +1,160 @@
-import React, { forwardRef } from 'react';
-import { cva, type VariantProps } from 'class-variance-authority';
+import React, { forwardRef, useCallback } from 'react';
+import * as SelectPrimitive from '@radix-ui/react-select';
 import { cn } from '../../lib/utils';
+import { Label } from '../Label';
 
-const selectVariants = cva(
-  [
-    'w-full appearance-none',
-    'px-[var(--ui-space-3)] py-[var(--ui-space-2)] pr-[var(--ui-space-8)]',
-    'bg-[var(--ui-bg-elevated)]',
-    'text-[var(--ui-text-primary)] text-[var(--ui-text-sm)]',
-    'border border-[var(--ui-border)] rounded-[var(--ui-radius-md)]',
-    'transition-all duration-[var(--ui-duration-fast)] ease-out',
-    'focus:outline-none focus:border-[var(--ui-border-focus)] focus:ring-2 focus:ring-[var(--ui-accent-muted)]',
-    'disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-[var(--ui-bg-muted)]',
-    // Custom dropdown arrow
-    'bg-[length:16px_16px] bg-no-repeat bg-[right_var(--ui-space-2)_center]',
-    "bg-[url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%2364748b'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E\")]",
-  ],
-  {
-    variants: {
-      variant: {
-        default: '',
-        error: 'border-[var(--ui-error-500)] focus:border-[var(--ui-error-500)] focus:ring-[var(--ui-error-muted)]',
-      },
-      size: {
-        sm: 'h-8 text-[var(--ui-text-xs)]',
-        md: 'h-10',
-        lg: 'h-12 text-[var(--ui-text-base)]',
-      },
-    },
-    defaultVariants: {
-      variant: 'default',
-      size: 'md',
-    },
-  }
-);
+const SelectTrigger = forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
+>(({ className, children, ...props }, ref) => (
+  <SelectPrimitive.Trigger
+    ref={ref}
+    className={cn('ui-select-trigger', className)}
+    {...props}
+  >
+    {children}
+    <SelectPrimitive.Icon asChild>
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="ui-select-icon"
+      >
+        <polyline points="6 9 12 15 18 9" />
+      </svg>
+    </SelectPrimitive.Icon>
+  </SelectPrimitive.Trigger>
+));
+SelectTrigger.displayName = SelectPrimitive.Trigger.displayName;
 
-const labelVariants = cva([
-  'block',
-  'mb-[var(--ui-space-1-5)]',
-  'text-[var(--ui-text-sm)] font-medium',
-  'text-[var(--ui-text-secondary)]',
-]);
+const SelectContent = forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
+>(({ className, children, position = 'popper', ...props }, ref) => (
+  <SelectPrimitive.Portal>
+    <SelectPrimitive.Content
+      ref={ref}
+      className={cn('ui-select-content', className)}
+      position={position}
+      {...props}
+    >
+      <SelectPrimitive.ScrollUpButton className="ui-select-scroll-button">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="ui-select-scroll-icon"
+        >
+          <polyline points="18 15 12 9 6 15" />
+        </svg>
+      </SelectPrimitive.ScrollUpButton>
+      <SelectPrimitive.Viewport
+        className={cn('ui-select-viewport', position === 'popper' && 'ui-select-viewport-popper')}
+      >
+        {children}
+      </SelectPrimitive.Viewport>
+      <SelectPrimitive.ScrollDownButton className="ui-select-scroll-button">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="ui-select-scroll-icon"
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </SelectPrimitive.ScrollDownButton>
+    </SelectPrimitive.Content>
+  </SelectPrimitive.Portal>
+));
+SelectContent.displayName = SelectPrimitive.Content.displayName;
 
-const helpTextVariants = cva([
-  'mt-[var(--ui-space-1)]',
-  'text-[var(--ui-text-xs)]',
-  'text-[var(--ui-text-muted)]',
-]);
+const SelectLabel = forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Label>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Label>
+>(({ className, ...props }, ref) => (
+  <SelectPrimitive.Label
+    ref={ref}
+    className={cn('ui-select-label', className)}
+    {...props}
+  />
+));
+SelectLabel.displayName = SelectPrimitive.Label.displayName;
 
-const errorTextVariants = cva([
-  'mt-[var(--ui-space-1)]',
-  'text-[var(--ui-text-xs)]',
-  'text-[var(--ui-error-500)]',
-]);
+const SelectItem = forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Item>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
+>(({ className, children, ...props }, ref) => (
+  <SelectPrimitive.Item
+    ref={ref}
+    className={cn('ui-select-item', className)}
+    {...props}
+  >
+    <span className="ui-select-item-indicator">
+      <SelectPrimitive.ItemIndicator>
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="ui-select-item-icon"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      </SelectPrimitive.ItemIndicator>
+    </span>
+    <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+  </SelectPrimitive.Item>
+));
+SelectItem.displayName = SelectPrimitive.Item.displayName;
+
+const SelectSeparator = forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Separator>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>
+>(({ className, ...props }, ref) => (
+  <SelectPrimitive.Separator
+    ref={ref}
+    className={cn('ui-select-separator', className)}
+    {...props}
+  />
+));
+SelectSeparator.displayName = SelectPrimitive.Separator.displayName;
+
+const SelectValue = SelectPrimitive.Value;
 
 export interface SelectOption {
   value: string;
   label: string;
+  disabled?: boolean;
 }
 
 export interface SelectProps
-  extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>, 'size'>,
-    VariantProps<typeof selectVariants> {
-  label: string;
+  extends Omit<
+    React.SelectHTMLAttributes<HTMLSelectElement>,
+    'onChange' | 'size' | 'value' | 'defaultValue'
+  > {
+  label?: string;
   options: SelectOption[];
   helpText?: string;
   error?: string;
+  value?: string;
+  defaultValue?: string;
+  onChange?: (event: React.ChangeEvent<HTMLSelectElement>) => void;
+  onValueChange?: (value: string) => void;
+  placeholder?: string;
 }
 
-const Select = forwardRef<HTMLSelectElement, SelectProps>(
+const Select = forwardRef<HTMLButtonElement, SelectProps>(
   (
     {
       label,
@@ -77,44 +163,65 @@ const Select = forwardRef<HTMLSelectElement, SelectProps>(
       error,
       id,
       className,
-      variant,
-      size,
-      ...props
+      value,
+      defaultValue,
+      onChange,
+      onValueChange,
+      name,
+      disabled,
+      required,
+      placeholder,
     },
     ref
   ) => {
-    const selectId = id || label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const selectVariant = error ? 'error' : variant;
+    const selectId =
+      id || (label ? label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') : undefined);
+    const placeholderText = placeholder ?? 'Select an option';
+
+    const handleValueChange = useCallback(
+      (nextValue: string) => {
+        onValueChange?.(nextValue);
+        if (onChange) {
+          const syntheticEvent = {
+            target: { value: nextValue, name },
+            currentTarget: { value: nextValue, name },
+          } as React.ChangeEvent<HTMLSelectElement>;
+          onChange(syntheticEvent);
+        }
+      },
+      [name, onChange, onValueChange]
+    );
 
     return (
-      <div className="flex flex-col">
-        <label className={cn(labelVariants())} htmlFor={selectId}>
-          {label}
-        </label>
-        <select
-          ref={ref}
-          id={selectId}
-          className={cn(selectVariants({ variant: selectVariant, size, className }))}
-          aria-invalid={!!error}
-          aria-describedby={error ? `${selectId}-error` : helpText ? `${selectId}-help` : undefined}
-          {...props}
+      <div className="ui-select-wrapper">
+        {label && <Label htmlFor={selectId}>{label}</Label>}
+        <SelectPrimitive.Root
+          value={value}
+          defaultValue={defaultValue}
+          onValueChange={handleValueChange}
+          name={name}
+          disabled={disabled}
+          required={required}
         >
-          {options.map(option => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-        {error && (
-          <p id={`${selectId}-error`} className={cn(errorTextVariants())} role="alert">
-            {error}
-          </p>
-        )}
-        {helpText && !error && (
-          <p id={`${selectId}-help`} className={cn(helpTextVariants())}>
-            {helpText}
-          </p>
-        )}
+          <SelectTrigger
+            id={selectId}
+            ref={ref}
+            className={cn(error && 'ui-select-trigger-error', className)}
+          >
+            <SelectValue placeholder={placeholderText} />
+          </SelectTrigger>
+          <SelectContent>
+            {options
+              .filter((option) => option.value !== '')
+              .map((option) => (
+                <SelectItem key={option.value} value={option.value} disabled={option.disabled}>
+                  {option.label}
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </SelectPrimitive.Root>
+        {error && <p className="ui-select-error-text">{error}</p>}
+        {helpText && !error && <p className="ui-select-help-text">{helpText}</p>}
       </div>
     );
   }
@@ -122,4 +229,13 @@ const Select = forwardRef<HTMLSelectElement, SelectProps>(
 
 Select.displayName = 'Select';
 
-export { Select, selectVariants };
+export {
+  Select,
+  SelectTrigger,
+  SelectContent,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectValue,
+  SelectPrimitive,
+};

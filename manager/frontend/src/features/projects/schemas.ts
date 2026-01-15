@@ -19,6 +19,7 @@ export const ProjectSchema = z.object({
 
 export const CreateProjectRequestSchema = z.object({
   name: z.string().min(1, 'Name is required'),
+  workspace_id: z.string().min(1, 'Workspace is required'),
   description: z.string().optional(),
   status: ProjectStatusSchema.optional(),
   github_repo_url: z.string().optional(),

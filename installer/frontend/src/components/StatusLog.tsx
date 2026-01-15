@@ -2,7 +2,8 @@ import { useEffect, useRef } from 'react';
 
 interface StatusLine {
   message: string;
-  type?: 'normal' | 'success' | 'error' | 'retry';
+  type?: 'normal' | 'success' | 'error' | 'retry' | 'in-progress';
+  id?: string;
 }
 
 interface StatusLogProps {
@@ -20,14 +21,46 @@ export function StatusLog({ lines }: StatusLogProps) {
   }, [lines]);
 
   return (
-    <div className="status-log" ref={logRef}>
+    <div
+      className="max-h-52 space-y-2 overflow-auto rounded-md border bg-muted/30 p-3 text-xs font-mono text-muted-foreground"
+      ref={logRef}
+      data-testid="status-log"
+    >
       {lines.map((line, index) => (
-        // Using index + message as key since log lines are append-only and have no unique IDs
+        // Prefer ids for stable updates, fallback to index + message for append-only logs.
         <div
-          key={`${index}-${line.message.slice(0, 20)}`}
-          className={`status-line ${line.type || ''}`}
+          key={line.id ?? `${index}-${line.message.slice(0, 20)}`}
+          className="flex gap-2"
+          data-status-line
+          data-status={line.type || 'normal'}
         >
-          {line.message}
+          {line.type === 'in-progress' ? (
+            <span
+              className="mt-0.5 inline-flex h-3 w-3 animate-spin rounded-full border border-muted-foreground border-t-transparent"
+              aria-label="In progress"
+            />
+          ) : (
+            <span
+              className={`${
+                line.type === 'success'
+                  ? 'text-emerald-600'
+                  : line.type === 'error'
+                    ? 'text-destructive'
+                    : line.type === 'retry'
+                      ? 'text-amber-600'
+                      : 'text-muted-foreground'
+              }`}
+            >
+              {line.type === 'success'
+                ? '✓'
+                : line.type === 'error'
+                  ? '✗'
+                  : line.type === 'retry'
+                    ? '↻'
+                    : '›'}
+            </span>
+          )}
+          <span>{line.message}</span>
         </div>
       ))}
     </div>

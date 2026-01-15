@@ -8,7 +8,12 @@ use uuid::Uuid;
 use crate::auth::{
     AuthUser, create_access_token, create_refresh_token, hash_password, verify_password,
 };
-use crate::db::{refresh_tokens, sessions, users};
+use crate::db::{
+    organization_members::{self, OrgRole},
+    organizations, refresh_tokens, sessions, users,
+    workspace_members::{self, WorkspaceRole},
+    workspaces,
+};
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
 
@@ -163,6 +168,106 @@ pub async fn register(
                 .into_response();
         }
     };
+
+    // If this is the first user (admin), create a default organization and workspace
+    if is_admin {
+        // Generate organization name based on user's display name or email
+        let org_name = req
+            .display_name
+            .as_ref()
+            .map(|name| format!("{}'s Organization", name))
+            .unwrap_or_else(|| "My Organization".to_string());
+
+        // Generate slug from organization name
+        let org_slug = org_name
+            .to_lowercase()
+            .replace(' ', "-")
+            .replace('\'', "")
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .collect::<String>();
+
+        // Create the default organization
+        match organizations::create_organization(state.db(), &org_name, &org_slug, None).await {
+            Ok(org) => {
+                tracing::info!(
+                    "Created default organization '{}' for admin user {}",
+                    org.name,
+                    user.id
+                );
+
+                // Add admin as owner of the organization
+                if let Err(e) =
+                    organization_members::add_member(state.db(), org.id, user.id, OrgRole::Owner, None)
+                        .await
+                {
+                    tracing::error!(
+                        "Failed to add admin as organization owner: {}. User can manually create organization.",
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Added admin user {} as owner of organization {}",
+                        user.id,
+                        org.id
+                    );
+
+                    // Create a default workspace within the organization
+                    match workspaces::create_workspace(
+                        state.db(),
+                        org.id,
+                        "Default Workspace",
+                        "default",
+                        Some("Your default workspace"),
+                    )
+                    .await
+                    {
+                        Ok(workspace) => {
+                            tracing::info!(
+                                "Created default workspace '{}' in organization {}",
+                                workspace.name,
+                                org.id
+                            );
+
+                            // Add admin as owner of the workspace
+                            if let Err(e) = workspace_members::add_member(
+                                state.db(),
+                                workspace.id,
+                                user.id,
+                                WorkspaceRole::Owner,
+                                None,
+                            )
+                            .await
+                            {
+                                tracing::error!(
+                                    "Failed to add admin as workspace owner: {}. User can manually join workspace.",
+                                    e
+                                );
+                            } else {
+                                tracing::info!(
+                                    "Added admin user {} as owner of workspace {}",
+                                    user.id,
+                                    workspace.id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to create default workspace: {}. User can manually create workspace.",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to create default organization: {}. User can manually create organization.",
+                    e
+                );
+            }
+        }
+    }
 
     // Get user with permissions
     let user_perms = match users::get_user_with_permissions(state.db(), user.id).await {

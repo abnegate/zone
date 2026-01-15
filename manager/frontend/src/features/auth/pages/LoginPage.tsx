@@ -1,10 +1,9 @@
 import { useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Button, Input } from '@zone/ui';
+import { Button, Input, Card, CardContent, CardDescription, CardHeader } from '@zone/ui';
 import { useAuth } from '../hooks';
 import { LoginRequestSchema } from '../schemas';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
-import './AuthPage.css';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import type { z } from 'zod';
@@ -15,7 +14,7 @@ type LoginForm = z.infer<typeof LoginRequestSchema>;
 export default function LoginPage() {
   const navigate = useNavigate();
   const { login, isAuthenticated, isLoading: authLoading } = useAuth();
-  
+
   const {
     register,
     handleSubmit,
@@ -50,9 +49,9 @@ export default function LoginPage() {
 
   if (authLoading) {
     return (
-      <div className="auth-page">
-        <div className="auth-loading">
-          <span className="spinner" />
+      <div className="flex min-h-screen items-center justify-center bg-background p-4">
+        <div className="flex flex-col items-center gap-3 text-muted-foreground">
+          <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
           <span>Loading...</span>
         </div>
       </div>
@@ -60,52 +59,62 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="auth-page">
-      <div className="auth-container">
-        <div className="auth-header">
-          <ZoneLogo size="xl" />
-          <p>Sign in to your account</p>
-        </div>
-
-        <form className="auth-form" onSubmit={handleSubmit(onSubmit)}>
-          <Input
-            label="Email"
-            type="email"
-            placeholder="you@example.com"
-            autoFocus
-            autoComplete="email"
-            error={errors.email?.message}
-            disabled={isSubmitting}
-            {...register('email')}
-          />
-
-          <Input
-            label="Password"
-            type="password"
-            placeholder="Enter your password"
-            autoComplete="current-password"
-            error={errors.password?.message}
-            disabled={isSubmitting}
-            {...register('password')}
-          />
-
-          {errors.root && <div className="auth-error">{errors.root.message}</div>}
-
-          <Button type="submit" variant="primary" loading={isSubmitting} className="btn-block">
-            {isSubmitting ? 'Signing in...' : 'Sign In'}
-          </Button>
-
-          <div className="auth-link" style={{ textAlign: 'center', marginTop: '0.5rem' }}>
-            <Link to="/forgot-password">Forgot password?</Link>
+    <div className="flex min-h-screen items-center justify-center bg-background p-4">
+      <Card className="w-full max-w-md">
+        <CardHeader className="text-center">
+          <div className="flex justify-center mb-2">
+            <ZoneLogo size="xl" />
           </div>
-        </form>
+          <CardDescription>Sign in to your account</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form className="grid gap-4" onSubmit={handleSubmit(onSubmit)}>
+            <Input
+              label="Email"
+              type="email"
+              placeholder="you@example.com"
+              autoFocus
+              autoComplete="email"
+              error={errors.email?.message}
+              disabled={isSubmitting}
+              {...register('email')}
+            />
 
-        <div className="auth-footer">
-          <p>
-            Don't have an account? <Link to="/register">Create one</Link>
-          </p>
-        </div>
-      </div>
+            <Input
+              label="Password"
+              type="password"
+              placeholder="Enter your password"
+              autoComplete="current-password"
+              error={errors.password?.message}
+              disabled={isSubmitting}
+              {...register('password')}
+            />
+
+            {errors.root && (
+              <div className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive">
+                {errors.root.message}
+              </div>
+            )}
+
+            <Button type="submit" loading={isSubmitting} className="w-full mt-2">
+              {isSubmitting ? 'Signing in...' : 'Sign In'}
+            </Button>
+
+            <div className="text-center text-sm">
+              <Link to="/forgot-password" className="text-primary hover:underline">
+                Forgot password?
+              </Link>
+            </div>
+          </form>
+
+          <div className="mt-6 pt-6 border-t text-center text-sm text-muted-foreground">
+            Don't have an account?{' '}
+            <Link to="/register" className="text-primary font-medium hover:underline">
+              Create one
+            </Link>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

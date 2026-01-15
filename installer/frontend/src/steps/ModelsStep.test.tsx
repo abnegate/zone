@@ -82,13 +82,6 @@ const renderWithForm = (defaultValues: InstallerConfig) => {
 };
 
 describe('ModelsStep', () => {
-  it('renders step header', () => {
-    renderWithForm(createMockConfig());
-
-    expect(screen.getByText('AI Provider Configuration')).toBeInTheDocument();
-    expect(screen.getByText('Choose your AI provider and configure models')).toBeInTheDocument();
-  });
-
   it('renders AI provider select with current value', () => {
     renderWithForm(createMockConfig());
 

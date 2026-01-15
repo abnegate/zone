@@ -16,33 +16,31 @@ describe('StatusLog', () => {
     expect(screen.getByText('Installation complete!')).toBeInTheDocument();
   });
 
-  it('applies type class to lines', () => {
+  it('marks line types via data attributes', () => {
     const lines = [
       { message: 'Normal message' },
       { message: 'Success!', type: 'success' as const },
       { message: 'Error occurred', type: 'error' as const },
       { message: 'Retrying...', type: 'retry' as const },
+      { message: 'Working...', type: 'in-progress' as const },
     ];
 
     render(<StatusLog lines={lines} />);
 
-    const lineElements = document.querySelectorAll('.status-line');
-
-    expect(lineElements[0]).not.toHaveClass('success');
-    expect(lineElements[0]).not.toHaveClass('error');
-    expect(lineElements[0]).not.toHaveClass('retry');
-
-    expect(lineElements[1]).toHaveClass('success');
-    expect(lineElements[2]).toHaveClass('error');
-    expect(lineElements[3]).toHaveClass('retry');
+    const lineElements = document.querySelectorAll('[data-status-line]');
+    expect(lineElements[0]).toHaveAttribute('data-status', 'normal');
+    expect(lineElements[1]).toHaveAttribute('data-status', 'success');
+    expect(lineElements[2]).toHaveAttribute('data-status', 'error');
+    expect(lineElements[3]).toHaveAttribute('data-status', 'retry');
+    expect(lineElements[4]).toHaveAttribute('data-status', 'in-progress');
   });
 
   it('handles empty lines array', () => {
     render(<StatusLog lines={[]} />);
 
-    const container = document.querySelector('.status-log');
+    const container = screen.getByTestId('status-log');
     expect(container).toBeInTheDocument();
-    expect(container?.children.length).toBe(0);
+    expect(container.children.length).toBe(0);
   });
 
   it('auto-scrolls to bottom when lines change', () => {
@@ -50,8 +48,7 @@ describe('StatusLog', () => {
 
     const { rerender } = render(<StatusLog lines={lines} />);
 
-    const container = document.querySelector('.status-log') as HTMLDivElement;
-    // Mock scrollHeight and scrollTop
+    const container = screen.getByTestId('status-log') as HTMLDivElement;
     Object.defineProperty(container, 'scrollHeight', { value: 200 });
     Object.defineProperty(container, 'scrollTop', { value: 0, writable: true });
 
@@ -66,7 +63,7 @@ describe('StatusLog', () => {
 
     render(<StatusLog lines={lines} />);
 
-    const lineElements = document.querySelectorAll('.status-line');
+    const lineElements = document.querySelectorAll('[data-status-line]');
     expect(lineElements[0]).toHaveTextContent('First');
     expect(lineElements[1]).toHaveTextContent('Second');
     expect(lineElements[2]).toHaveTextContent('Third');
@@ -77,7 +74,7 @@ describe('StatusLog', () => {
 
     render(<StatusLog lines={lines} />);
 
-    const lineElement = document.querySelector('.status-line');
-    expect(lineElement).toHaveClass('normal');
+    const lineElement = document.querySelector('[data-status-line]');
+    expect(lineElement).toHaveAttribute('data-status', 'normal');
   });
 });

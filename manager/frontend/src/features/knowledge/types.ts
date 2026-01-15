@@ -15,6 +15,7 @@ export interface KnowledgeEntry {
 }
 
 export interface CreateKnowledgeRequest {
+  workspace_id: string;
   title: string;
   type: KnowledgeType;
   content: string;
@@ -39,6 +40,7 @@ export interface SearchResult {
 }
 
 export interface SearchOptions {
+  workspace_id: string;
   query: string;
   mode?: SearchMode;
   source_ids?: string[];
@@ -51,6 +53,7 @@ export interface SearchResponse {
 }
 
 export interface GatherContextRequest {
+  workspace_id: string;
   source_ids: string[];
 }
 

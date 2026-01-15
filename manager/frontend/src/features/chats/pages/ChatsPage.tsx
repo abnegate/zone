@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Modal, Select } from '../../../components';
+import { Button, Modal, Select, Tabs, TabsList, TabsTrigger, EmptyState } from '@zone/ui';
 import { useAuth } from '../../../features/auth';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { useChats, useChat, useChatSearch } from '../hooks';
 import type { ChatSearchResult } from '../types';
@@ -9,6 +10,7 @@ import './ChatsPage.css';
 
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
+  const { currentWorkspace } = useWorkspace();
   const { models } = useModels();
 
   const [showArchived, setShowArchived] = useState(false);
@@ -69,11 +71,15 @@ export default function ChatsPage() {
 
   const handleCreateChat = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isAuthenticated || !newChatModel) return;
+    if (!isAuthenticated || !newChatModel || !currentWorkspace) return;
 
     setOperationError(null);
     try {
-      const chat = await createChat({ model_name: newChatModel });
+      const chat = await createChat({
+        workspace_id: currentWorkspace.id,
+        title: `Chat with ${newChatModel}`,
+        model_name: newChatModel,
+      });
       setShowNewChatModal(false);
       setNewChatModel('');
       selectChat(chat.id);
@@ -161,10 +167,10 @@ export default function ChatsPage() {
   const loading = chatsLoading || chatLoading;
 
   return (
-    <div className="page page--full chats-page">
+    <div className="page chats-page">
       <div className="chats-sidebar">
         <div className="chats-sidebar-header">
-          <h2>Chats</h2>
+          <h1 className="text-2xl font-semibold text-foreground">Chats</h1>
           <Button variant="primary" size="sm" onClick={() => setShowNewChatModal(true)}>
             + New
           </Button>
@@ -202,22 +208,16 @@ export default function ChatsPage() {
         </form>
 
         {!showSearchResults && (
-          <div className="chats-filter">
-            <button
-              className={`filter-btn ${!showArchived ? 'active' : ''}`}
-              onClick={() => setShowArchived(false)}
-              type="button"
-            >
-              Active
-            </button>
-            <button
-              className={`filter-btn ${showArchived ? 'active' : ''}`}
-              onClick={() => setShowArchived(true)}
-              type="button"
-            >
-              Archived
-            </button>
-          </div>
+          <Tabs
+            value={showArchived ? 'archived' : 'active'}
+            onValueChange={(v) => setShowArchived(v === 'archived')}
+            className="chats-filter"
+          >
+            <TabsList className="w-full">
+              <TabsTrigger value="active" className="flex-1">Active</TabsTrigger>
+              <TabsTrigger value="archived" className="flex-1">Archived</TabsTrigger>
+            </TabsList>
+          </Tabs>
         )}
 
         {showSearchResults ? (
@@ -260,7 +260,23 @@ export default function ChatsPage() {
         ) : error ? (
           <div className="chats-error">{error}</div>
         ) : chats.length === 0 ? (
-          <div className="chats-empty">{showArchived ? 'No archived chats' : 'No chats yet'}</div>
+          <EmptyState
+            icon={
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                width="48"
+                height="48"
+              >
+                <path d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 4z" />
+              </svg>
+            }
+            title={showArchived ? 'No archived chats' : 'No chats yet'}
+            description={showArchived ? 'Your archived conversations will appear here' : 'Start a new conversation to get started'}
+            action={!showArchived ? <Button onClick={() => setShowNewChatModal(true)}>New Chat</Button> : undefined}
+          />
         ) : (
           <div className="chats-list">
             {chats.map((chat) => (
@@ -438,10 +454,8 @@ export default function ChatsPage() {
             label="Select Model"
             value={newChatModel}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setNewChatModel(e.target.value)}
-            options={[
-              { value: '', label: 'Choose a model...' },
-              ...models.map((model) => ({ value: model.name, label: model.name })),
-            ]}
+            placeholder="Choose a model..."
+            options={models.map((model) => ({ value: model.name, label: model.name }))}
           />
           <div className="modal-actions">
             <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>

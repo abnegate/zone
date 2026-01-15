@@ -4,6 +4,7 @@ import type { WizardStep } from '@zone/ui';
 import type { CreateProjectRequest, Project, ProjectStatus } from '../types';
 import type { Source } from '../../../types';
 import { client } from '../../../api/client';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { getErrors } from '../../../validation';
 import { CreateProjectRequestSchema } from '../schemas';
 
@@ -50,6 +51,7 @@ export function CreateProjectWizard({
   onCreated,
   createProject,
 }: CreateProjectWizardProps) {
+  const { currentWorkspace } = useWorkspace();
   const [currentStep, setCurrentStep] = useState(0);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -66,7 +68,7 @@ export function CreateProjectWizard({
     if (isOpen) {
       setSourcesLoading(true);
       client
-        .getSources()
+        .getSources('00000000-0000-0000-0000-000000000001')
         .then(setSources)
         .catch((err) => console.error('Failed to load sources:', err))
         .finally(() => setSourcesLoading(false));
@@ -86,8 +88,14 @@ export function CreateProjectWizard({
   }, [currentStep, name]);
 
   const handleComplete = useCallback(async () => {
+    if (!currentWorkspace) {
+      setError('No workspace selected');
+      return;
+    }
+
     const request: CreateProjectRequest = {
       name: name.trim(),
+      workspace_id: currentWorkspace.id,
       description: description.trim() || undefined,
       status,
       source_id: sourceId || undefined,
@@ -112,7 +120,7 @@ export function CreateProjectWizard({
     } finally {
       setLoading(false);
     }
-  }, [name, description, status, sourceId, createProject, onCreated]);
+  }, [currentWorkspace, name, description, status, sourceId, createProject, onCreated]);
 
   const handleClose = useCallback(() => {
     setCurrentStep(0);

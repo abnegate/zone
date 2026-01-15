@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useFormContext } from 'react-hook-form';
+import { Controller, useFormContext } from 'react-hook-form';
 import { Checkbox, Select } from '../components';
 import type { InstallerConfig } from '../types';
 
@@ -14,20 +14,17 @@ const localeOptions = [
 ];
 
 export function InterfaceStep() {
-  const { register, setValue, watch } = useFormContext<InstallerConfig>();
+  const { setValue, watch, control } = useFormContext<InstallerConfig>();
   const authEnabled = watch('WEBUI_AUTH') === 'true';
   const signupEnabled = watch('WEBUI_ENABLE_SIGNUP') === 'true';
-  return (
-    <div className="step-content">
-      <div className="step-header">
-        <h2>Interface Settings</h2>
-        <p>Configure the web interface</p>
-      </div>
 
-      <div className="form-field">
+  return (
+    <div className="space-y-6">
+      <div className="space-y-4">
         <Checkbox
           label="Enable built-in authentication"
           checked={authEnabled}
+          helpText="Uses Traefik basic auth by default"
           onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
             setValue('WEBUI_AUTH', e.target.checked ? 'true' : 'false', {
               shouldDirty: true,
@@ -35,12 +32,7 @@ export function InterfaceStep() {
             })
           }
         />
-        <p className="help-text" style={{ marginLeft: '2.25rem' }}>
-          Uses Traefik basic auth by default
-        </p>
-      </div>
 
-      <div className="form-field">
         <Checkbox
           label="Allow user signups"
           checked={signupEnabled}
@@ -51,13 +43,21 @@ export function InterfaceStep() {
             })
           }
         />
-      </div>
 
-      <Select
-        label="Default Language"
-        options={localeOptions}
-        {...register('WEBUI_DEFAULT_LOCALE')}
-      />
+        <Controller
+          control={control}
+          name="WEBUI_DEFAULT_LOCALE"
+          render={({ field }) => (
+            <Select
+              label="Default Language"
+              options={localeOptions}
+              value={field.value}
+              onValueChange={field.onChange}
+              name={field.name}
+            />
+          )}
+        />
+      </div>
     </div>
   );
 }

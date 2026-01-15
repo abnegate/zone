@@ -1,23 +1,42 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useForm, FormProvider } from 'react-hook-form';
-import { Button, InfoBox, Modal, StatusLog, StepPills, ZoneLogo } from '../components';
 import {
-  useInstallation,
-  useKeyboardNavigation,
-} from '../hooks';
-import {
-  AdvancedStep,
-  DomainStep,
-  InterfaceStep,
-  ModelsStep,
-  SearchStep,
-  SecurityStep,
-  VPNStep,
-} from '../steps';
+  AlertDescription,
+  AlertTitle,
+  Button,
+  Card,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  CardContent,
+  CardFooter,
+  InfoBox,
+  Separator,
+  Modal,
+  ProgressBar,
+  StatusLog,
+  StepPills,
+  ZoneLogo,
+} from '../components';
+import { useInstallation } from '../hooks/useInstallation';
+import { useKeyboardNavigation } from '../hooks/useKeyboardNavigation';
+import { DomainStep } from '../steps/DomainStep';
+import { SecurityStep } from '../steps/SecurityStep';
+import { ModelsStep } from '../steps/ModelsStep';
+import { InterfaceStep } from '../steps/InterfaceStep';
+import { SearchStep } from '../steps/SearchStep';
+import { VPNStep } from '../steps/VPNStep';
+import { AdvancedStep } from '../steps/AdvancedStep';
+import { InstallSummary } from '../components/InstallSummary';
 import type { InstallerConfig } from '../types';
 import { STEPS } from '../types';
-import { StepSchemas, type StepSchemaKey } from '../validation/schemas';
+import type { StepSchemaKey } from '../validation/schemas';
 import { loadConfig, saveConfig } from '../utils/crypto';
+
+const loadStepSchema = async (stepId: StepSchemaKey) => {
+  const module = await import('../validation/schemas');
+  return module.StepSchemas[stepId];
+};
 
 const DEFAULT_CONFIG: InstallerConfig = {
   // Domain
@@ -103,11 +122,22 @@ const DEFAULT_CONFIG: InstallerConfig = {
 export default function InstallerForm() {
   const [currentStep, setCurrentStep] = useState(1);
   const [showModal, setShowModal] = useState(false);
+  const [showCompletionPage, setShowCompletionPage] = useState(false);
+  const [completionSnapshot, setCompletionSnapshot] = useState<{
+    completedAt: Date;
+    summaryRows: Array<{ label: string; value: string }>;
+    webUiHost: string;
+  } | null>(null);
+  const [completedAt, setCompletedAt] = useState<Date | null>(null);
+  const [summaryRows, setSummaryRows] = useState<Array<{ label: string; value: string }>>([]);
 
   const methods = useForm<InstallerConfig>({
     defaultValues: DEFAULT_CONFIG,
     mode: 'onChange',
   });
+
+  const { isInstalling, progress, statusLines, isComplete, error, install, reset } =
+    useInstallation();
 
   // Persistence
   useEffect(() => {
@@ -125,28 +155,107 @@ export default function InstallerForm() {
     return () => subscription.unsubscribe();
   }, [methods]);
 
-  const { isInstalling, progress, statusLines, isComplete, error, install, reset } =
-    useInstallation();
-
-  const totalSteps = STEPS.length;
-
-  const handleNext = useCallback(() => {
-    const stepId = STEPS[currentStep - 1].id as StepSchemaKey;
-    const schema = StepSchemas[stepId];
-    const result = schema.safeParse(methods.getValues());
-
-    if (!result.success) {
-      result.error.issues.forEach((issue) => {
-        methods.setError(issue.path[0] as keyof InstallerConfig, { message: issue.message });
-      });
+  useEffect(() => {
+    if (!isComplete) {
+      setCompletedAt(null);
+      setSummaryRows([]);
       return;
     }
 
+    const summary = [
+      { label: 'Web UI Host', value: methods.getValues('DOMAIN_HOST_WEBUI') || '—' },
+      { label: 'AI Provider', value: methods.getValues('AI_PROVIDER') || '—' },
+      {
+        label: 'Web UI Auth',
+        value: methods.getValues('WEBUI_AUTH') === 'true' ? 'Enabled' : 'Disabled',
+      },
+      {
+        label: 'Web Search',
+        value: methods.getValues('SEARCH_ENABLE_WEB_SEARCH') === 'true' ? 'Enabled' : 'Disabled',
+      },
+      { label: 'VPN Provider', value: methods.getValues('VPN_SERVICE_PROVIDER') || '—' },
+    ];
+    const completionTime = completedAt ?? new Date();
+    const webUiHost = methods.getValues('DOMAIN_HOST_WEBUI') || '';
+
+    setCompletedAt(completionTime);
+    setSummaryRows(summary);
+    setCompletionSnapshot((prev) =>
+      prev ?? { completedAt: completionTime, summaryRows: summary, webUiHost }
+    );
+  }, [completedAt, isComplete, methods]);
+
+  const totalSteps = STEPS.length;
+  const stepMeta = STEPS[currentStep - 1] ?? STEPS[0];
+
+  const applyResolverErrors = useCallback(
+    (errors: Record<string, { message?: unknown } | undefined>) => {
+      for (const [field, error] of Object.entries(errors)) {
+        const message = typeof error?.message === 'string' ? error.message : 'Invalid value';
+        methods.setError(field as keyof InstallerConfig, { message });
+      }
+    },
+    [methods]
+  );
+
+  const validateStep = useCallback(
+    async (stepId: StepSchemaKey) => {
+      const schema = await loadStepSchema(stepId);
+      const { zodResolver } = await import('@hookform/resolvers/zod');
+      const resolver = zodResolver(schema);
+      const result = await resolver(methods.getValues(), undefined, {
+        criteriaMode: 'all',
+        shouldUseNativeValidation: false,
+        fields: {},
+        names: [],
+      });
+
+      if (Object.keys(result.errors).length > 0) {
+        applyResolverErrors(result.errors as Record<string, { message?: unknown } | undefined>);
+        return false;
+      }
+
+      return true;
+    },
+    [applyResolverErrors, methods]
+  );
+
+  const validateCurrentStep = useCallback(async () => {
     methods.clearErrors();
+    const stepId = STEPS[currentStep - 1].id as StepSchemaKey;
+    return validateStep(stepId);
+  }, [currentStep, methods, validateStep]);
+
+  const validateAllSteps = useCallback(async () => {
+    methods.clearErrors();
+    const stepIds = STEPS.map((step) => step.id as StepSchemaKey);
+    let firstInvalidIndex: number | null = null;
+
+    for (const [index, stepId] of stepIds.entries()) {
+      const isValid = await validateStep(stepId);
+      if (!isValid && firstInvalidIndex === null) {
+        firstInvalidIndex = index;
+      }
+    }
+
+    if (firstInvalidIndex !== null) {
+      setCurrentStep(firstInvalidIndex + 1);
+      return false;
+    }
+
+    return true;
+  }, [methods, setCurrentStep, validateStep]);
+
+  const handleNext = useCallback(async () => {
+    const isValid = await validateCurrentStep();
+    if (!isValid) {
+      return;
+    }
+
     if (currentStep < totalSteps) {
       setCurrentStep((prev) => prev + 1);
     }
-  }, [currentStep, totalSteps, methods]);
+  }, [currentStep, totalSteps, validateCurrentStep]);
 
   const handlePrevious = useCallback(() => {
     if (currentStep > 1) {
@@ -163,26 +272,51 @@ export default function InstallerForm() {
     [methods]
   );
 
-  const handleInstall = useCallback(() => {
-    const stepId = STEPS[currentStep - 1].id as StepSchemaKey;
-    const schema = StepSchemas[stepId];
-    const result = schema.safeParse(methods.getValues());
-
-    if (!result.success) {
-      result.error.issues.forEach((issue) => {
-        methods.setError(issue.path[0] as keyof InstallerConfig, { message: issue.message });
-      });
+  const handleInstall = useCallback(async () => {
+    const isValid = await validateAllSteps();
+    if (!isValid) {
       return;
     }
 
+    setShowCompletionPage(false);
+    setCompletionSnapshot(null);
     setShowModal(true);
     install(methods.getValues());
-  }, [currentStep, methods, install]);
+  }, [install, methods, validateAllSteps]);
 
   const handleCloseModal = useCallback(() => {
     setShowModal(false);
+    if (isComplete) {
+      setShowCompletionPage(true);
+      setCompletionSnapshot((prev) => {
+        if (prev) {
+          return prev;
+        }
+        const summary = [
+          { label: 'Web UI Host', value: methods.getValues('DOMAIN_HOST_WEBUI') || '—' },
+          { label: 'AI Provider', value: methods.getValues('AI_PROVIDER') || '—' },
+          {
+            label: 'Web UI Auth',
+            value: methods.getValues('WEBUI_AUTH') === 'true' ? 'Enabled' : 'Disabled',
+          },
+          {
+            label: 'Web Search',
+            value: methods.getValues('SEARCH_ENABLE_WEB_SEARCH') === 'true' ? 'Enabled' : 'Disabled',
+          },
+          { label: 'VPN Provider', value: methods.getValues('VPN_SERVICE_PROVIDER') || '—' },
+        ];
+        return {
+          completedAt: completedAt ?? new Date(),
+          summaryRows: summary,
+          webUiHost: methods.getValues('DOMAIN_HOST_WEBUI') || '',
+        };
+      });
+    }
     reset();
-  }, [reset]);
+    if (typeof window !== 'undefined') {
+      window.close();
+    }
+  }, [completedAt, isComplete, methods, reset]);
 
   useKeyboardNavigation({
     currentStep,
@@ -213,88 +347,167 @@ export default function InstallerForm() {
     }
   };
 
+  if (showCompletionPage && completionSnapshot) {
+    const webUiHost = completionSnapshot.webUiHost.trim();
+    const webUiUrl =
+      webUiHost.length === 0
+        ? ''
+        : webUiHost.startsWith('http://') || webUiHost.startsWith('https://')
+          ? webUiHost
+          : `http://${webUiHost}`;
+
+    return (
+      <div className="min-h-screen bg-muted/30 text-foreground">
+        <div className="mx-auto w-full max-w-3xl px-4 py-8">
+          <Card>
+            <CardHeader className="space-y-2">
+              <ZoneLogo size="md" />
+              <CardTitle>Installation complete</CardTitle>
+              <CardDescription>
+                Zone is up and running. If this tab did not close automatically, you can close it
+                now.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <InfoBox variant="success">
+                <AlertTitle>Docker Compose stack started</AlertTitle>
+                <AlertDescription className="flex flex-wrap items-center gap-2">
+                  <span>Use</span>
+                  <code className="rounded-md bg-muted px-2 py-1 text-xs">
+                    docker compose logs -f
+                  </code>
+                  <span>to monitor.</span>
+                </AlertDescription>
+              </InfoBox>
+
+              {webUiUrl && (
+                <InfoBox variant="info">
+                  <AlertTitle>Open Web UI</AlertTitle>
+                  <AlertDescription>
+                    <a className="underline" href={webUiUrl} target="_blank" rel="noreferrer">
+                      {webUiUrl}
+                    </a>
+                  </AlertDescription>
+                </InfoBox>
+              )}
+
+              {completionSnapshot.summaryRows.length > 0 && (
+                <InstallSummary
+                  rows={completionSnapshot.summaryRows}
+                  completedAt={completionSnapshot.completedAt}
+                />
+              )}
+            </CardContent>
+            <CardFooter className="justify-between gap-3">
+              <Button variant="secondary" onClick={() => setShowCompletionPage(false)}>
+                Back to configuration
+              </Button>
+              <Button onClick={() => window.close()}>Close tab</Button>
+            </CardFooter>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="installer-layout">
-      <aside className="installer-sidebar">
-        <header className="sidebar-header">
-          <ZoneLogo size="lg" />
-          <p>Configuration</p>
-        </header>
-        <StepPills currentStep={currentStep} onStepClick={handleStepClick} />
-      </aside>
+    <div className="min-h-screen bg-muted/30 text-foreground">
+      <div className="mx-auto w-full max-w-4xl px-4 py-6">
+        <div className="grid items-start gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+          <aside className="lg:sticky lg:top-6" data-testid="installer-sidebar">
+            <Card>
+              <CardHeader className="pb-3">
+                <ZoneLogo size="md" />
+                <p className="font-display text-sm font-semibold text-muted-foreground">
+                  Configuration
+                </p>
+              </CardHeader>
+              <Separator />
+              <CardContent className="pt-4">
+                <StepPills currentStep={currentStep} onStepClick={handleStepClick} />
+              </CardContent>
+            </Card>
+          </aside>
 
-      <main className="installer-main">
-        <FormProvider {...methods}>
-            <div className="card">
-            {renderStep()}
+          <main className="min-w-0" data-testid="installer-main">
+            <FormProvider {...methods}>
+              <Card className="w-full" data-testid="installer-card">
+                <CardHeader className="border-b">
+                  <CardTitle>{stepMeta.title}</CardTitle>
+                  <CardDescription>{stepMeta.description}</CardDescription>
+                  <div className="pt-4">
+                    <ProgressBar
+                      value={currentStep}
+                      max={totalSteps}
+                      showPercentage={false}
+                      label={`Step ${currentStep} of ${totalSteps}`}
+                    />
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-6 pt-6">
+                  {renderStep()}
+                </CardContent>
 
-            <div className="nav-buttons">
-                <Button variant="secondary" onClick={handlePrevious} disabled={currentStep === 1}>
-                Previous
-                </Button>
+                <CardFooter className="justify-between border-t px-6 py-4">
+                  <Button variant="secondary" onClick={handlePrevious} disabled={currentStep === 1}>
+                    Previous
+                  </Button>
 
-                {currentStep < totalSteps ? (
-                <Button variant="primary" onClick={handleNext}>
-                    Next
-                </Button>
-                ) : (
-                <Button variant="primary" onClick={handleInstall}>
-                    Install
-                </Button>
-                )}
-            </div>
-            </div>
-        </FormProvider>
-      </main>
+                  {currentStep < totalSteps ? (
+                    <Button onClick={handleNext}>Next</Button>
+                  ) : (
+                    <Button onClick={handleInstall}>Install</Button>
+                  )}
+                </CardFooter>
+              </Card>
+            </FormProvider>
+          </main>
+        </div>
+      </div>
 
       <Modal
         isOpen={showModal}
         onClose={isComplete || error ? handleCloseModal : undefined}
-        title={isInstalling ? 'Installing Zone...' : 'Installing Zone'}
+        title={isComplete ? 'Installation complete' : isInstalling ? 'Installing Zone...' : 'Installing Zone'}
+        size="xl"
+        className="max-h-[90vh] w-[90vw] max-w-[900px] overflow-y-auto"
       >
-        <StatusLog lines={statusLines} />
+        <div className="space-y-4">
+          <StatusLog lines={statusLines} />
+          <ProgressBar value={progress} showPercentage={false} />
 
-        <div className="modal-progress">
-          <div className="progress-bar-track">
-            <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
-          </div>
-        </div>
+          {isComplete && (
+            <InfoBox variant="success">
+              <AlertTitle>Installation Complete</AlertTitle>
+              <AlertDescription className="flex flex-wrap items-center gap-2">
+                <span>Docker Compose stack started.</span>
+                <span>Use</span>
+                <code className="rounded-md bg-muted px-2 py-1 text-xs">
+                  docker compose logs -f
+                </code>
+                <span>to monitor.</span>
+                <span>The installer will shut down automatically.</span>
+              </AlertDescription>
+            </InfoBox>
+          )}
 
-        {isComplete && (
-          <InfoBox variant="success">
-            <strong>Installation Complete</strong>
-            <p style={{ marginTop: 'var(--space-sm)', fontSize: '0.875rem' }}>
-              Run{' '}
-              <code
-                style={{
-                  background: 'var(--bg-base)',
-                  padding: '0.25rem 0.5rem',
-                  borderRadius: '0.25rem',
-                }}
-              >
-                make up
-              </code>{' '}
-              to start the stack.
-            </p>
-          </InfoBox>
-        )}
+          {isComplete && completedAt && summaryRows.length > 0 && (
+            <InstallSummary rows={summaryRows} completedAt={completedAt} />
+          )}
 
-        {error && (
-          <InfoBox variant="warning">
-            <strong>Installation Failed</strong>
-            <p className="font-mono" style={{ marginTop: 'var(--space-sm)', fontSize: '0.875rem' }}>
-              {error}
-            </p>
-          </InfoBox>
-        )}
+          {error && (
+            <InfoBox variant="warning">
+              <AlertTitle>Installation Failed</AlertTitle>
+              <AlertDescription className="font-mono text-xs">{error}</AlertDescription>
+            </InfoBox>
+          )}
 
-        {(isComplete || error) && (
-          <div className="modal-buttons">
-            <Button variant="primary" onClick={handleCloseModal} className="w-full">
+          {(isComplete || error) && (
+            <Button onClick={handleCloseModal} className="w-full">
               Close
             </Button>
-          </div>
-        )}
+          )}
+        </div>
       </Modal>
     </div>
   );

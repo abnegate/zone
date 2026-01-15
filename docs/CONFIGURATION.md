@@ -250,10 +250,10 @@ For production, regenerate secrets for security.
 - **Note**: Used by both ollama and ollama-init services
 
 ### `DOCKER_VERSION_POSTGRES`
-- **Default**: `16-alpine`
+- **Default**: `pg16`
 - **Description**: PostgreSQL database version for LiteLLM
-- **Example**: `16-alpine`, `15-alpine`, `14-alpine`
-- **Note**: Alpine variant for smaller image size
+- **Example**: `pg16`, `pg15`, `pg14`
+- **Note**: Uses pgvector tags (e.g., `pg16`)
 
 ### `DOCKER_VERSION_LITELLM`
 - **Default**: `main-stable`

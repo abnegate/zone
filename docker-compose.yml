@@ -232,7 +232,7 @@ services:
       - SECURITY_MANAGER_API_KEY=${SECURITY_MANAGER_API_KEY}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${MANAGER_POSTGRES_DB:-manager}
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENCODED}@postgres:5432/${MANAGER_POSTGRES_DB:-manager}
       - REDIS_URL=redis://valkey:6379
       - POSTGRES_HOST=postgres
       - POSTGRES_DB=${MANAGER_POSTGRES_DB:-manager}
@@ -569,12 +569,18 @@ services:
       dockerfile: installer/Dockerfile
     container_name: zone-installer
     restart: "no"
+    user: root
     profiles:
       - installer
     volumes:
+      - .:/project:ro
+      - ${PWD:-.}:${PWD:-.}:ro
       - ./.env.example:/project/.env.example:ro
       - ./.env:/project/.env
       - ./auth:/project/auth
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - ZONE_HOST_PROJECT_DIR=${PWD:-.}
     working_dir: /project
     ports:
       - "127.0.0.1:8000:8000"

@@ -40,9 +40,12 @@ class ProjectsApi {
   // Projects
   // =============================================================================
 
-  async getProjects(status?: string): Promise<Project[]> {
-    const params = status ? `?status=${encodeURIComponent(status)}` : '';
-    const response = await fetch(`${API_BASE}/api/projects${params}`, {
+  async getProjects(workspaceId: string, status?: string): Promise<Project[]> {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (status) {
+      params.set('status', status);
+    }
+    const response = await fetch(`${API_BASE}/api/projects?${params}`, {
       headers: this.getHeaders(),
     });
     if (!response.ok) {

@@ -1,6 +1,14 @@
 import type React from 'react';
-import { useFormContext } from 'react-hook-form';
-import { Checkbox, InfoBox, Input, Select } from '../components';
+import { Controller, useFormContext } from 'react-hook-form';
+import {
+  AlertDescription,
+  AlertTitle,
+  Checkbox,
+  InfoBox,
+  Input,
+  SectionHeader,
+  Select,
+} from '../components';
 import type { AiProvider, InstallerConfig } from '../types';
 
 const providerOptions: { value: AiProvider; label: string }[] = [
@@ -95,6 +103,7 @@ export function ModelsStep() {
     register,
     setValue,
     watch,
+    control,
     formState: { errors },
   } = useFormContext<InstallerConfig>();
   const provider = (watch('AI_PROVIDER') ?? 'self_hosted') as AiProvider;
@@ -103,23 +112,25 @@ export function ModelsStep() {
   const hasEmbeddingModels = providerModels.embedding.length > 0;
 
   return (
-    <div className="step-content">
-      <div className="step-header">
-        <h2>AI Provider Configuration</h2>
-        <p>Choose your AI provider and configure models</p>
-      </div>
-
-      <Select
-        label="AI Provider"
-        options={providerOptions}
-        helpText="Select your AI provider. Self-hosted uses local Ollama models."
-        {...register('AI_PROVIDER')}
+    <div className="space-y-6">
+      <Controller
+        control={control}
+        name="AI_PROVIDER"
+        render={({ field }) => (
+          <Select
+            label="AI Provider"
+            options={providerOptions}
+            helpText="Select your AI provider. Self-hosted uses local Ollama models."
+            value={field.value}
+            onValueChange={field.onChange}
+            name={field.name}
+          />
+        )}
       />
 
-      {/* Self-hosted (Ollama via LiteLLM) settings */}
       {provider === 'self_hosted' && (
-        <>
-          <h3 className="section-header">LiteLLM Configuration</h3>
+        <div className="space-y-4">
+          <SectionHeader title="LiteLLM Configuration" />
           <Input
             label="LiteLLM Host"
             type="text"
@@ -135,13 +146,12 @@ export function ModelsStep() {
             error={errors.AI_LITELLM_KEY?.message}
             {...register('AI_LITELLM_KEY')}
           />
-        </>
+        </div>
       )}
 
-      {/* OpenAI settings */}
       {provider === 'openai' && (
-        <>
-          <h3 className="section-header">OpenAI Configuration</h3>
+        <div className="space-y-4">
+          <SectionHeader title="OpenAI Configuration" />
           <Input
             label="OpenAI API Key"
             type="password"
@@ -158,13 +168,12 @@ export function ModelsStep() {
             error={errors.AI_OPENAI_BASE_URL?.message}
             {...register('AI_OPENAI_BASE_URL')}
           />
-        </>
+        </div>
       )}
 
-      {/* Anthropic settings */}
       {provider === 'anthropic' && (
-        <>
-          <h3 className="section-header">Anthropic Configuration</h3>
+        <div className="space-y-4">
+          <SectionHeader title="Anthropic Configuration" />
           <Input
             label="Anthropic API Key"
             type="password"
@@ -182,21 +191,31 @@ export function ModelsStep() {
             {...register('AI_ANTHROPIC_BASE_URL')}
           />
           <InfoBox variant="warning">
-            Anthropic does not provide embedding models. You will need to use a different provider
-            for embeddings (e.g., OpenAI or a self-hosted model).
+            <AlertTitle>Embeddings</AlertTitle>
+            <AlertDescription>
+              Anthropic does not provide embedding models. Use a different provider for embeddings
+              (e.g., OpenAI or a self-hosted model).
+            </AlertDescription>
           </InfoBox>
-        </>
+        </div>
       )}
 
-      {/* AWS Bedrock settings */}
       {provider === 'bedrock' && (
-        <>
-          <h3 className="section-header">AWS Bedrock Configuration</h3>
-          <Select
-            label="AWS Region"
-            options={awsRegions}
-            helpText="Select the AWS region for Bedrock"
-            {...register('AI_BEDROCK_REGION')}
+        <div className="space-y-4">
+          <SectionHeader title="AWS Bedrock Configuration" />
+          <Controller
+            control={control}
+            name="AI_BEDROCK_REGION"
+            render={({ field }) => (
+              <Select
+                label="AWS Region"
+                options={awsRegions}
+                helpText="Select the AWS region for Bedrock"
+                value={field.value}
+                onValueChange={field.onChange}
+                name={field.name}
+              />
+            )}
           />
           <Checkbox
             label="Use IAM Role"
@@ -228,60 +247,89 @@ export function ModelsStep() {
               />
             </>
           )}
-        </>
+        </div>
       )}
 
-      <h3 className="section-header">Model Selection</h3>
-
-      <Select
-        label="Fast Model"
-        options={providerModels.fast}
-        helpText="For general queries and quick responses"
-        {...register('AI_MODEL_FAST')}
-      />
-
-      <Select
-        label="Reasoning Model"
-        options={providerModels.reasoning}
-        helpText="For complex analysis and detailed reasoning"
-        {...register('AI_MODEL_REASONING')}
-      />
-
-      {hasEmbeddingModels ? (
-        <Select
-          label="Embedding Model"
-          options={providerModels.embedding}
-          helpText="For semantic routing and search"
-          {...register('AI_MODEL_EMBEDDING')}
+      <div className="space-y-4">
+        <SectionHeader title="Model Selection" />
+        <Controller
+          control={control}
+          name="AI_MODEL_FAST"
+          render={({ field }) => (
+            <Select
+              label="Fast Model"
+              options={providerModels.fast}
+              helpText="For general queries and quick responses"
+              value={field.value}
+              onValueChange={field.onChange}
+              name={field.name}
+            />
+          )}
         />
-      ) : (
-        <Input
-          label="Embedding Model (External)"
-          type="text"
-          placeholder="text-embedding-3-small"
-          helpText="Enter an embedding model from another provider (e.g., OpenAI)"
-          error={errors.AI_MODEL_EMBEDDING?.message}
-          {...register('AI_MODEL_EMBEDDING')}
+        <Controller
+          control={control}
+          name="AI_MODEL_REASONING"
+          render={({ field }) => (
+            <Select
+              label="Reasoning Model"
+              options={providerModels.reasoning}
+              helpText="For complex analysis and detailed reasoning"
+              value={field.value}
+              onValueChange={field.onChange}
+              name={field.name}
+            />
+          )}
         />
-      )}
+        {hasEmbeddingModels ? (
+          <Controller
+            control={control}
+            name="AI_MODEL_EMBEDDING"
+            render={({ field }) => (
+              <Select
+                label="Embedding Model"
+                options={providerModels.embedding}
+                helpText="For semantic routing and search"
+                value={field.value}
+                onValueChange={field.onChange}
+                name={field.name}
+              />
+            )}
+          />
+        ) : (
+          <Input
+            label="Embedding Model (External)"
+            type="text"
+            placeholder="text-embedding-3-small"
+            helpText="Enter an embedding model from another provider (e.g., OpenAI)"
+            error={errors.AI_MODEL_EMBEDDING?.message}
+            {...register('AI_MODEL_EMBEDDING')}
+          />
+        )}
+      </div>
 
       {provider === 'self_hosted' && (
         <InfoBox variant="info">
-          Models will download on first start. Total size varies (typically 10-50GB).
+          <AlertDescription>
+            Models will download on first start. Total size varies (typically 10-50GB).
+          </AlertDescription>
         </InfoBox>
       )}
 
       {(provider === 'openai' || provider === 'anthropic') && (
         <InfoBox variant="info">
-          API usage will be billed according to your provider's pricing. Monitor usage in your
-          provider's dashboard.
+          <AlertDescription>
+            API usage will be billed according to your provider's pricing. Monitor usage in your
+            provider's dashboard.
+          </AlertDescription>
         </InfoBox>
       )}
 
       {provider === 'bedrock' && (
         <InfoBox variant="info">
-          AWS Bedrock usage is billed through your AWS account. Ensure you have model access enabled
-          in the AWS console.
+          <AlertDescription>
+            AWS Bedrock usage is billed through your AWS account. Ensure you have model access
+            enabled in the AWS console.
+          </AlertDescription>
         </InfoBox>
       )}
     </div>

@@ -19,6 +19,7 @@ export interface Project {
 
 export interface CreateProjectRequest {
   name: string;
+  workspace_id: string;
   description?: string;
   status?: ProjectStatus;
   /** @deprecated Use source_id instead */

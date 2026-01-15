@@ -51,6 +51,27 @@ generate_secret() {
     openssl rand -base64 32
 }
 
+url_encode() {
+    local input="$1"
+    local output=""
+    local i
+    local c
+    local hex
+
+    for ((i = 0; i < ${#input}; i++)); do
+        c="${input:i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) output+="$c" ;;
+            *)
+                printf -v hex '%%%02X' "'$c"
+                output+="$hex"
+                ;;
+        esac
+    done
+
+    printf '%s' "$output"
+}
+
 # Check prerequisites
 check_prerequisites() {
     log_step "Checking prerequisites..."
@@ -109,6 +130,8 @@ setup_env_file() {
     local litellm_salt=$(generate_secret)
     local searxng_secret=$(generate_secret)
     local postgres_password=$(generate_secret)
+    local postgres_password_encoded
+    postgres_password_encoded=$(url_encode "${postgres_password}")
     local manager_api_key=$(generate_secret)
 
     # Use sed to replace empty values with new prefixed names
@@ -126,6 +149,10 @@ setup_env_file() {
     fi
     if ! sed -i.bak "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${postgres_password}|" "${ENV_FILE}"; then
         log_error "Failed to update POSTGRES_PASSWORD"
+        exit 1
+    fi
+    if ! sed -i.bak "s|^POSTGRES_PASSWORD_URLENCODED=.*|POSTGRES_PASSWORD_URLENCODED=${postgres_password_encoded}|" "${ENV_FILE}"; then
+        log_error "Failed to update POSTGRES_PASSWORD_URLENCODED"
         exit 1
     fi
     if ! sed -i.bak "s|^SECURITY_MANAGER_API_KEY=.*|SECURITY_MANAGER_API_KEY=${manager_api_key}|" "${ENV_FILE}"; then

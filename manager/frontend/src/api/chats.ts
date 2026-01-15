@@ -35,9 +35,12 @@ class ChatsApi {
     return headers;
   }
 
-  async getChats(archived?: boolean): Promise<Chat[]> {
-    const params = archived !== undefined ? `?archived=${archived}` : '';
-    const response = await fetch(`${API_BASE}/api/chats${params}`, {
+  async getChats(workspaceId: string, archived?: boolean): Promise<Chat[]> {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (archived !== undefined) {
+      params.set('archived', String(archived));
+    }
+    const response = await fetch(`${API_BASE}/api/chats?${params}`, {
       headers: this.getHeaders(),
     });
     if (!response.ok) {

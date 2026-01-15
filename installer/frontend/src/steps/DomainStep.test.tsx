@@ -129,15 +129,4 @@ describe('DomainStep', () => {
     // The component should render without errors initially
     expect(screen.getByLabelText(/Web Interface Hostname/i)).toBeInTheDocument();
   });
-
-  it('renders step title and description', () => {
-    render(
-      <TestWrapper defaultValues={createMockConfig()}>
-        <DomainStep />
-      </TestWrapper>
-    );
-
-    expect(screen.getByText('Domain Configuration')).toBeInTheDocument();
-    expect(screen.getByText('Configure hostnames for your services')).toBeInTheDocument();
-  });
 });

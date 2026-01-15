@@ -4,6 +4,16 @@ import { client } from '../../../api/client';
 import { useAuth } from '../../../features/auth';
 import { useProjects, useSyncConfigs } from '../hooks';
 import { CreateProjectWizard } from '../components';
+import {
+  Button,
+  Badge,
+  Card,
+  CardContent,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+  EmptyState,
+} from '@zone/ui';
 import type {
   CreateSyncConfigRequest,
   Project,
@@ -26,10 +36,10 @@ const statusLabels: Record<ProjectStatus, string> = {
   cancelled: 'Cancelled',
 };
 
-const statusColors: Record<ProjectStatus, string> = {
-  active: 'status-active',
-  on_hold: 'status-on-hold',
-  cancelled: 'status-cancelled',
+const statusVariants: Record<ProjectStatus, 'success' | 'warning' | 'destructive'> = {
+  active: 'success',
+  on_hold: 'warning',
+  cancelled: 'destructive',
 };
 
 export default function ProjectsPage() {
@@ -49,7 +59,7 @@ export default function ProjectsPage() {
   // Sources query
   const { data: sources = [] } = useQuery({
     queryKey: ['sources'],
-    queryFn: () => client.getSources(),
+    queryFn: () => client.getSources('00000000-0000-0000-0000-000000000001'),
     enabled: isAuthenticated
   });
 
@@ -225,64 +235,41 @@ export default function ProjectsPage() {
   };
 
   return (
-    <div className="page page--full projects-page">
-      <header className="page-header">
-        <div className="header-content">
-          <h1>Projects</h1>
-          <p className="subtitle">Organize work with GitHub integration</p>
+    <div className="page projects-page">
+      <header className="flex justify-between items-start mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold text-foreground">Projects</h1>
+          <p className="text-muted-foreground mt-1">Organize work with GitHub integration</p>
         </div>
-        <button
-          className="btn btn-primary"
+        <Button
           onClick={() => {
             resetForm();
             setShowCreateModal(true);
           }}
-          type="button"
         >
           + New Project
-        </button>
+        </Button>
       </header>
 
-      <div className="projects-filter">
-        <button
-          className={`filter-btn ${statusFilter === 'all' ? 'active' : ''}`}
-          onClick={() => setStatusFilter('all')}
-          type="button"
-        >
-          All
-        </button>
-        <button
-          className={`filter-btn ${statusFilter === 'active' ? 'active' : ''}`}
-          onClick={() => setStatusFilter('active')}
-          type="button"
-        >
-          Active
-        </button>
-        <button
-          className={`filter-btn ${statusFilter === 'on_hold' ? 'active' : ''}`}
-          onClick={() => setStatusFilter('on_hold')}
-          type="button"
-        >
-          On Hold
-        </button>
-        <button
-          className={`filter-btn ${statusFilter === 'cancelled' ? 'active' : ''}`}
-          onClick={() => setStatusFilter('cancelled')}
-          type="button"
-        >
-          Cancelled
-        </button>
-      </div>
+      <Tabs value={statusFilter} onValueChange={(v) => setStatusFilter(v as ProjectStatus | 'all')} className="mb-6">
+        <TabsList>
+          <TabsTrigger value="all">All</TabsTrigger>
+          <TabsTrigger value="active">Active</TabsTrigger>
+          <TabsTrigger value="on_hold">On Hold</TabsTrigger>
+          <TabsTrigger value="cancelled">Cancelled</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       {loading ? (
-        <div className="projects-loading">
-          <span className="spinner" /> Loading projects...
+        <div className="flex items-center justify-center py-12 text-muted-foreground">
+          <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent mr-2" />
+          Loading projects...
         </div>
       ) : error ? (
-        <div className="projects-error">{error}</div>
+        <div className="text-destructive py-12 text-center">{error}</div>
       ) : projects.length === 0 ? (
-        <div className="projects-empty">
-          <div className="empty-icon">
+        <EmptyState
+          icon={
             <svg
               viewBox="0 0 24 24"
               fill="none"
@@ -293,59 +280,63 @@ export default function ProjectsPage() {
             >
               <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
             </svg>
-          </div>
-          <h3>No projects yet</h3>
-          <p>Create your first project to get started</p>
-          <button
-            className="btn btn-primary"
-            onClick={() => {
-              resetForm();
-              setShowCreateModal(true);
-            }}
-            type="button"
-          >
-            Create Project
-          </button>
-        </div>
+          }
+          title="No projects yet"
+          description="Create your first project to get started"
+          action={
+            <Button
+              onClick={() => {
+                resetForm();
+                setShowCreateModal(true);
+              }}
+            >
+              Create Project
+            </Button>
+          }
+        />
       ) : (
-        <div className="projects-grid">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {projects.map((project) => (
-            <div
+            <Card
               key={project.id}
-              className={`project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
+              className={`cursor-pointer transition-all hover:border-primary ${selectedProject?.id === project.id ? 'border-primary bg-primary/5' : ''}`}
               onClick={() => setSelectedProject(project)}
               onKeyDown={(e) => e.key === 'Enter' && setSelectedProject(project)}
               role="button"
               tabIndex={0}
             >
-              <div className="project-card-header">
-                <h3 className="project-name">{project.name}</h3>
-                <span className={`status-badge ${statusColors[project.status]}`}>
-                  {statusLabels[project.status]}
-                </span>
-              </div>
-              {project.description && <p className="project-description">{project.description}</p>}
-              <div className="project-card-footer">
-                {(() => {
-                  const source = getProjectSource(project);
-                  return source ? (
-                    <a
-                      href={source.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="source-link"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <span className={`source-type-icon ${source.source_type}`} />
-                      {source.name}
-                    </a>
-                  ) : (
-                    <span className="no-source">No source</span>
-                  );
-                })()}
-                <span className="project-date">{formatDate(project.updated_at)}</span>
-              </div>
-            </div>
+              <CardContent className="p-4">
+                <div className="flex justify-between items-start mb-2">
+                  <h3 className="font-semibold text-foreground">{project.name}</h3>
+                  <Badge variant={statusVariants[project.status]}>
+                    {statusLabels[project.status]}
+                  </Badge>
+                </div>
+                {project.description && (
+                  <p className="text-sm text-muted-foreground line-clamp-2 mb-3">{project.description}</p>
+                )}
+                <div className="flex justify-between items-center text-xs text-muted-foreground">
+                  {(() => {
+                    const source = getProjectSource(project);
+                    return source ? (
+                      <a
+                        href={source.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 hover:text-primary"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <span className={`w-3 h-3 rounded-sm source-type-icon ${source.source_type}`} />
+                        {source.name}
+                      </a>
+                    ) : (
+                      <span className="opacity-50">No source</span>
+                    );
+                  })()}
+                  <span>{formatDate(project.updated_at)}</span>
+                </div>
+              </CardContent>
+            </Card>
           ))}
         </div>
       )}
@@ -355,10 +346,10 @@ export default function ProjectsPage() {
         <div className="project-details">
           <div className="details-header">
             <h2>{selectedProject.name}</h2>
-            <button
-              className="btn btn-icon"
+            <Button
+              variant="ghost"
+              size="icon"
               onClick={() => setSelectedProject(null)}
-              type="button"
               aria-label="Close"
             >
               <svg
@@ -371,15 +362,15 @@ export default function ProjectsPage() {
               >
                 <path d="M6 18L18 6M6 6l12 12" />
               </svg>
-            </button>
+            </Button>
           </div>
 
           <div className="details-content">
             <div className="detail-row">
               <span className="detail-label">Status</span>
-              <span className={`status-badge ${statusColors[selectedProject.status]}`}>
+              <Badge variant={statusVariants[selectedProject.status]}>
                 {statusLabels[selectedProject.status]}
-              </span>
+              </Badge>
             </div>
 
             {selectedProject.description && (
@@ -409,25 +400,21 @@ export default function ProjectsPage() {
                     >
                       {source.url}
                     </a>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={handleUnlinkSource}
-                      type="button"
-                    >
+                    <Button variant="secondary" size="sm" onClick={handleUnlinkSource}>
                       Unlink
-                    </button>
+                    </Button>
                   </div>
                 ) : (
-                  <button
-                    className="btn btn-secondary btn-sm"
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => {
                       setFormSourceId('');
                       setShowSourceModal(true);
                     }}
-                    type="button"
                   >
                     Link Source
-                  </button>
+                  </Button>
                 );
               })()}
             </div>
@@ -446,16 +433,16 @@ export default function ProjectsPage() {
             <div className="sync-config-section">
               <div className="sync-config-header">
                 <h3>External Sync</h3>
-                <button
-                  className="btn btn-secondary btn-sm"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => {
                     resetForm();
                     setShowSyncModal(true);
                   }}
-                  type="button"
                 >
                   + Add Sync
-                </button>
+                </Button>
               </div>
 
               {syncLoading ? (
@@ -490,13 +477,13 @@ export default function ProjectsPage() {
                           <span className="sync-external-link">{config.external_project_id}</span>
                         )}
                       </div>
-                      <button
-                        className="btn btn-danger btn-sm"
+                      <Button
+                        variant="destructive"
+                        size="sm"
                         onClick={() => handleDeleteSyncConfig(config.id)}
-                        type="button"
                       >
                         Remove
-                      </button>
+                      </Button>
                     </div>
                   ))}
                 </div>
@@ -505,20 +492,12 @@ export default function ProjectsPage() {
           </div>
 
           <div className="details-actions">
-            <button
-              className="btn btn-secondary"
-              onClick={() => openEditModal(selectedProject)}
-              type="button"
-            >
+            <Button variant="secondary" className="flex-1" onClick={() => openEditModal(selectedProject)}>
               Edit Project
-            </button>
-            <button
-              className="btn btn-danger"
-              onClick={() => setShowDeleteConfirm(true)}
-              type="button"
-            >
+            </Button>
+            <Button variant="destructive" className="flex-1" onClick={() => setShowDeleteConfirm(true)}>
               Delete
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -580,22 +559,12 @@ export default function ProjectsPage() {
                 </select>
               </div>
               <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setShowEditModal(false)}
-                >
+                <Button variant="secondary" type="button" onClick={() => setShowEditModal(false)}>
                   Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={submitting}>
-                  {submitting ? (
-                    <>
-                      <span className="spinner" /> Saving...
-                    </>
-                  ) : (
-                    'Save Changes'
-                  )}
-                </button>
+                </Button>
+                <Button type="submit" disabled={submitting} loading={submitting}>
+                  {submitting ? 'Saving...' : 'Save Changes'}
+                </Button>
               </div>
             </form>
           </div>
@@ -620,27 +589,18 @@ export default function ProjectsPage() {
               cannot be undone.
             </p>
             <div className="modal-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => setShowDeleteConfirm(false)}
-              >
+              <Button variant="secondary" type="button" onClick={() => setShowDeleteConfirm(false)}>
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="destructive"
                 type="button"
-                className="btn btn-danger"
                 onClick={handleDeleteProject}
                 disabled={submitting}
+                loading={submitting}
               >
-                {submitting ? (
-                  <>
-                    <span className="spinner" /> Deleting...
-                  </>
-                ) : (
-                  'Delete Project'
-                )}
-              </button>
+                {submitting ? 'Deleting...' : 'Delete Project'}
+              </Button>
             </div>
           </div>
         </div>
@@ -684,26 +644,12 @@ export default function ProjectsPage() {
                 )}
               </div>
               <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setShowSourceModal(false)}
-                >
+                <Button variant="secondary" type="button" onClick={() => setShowSourceModal(false)}>
                   Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="btn btn-primary"
-                  disabled={submitting || !formSourceId}
-                >
-                  {submitting ? (
-                    <>
-                      <span className="spinner" /> Linking...
-                    </>
-                  ) : (
-                    'Link Source'
-                  )}
-                </button>
+                </Button>
+                <Button type="submit" disabled={submitting || !formSourceId} loading={submitting}>
+                  {submitting ? 'Linking...' : 'Link Source'}
+                </Button>
               </div>
             </form>
           </div>
@@ -780,22 +726,12 @@ export default function ProjectsPage() {
                 </div>
               )}
               <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setShowSyncModal(false)}
-                >
+                <Button variant="secondary" type="button" onClick={() => setShowSyncModal(false)}>
                   Cancel
-                </button>
-                <button type="submit" className="btn btn-primary" disabled={submitting}>
-                  {submitting ? (
-                    <>
-                      <span className="spinner" /> Adding...
-                    </>
-                  ) : (
-                    'Add Sync Config'
-                  )}
-                </button>
+                </Button>
+                <Button type="submit" disabled={submitting} loading={submitting}>
+                  {submitting ? 'Adding...' : 'Add Sync Config'}
+                </Button>
               </div>
             </form>
           </div>

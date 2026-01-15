@@ -4,7 +4,7 @@ test.describe('Secret Generation', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     // Navigate to security step via step pill
-    await page.click('.stepper-item:nth-child(2) .stepper-button');
+    await page.click('[data-step="2"]');
   });
 
   test('generates secret on button click', async ({ page }) => {

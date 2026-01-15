@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { selectOption } from './helpers';
 
 test.describe('Interface Settings', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     // Navigate to Interface step (step 4)
-    await page.click('.stepper-item:nth-child(4) .stepper-button');
-    await expect(page.locator('h2')).toContainText('Interface Settings');
+    await page.click('[data-step="4"]');
+    await expect(page.getByRole('heading', { name: 'Interface Settings' })).toBeVisible();
   });
 
   test('displays authentication checkbox', async ({ page }) => {
@@ -44,11 +45,19 @@ test.describe('Interface Settings', () => {
   test('can select different languages', async ({ page }) => {
     const langSelect = page.getByLabel('Default Language');
 
-    const languages = ['en-US', 'en-GB', 'es-ES', 'fr-FR', 'de-DE', 'ja-JP', 'zh-CN'];
+    const languages = [
+      'English (US)',
+      'English (UK)',
+      'Spanish',
+      'French',
+      'German',
+      'Japanese',
+      'Chinese (Simplified)',
+    ];
 
     for (const lang of languages) {
-      await langSelect.selectOption(lang);
-      await expect(langSelect).toHaveValue(lang);
+      await selectOption(page, 'Default Language', lang);
+      await expect(langSelect).toHaveText(lang);
     }
   });
 

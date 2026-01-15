@@ -81,7 +81,7 @@ export function CreateTaskWizard({
 
   const handleComplete = useCallback(async () => {
     const request: CreateTaskRequest = {
-      project_id: projectId,
+      project_ids: projectId ? [projectId] : [],
       title: title.trim(),
       description: description.trim(),
       priority,
