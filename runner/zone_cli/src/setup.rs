@@ -217,15 +217,15 @@ impl Setup {
         content = replace_env_value(&content, "WEBUI_OPENAI_API_KEY", &litellm_key);
 
         // Update CORS origin based on domain
-        if let Some(domain) = get_env_value(&content, "DOMAIN_HOST_WEBUI") {
-            if !domain.is_empty() {
-                content = replace_env_value(
-                    &content,
-                    "WEBUI_CORS_ALLOW_ORIGIN",
-                    &format!("http://{}", domain),
-                );
-                self.log_info(&format!("Set WEBUI_CORS_ALLOW_ORIGIN to http://{}", domain));
-            }
+        if let Some(domain) = get_env_value(&content, "DOMAIN_HOST_WEBUI")
+            && !domain.is_empty()
+        {
+            content = replace_env_value(
+                &content,
+                "WEBUI_CORS_ALLOW_ORIGIN",
+                &format!("http://{}", domain),
+            );
+            self.log_info(&format!("Set WEBUI_CORS_ALLOW_ORIGIN to http://{}", domain));
         }
 
         std::fs::write(&self.env_file, content)?;
@@ -252,16 +252,16 @@ impl Setup {
         let content = std::fs::read_to_string(&self.env_file)?;
 
         // Check for insecure defaults
-        if let Some(val) = get_env_value(&content, "SECURITY_LITELLM_MASTER_KEY") {
-            if val.contains("dev-insecure") {
-                self.log_warn("SECURITY_LITELLM_MASTER_KEY is using default insecure value");
-            }
+        if let Some(val) = get_env_value(&content, "SECURITY_LITELLM_MASTER_KEY")
+            && val.contains("dev-insecure")
+        {
+            self.log_warn("SECURITY_LITELLM_MASTER_KEY is using default insecure value");
         }
 
-        if let Some(val) = get_env_value(&content, "SECURITY_SEARXNG_SECRET_KEY") {
-            if val.contains("dev-insecure") {
-                self.log_warn("SECURITY_SEARXNG_SECRET_KEY is using default insecure value");
-            }
+        if let Some(val) = get_env_value(&content, "SECURITY_SEARXNG_SECRET_KEY")
+            && val.contains("dev-insecure")
+        {
+            self.log_warn("SECURITY_SEARXNG_SECRET_KEY is using default insecure value");
         }
 
         // Check VPN configuration
@@ -433,13 +433,13 @@ fn get_env_value(content: &str, key: &str) -> Option<String> {
         if line.starts_with('#') || line.is_empty() {
             continue;
         }
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == key {
-                let v = v.trim();
-                // Remove quotes
-                let v = v.trim_matches('"').trim_matches('\'');
-                return Some(v.to_string());
-            }
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            let v = v.trim();
+            // Remove quotes
+            let v = v.trim_matches('"').trim_matches('\'');
+            return Some(v.to_string());
         }
     }
     None
@@ -452,14 +452,14 @@ fn replace_env_value(content: &str, key: &str, value: &str) -> String {
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with('#') && !trimmed.is_empty() {
-            if let Some((k, _)) = trimmed.split_once('=') {
-                if k.trim() == key {
-                    result.push_str(&format!("{}={}\n", key, value));
-                    found = true;
-                    continue;
-                }
-            }
+        if !trimmed.starts_with('#')
+            && !trimmed.is_empty()
+            && let Some((k, _)) = trimmed.split_once('=')
+            && k.trim() == key
+        {
+            result.push_str(&format!("{}={}\n", key, value));
+            found = true;
+            continue;
         }
         result.push_str(line);
         result.push('\n');

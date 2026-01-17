@@ -204,10 +204,10 @@ impl GitService {
                     if let Some(num) = part.split_whitespace().next() {
                         insertions = num.parse().unwrap_or(0);
                     }
-                } else if part.contains("deletion") {
-                    if let Some(num) = part.split_whitespace().next() {
-                        deletions = num.parse().unwrap_or(0);
-                    }
+                } else if part.contains("deletion")
+                    && let Some(num) = part.split_whitespace().next()
+                {
+                    deletions = num.parse().unwrap_or(0);
                 }
             }
         }

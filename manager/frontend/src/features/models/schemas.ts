@@ -17,29 +17,30 @@ export const InstalledModelSchema = z.object({
 });
 
 export const BrowseModelSchema = z.object({
-  id: z.string(),
   name: z.string(),
-  description: z.string(),
-  downloads: z.number(),
-  tags: z.array(z.string()),
-  install_name: z.string().nullable().optional(),
-  author: z.string().nullable().optional(),
-  likes: z.number().nullable().optional(),
-  last_modified: z.string().nullable().optional(),
-  url: z.string().nullable().optional(),
+  size: z.number().nullable().optional(),
+  digest: z.string().nullable().optional(),
+  modified_at: z.string().nullable().optional(),
+  details: z
+    .object({
+      format: z.string().nullable().optional(),
+      family: z.string().nullable().optional(),
+      parameter_size: z.string().nullable().optional(),
+      quantization_level: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
 });
 
-export const ModelSourceSchema = z.enum(['ollama', 'huggingface', 'modelscope']);
+export const ModelSourceSchema = z.enum(['ollama', 'huggingface', 'gpt4all', 'openrouter']);
 
 export const ModelsResponseSchema = z.object({
   models: z.array(InstalledModelSchema),
 });
 
 export const BrowseResponseSchema = z.object({
-  source: ModelSourceSchema,
   models: z.array(BrowseModelSchema),
-  total: z.number().nullable().optional(),
-  has_more: z.boolean(),
+  next_cursor: z.string().nullable(),
 });
 
 export const PullProgressSchema = z.object({

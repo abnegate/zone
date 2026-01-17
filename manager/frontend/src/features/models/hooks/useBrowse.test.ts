@@ -1,39 +1,49 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { modelsApi } from '../../../api/models';
-import { useBrowse } from './useBrowse';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Mock the modelsApi
-jest.mock('../../../api/models', () => ({
+const mockBrowseModels = mock();
+
+// State container for auth mock that can be updated per test
+let authState = {
+  isAuthenticated: true,
+};
+
+mock.module('../../../api/models', () => ({
   modelsApi: {
-    browseModels: jest.fn(),
+    browseModels: mockBrowseModels,
   },
 }));
 
-// Mock useAuth hook
-jest.mock('../../auth/context', () => ({
-  useAuth: jest.fn(() => ({
-    isAuthenticated: true,
-  })),
+mock.module('../../../features/auth', () => ({
+  useAuth: () => ({
+    isAuthenticated: authState.isAuthenticated,
+  }),
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-import { useAuth } from '../../auth';
+let useBrowse: typeof import('./useBrowse').useBrowse;
 
-const mockModelsApi = modelsApi as jest.Mocked<typeof modelsApi>;
-const mockUseAuth = useAuth as jest.Mock;
+beforeAll(async () => {
+  ({ useBrowse } = await import('./useBrowse'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useBrowse', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockUseAuth.mockReturnValue({
+    mockBrowseModels.mockReset();
+    // Reset auth state to default
+    authState = {
       isAuthenticated: true,
-    });
+    };
   });
 
   it('initializes with default state', () => {
     const { result } = renderHook(() => useBrowse());
 
-    expect(result.current.source).toBe('ollama');
+    expect(result.current.source).toBe('all');
     expect(result.current.query).toBe('');
     expect(result.current.models).toEqual([]);
     expect(result.current.loading).toBe(false);
@@ -42,52 +52,83 @@ describe('useBrowse', () => {
     expect(result.current.error).toBeNull();
   });
 
-  it('searches models when authenticated', async () => {
+  it('searches models from single source when authenticated', async () => {
     const mockModels = [
-      { id: 'model1', name: 'llama2', description: 'A model', downloads: 1000, tags: ['llm'] },
+      { name: 'llama2:7b', size: 3800000000, details: { family: 'llama', parameter_size: '7B' } },
     ];
-    mockModelsApi.browseModels.mockResolvedValueOnce({
-      source: 'ollama',
+
+    // Mock for changeSource call
+    mockBrowseModels.mockResolvedValueOnce({
       models: mockModels,
-      has_more: false,
+      next_cursor: null,
     });
 
     const { result } = renderHook(() => useBrowse());
 
+    // Change to single source - this triggers a search
     await act(async () => {
-      await result.current.search('llama');
+      result.current.changeSource('ollama');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(result.current.source).toBe('ollama');
+    });
+
+    // Models should have source field added
+    expect(result.current.models).toEqual(mockModels.map(m => ({ ...m, source: 'ollama' })));
+    expect(result.current.hasMore).toBe(false); // next_cursor is null
+    expect(mockBrowseModels).toHaveBeenCalledWith('ollama', '', null, 20);
+  });
+
+  it('searches all sources when source is all', async () => {
+    const ollamaModels = [{ name: 'llama:7b', size: 1000000000 }];
+    const huggingfaceModels = [{ name: 'hf/model', size: 2000000000 }];
+
+    // Mock responses for each source - all 4 sources will be called
+    mockBrowseModels
+      .mockResolvedValueOnce({ models: ollamaModels, next_cursor: null })
+      .mockResolvedValueOnce({ models: huggingfaceModels, next_cursor: null })
+      .mockResolvedValueOnce({ models: [], next_cursor: null })
+      .mockResolvedValueOnce({ models: [], next_cursor: null });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      await result.current.search('', 'all');
     });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(result.current.models).toEqual(mockModels);
-    expect(result.current.hasMore).toBe(false);
-    expect(mockModelsApi.browseModels).toHaveBeenCalledWith('ollama', 'llama', 0, 20);
+    // Should have interleaved results from both sources
+    expect(result.current.models.length).toBe(2);
+    // Models should have source field set
+    expect(result.current.models.some(m => m.source === 'ollama')).toBe(true);
+    expect(result.current.models.some(m => m.source === 'huggingface')).toBe(true);
   });
 
   it('does not search when not authenticated', async () => {
-    mockUseAuth.mockReturnValue({
-      isAuthenticated: false,
-    });
+    authState = { isAuthenticated: false };
 
     const { result } = renderHook(() => useBrowse());
 
     await act(async () => {
-      await result.current.search('llama');
+      await result.current.search('llama', 'ollama');
     });
 
-    expect(mockModelsApi.browseModels).not.toHaveBeenCalled();
+    expect(mockBrowseModels).not.toHaveBeenCalled();
   });
 
-  it('handles search error', async () => {
-    mockModelsApi.browseModels.mockRejectedValueOnce(new Error('Network error'));
+  it('handles search error for single source', async () => {
+    mockBrowseModels.mockRejectedValueOnce(new Error('Network error'));
 
     const { result } = renderHook(() => useBrowse());
 
+    // Change to single source first with a rejected promise
     await act(async () => {
-      await result.current.search('llama');
+      result.current.changeSource('ollama');
     });
 
     await waitFor(() => {
@@ -98,23 +139,32 @@ describe('useBrowse', () => {
     expect(result.current.models).toEqual([]);
   });
 
-  it('loads more models', async () => {
-    const firstPage = [{ id: '1', name: 'model1', description: '', downloads: 100, tags: [] }];
-    const secondPage = [{ id: '2', name: 'model2', description: '', downloads: 200, tags: [] }];
+  it('loads more models using cursor for single source', async () => {
+    // Create arrays of 20 items to trigger hasMore=true
+    const firstPage = Array.from({ length: 20 }, (_, i) => ({
+      name: `model-${i}`,
+      size: 1000000000,
+    }));
+    const secondPage = [{ name: 'model-extra', size: 1000000000 }];
 
-    mockModelsApi.browseModels
-      .mockResolvedValueOnce({ source: 'ollama', models: firstPage, has_more: true })
-      .mockResolvedValueOnce({ source: 'ollama', models: secondPage, has_more: false });
+    // First mock for changeSource call, second for loadMore
+    mockBrowseModels
+      .mockResolvedValueOnce({ models: firstPage, next_cursor: 'cursor-page-2' })
+      .mockResolvedValueOnce({ models: secondPage, next_cursor: null });
 
     const { result } = renderHook(() => useBrowse());
 
+    // Switch to single source - this triggers search
     await act(async () => {
-      await result.current.search();
+      result.current.changeSource('ollama');
     });
 
     await waitFor(() => {
-      expect(result.current.models).toHaveLength(1);
+      expect(result.current.loading).toBe(false);
+      expect(result.current.models).toHaveLength(20);
     });
+
+    expect(result.current.hasMore).toBe(true); // has cursor for next page
 
     await act(async () => {
       await result.current.loadMore();
@@ -124,57 +174,54 @@ describe('useBrowse', () => {
       expect(result.current.loadingMore).toBe(false);
     });
 
-    expect(result.current.models).toHaveLength(2);
-    expect(result.current.hasMore).toBe(false);
+    expect(result.current.models).toHaveLength(21);
+    expect(result.current.hasMore).toBe(false); // next_cursor is null
+    // Verify cursor was passed in loadMore call
+    expect(mockBrowseModels).toHaveBeenLastCalledWith('ollama', '', 'cursor-page-2', 20);
   });
 
   it('does not load more when no more results available', async () => {
-    mockModelsApi.browseModels.mockResolvedValueOnce({
-      source: 'ollama',
+    mockBrowseModels.mockResolvedValueOnce({
       models: [],
-      has_more: false,
+      next_cursor: null,
     });
 
     const { result } = renderHook(() => useBrowse());
 
+    // Change to single source
     await act(async () => {
-      await result.current.search();
+      result.current.changeSource('ollama');
     });
 
     await waitFor(() => {
+      expect(result.current.loading).toBe(false);
       expect(result.current.hasMore).toBe(false);
     });
 
     // Try to load more - should not call API
-    const callsBefore = mockModelsApi.browseModels.mock.calls.length;
+    const callsBefore = mockBrowseModels.mock.calls.length;
     await act(async () => {
       await result.current.loadMore();
     });
 
     // Should not have made additional calls
-    expect(mockModelsApi.browseModels).toHaveBeenCalledTimes(callsBefore);
+    expect(mockBrowseModels).toHaveBeenCalledTimes(callsBefore);
   });
 
   it('changes source and clears results', async () => {
-    mockModelsApi.browseModels
-      .mockResolvedValueOnce({
-        source: 'ollama',
-        models: [{ id: '1', name: 'ollama-model', description: '', downloads: 100, tags: [] }],
-        has_more: false,
-      })
-      .mockResolvedValueOnce({
-        source: 'huggingface',
-        models: [{ id: '2', name: 'hf-model', description: '', downloads: 200, tags: [] }],
-        has_more: false,
-      });
+    mockBrowseModels
+      .mockResolvedValueOnce({ models: [{ name: 'ollama-model', size: 1000000000 }], next_cursor: null })
+      .mockResolvedValueOnce({ models: [{ name: 'hf-model', size: 2000000000 }], next_cursor: null });
 
     const { result } = renderHook(() => useBrowse());
 
+    // Change to ollama source
     await act(async () => {
-      await result.current.search();
+      result.current.changeSource('ollama');
     });
 
     await waitFor(() => {
+      expect(result.current.loading).toBe(false);
       expect(result.current.models).toHaveLength(1);
     });
 
@@ -184,10 +231,11 @@ describe('useBrowse', () => {
 
     await waitFor(() => {
       expect(result.current.source).toBe('huggingface');
+      expect(result.current.loading).toBe(false);
     });
 
     expect(result.current.query).toBe('');
-    expect(mockModelsApi.browseModels).toHaveBeenLastCalledWith('huggingface', '', 0, 20);
+    expect(mockBrowseModels).toHaveBeenLastCalledWith('huggingface', '', null, 20);
   });
 
   it('sets query', () => {
@@ -200,19 +248,26 @@ describe('useBrowse', () => {
     expect(result.current.query).toBe('test query');
   });
 
-  it('handles loadMore error', async () => {
-    mockModelsApi.browseModels
-      .mockResolvedValueOnce({
-        source: 'ollama',
-        models: [{ id: '1', name: 'model', description: '', downloads: 100, tags: [] }],
-        has_more: true,
-      })
+  it('handles loadMore error for single source', async () => {
+    const firstPage = Array.from({ length: 20 }, (_, i) => ({
+      name: `model-${i}`,
+      size: 1000000000,
+    }));
+
+    mockBrowseModels
+      .mockResolvedValueOnce({ models: firstPage, next_cursor: 'next-page' })
       .mockRejectedValueOnce(new Error('Load more failed'));
 
     const { result } = renderHook(() => useBrowse());
 
+    // Change to single source
     await act(async () => {
-      await result.current.search();
+      result.current.changeSource('ollama');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(result.current.models).toHaveLength(20);
     });
 
     await act(async () => {
@@ -225,16 +280,17 @@ describe('useBrowse', () => {
 
     expect(result.current.error).toBe('Load more failed');
     // Original models should still be there
-    expect(result.current.models).toHaveLength(1);
+    expect(result.current.models).toHaveLength(20);
   });
 
   it('handles non-Error object in search error', async () => {
-    mockModelsApi.browseModels.mockRejectedValueOnce('String error');
+    mockBrowseModels.mockRejectedValueOnce('String error');
 
     const { result } = renderHook(() => useBrowse());
 
+    // Change to single source - triggers search with rejection
     await act(async () => {
-      await result.current.search('llama');
+      result.current.changeSource('ollama');
     });
 
     await waitFor(() => {
@@ -246,18 +302,25 @@ describe('useBrowse', () => {
   });
 
   it('handles non-Error object in loadMore error', async () => {
-    mockModelsApi.browseModels
-      .mockResolvedValueOnce({
-        source: 'ollama',
-        models: [{ id: '1', name: 'model', description: '', downloads: 100, tags: [] }],
-        has_more: true,
-      })
+    const firstPage = Array.from({ length: 20 }, (_, i) => ({
+      name: `model-${i}`,
+      size: 1000000000,
+    }));
+
+    mockBrowseModels
+      .mockResolvedValueOnce({ models: firstPage, next_cursor: 'next-page' })
       .mockRejectedValueOnce('String error');
 
     const { result } = renderHook(() => useBrowse());
 
+    // Change to single source
     await act(async () => {
-      await result.current.search();
+      result.current.changeSource('ollama');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(result.current.models).toHaveLength(20);
     });
 
     await act(async () => {
@@ -269,6 +332,6 @@ describe('useBrowse', () => {
     });
 
     expect(result.current.error).toBe('Failed to load more models');
-    expect(result.current.models).toHaveLength(1);
+    expect(result.current.models).toHaveLength(20);
   });
 });

@@ -1,6 +1,9 @@
 import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { ChatWithMessages, Message } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockGetChat = mock();
 const mockSendMessage = mock();
@@ -23,6 +26,17 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 describe('useChat', () => {
   const mockMessages: Message[] = [
@@ -53,13 +67,15 @@ describe('useChat', () => {
   };
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGetChat.mockReset();
+    mockSendMessage.mockReset();
+    mockDeleteMessage.mockReset();
   });
 
   it('should fetch chat on mount', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
-    const { result } = renderHook(() => useChat('1'));
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
 
@@ -76,7 +92,7 @@ describe('useChat', () => {
     const error = new Error('Failed to fetch chat');
     mockGetChat.mockRejectedValue(error);
 
-    const { result } = renderHook(() => useChat('1'));
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -97,7 +113,7 @@ describe('useChat', () => {
     mockGetChat.mockResolvedValue(mockChat);
     mockSendMessage.mockResolvedValue(newMessage);
 
-    const { result } = renderHook(() => useChat('1'));
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -117,7 +133,7 @@ describe('useChat', () => {
     mockGetChat.mockResolvedValue(mockChat);
     mockDeleteMessage.mockResolvedValue(undefined);
 
-    const { result } = renderHook(() => useChat('1'));
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -135,7 +151,7 @@ describe('useChat', () => {
   it('should refresh chat', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
-    const { result } = renderHook(() => useChat('1'));
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -168,7 +184,7 @@ describe('useChat', () => {
     mockGetChat.mockResolvedValue(mockChat);
     mockSendMessage.mockRejectedValue(error);
 
-    const { result } = renderHook(() => useChat('1'));
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -183,7 +199,7 @@ describe('useChat', () => {
   it('should not fetch when chatId is null', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
-    const { result } = renderHook(() => useChat(null));
+    const { result } = renderHook(() => useChat(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);

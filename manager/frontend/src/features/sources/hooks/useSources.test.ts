@@ -4,8 +4,11 @@
 
 import { renderHook, waitFor } from '@testing-library/react';
 import { act } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Source } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockGetSources = mock();
 const mockCreateSource = mock();
@@ -25,6 +28,22 @@ mock.module('../../../api/sources', () => ({
   },
 }));
 
+// Mock useWorkspace to provide a test workspace
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' },
+    currentOrganization: { id: 'test-org-id', name: 'Test Org' },
+    workspaces: [],
+    organizations: [],
+    loading: false,
+    error: null,
+    setCurrentWorkspace: mock(),
+    setCurrentOrganization: mock(),
+    refreshWorkspaces: mock(),
+    refreshOrganizations: mock(),
+  }),
+}));
+
 let useSources: typeof import('./useSources').useSources;
 
 beforeAll(async () => {
@@ -34,6 +53,17 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 describe('useSources', () => {
   const mockSources: Source[] = [
@@ -68,13 +98,18 @@ describe('useSources', () => {
   ];
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGetSources.mockReset();
+    mockCreateSource.mockReset();
+    mockUpdateSource.mockReset();
+    mockDeleteSource.mockReset();
+    mockVerifySource.mockReset();
+    mockGetSource.mockReset();
   });
 
   it('should fetch sources on mount', async () => {
     mockGetSources.mockResolvedValue(mockSources);
 
-    const { result } = renderHook(() => useSources());
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
     expect(result.current.sources).toEqual([]);
@@ -92,7 +127,7 @@ describe('useSources', () => {
     const errorMessage = 'Failed to fetch sources';
     mockGetSources.mockRejectedValue(new Error(errorMessage));
 
-    const { result } = renderHook(() => useSources());
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -105,25 +140,25 @@ describe('useSources', () => {
   it('should filter sources by type', async () => {
     mockGetSources.mockResolvedValue(mockSources);
 
-    const { result } = renderHook(() => useSources({ type: 'github' }));
+    const { result } = renderHook(() => useSources({ type: 'github' }), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(mockGetSources).toHaveBeenCalledWith('github', false);
+    expect(mockGetSources).toHaveBeenCalledWith('test-workspace-id', 'github', false);
   });
 
   it('should filter active sources only', async () => {
     mockGetSources.mockResolvedValue([mockSources[0]]);
 
-    const { result } = renderHook(() => useSources({ activeOnly: true }));
+    const { result } = renderHook(() => useSources({ activeOnly: true }), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(mockGetSources).toHaveBeenCalledWith(undefined, true);
+    expect(mockGetSources).toHaveBeenCalledWith('test-workspace-id', undefined, true);
   });
 
   it('should create source', async () => {
@@ -131,7 +166,7 @@ describe('useSources', () => {
     mockGetSources.mockResolvedValue(mockSources);
     mockCreateSource.mockResolvedValue(newSource);
 
-    const { result } = renderHook(() => useSources());
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -153,7 +188,7 @@ describe('useSources', () => {
     mockGetSources.mockResolvedValue(mockSources);
     mockUpdateSource.mockResolvedValue(updatedSource);
 
-    const { result } = renderHook(() => useSources());
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -170,7 +205,7 @@ describe('useSources', () => {
     mockGetSources.mockResolvedValue(mockSources);
     mockDeleteSource.mockResolvedValue();
 
-    const { result } = renderHook(() => useSources());
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -198,7 +233,7 @@ describe('useSources', () => {
     });
     mockGetSource.mockResolvedValue(verifiedSource);
 
-    const { result } = renderHook(() => useSources());
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -218,7 +253,7 @@ describe('useSources', () => {
   it('should refresh sources', async () => {
     mockGetSources.mockResolvedValue(mockSources);
 
-    const { result } = renderHook(() => useSources());
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);

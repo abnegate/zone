@@ -1,43 +1,60 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { modelsApi } from '../../../api/models';
-import { useModels } from './useModels';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Mock the modelsApi
-jest.mock('../../../api/models', () => ({
+const mockGetModels = mock();
+const mockDeleteModel = mock();
+const mockLogout = mock();
+
+// State container for auth mock that can be updated per test
+let authState = {
+  isAuthenticated: true,
+  isLoading: false,
+};
+
+mock.module('../../../api/models', () => ({
   modelsApi: {
-    getModels: jest.fn(),
-    deleteModel: jest.fn(),
+    getModels: mockGetModels,
+    deleteModel: mockDeleteModel,
   },
 }));
 
-// Mock useAuth hook
-jest.mock('../../auth/context', () => ({
-  useAuth: jest.fn(() => ({
-    isAuthenticated: true,
-    logout: jest.fn(),
-  })),
+// Mock the auth module - note this is the actual import path used by useModels
+mock.module('../../../features/auth', () => ({
+  useAuth: () => ({
+    isAuthenticated: authState.isAuthenticated,
+    isLoading: authState.isLoading,
+    logout: mockLogout,
+  }),
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-import { useAuth } from '../../auth';
+let useModels: typeof import('./useModels').useModels;
 
-const mockModelsApi = modelsApi as jest.Mocked<typeof modelsApi>;
-const mockUseAuth = useAuth as jest.Mock;
+beforeAll(async () => {
+  ({ useModels } = await import('./useModels'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('useModels', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockUseAuth.mockReturnValue({
+    mockGetModels.mockReset();
+    mockDeleteModel.mockReset();
+    mockLogout.mockReset();
+    // Reset auth state to default
+    authState = {
       isAuthenticated: true,
-      logout: jest.fn(),
-    });
+      isLoading: false,
+    };
   });
 
   it('fetches models on mount when authenticated', async () => {
     const mockModels = [
       { name: 'llama2', size: 3800000000, modified_at: '2024-01-01', digest: 'abc123' },
     ];
-    mockModelsApi.getModels.mockResolvedValueOnce({ models: mockModels });
+    mockGetModels.mockResolvedValueOnce({ models: mockModels });
 
     const { result } = renderHook(() => useModels());
 
@@ -52,22 +69,19 @@ describe('useModels', () => {
   });
 
   it('does not fetch when not authenticated', async () => {
-    mockUseAuth.mockReturnValue({
-      isAuthenticated: false,
-      logout: jest.fn(),
-    });
+    authState = { isAuthenticated: false, isLoading: false };
 
     const { result } = renderHook(() => useModels());
 
     // Wait a bit to ensure no fetch happens
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(mockModelsApi.getModels).not.toHaveBeenCalled();
+    expect(mockGetModels).not.toHaveBeenCalled();
     expect(result.current.loading).toBe(true); // Never transitions to false since no fetch
   });
 
   it('handles fetch error', async () => {
-    mockModelsApi.getModels.mockRejectedValueOnce(new Error('Network error'));
+    mockGetModels.mockRejectedValueOnce(new Error('Network error'));
 
     const { result } = renderHook(() => useModels());
 
@@ -80,7 +94,7 @@ describe('useModels', () => {
   });
 
   it('handles empty models response', async () => {
-    mockModelsApi.getModels.mockResolvedValueOnce({ models: [] });
+    mockGetModels.mockResolvedValueOnce({ models: [] });
 
     const { result } = renderHook(() => useModels());
 
@@ -92,7 +106,7 @@ describe('useModels', () => {
   });
 
   it('handles undefined models in response', async () => {
-    mockModelsApi.getModels.mockResolvedValueOnce({ models: [] });
+    mockGetModels.mockResolvedValueOnce({ models: [] });
 
     const { result } = renderHook(() => useModels());
 
@@ -108,8 +122,8 @@ describe('useModels', () => {
       { name: 'llama2', size: 3800000000, modified_at: '2024-01-01' },
       { name: 'mistral', size: 4000000000, modified_at: '2024-01-02' },
     ];
-    mockModelsApi.getModels.mockResolvedValueOnce({ models: mockModels });
-    mockModelsApi.deleteModel.mockResolvedValueOnce(undefined);
+    mockGetModels.mockResolvedValueOnce({ models: mockModels });
+    mockDeleteModel.mockResolvedValueOnce(undefined);
 
     const { result } = renderHook(() => useModels());
 
@@ -129,8 +143,8 @@ describe('useModels', () => {
 
   it('handles delete error', async () => {
     const mockModels = [{ name: 'llama2', size: 3800000000, modified_at: '2024-01-01' }];
-    mockModelsApi.getModels.mockResolvedValueOnce({ models: mockModels });
-    mockModelsApi.deleteModel.mockRejectedValueOnce(new Error('Delete failed'));
+    mockGetModels.mockResolvedValueOnce({ models: mockModels });
+    mockDeleteModel.mockRejectedValueOnce(new Error('Delete failed'));
 
     const { result } = renderHook(() => useModels());
 
@@ -149,7 +163,7 @@ describe('useModels', () => {
   });
 
   it('refreshes models', async () => {
-    mockModelsApi.getModels
+    mockGetModels
       .mockResolvedValueOnce({ models: [{ name: 'llama2', size: 1, modified_at: '' }] })
       .mockResolvedValueOnce({ models: [{ name: 'mistral', size: 2, modified_at: '' }] });
 
@@ -171,22 +185,17 @@ describe('useModels', () => {
   });
 
   it('calls logout on 401 error', async () => {
-    const logoutMock = jest.fn();
-    mockUseAuth.mockReturnValue({
-      isAuthenticated: true,
-      logout: logoutMock,
-    });
-    mockModelsApi.getModels.mockRejectedValueOnce(new Error('401 Unauthorized'));
+    mockGetModels.mockRejectedValueOnce(new Error('401 Unauthorized'));
 
     renderHook(() => useModels());
 
     await waitFor(() => {
-      expect(logoutMock).toHaveBeenCalled();
+      expect(mockLogout).toHaveBeenCalled();
     });
   });
 
   it('handles non-Error object in fetch error', async () => {
-    mockModelsApi.getModels.mockRejectedValueOnce('String error');
+    mockGetModels.mockRejectedValueOnce('String error');
 
     const { result } = renderHook(() => useModels());
 
@@ -202,8 +211,8 @@ describe('useModels', () => {
     const mockModels = [
       { name: 'llama2', size: 3800000000, modified_at: '2024-01-01', digest: 'abc123' },
     ];
-    mockModelsApi.getModels.mockResolvedValueOnce({ models: mockModels });
-    mockModelsApi.deleteModel.mockRejectedValueOnce('String error');
+    mockGetModels.mockResolvedValueOnce({ models: mockModels });
+    mockDeleteModel.mockRejectedValueOnce('String error');
 
     const { result } = renderHook(() => useModels());
 

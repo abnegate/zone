@@ -17,6 +17,8 @@ use crate::db::sessions;
 use crate::error::ServerError;
 use crate::state::AppState;
 
+use super::common::Timestamps;
+
 /// Session information response
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
@@ -27,7 +29,8 @@ pub struct SessionResponse {
     pub last_active_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    #[serde(flatten)]
+    pub timestamps: Timestamps,
     pub is_current: bool,
 }
 
@@ -43,7 +46,7 @@ impl SessionResponse {
             last_active_at: session.last_active_at,
             expires_at: session.expires_at,
             revoked_at: session.revoked_at,
-            created_at: session.created_at,
+            timestamps: Timestamps::from_utc(session.created_at, session.created_at),
             is_current,
         }
     }

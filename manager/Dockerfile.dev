@@ -1,0 +1,49 @@
+# Development Dockerfile for Rust hot reload with cargo-watch
+FROM rust:1.92-alpine3.23
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+# Install cargo-watch for hot reloading
+RUN cargo install cargo-watch --locked
+
+# Copy Cargo manifests for dependency caching
+COPY runner/Cargo.toml runner/Cargo.lock ./runner/
+COPY runner/tool_runner/Cargo.toml ./runner/tool_runner/
+COPY runner/zone_runner/Cargo.toml ./runner/zone_runner/
+COPY runner/zone_core/Cargo.toml ./runner/zone_core/
+COPY runner/zone_context/Cargo.toml ./runner/zone_context/
+COPY runner/zone_server/Cargo.toml ./runner/zone_server/
+COPY runner/zone_cli/Cargo.toml ./runner/zone_cli/
+COPY runner/zone_installer/Cargo.toml ./runner/zone_installer/
+
+# Create dummy source files for dependency compilation
+RUN mkdir -p runner/tool_runner/src runner/zone_runner/src runner/zone_core/src \
+    runner/zone_context/src runner/zone_server/src runner/zone_cli/src runner/zone_installer/src && \
+    echo "fn main() {}" > runner/tool_runner/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_runner/src/main.rs && \
+    echo "fn main() {}" > runner/zone_core/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_context/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_server/src/main.rs && \
+    echo "fn main() {}" > runner/zone_cli/src/main.rs && \
+    echo "fn main() {}" > runner/zone_installer/src/main.rs
+
+# Pre-compile dependencies (this layer will be cached)
+WORKDIR /app/runner
+ENV SQLX_OFFLINE=true
+RUN cargo build --package zone_server 2>/dev/null || true
+
+# Environment for development
+ENV RUST_BACKTRACE=1
+ENV RUST_LOG=zone_server=debug,zone_core=debug,zone_context=debug,tower_http=debug
+
+EXPOSE 8000
+
+# Use cargo-watch to rebuild and restart on file changes
+# --poll: use polling for reliable Docker volume watching
+# -w: watch specific directories
+# -x: execute cargo run
+# NOTE: Clean internal crates first since they were compiled with dummy sources
+CMD ["sh", "-c", "cargo clean -p zone_context -p zone_core -p zone_server 2>/dev/null; exec cargo watch --poll -w zone_server/src -w zone_core/src -w zone_context/src -x 'run --package zone_server'"]

@@ -51,14 +51,14 @@
 .btn-primary:hover:not(:disabled) {
   background: linear-gradient(180deg, var(--ui-accent-400) 0%, var(--ui-accent-500) 100%);
   box-shadow:
-    0 4px 12px rgba(6, 182, 212, 0.3),
+    0 4px 12px var(--ui-accent-glow),
     0 0 0 1px rgba(255, 255, 255, 0.15) inset,
     0 -1px 0 rgba(0, 0, 0, 0.15) inset;
 }
 
 .btn-primary:focus-visible {
   box-shadow:
-    0 4px 12px rgba(6, 182, 212, 0.3),
+    0 4px 12px var(--ui-accent-glow),
     0 0 0 2px var(--ui-bg-base),
     0 0 0 4px var(--ui-accent-500);
 }
@@ -165,7 +165,7 @@
 }
 
 .btn-accent-outline:hover:not(:disabled) {
-  background: rgba(6, 182, 212, 0.1);
+  background: var(--ui-accent-muted);
   box-shadow: 0 0 0 1px var(--ui-accent-400);
 }
 

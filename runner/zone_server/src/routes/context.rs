@@ -832,17 +832,17 @@ pub async fn create_knowledge(
     }
 
     // Validate content if provided
-    if let Some(ref content) = req.content {
-        if content.len() > MAX_CONTENT_LENGTH {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(format!(
-                    "Content must not exceed {} characters",
-                    MAX_CONTENT_LENGTH
-                ))),
-            )
-                .into_response();
-        }
+    if let Some(ref content) = req.content
+        && content.len() > MAX_CONTENT_LENGTH
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(format!(
+                "Content must not exceed {} characters",
+                MAX_CONTENT_LENGTH
+            ))),
+        )
+            .into_response();
     }
 
     // Validate URL if provided
@@ -1182,21 +1182,21 @@ fn extract_text_from_html(html: &str) -> String {
     ];
 
     for selector_str in &main_selectors {
-        if let Ok(selector) = Selector::parse(selector_str) {
-            if let Some(element) = document.select(&selector).next() {
-                let text = extract_text_from_element(&element);
-                if !text.trim().is_empty() {
-                    return clean_text(&text);
-                }
+        if let Ok(selector) = Selector::parse(selector_str)
+            && let Some(element) = document.select(&selector).next()
+        {
+            let text = extract_text_from_element(&element);
+            if !text.trim().is_empty() {
+                return clean_text(&text);
             }
         }
     }
 
     // Fallback: get body text
-    if let Ok(body_selector) = Selector::parse("body") {
-        if let Some(body) = document.select(&body_selector).next() {
-            return clean_text(&extract_text_from_element(&body));
-        }
+    if let Ok(body_selector) = Selector::parse("body")
+        && let Some(body) = document.select(&body_selector).next()
+    {
+        return clean_text(&extract_text_from_element(&body));
     }
 
     // Last resort: all text

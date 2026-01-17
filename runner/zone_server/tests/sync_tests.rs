@@ -1,5 +1,7 @@
 //! Integration tests for sync functionality
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -40,6 +42,7 @@ async fn setup_test_state() -> AppState {
         jwt_refresh_lifetime: 604800,
         litellm_host: "http://localhost:4000".to_string(),
         litellm_key: "test-key".to_string(),
+        ollama_host: "http://localhost:11434".to_string(),
         encryption_key: "12345678901234567890123456789012".to_string(),
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,
@@ -159,19 +162,23 @@ async fn test_sync_config_lifecycle() {
 async fn test_synced_item_lifecycle() {
     let state = setup_test_state().await;
 
+    // Setup test data (organization, workspace, user)
+    let (_org_id, workspace_id, _user_id) = common::setup_test_data(state.db()).await;
+
     // Create test project using db function
     let project = projects::create_project(
         state.db(),
         "Synced Item Test Project",
         Some("Test Description"),
-        None,
+        Some(workspace_id),
     )
     .await
     .expect("Failed to create project");
 
     let task = tasks::create_task(
         state.db(),
-        project.id,
+        workspace_id,
+        &[project.id],
         "Test Task",
         "Test Description",
         None,

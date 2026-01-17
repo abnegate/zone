@@ -18,9 +18,9 @@ const mockInstalledModels = [
 ];
 
 const mockBrowseModels = [
-  { id: 'llama3.2', name: 'llama3.2', description: 'Meta Llama 3.2', downloads: 1500000, tags: ['chat', 'general'] },
-  { id: 'mistral', name: 'mistral', description: 'Mistral AI 7B', downloads: 800000, tags: ['chat', 'code'] },
-  { id: 'codellama', name: 'codellama', description: 'Code Llama', downloads: 500000, tags: ['code'] },
+  { id: 'llama3.2', name: 'llama3.2', description: 'Meta Llama 3.2', downloads: 1500000, details: { family: 'llama', parameter_size: '3.2B' } },
+  { id: 'mistral', name: 'mistral', description: 'Mistral AI 7B', downloads: 800000, details: { family: 'mistral', parameter_size: '7B' } },
+  { id: 'codellama', name: 'codellama', description: 'Code Llama', downloads: 500000, details: { family: 'llama' } },
 ];
 
 // Setup API routes for models page
@@ -42,7 +42,7 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
           body: JSON.stringify({
             source: 'ollama',
             models: browseModels,
-            has_more: false,
+            next_cursor: null,
           }),
         });
       } else {
@@ -104,7 +104,9 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
 
 // Helper to switch to browse tab and wait for it to load
 async function switchToBrowseTab(page: Page) {
-  await page.getByRole('button', { name: 'Browse' }).click();
+  await page.getByRole('tab', { name: 'Browse' }).click();
+  // Click Ollama source tab for predictable single-source behavior in tests
+  await page.click('button[role="tab"]:has-text("Ollama")');
   // Wait for browse content to appear (either browse items or empty placeholder)
   // Use first() to avoid strict mode violation when multiple items exist
   await expect(page.locator('.browse-item, .empty-placeholder').first()).toBeVisible();
@@ -146,16 +148,18 @@ test.describe('Models Page', () => {
     await expect(page.locator('.browse-name').first()).toHaveText('llama3.2');
   });
 
-  test('shows download counts formatted', async ({ page }) => {
+  test('displays model source badge', async ({ page }) => {
     await switchToBrowseTab(page);
-    await expect(page.locator('.browse-downloads').first()).toContainText('1.5M downloads');
+    // Models show their source badge
+    await expect(page.locator('.browse-source').first()).toContainText('ollama');
   });
 
   test('displays model tags', async ({ page }) => {
     await switchToBrowseTab(page);
     const firstItem = page.locator('.browse-item').first();
+    // Tags come from model.details (family, parameter_size)
     await expect(firstItem.locator('.tag')).toHaveCount(2);
-    await expect(firstItem.locator('.tag').first()).toHaveText('chat');
+    await expect(firstItem.locator('.tag').first()).toHaveText('llama');
   });
 
   test('search filters browse results', async ({ page }) => {
@@ -177,14 +181,14 @@ test.describe('Models Page', () => {
             body: JSON.stringify({
               source: 'ollama',
               models: [mockBrowseModels[2]], // codellama
-              has_more: false,
+              next_cursor: null,
             }),
           });
         } else {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
-            body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, has_more: false }),
+            body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, next_cursor: null }),
           });
         }
       } else if (method === 'GET') {
@@ -232,14 +236,14 @@ test.describe('Models Page', () => {
                 author: 'TheBloke',
                 install_name: 'hf.co/TheBloke/Llama-2-7B-GGUF',
               }],
-              has_more: false,
+              next_cursor: null,
             }),
           });
         } else {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
-            body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, has_more: false }),
+            body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, next_cursor: null }),
           });
         }
       } else if (method === 'GET') {
@@ -254,8 +258,8 @@ test.describe('Models Page', () => {
     });
 
     // Click HuggingFace tab
-    await page.click('.source-tab:has-text("HuggingFace")');
-    await expect(page.locator('.source-tab:has-text("HuggingFace")')).toHaveClass(/active/);
+    await page.click('button[role="tab"]:has-text("HuggingFace")');
+    await expect(page.locator('button[role="tab"]:has-text("HuggingFace")')).toHaveAttribute('data-state', 'active');
     await expect(page.locator('.browse-name').first()).toHaveText('Llama-2-7B-GGUF');
   });
 
@@ -363,7 +367,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, has_more: false }),
+          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, next_cursor: null }),
         });
       } else {
         route.continue();
@@ -409,7 +413,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, has_more: false }),
+          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, next_cursor: null }),
         });
       } else {
         route.continue();
@@ -472,7 +476,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, has_more: false }),
+          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, next_cursor: null }),
         });
       } else {
         route.continue();
@@ -507,7 +511,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, has_more: false }),
+          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, next_cursor: null }),
         });
       } else {
         route.continue();
@@ -540,7 +544,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, has_more: false }),
+          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, next_cursor: null }),
         });
       } else {
         route.continue();
@@ -566,7 +570,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: [], has_more: false }),
+          body: JSON.stringify({ source: 'ollama', models: [], next_cursor: null }),
         });
       } else if (route.request().method() === 'GET') {
         route.fulfill({
@@ -601,7 +605,7 @@ test.describe('Models Page', () => {
           body: JSON.stringify({
             source: source || 'ollama',
             models: source === 'huggingface' ? [] : mockBrowseModels,
-            has_more: false,
+            next_cursor: null,
           }),
         });
       } else if (route.request().method() === 'GET') {
@@ -619,10 +623,10 @@ test.describe('Models Page', () => {
     await expect(page.locator('.browse-item')).toHaveCount(3);
 
     // Switch to HuggingFace
-    await page.click('.source-tab:has-text("HuggingFace")');
+    await page.click('button[role="tab"]:has-text("HuggingFace")');
 
     // Should show HuggingFace tab as active
-    await expect(page.locator('.source-tab:has-text("HuggingFace")')).toHaveClass(/active/);
+    await expect(page.locator('button[role="tab"]:has-text("HuggingFace")')).toHaveAttribute('data-state', 'active');
   });
 
   test('shows browse model details from click', async ({ page }) => {
@@ -672,7 +676,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, has_more: false }),
+          body: JSON.stringify({ source: 'ollama', models: mockBrowseModels, next_cursor: null }),
         });
       } else {
         route.continue();
@@ -704,7 +708,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: modelsWithDownloads, has_more: false }),
+          body: JSON.stringify({ source: 'ollama', models: modelsWithDownloads, next_cursor: null }),
         });
       } else if (route.request().method() === 'GET') {
         route.fulfill({

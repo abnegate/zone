@@ -157,7 +157,7 @@
 
 .nav-item.active {
   color: var(--ui-accent-500);
-  background: rgba(6, 182, 212, 0.08);
+  background: var(--ui-accent-muted);
 }
 
 /* Active indicator bar */
@@ -277,7 +277,7 @@
 
 .theme-toggle:hover {
   color: var(--ui-accent-500);
-  background: rgba(6, 182, 212, 0.08);
+  background: var(--ui-accent-muted);
   border-color: var(--ui-accent-500);
 }
 

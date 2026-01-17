@@ -1,30 +1,52 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { tasksApi } from '../../../api/tasks';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Task } from '../types';
-import { useTasks } from './useTasks';
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
-import { WorkspaceProvider } from '../../../shared/context/WorkspaceContext';
 
-jest.mock('../../../api/tasks', () => ({
+const mockGetTasks = mock();
+const mockCreateTask = mock();
+const mockUpdateTask = mock();
+const mockDeleteTask = mock();
+
+mock.module('../../../api/tasks', () => ({
   tasksApi: {
-    getTasks: jest.fn(),
-    createTask: jest.fn(),
-    updateTask: jest.fn(),
-    deleteTask: jest.fn(),
+    getTasks: mockGetTasks,
+    createTask: mockCreateTask,
+    updateTask: mockUpdateTask,
+    deleteTask: mockDeleteTask,
   },
 }));
 
-const mockTasksApi = tasksApi as jest.Mocked<typeof tasksApi>;
-
+// Mock the workspace context
 const mockWorkspace = {
   id: 'workspace-1',
   name: 'Test Workspace',
   organization_id: 'org-1',
+  slug: 'test-workspace',
+  description: null,
+  is_active: true,
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
 };
+
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: mockWorkspace,
+    loading: false,
+  }),
+}));
+
+let useTasks: typeof import('./useTasks').useTasks;
+
+beforeAll(async () => {
+  ({ useTasks } = await import('./useTasks'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const createWrapper = () => {
   const queryClient = new QueryClient({
@@ -35,11 +57,7 @@ const createWrapper = () => {
   });
 
   return ({ children }: { children: ReactNode }) =>
-    createElement(
-      QueryClientProvider,
-      { client: queryClient },
-      createElement(WorkspaceProvider, { initialWorkspace: mockWorkspace }, children)
-    );
+    createElement(QueryClientProvider, { client: queryClient }, children);
 };
 
 const mockTask: Task = {
@@ -71,12 +89,15 @@ const mockTask: Task = {
 
 describe('useTasks', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockTasksApi.getTasks.mockResolvedValue([]);
+    mockGetTasks.mockReset();
+    mockCreateTask.mockReset();
+    mockUpdateTask.mockReset();
+    mockDeleteTask.mockReset();
+    mockGetTasks.mockResolvedValue([]);
   });
 
   it('loads tasks on mount', async () => {
-    mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
+    mockGetTasks.mockResolvedValueOnce([mockTask]);
     const wrapper = createWrapper();
 
     const { result } = renderHook(() => useTasks(), { wrapper });
@@ -89,11 +110,11 @@ describe('useTasks', () => {
 
     expect(result.current.tasks).toEqual([mockTask]);
     expect(result.current.error).toBeNull();
-    expect(mockTasksApi.getTasks).toHaveBeenCalledWith('workspace-1', undefined, undefined);
+    expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', undefined, undefined);
   });
 
   it('loads tasks with filters', async () => {
-    mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
+    mockGetTasks.mockResolvedValueOnce([mockTask]);
     const wrapper = createWrapper();
 
     const { result } = renderHook(() => useTasks('proj-1', 'created'), { wrapper });
@@ -102,11 +123,11 @@ describe('useTasks', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(mockTasksApi.getTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', 'created');
+    expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', 'created');
   });
 
   it('handles load error', async () => {
-    mockTasksApi.getTasks.mockRejectedValueOnce(new Error('Network error'));
+    mockGetTasks.mockRejectedValueOnce(new Error('Network error'));
     const wrapper = createWrapper();
 
     const { result } = renderHook(() => useTasks(), { wrapper });
@@ -120,10 +141,10 @@ describe('useTasks', () => {
   });
 
   it('creates a task', async () => {
-    mockTasksApi.getTasks.mockResolvedValueOnce([]);
+    mockGetTasks.mockResolvedValueOnce([]);
     const newTask = { ...mockTask, id: 'task-2', title: 'New Task' };
-    mockTasksApi.getTasks.mockResolvedValueOnce([newTask]);
-    mockTasksApi.createTask.mockResolvedValueOnce(newTask);
+    mockGetTasks.mockResolvedValueOnce([newTask]);
+    mockCreateTask.mockResolvedValueOnce(newTask);
     const wrapper = createWrapper();
 
     const { result } = renderHook(() => useTasks(), { wrapper });
@@ -142,17 +163,17 @@ describe('useTasks', () => {
       await result.current.createTask(request);
     });
 
-    expect(mockTasksApi.createTask).toHaveBeenCalledWith('workspace-1', request);
+    expect(mockCreateTask).toHaveBeenCalledWith('workspace-1', request);
     await waitFor(() => {
       expect(result.current.tasks).toEqual([newTask]);
     });
   });
 
   it('updates a task', async () => {
-    mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
+    mockGetTasks.mockResolvedValueOnce([mockTask]);
     const updatedTask = { ...mockTask, title: 'Updated Task' };
-    mockTasksApi.getTasks.mockResolvedValueOnce([updatedTask]);
-    mockTasksApi.updateTask.mockResolvedValueOnce(updatedTask);
+    mockGetTasks.mockResolvedValueOnce([updatedTask]);
+    mockUpdateTask.mockResolvedValueOnce(updatedTask);
     const wrapper = createWrapper();
 
     const { result } = renderHook(() => useTasks(), { wrapper });
@@ -166,16 +187,16 @@ describe('useTasks', () => {
       await result.current.updateTask('task-1', request);
     });
 
-    expect(mockTasksApi.updateTask).toHaveBeenCalledWith('task-1', request);
+    expect(mockUpdateTask).toHaveBeenCalledWith('task-1', request);
     await waitFor(() => {
       expect(result.current.tasks[0].title).toBe('Updated Task');
     });
   });
 
   it('deletes a task', async () => {
-    mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
-    mockTasksApi.getTasks.mockResolvedValueOnce([]);
-    mockTasksApi.deleteTask.mockResolvedValueOnce();
+    mockGetTasks.mockResolvedValueOnce([mockTask]);
+    mockGetTasks.mockResolvedValueOnce([]);
+    mockDeleteTask.mockResolvedValueOnce();
     const wrapper = createWrapper();
 
     const { result } = renderHook(() => useTasks(), { wrapper });
@@ -188,14 +209,14 @@ describe('useTasks', () => {
       await result.current.deleteTask('task-1');
     });
 
-    expect(mockTasksApi.deleteTask).toHaveBeenCalledWith('task-1');
+    expect(mockDeleteTask).toHaveBeenCalledWith('task-1');
     await waitFor(() => {
       expect(result.current.tasks).toEqual([]);
     });
   });
 
   it('refetches tasks', async () => {
-    mockTasksApi.getTasks.mockResolvedValueOnce([mockTask]);
+    mockGetTasks.mockResolvedValueOnce([mockTask]);
     const wrapper = createWrapper();
 
     const { result } = renderHook(() => useTasks(), { wrapper });
@@ -204,19 +225,19 @@ describe('useTasks', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    mockTasksApi.getTasks.mockResolvedValueOnce([mockTask, mockTask]);
+    mockGetTasks.mockResolvedValueOnce([mockTask, mockTask]);
 
     act(() => {
       result.current.refetch();
     });
 
     await waitFor(() => {
-      expect(mockTasksApi.getTasks).toHaveBeenCalledTimes(2);
+      expect(mockGetTasks).toHaveBeenCalledTimes(2);
     });
   });
 
   it('reloads when filters change', async () => {
-    mockTasksApi.getTasks.mockResolvedValue([mockTask]);
+    mockGetTasks.mockResolvedValue([mockTask]);
     const wrapper = createWrapper();
 
     const { rerender } = renderHook(
@@ -229,13 +250,13 @@ describe('useTasks', () => {
     );
 
     await waitFor(() => {
-      expect(mockTasksApi.getTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', undefined);
+      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', undefined);
     });
 
     rerender({ projectId: 'proj-1', status: 'created' });
 
     await waitFor(() => {
-      expect(mockTasksApi.getTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', 'created');
+      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', 'created');
     });
   });
 });

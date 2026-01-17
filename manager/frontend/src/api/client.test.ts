@@ -147,7 +147,7 @@ describe('Client', () => {
 
   describe('browseModels', () => {
     it('browses models with default parameters', async () => {
-      const mockResponse = { source: 'ollama', models: [], has_more: false };
+      const mockResponse = { models: [{ name: 'llama2:7b', size: 3800000000 }], next_cursor: null };
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockResponse,
@@ -162,19 +162,31 @@ describe('Client', () => {
       );
     });
 
-    it('includes query parameters', async () => {
+    it('includes query parameters with cursor', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ source: 'huggingface', models: [], has_more: false }),
+        json: async () => ({ models: [], next_cursor: null }),
       });
 
-      await client.browseModels('huggingface', 'llama', 20, 10);
+      await client.browseModels('huggingface', 'llama', 'cursor-abc123', 10);
 
       const url = mockFetch.mock.calls[0][0];
       expect(url).toContain('source=huggingface');
       expect(url).toContain('q=llama');
-      expect(url).toContain('offset=20');
+      expect(url).toContain('cursor=cursor-abc123');
       expect(url).toContain('limit=10');
+    });
+
+    it('omits cursor when null', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ models: [], next_cursor: null }),
+      });
+
+      await client.browseModels('ollama', 'test', null, 20);
+
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).not.toContain('cursor=');
     });
   });
 
@@ -204,6 +216,7 @@ describe('Client', () => {
   });
 
   describe('Chats API', () => {
+    const testWorkspaceId = 'ws-test-123';
     const mockChat = {
       id: '1',
       title: 'Test Chat',
@@ -228,7 +241,7 @@ describe('Client', () => {
         json: async () => mockChats,
       });
 
-      const result = await client.getChats();
+      const result = await client.getChats(testWorkspaceId);
 
       expect(result).toEqual(mockChats.chats);
     });
@@ -239,9 +252,9 @@ describe('Client', () => {
         json: async () => ({ chats: [] }),
       });
 
-      await client.getChats(true);
+      await client.getChats(testWorkspaceId, true);
 
-      expect(mockFetch).toHaveBeenCalledWith('/api/chats?archived=true', expect.any(Object));
+      expect(mockFetch).toHaveBeenCalledWith(`/api/chats?workspace_id=${testWorkspaceId}&archived=true`, expect.any(Object));
     });
 
     it('getChat fetches single chat', async () => {
@@ -541,6 +554,7 @@ describe('Client', () => {
   });
 
   describe('Projects API', () => {
+    const testWorkspaceId = 'ws-test-123';
     const mockProject = {
       id: '1',
       name: 'Test',
@@ -558,7 +572,7 @@ describe('Client', () => {
         json: async () => ({ projects: [mockProject] }),
       });
 
-      const result = await client.getProjects();
+      const result = await client.getProjects(testWorkspaceId);
 
       expect(result).toHaveLength(1);
     });
@@ -569,9 +583,9 @@ describe('Client', () => {
         json: async () => ({ projects: [] }),
       });
 
-      await client.getProjects('active');
+      await client.getProjects(testWorkspaceId, 'active');
 
-      expect(mockFetch).toHaveBeenCalledWith('/api/projects?status=active', expect.any(Object));
+      expect(mockFetch).toHaveBeenCalledWith(`/api/projects?workspace_id=${testWorkspaceId}&status=active`, expect.any(Object));
     });
 
     it('getProject fetches single project', async () => {
@@ -656,9 +670,11 @@ describe('Client', () => {
   });
 
   describe('Tasks API', () => {
+    const testWorkspaceId = 'ws-test-123';
     const mockTask = {
       id: '1',
-      project_id: 'p1',
+      workspace_id: testWorkspaceId,
+      project_ids: ['p1'],
       title: 'Task',
       description: 'Do something',
       acceptance_criteria: null,
@@ -709,7 +725,7 @@ describe('Client', () => {
         json: async () => ({ tasks: [mockTask] }),
       });
 
-      const result = await client.getTasks();
+      const result = await client.getTasks(testWorkspaceId);
 
       expect(result).toHaveLength(1);
     });
@@ -720,9 +736,10 @@ describe('Client', () => {
         json: async () => ({ tasks: [] }),
       });
 
-      await client.getTasks('project-1', 'pending');
+      await client.getTasks(testWorkspaceId, 'project-1', 'pending');
 
       const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain(`/api/workspaces/${testWorkspaceId}/tasks`);
       expect(url).toContain('project_id=project-1');
       expect(url).toContain('status=pending');
     });
@@ -733,10 +750,10 @@ describe('Client', () => {
         json: async () => ({ task: mockTask }),
       });
 
-      await client.createTask({ project_id: 'p1', title: 'Task', description: 'Do something' });
+      await client.createTask(testWorkspaceId, { project_ids: ['p1'], title: 'Task', description: 'Do something' });
 
       expect(mockFetch).toHaveBeenCalledWith(
-        '/api/tasks',
+        `/api/workspaces/${testWorkspaceId}/tasks`,
         expect.objectContaining({ method: 'POST' })
       );
     });
@@ -790,6 +807,7 @@ describe('Client', () => {
   });
 
   describe('Sources API', () => {
+    const testWorkspaceId = 'ws-test-123';
     const mockSourceType = {
       id: 'github' as const,
       name: 'GitHub',
@@ -829,7 +847,7 @@ describe('Client', () => {
         json: async () => ({ sources: [mockSource] }),
       });
 
-      const result = await client.getSources();
+      const result = await client.getSources(testWorkspaceId);
 
       expect(result).toHaveLength(1);
     });
@@ -840,11 +858,12 @@ describe('Client', () => {
         json: async () => ({ sources: [] }),
       });
 
-      await client.getSources('github', true);
+      await client.getSources(testWorkspaceId, 'github', true);
 
       const url = mockFetch.mock.calls[0][0];
-      expect(url).toContain('type=github');
-      expect(url).toContain('active=true');
+      expect(url).toContain(`/api/workspaces/${testWorkspaceId}/sources`);
+      expect(url).toContain('source_type=github');
+      expect(url).toContain('is_active=true');
     });
 
     it('createSource creates source', async () => {
@@ -853,14 +872,14 @@ describe('Client', () => {
         json: async () => ({ source: mockSource }),
       });
 
-      await client.createSource({
+      await client.createSource(testWorkspaceId, {
         name: 'Test',
         source_type: 'github',
         config: { owner: 'test', repo: 'test' },
       });
 
       expect(mockFetch).toHaveBeenCalledWith(
-        '/api/sources',
+        `/api/workspaces/${testWorkspaceId}/sources`,
         expect.objectContaining({ method: 'POST' })
       );
     });
@@ -871,7 +890,7 @@ describe('Client', () => {
         json: async () => ({ success: true, message: 'Verified' }),
       });
 
-      const result = await client.verifySource('1');
+      const result = await client.verifySource(testWorkspaceId, '1');
 
       expect(result.success).toBe(true);
     });
@@ -1041,7 +1060,7 @@ describe('Client', () => {
       await client.updateWorkspaceTheme('org-1', 'ws-1', { primary_color_light: '#ff0000' });
 
       expect(mockFetch).toHaveBeenCalledWith(
-        '/api/organizations/org-1/workspaces/ws-1/settings/theme',
+        '/api/workspaces/ws-1/theme',
         expect.objectContaining({ method: 'PUT' })
       );
     });
@@ -1055,7 +1074,7 @@ describe('Client', () => {
       await client.resetWorkspaceTheme('org-1', 'ws-1');
 
       expect(mockFetch).toHaveBeenCalledWith(
-        '/api/organizations/org-1/workspaces/ws-1/settings/theme',
+        '/api/workspaces/ws-1/theme',
         expect.objectContaining({ method: 'DELETE' })
       );
     });
@@ -1079,7 +1098,7 @@ describe('Client', () => {
     it('getChats throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
 
-      await expect(client.getChats()).rejects.toThrow('Failed to fetch chats: 401');
+      await expect(client.getChats('ws-test')).rejects.toThrow('Failed to fetch chats: 401');
     });
 
     it('getChat throws on failed request', async () => {
@@ -3705,6 +3724,7 @@ describe('Client', () => {
   });
 
   describe('Knowledge Base API', () => {
+    const testWorkspaceId = '00000000-0000-0000-0000-000000000001';
     const mockEntry = {
       id: 'kb-1',
       workspace_id: 'ws-1',
@@ -3729,13 +3749,16 @@ describe('Client', () => {
           json: async () => mockResponse,
         });
 
-        const result = await client.getKnowledge();
+        const result = await client.getKnowledge(testWorkspaceId);
 
         expect(result).toEqual(mockResponse);
-        expect(mockFetch).toHaveBeenCalledWith('/api/knowledge', expect.any(Object));
+        expect(mockFetch).toHaveBeenCalledWith(
+          `/api/knowledge?workspace_id=${testWorkspaceId}`,
+          expect.any(Object)
+        );
       });
 
-      it('fetches knowledge entries with workspace filter', async () => {
+      it('fetches knowledge entries with different workspace', async () => {
         const workspaceId = 'ws-123';
         const mockResponse = {
           entries: [mockEntry],
@@ -3761,7 +3784,7 @@ describe('Client', () => {
           json: async () => ({ message: 'Server error' }),
         });
 
-        await expect(client.getKnowledge()).rejects.toThrow('Server error');
+        await expect(client.getKnowledge(testWorkspaceId)).rejects.toThrow('Server error');
       });
     });
 

@@ -13,20 +13,23 @@ export interface InstalledModel {
 }
 
 export interface BrowseModel {
-  id: string;
   name: string;
-  description: string;
-  downloads: number;
-  tags: string[];
-  // Optional fields provided by richer sources (HuggingFace, ModelScope)
-  install_name?: string | null;
-  author?: string | null;
-  likes?: number | null;
-  last_modified?: string | null;
-  url?: string | null;
+  size?: number | null;
+  digest?: string | null;
+  modified_at?: string | null;
+  details?: {
+    format?: string | null;
+    family?: string | null;
+    parameter_size?: string | null;
+    quantization_level?: string | null;
+  } | null;
+  source?: ModelSource;
 }
 
-export type ModelSource = 'ollama' | 'huggingface' | 'modelscope';
+export type ModelSource = 'ollama' | 'huggingface' | 'gpt4all' | 'openrouter';
+export type BrowseSource = ModelSource | 'all';
+
+export const ALL_SOURCES: ModelSource[] = ['ollama', 'huggingface', 'gpt4all', 'openrouter'];
 
 // =============================================================================
 // Pull Progress Types
@@ -57,10 +60,8 @@ export interface ModelsResponse {
 }
 
 export interface BrowseResponse {
-  source: ModelSource;
   models: BrowseModel[];
-  total?: number | null;
-  has_more: boolean;
+  next_cursor: string | null;
 }
 
 export interface ModelCardResponse {

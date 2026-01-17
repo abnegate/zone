@@ -161,7 +161,6 @@ export function CreateProjectWizard({
                 }}
                 placeholder="My Awesome Project"
                 className={fieldErrors.name ? 'input-error' : ''}
-                autoFocus
               />
               {fieldErrors.name && <span className="field-error">{fieldErrors.name}</span>}
             </div>

@@ -134,12 +134,22 @@ async fn handle_install(
 }
 
 async fn run_install(config: InstallerConfig, tx: mpsc::Sender<InstallUpdate>) {
-    let mut send = |update: InstallUpdate| async {
+    let send = |update: InstallUpdate| async {
         let _ = tx.send(update).await;
     };
 
-    send(InstallUpdate::step_done("config", 10, "Configuration received")).await;
-    send(InstallUpdate::step_start("env", 30, "Creating .env file...")).await;
+    send(InstallUpdate::step_done(
+        "config",
+        10,
+        "Configuration received",
+    ))
+    .await;
+    send(InstallUpdate::step_start(
+        "env",
+        30,
+        "Creating .env file...",
+    ))
+    .await;
 
     match create_env_from_config(&config).await {
         Ok(_) => {
@@ -156,7 +166,12 @@ async fn run_install(config: InstallerConfig, tx: mpsc::Sender<InstallUpdate>) {
         }
     }
 
-    send(InstallUpdate::step_start("auth-dir", 50, "Creating auth directory...")).await;
+    send(InstallUpdate::step_start(
+        "auth-dir",
+        50,
+        "Creating auth directory...",
+    ))
+    .await;
     if let Err(e) = fs::create_dir_all("./auth").await {
         send(InstallUpdate::step_error(
             "auth-dir",
@@ -166,7 +181,12 @@ async fn run_install(config: InstallerConfig, tx: mpsc::Sender<InstallUpdate>) {
         .await;
         return;
     }
-    send(InstallUpdate::step_done("auth-dir", 60, "Auth directory created")).await;
+    send(InstallUpdate::step_done(
+        "auth-dir",
+        60,
+        "Auth directory created",
+    ))
+    .await;
 
     send(InstallUpdate::step_start(
         "auth-creds",
@@ -176,7 +196,12 @@ async fn run_install(config: InstallerConfig, tx: mpsc::Sender<InstallUpdate>) {
     .await;
     match create_auth_file().await {
         Ok(_) => {
-            send(InstallUpdate::step_done("auth-creds", 90, "Admin credentials created")).await;
+            send(InstallUpdate::step_done(
+                "auth-creds",
+                90,
+                "Admin credentials created",
+            ))
+            .await;
         }
         Err(e) => {
             send(InstallUpdate::step_error(
@@ -251,14 +276,14 @@ async fn create_env_from_config(config: &InstallerConfig) -> Result<(), std::io:
         }
     }
 
-    if let Some(domain) = config.get("DOMAIN_HOST_WEBUI") {
-        if !domain.trim().is_empty() {
-            content = replace_env_value(
-                &content,
-                "WEBUI_CORS_ALLOW_ORIGIN",
-                &format!("http://{}", domain.trim()),
-            );
-        }
+    if let Some(domain) = config.get("DOMAIN_HOST_WEBUI")
+        && !domain.trim().is_empty()
+    {
+        content = replace_env_value(
+            &content,
+            "WEBUI_CORS_ALLOW_ORIGIN",
+            &format!("http://{}", domain.trim()),
+        );
     }
 
     if let Some(value) = config.get("AI_MODEL_FAST") {
@@ -275,7 +300,11 @@ async fn create_env_from_config(config: &InstallerConfig) -> Result<(), std::io:
     content = ensure_env_value(&content, "SECURITY_LITELLM_UI_PASSWORD", "");
     content = ensure_env_secret(&content, "JWT_SECRET");
     content = ensure_env_secret(&content, "ENCRYPTION_KEY");
-    content = ensure_urlencoded_secret(&content, "POSTGRES_PASSWORD", "POSTGRES_PASSWORD_URLENCODED");
+    content = ensure_urlencoded_secret(
+        &content,
+        "POSTGRES_PASSWORD",
+        "POSTGRES_PASSWORD_URLENCODED",
+    );
 
     fs::write(".env", content).await
 }
@@ -377,12 +406,12 @@ fn get_env_value(content: &str, key: &str) -> Option<String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if let Some((k, v)) = trimmed.split_once('=') {
-            if k.trim() == key {
-                let value = v.trim();
-                let value = value.trim_matches('"').trim_matches('\'');
-                return Some(value.to_string());
-            }
+        if let Some((k, v)) = trimmed.split_once('=')
+            && k.trim() == key
+        {
+            let value = v.trim();
+            let value = value.trim_matches('"').trim_matches('\'');
+            return Some(value.to_string());
         }
     }
     None
@@ -394,14 +423,14 @@ fn replace_env_value(content: &str, key: &str, value: &str) -> String {
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if !trimmed.starts_with('#') && !trimmed.is_empty() {
-            if let Some((k, _)) = trimmed.split_once('=') {
-                if k.trim() == key {
-                    result.push_str(&format!("{}={}\n", key, value));
-                    found = true;
-                    continue;
-                }
-            }
+        if !trimmed.starts_with('#')
+            && !trimmed.is_empty()
+            && let Some((k, _)) = trimmed.split_once('=')
+            && k.trim() == key
+        {
+            result.push_str(&format!("{}={}\n", key, value));
+            found = true;
+            continue;
         }
         result.push_str(line);
         result.push('\n');
@@ -442,7 +471,8 @@ fn generate_secret() -> String {
 fn url_encode(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
-        let is_unreserved = matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~');
+        let is_unreserved =
+            matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~');
         if is_unreserved {
             encoded.push(byte as char);
         } else {
@@ -702,9 +732,7 @@ async fn monitor_compose_services(
             let id = format!("compose:{}", service);
             let last_message = last_messages.get(&id);
             let last_state = last_states.get(&id);
-            if last_message.map_or(true, |msg| msg != &message)
-                || last_state.map_or(true, |s| s != &state)
-            {
+            if last_message != Some(&message) || last_state != Some(&state) {
                 last_messages.insert(id.clone(), message.clone());
                 last_states.insert(id.clone(), state.clone());
                 let update = InstallUpdate::with_state(
@@ -778,7 +806,8 @@ async fn inspect_compose_service(
         return Ok(ServiceInspect::default());
     }
 
-    let format = "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.State.ExitCode}}";
+    let format =
+        "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.State.ExitCode}}";
     let inspect_output = Command::new("docker")
         .args(["inspect", "--format", format, &id])
         .current_dir(&context.working_dir)
@@ -793,7 +822,7 @@ async fn inspect_compose_service(
     let output = String::from_utf8_lossy(&inspect_output.stdout);
     let parts: Vec<&str> = output.trim().split('|').collect();
     Ok(ServiceInspect {
-        status: parts.get(0).unwrap_or(&"").to_string(),
+        status: parts.first().unwrap_or(&"").to_string(),
         health: parts.get(1).unwrap_or(&"").to_string(),
         exit_code: parts
             .get(2)
@@ -880,10 +909,7 @@ struct ServiceInspect {
     exists: bool,
 }
 
-fn map_service_state(
-    service: &str,
-    inspect: &ServiceInspect,
-) -> (String, String, bool, bool) {
+fn map_service_state(service: &str, inspect: &ServiceInspect) -> (String, String, bool, bool) {
     if !inspect.exists || inspect.status.is_empty() {
         return (
             "in-progress".to_string(),

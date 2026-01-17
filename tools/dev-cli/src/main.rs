@@ -115,6 +115,30 @@ enum Commands {
         #[command(subcommand)]
         command: DbCommands,
     },
+    /// Start development environment with hot reload
+    Up {
+        /// Additional arguments to pass to docker compose
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Stop development environment
+    Down {
+        /// Additional arguments to pass to docker compose
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Show logs from development containers
+    Logs {
+        /// Additional arguments to pass to docker compose logs
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Restart development environment
+    Restart {
+        /// Additional arguments to pass to docker compose
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -625,7 +649,7 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
             Project::Server => {
                 // Test zone_server - start DB containers first, set up test DB, run migrations, then run tests
                 // The tests expect postgres://postgres:postgres@localhost:5432/zone_test
-                // Docker compose uses litellm credentials, so we create a test user/db
+                // Stop existing containers and start fresh with test credentials
                 let server_dir = root.join("runner/zone_server");
                 tasks.push(TaskConfig {
                     project: *project,
@@ -634,9 +658,12 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
                     args: vec![
                         "-c".to_string(),
                         format!(
-                            "cd {root} && docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres valkey && \
-                             until docker exec postgres pg_isready -U litellm > /dev/null 2>&1; do sleep 1; done && \
-                             docker exec postgres psql -U litellm -d litellm -c \"CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres';\" 2>/dev/null || true && \
+                            "cd {root} && \
+                             docker compose -f docker-compose.yml -f docker-compose.dev.yml stop postgres 2>/dev/null || true && \
+                             docker compose -f docker-compose.yml -f docker-compose.dev.yml rm -f postgres 2>/dev/null || true && \
+                             POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres POSTGRES_DB=postgres \
+                             docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres valkey && \
+                             until docker exec postgres pg_isready -U postgres > /dev/null 2>&1; do sleep 1; done && \
                              docker exec postgres psql -U postgres -c \"CREATE DATABASE zone_test;\" 2>/dev/null || true && \
                              cd {server_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test sqlx migrate run && \
                              cd {working_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test cargo test -p zone_server",
@@ -1483,6 +1510,7 @@ async fn run_simple(tasks: Vec<TaskConfig>) -> Result<bool> {
             });
             handles.push(handle);
         }
+        drop(tx_clone); // Drop after all clones are made so receiver can detect completion
         for handle in handles {
             let _ = handle.await;
         }
@@ -1559,6 +1587,11 @@ async fn run_simple(tasks: Vec<TaskConfig>) -> Result<bool> {
                 );
             }
         }
+
+        // Exit once all tasks have reported completion
+        if completed == total {
+            break;
+        }
     }
 
     println!();
@@ -1578,6 +1611,35 @@ async fn run_simple(tasks: Vec<TaskConfig>) -> Result<bool> {
     }
 
     Ok(failed == 0)
+}
+
+fn run_docker_compose(root: &PathBuf, subcommand: &str, extra_args: &[String]) -> Result<()> {
+    let mut cmd = Command::new("docker");
+    cmd.arg("compose")
+        .arg("-f")
+        .arg(root.join("docker-compose.yml"))
+        .arg("-f")
+        .arg(root.join("docker-compose.dev.yml"))
+        .arg(subcommand)
+        .args(extra_args)
+        .current_dir(root);
+
+    // For 'up', add default flags if not specified
+    if subcommand == "up" && !extra_args.iter().any(|a| a == "-d" || a == "--detach") {
+        // Run in foreground by default for dev (shows logs)
+    }
+
+    let status = cmd.status()?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "docker compose {} failed with exit code: {:?}",
+            subcommand,
+            status.code()
+        ));
+    }
+
+    Ok(())
 }
 
 async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> Result<()> {
@@ -1739,6 +1801,30 @@ async fn main() -> Result<()> {
         Commands::Audit { project } => create_audit_tasks(&root, &get_projects(project.clone())),
         Commands::Db { command } => {
             return run_db_command(&root, &command, cli.simple).await;
+        }
+        Commands::Up { args } => {
+            println!(
+                "{} Starting development environment with hot reload...",
+                "→".cyan()
+            );
+            println!(
+                "{}",
+                "  Rust server: cargo-watch rebuilds on file changes".dimmed()
+            );
+            println!("{}", "  Frontend: Vite HMR enabled".dimmed());
+            println!();
+            return run_docker_compose(&root, "up", args);
+        }
+        Commands::Down { args } => {
+            println!("{} Stopping development environment...", "→".cyan());
+            return run_docker_compose(&root, "down", args);
+        }
+        Commands::Logs { args } => {
+            return run_docker_compose(&root, "logs", args);
+        }
+        Commands::Restart { args } => {
+            println!("{} Restarting development environment...", "→".cyan());
+            return run_docker_compose(&root, "restart", args);
         }
     };
 

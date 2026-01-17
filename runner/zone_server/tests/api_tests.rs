@@ -429,8 +429,11 @@ async fn test_projects_list_with_auth() {
 async fn test_tasks_list_with_auth() {
     let client = TestClient::with_db().await;
     let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
 
-    let response = client.get_auth("/api/tasks", &token).await;
+    let response = client
+        .get_auth(&format!("/api/workspaces/{}/tasks", workspace_id), &token)
+        .await;
 
     response.assert_status(StatusCode::OK);
 }
@@ -472,8 +475,8 @@ async fn test_sources_types_with_auth() {
     response.assert_status(StatusCode::OK);
 
     let body = response.json_value();
-    assert!(body.is_array());
-    let types = body.as_array().unwrap();
+    assert!(body["types"].is_array());
+    let types = body["types"].as_array().unwrap();
     assert!(!types.is_empty());
     // Verify source type structure
     let first = &types[0];
@@ -941,10 +944,10 @@ async fn test_project_create() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["id"].is_string());
-    assert_eq!(body["name"], "Test Project");
-    assert_eq!(body["description"], "A test project");
-    assert_eq!(body["status"], "active");
+    assert!(body["project"]["id"].is_string());
+    assert_eq!(body["project"]["name"], "Test Project");
+    assert_eq!(body["project"]["description"], "A test project");
+    assert_eq!(body["project"]["status"], "active");
 }
 
 #[tokio::test]
@@ -961,7 +964,10 @@ async fn test_project_get() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Get project
     let response = client
@@ -972,7 +978,7 @@ async fn test_project_get() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["name"], "Get Test Project");
+    assert_eq!(response.json_value()["project"]["name"], "Get Test Project");
 }
 
 #[tokio::test]
@@ -1002,7 +1008,10 @@ async fn test_project_update() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update project - valid statuses: 'active', 'on_hold', 'cancelled'
     let response = client
@@ -1019,8 +1028,8 @@ async fn test_project_update() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["name"], "Updated Project");
-    assert_eq!(body["status"], "on_hold");
+    assert_eq!(body["project"]["name"], "Updated Project");
+    assert_eq!(body["project"]["status"], "on_hold");
 }
 
 #[tokio::test]
@@ -1037,7 +1046,10 @@ async fn test_project_delete() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Delete
     let response = client
@@ -1084,7 +1096,7 @@ async fn test_project_list_with_filter() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert!(body.is_array());
+    assert!(body["projects"].is_array());
 }
 
 #[tokio::test]
@@ -1101,7 +1113,10 @@ async fn test_project_github_link() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Link GitHub
     let response = client
@@ -1119,7 +1134,7 @@ async fn test_project_github_link() {
 
     response.assert_status(StatusCode::OK);
     assert_eq!(
-        response.json_value()["github_repo_url"],
+        response.json_value()["project"]["github_repo_url"],
         "https://github.com/test/repo"
     );
 
@@ -1135,7 +1150,7 @@ async fn test_project_github_link() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert!(response.json_value()["github_repo_url"].is_null());
+    assert!(response.json_value()["project"]["github_repo_url"].is_null());
 }
 
 // =============================================================================
@@ -1156,14 +1171,17 @@ async fn test_task_create() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create task
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Test Task",
                 "description": "A test task",
                 "acceptance_criteria": "Must pass tests",
@@ -1176,12 +1194,12 @@ async fn test_task_create() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["id"].is_string());
-    assert_eq!(body["title"], "Test Task");
-    assert_eq!(body["priority"], 1);
-    assert_eq!(body["is_agentic"], true);
+    assert!(body["task"]["id"].is_string());
+    assert_eq!(body["task"]["title"], "Test Task");
+    assert_eq!(body["task"]["priority"], 1);
+    assert_eq!(body["task"]["is_agentic"], true);
     // Task status starts as "created"
-    assert_eq!(body["status"], "created");
+    assert_eq!(body["task"]["status"], "created");
 }
 
 #[tokio::test]
@@ -1198,20 +1216,26 @@ async fn test_task_get() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Get Test Task",
                 "description": "Test"
             }),
             &token,
         )
         .await;
-    let task_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Get task
     let response = client
@@ -1219,7 +1243,7 @@ async fn test_task_get() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["title"], "Get Test Task");
+    assert_eq!(response.json_value()["task"]["title"], "Get Test Task");
 }
 
 #[tokio::test]
@@ -1249,20 +1273,26 @@ async fn test_task_update() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Original Task",
                 "description": "Original"
             }),
             &token,
         )
         .await;
-    let task_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update task
     let response = client
@@ -1280,9 +1310,9 @@ async fn test_task_update() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["title"], "Updated Task");
-    assert_eq!(body["status"], "in_progress");
-    assert_eq!(body["priority"], 5);
+    assert_eq!(body["task"]["title"], "Updated Task");
+    assert_eq!(body["task"]["status"], "in_progress");
+    assert_eq!(body["task"]["priority"], 5);
 }
 
 #[tokio::test]
@@ -1299,20 +1329,26 @@ async fn test_task_delete() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Delete Me Task",
                 "description": "Delete"
             }),
             &token,
         )
         .await;
-    let task_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Delete task
     let response = client
@@ -1336,20 +1372,26 @@ async fn test_task_queue() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Queue Me Task",
                 "description": "Queue"
             }),
             &token,
         )
         .await;
-    let task_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Queue task
     let response = client
@@ -1357,7 +1399,7 @@ async fn test_task_queue() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["status"], "queued");
+    assert_eq!(response.json_value()["task"]["status"], "queued");
 }
 
 #[tokio::test]
@@ -1374,13 +1416,16 @@ async fn test_task_list_with_filters() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Filter Task",
                 "description": "Test"
             }),
@@ -1390,15 +1435,26 @@ async fn test_task_list_with_filters() {
 
     // List with project filter
     let response = client
-        .get_auth(&format!("/api/tasks?project_id={}", project_id), &token)
+        .get_auth(
+            &format!(
+                "/api/workspaces/{}/tasks?project_id={}",
+                workspace_id, project_id
+            ),
+            &token,
+        )
         .await;
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert!(body.is_array());
+    assert!(body["tasks"].is_array());
 
     // List with status filter
-    let response = client.get_auth("/api/tasks?status=pending", &token).await;
+    let response = client
+        .get_auth(
+            &format!("/api/workspaces/{}/tasks?status=pending", workspace_id),
+            &token,
+        )
+        .await;
 
     response.assert_status(StatusCode::OK);
 }
@@ -1417,20 +1473,26 @@ async fn test_task_runs() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Task With Runs",
                 "description": "Test"
             }),
             &token,
         )
         .await;
-    let task_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create task run
     let response = client
@@ -1438,9 +1500,12 @@ async fn test_task_runs() {
         .await;
 
     response.assert_status(StatusCode::CREATED);
-    let run_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let run_id = response.json_value()["run"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     // Task run status starts as "running"
-    assert_eq!(response.json_value()["status"], "running");
+    assert_eq!(response.json_value()["run"]["status"], "running");
 
     // List task runs
     let response = client
@@ -1448,7 +1513,7 @@ async fn test_task_runs() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert!(response.json_value().is_array());
+    assert!(response.json_value()["runs"].is_array());
 
     // Get specific run
     let response = client
@@ -1463,7 +1528,7 @@ async fn test_task_runs() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert!(response.json_value().is_array());
+    assert!(response.json_value()["logs"].is_array());
 }
 
 #[tokio::test]
@@ -1685,7 +1750,7 @@ async fn test_chat_list_with_filters() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert!(response.json_value().is_array());
+    assert!(response.json_value()["chats"].is_array());
 }
 
 #[tokio::test]
@@ -1729,7 +1794,7 @@ async fn test_chat_messages() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    let messages = response.json_value();
+    let messages = response.json_value()["messages"].clone();
     assert!(messages.is_array());
     assert_eq!(messages.as_array().unwrap().len(), 1);
 
@@ -2014,7 +2079,7 @@ async fn test_source_list_with_filters() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert!(response.json_value().is_array());
+    assert!(response.json_value()["sources"].is_array());
 
     // List with active filter
     let response = client
@@ -2126,8 +2191,11 @@ async fn test_project_create_minimal() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["description"].is_null());
-    assert_eq!(body["workspace_id"].as_str().unwrap(), &workspace_id);
+    assert!(body["project"]["description"].is_null());
+    assert_eq!(
+        body["project"]["workspace_id"].as_str().unwrap(),
+        &workspace_id
+    );
 }
 
 #[tokio::test]
@@ -2144,14 +2212,17 @@ async fn test_task_create_minimal() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create task with minimal fields
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Minimal Task",
                 "description": "Required field"
             }),
@@ -2161,9 +2232,9 @@ async fn test_task_create_minimal() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["acceptance_criteria"].is_null());
-    assert!(body["priority"].is_null());
-    assert_eq!(body["is_agentic"], false);
+    assert!(body["task"]["acceptance_criteria"].is_null());
+    assert!(body["task"]["priority"].is_null());
+    assert_eq!(body["task"]["is_agentic"], false);
 }
 
 #[tokio::test]
@@ -2431,34 +2502,32 @@ async fn test_workspace_theme_delete_not_found() {
 async fn test_models_list_huggingface() {
     let client = TestClient::with_db().await;
     let token = get_auth_token(&client).await;
-    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+    let (_org_id, _workspace_id) = setup_test_workspace(&client, &token).await;
 
-    // HuggingFace returns static sample data
+    // HuggingFace returns data from external API
     let response = client
         .get_auth("/api/models?source=huggingface", &token)
         .await;
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert!(body.is_array());
-    assert!(!body.as_array().unwrap().is_empty());
+    assert!(body["models"].is_array());
+    assert!(!body["models"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn test_models_list_modelscope() {
+async fn test_models_list_gpt4all() {
     let client = TestClient::with_db().await;
     let token = get_auth_token(&client).await;
-    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+    let (_org_id, _workspace_id) = setup_test_workspace(&client, &token).await;
 
-    // ModelScope returns static sample data
-    let response = client
-        .get_auth("/api/models?source=modelscope", &token)
-        .await;
+    // GPT4All returns data from external API
+    let response = client.get_auth("/api/models?source=gpt4all", &token).await;
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert!(body.is_array());
-    assert!(!body.as_array().unwrap().is_empty());
+    assert!(body["models"].is_array());
+    assert!(!body["models"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2889,7 +2958,7 @@ async fn test_project_with_workspace() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert_eq!(body["workspace_id"], ws_id);
+    assert_eq!(body["project"]["workspace_id"], ws_id);
 }
 
 #[tokio::test]
@@ -2973,7 +3042,10 @@ async fn test_project_status_cancelled() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update to cancelled
     let response = client
@@ -2985,7 +3057,7 @@ async fn test_project_status_cancelled() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["status"], "cancelled");
+    assert_eq!(response.json_value()["project"]["status"], "cancelled");
 }
 
 #[tokio::test]
@@ -3002,20 +3074,26 @@ async fn test_task_status_completed() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Complete Me",
                 "description": "Test"
             }),
             &token,
         )
         .await;
-    let task_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update to complete (valid statuses: created, queued, in_progress, review, complete, blocked)
     let response = client
@@ -3027,7 +3105,7 @@ async fn test_task_status_completed() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["status"], "complete");
+    assert_eq!(response.json_value()["task"]["status"], "complete");
 }
 
 #[tokio::test]
@@ -3054,7 +3132,7 @@ async fn test_organization_list_filters() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert!(response.json_value().is_array());
+    assert!(response.json_value()["organizations"].is_array());
 }
 
 #[tokio::test]
@@ -3083,9 +3161,9 @@ async fn test_task_runs_list_for_nonexistent_task() {
         .get_auth(&format!("/api/tasks/{}/runs", uuid::Uuid::new_v4()), &token)
         .await;
 
-    // Returns empty array
+    // Returns empty runs array
     response.assert_status(StatusCode::OK);
-    assert!(response.json_value().is_array());
+    assert!(response.json_value()["runs"].is_array());
 }
 
 #[tokio::test]
@@ -3222,9 +3300,9 @@ async fn test_task_create_for_nonexistent_project() {
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": uuid::Uuid::new_v4(),
+                "project_ids": [uuid::Uuid::new_v4()],
                 "title": "Test Task",
                 "description": "Test"
             }),
@@ -3250,20 +3328,26 @@ async fn test_task_with_blocked_status() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Block Me",
                 "description": "Test"
             }),
             &token,
         )
         .await;
-    let task_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update to blocked status
     let response = client
@@ -3275,7 +3359,7 @@ async fn test_task_with_blocked_status() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["status"], "blocked");
+    assert_eq!(response.json_value()["task"]["status"], "blocked");
 }
 
 #[tokio::test]
@@ -3292,20 +3376,26 @@ async fn test_task_with_review_status() {
             &token,
         )
         .await;
-    let project_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let project_id = response.json_value()["project"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .post_json_auth(
-            "/api/tasks",
+            &format!("/api/workspaces/{}/tasks", workspace_id),
             &json!({
-                "project_id": project_id,
+                "project_ids": [project_id],
                 "title": "Review Me",
                 "description": "Test"
             }),
             &token,
         )
         .await;
-    let task_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let task_id = response.json_value()["task"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update to review status
     let response = client
@@ -3317,7 +3407,7 @@ async fn test_task_with_review_status() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["status"], "review");
+    assert_eq!(response.json_value()["task"]["status"], "review");
 }
 
 #[tokio::test]
@@ -3355,9 +3445,9 @@ async fn test_chat_archived_filter() {
         .await;
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert!(body.is_array());
+    assert!(body["chats"].is_array());
     // Should have at least the one we archived
-    let archived: Vec<_> = body
+    let archived: Vec<_> = body["chats"]
         .as_array()
         .unwrap()
         .iter()
@@ -3397,7 +3487,7 @@ async fn test_organization_inactive_filter() {
         .await;
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert!(body.is_array());
+    assert!(body["organizations"].is_array());
 }
 
 #[tokio::test]

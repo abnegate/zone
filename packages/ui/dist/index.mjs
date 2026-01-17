@@ -555,7 +555,7 @@ var ProgressBar = React11.forwardRef(
           "%"
         ] })
       ] }),
-      /* @__PURE__ */ jsx11(Progress, { value: percentage })
+      /* @__PURE__ */ jsx11(Progress, { value: percentage, "aria-label": label || "Progress" })
     ] });
   }
 );

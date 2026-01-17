@@ -153,6 +153,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_persist_event_stores_to_database() {
         let pool = create_test_pool().await;
         let gathering_id = create_test_gathering(&pool).await;
@@ -178,6 +179,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_get_events_since_returns_new_events_only() {
         let pool = create_test_pool().await;
         let gathering_id = create_test_gathering(&pool).await;
@@ -214,6 +216,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_get_events_since_none_returns_all_events() {
         let pool = create_test_pool().await;
         let gathering_id = create_test_gathering(&pool).await;
@@ -235,6 +238,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_cleanup_old_events_removes_stale_data() {
         let pool = create_test_pool().await;
         let gathering_id = create_test_gathering(&pool).await;
@@ -275,6 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_cleanup_preserves_recent_events() {
         let pool = create_test_pool().await;
         let gathering_id = create_test_gathering(&pool).await;
@@ -301,6 +306,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_cleanup_without_gathering_id_cleans_all() {
         let pool = create_test_pool().await;
         let gathering_id = create_test_gathering(&pool).await;

@@ -7,6 +7,7 @@ pub mod audit;
 pub mod auth;
 pub mod billing;
 pub mod chats;
+pub mod common;
 pub mod context;
 pub mod error;
 pub mod health;

@@ -150,19 +150,25 @@ describe('AdvancedStep', () => {
     });
 
     it('displays retention select with current value', () => {
-      renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
-
-      expect(screen.getByLabelText(/metrics retention/i)).toHaveValue('15d');
-    });
-
-    it('updates retention selection', () => {
       const { methods } = renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
 
-      fireEvent.change(screen.getByLabelText(/metrics retention/i), {
-        target: { value: '30d' },
-      });
+      expect(methods.getValues('MONITORING_RETENTION_TIME')).toBe('15d');
+      expect(screen.getByLabelText(/metrics retention/i)).toHaveTextContent('15 days');
+    });
 
-      expect(methods.getValues('MONITORING_RETENTION_TIME')).toBe('30d');
+    it('updates retention selection', async () => {
+      const { methods } = renderWithForm(createMockConfig({ MONITORING_ENABLED: 'true' }));
+
+      // Radix UI Select requires clicking to open, then selecting an option
+      fireEvent.click(screen.getByLabelText(/metrics retention/i));
+      await waitFor(() => {
+        expect(screen.getByText('30 days')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('30 days'));
+
+      await waitFor(() => {
+        expect(methods.getValues('MONITORING_RETENTION_TIME')).toBe('30d');
+      });
     });
   });
 
@@ -202,7 +208,7 @@ describe('AdvancedStep', () => {
       expect(methods.getValues('ALERT_ENABLED')).toBe('false');
     });
 
-    it('updates alert fields', () => {
+    it('updates alert fields', async () => {
       const { methods } = renderWithForm(
         createMockConfig({ MONITORING_ENABLED: 'true', ALERT_ENABLED: 'true' })
       );
@@ -217,10 +223,15 @@ describe('AdvancedStep', () => {
       });
       expect(methods.getValues('ALERT_SMTP_HOST')).toBe('smtp.gmail.com');
 
-      fireEvent.change(screen.getByLabelText(/smtp port/i), {
-        target: { value: '465' },
+      // SMTP Port is a Radix Select, need to click to open and select
+      fireEvent.click(screen.getByLabelText(/smtp port/i));
+      await waitFor(() => {
+        expect(screen.getByText('465 (SMTPS)')).toBeInTheDocument();
       });
-      expect(methods.getValues('ALERT_SMTP_PORT')).toBe('465');
+      fireEvent.click(screen.getByText('465 (SMTPS)'));
+      await waitFor(() => {
+        expect(methods.getValues('ALERT_SMTP_PORT')).toBe('465');
+      });
 
       fireEvent.change(screen.getByLabelText(/smtp username/i), {
         target: { value: 'user@gmail.com' },
@@ -278,19 +289,25 @@ describe('AdvancedStep', () => {
     });
 
     it('renders timezone select with current value', () => {
-      renderWithForm(createMockConfig());
-
-      expect(screen.getByLabelText(/timezone/i)).toHaveValue('UTC');
-    });
-
-    it('updates timezone', () => {
       const { methods } = renderWithForm(createMockConfig());
 
-      fireEvent.change(screen.getByLabelText(/timezone/i), {
-        target: { value: 'America/New_York' },
-      });
+      expect(methods.getValues('ADVANCED_TZ')).toBe('UTC');
+      expect(screen.getByLabelText(/timezone/i)).toHaveTextContent('UTC');
+    });
 
-      expect(methods.getValues('ADVANCED_TZ')).toBe('America/New_York');
+    it('updates timezone', async () => {
+      const { methods } = renderWithForm(createMockConfig());
+
+      // Radix UI Select requires clicking to open, then selecting an option
+      fireEvent.click(screen.getByLabelText(/timezone/i));
+      await waitFor(() => {
+        expect(screen.getByText('America/New_York')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('America/New_York'));
+
+      await waitFor(() => {
+        expect(methods.getValues('ADVANCED_TZ')).toBe('America/New_York');
+      });
     });
 
     it('renders ACME email input with current value', () => {

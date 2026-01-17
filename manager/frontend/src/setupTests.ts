@@ -2,6 +2,17 @@ import { mock, expect, afterEach, jest } from 'bun:test';
 import '@testing-library/dom';
 import { cleanup } from '@testing-library/react';
 
+// Polyfill NodeFilter for Radix UI's focus-scope (uses document.createTreeWalker)
+if (typeof globalThis.NodeFilter === 'undefined') {
+  (globalThis as Record<string, unknown>).NodeFilter = {
+    SHOW_ELEMENT: 1,
+    SHOW_TEXT: 4,
+    FILTER_ACCEPT: 1,
+    FILTER_REJECT: 2,
+    FILTER_SKIP: 3,
+  };
+}
+
 // Cleanup after each test to prevent DOM accumulation
 afterEach(() => {
   cleanup();
@@ -15,12 +26,12 @@ expect.extend({
       pass,
       message: () =>
         pass
-          ? `expected element not to be in the document`
-          : `expected element to be in the document`,
+          ? 'expected element not to be in the document'
+          : 'expected element to be in the document',
     };
   },
   toHaveClass(received: Element | null, className: string) {
-    const pass = received !== null && received.classList.contains(className);
+    const pass = received?.classList.contains(className) ?? false;
     return {
       pass,
       message: () =>
@@ -66,8 +77,8 @@ expect.extend({
       pass,
       message: () =>
         pass
-          ? `expected element not to be disabled`
-          : `expected element to be disabled`,
+          ? 'expected element not to be disabled'
+          : 'expected element to be disabled',
     };
   },
   toBeChecked(received: HTMLInputElement | null) {
@@ -79,8 +90,8 @@ expect.extend({
       pass,
       message: () =>
         pass
-          ? `expected element not to be checked`
-          : `expected element to be checked`,
+          ? 'expected element not to be checked'
+          : 'expected element to be checked',
     };
   },
   toContainHTML(received: Element | null, html: string) {

@@ -13,18 +13,7 @@ use crate::auth::AuthUser;
 use crate::db::{projects, workspace_members};
 use crate::state::AppState;
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-}
+use super::common::{ErrorResponse, Timestamps};
 
 /// Project data
 #[derive(Debug, Serialize)]
@@ -36,6 +25,8 @@ pub struct ProjectData {
     description: Option<String>,
     status: String,
     github_repo_url: Option<String>,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 /// Single project response
@@ -60,6 +51,7 @@ impl From<projects::ProjectRow> for ProjectData {
             description: row.description,
             status: row.status,
             github_repo_url: row.github_repo_url,
+            timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }

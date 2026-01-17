@@ -103,7 +103,7 @@ test.describe('Install from Browse', () => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ source, models: mockBrowseModels, has_more: false }),
+        body: JSON.stringify({ source, models: mockBrowseModels, next_cursor: null }),
       });
     });
 
@@ -111,7 +111,7 @@ test.describe('Install from Browse', () => {
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    await page.click('button.main-tab:has-text("Browse")');
+    await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
 
@@ -123,7 +123,7 @@ test.describe('Install from Browse', () => {
   test('clicking install on browse item populates form', async ({ page }) => {
     await page.locator('.browse-item').first().locator('.btn-primary').click();
     // Switch to Installed tab to see the form
-    await page.click('button.main-tab:has-text("Installed")');
+    await page.click('button[role="tab"]:has-text("Installed")');
     await expect(page.locator('.model-form input')).toHaveValue('llama3.2');
   });
 
@@ -138,24 +138,27 @@ test.describe('Install from Browse', () => {
       .click();
 
     // Switch to Installed tab to see the form
-    await page.click('button.main-tab:has-text("Installed")');
+    await page.click('button[role="tab"]:has-text("Installed")');
 
     // Form should be populated
     await expect(page.locator('.model-form input')).toHaveValue('llama3.2');
   });
 
   test('multiple installs overwrite previous input', async ({ page }) => {
+    // Click Ollama source tab for predictable ordering
+    await page.click('button[role="tab"]:has-text("Ollama")');
     // Click first model's install
     await page.locator('.browse-item').first().locator('.btn-primary').click();
     // Switch to Installed tab to verify first input
-    await page.click('button.main-tab:has-text("Installed")');
+    await page.click('button[role="tab"]:has-text("Installed")');
     await expect(page.locator('.model-form input')).toHaveValue('llama3.2');
 
-    // Switch back to Browse and click second model's install
-    await page.click('button.main-tab:has-text("Browse")');
+    // Switch back to Browse (Ollama tab) and click second model's install
+    await page.click('button[role="tab"]:has-text("Browse")');
+    await page.click('button[role="tab"]:has-text("Ollama")');
     await page.locator('.browse-item').nth(1).locator('.btn-primary').click();
     // Switch to Installed tab to verify second input
-    await page.click('button.main-tab:has-text("Installed")');
+    await page.click('button[role="tab"]:has-text("Installed")');
     await expect(page.locator('.model-form input')).toHaveValue('codellama');
   });
 });

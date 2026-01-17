@@ -193,7 +193,6 @@ export function CreateTaskWizard({
                 }}
                 placeholder="What needs to be done?"
                 className={fieldErrors.title ? 'input-error' : ''}
-                autoFocus
               />
               {fieldErrors.title && <span className="field-error">{fieldErrors.title}</span>}
             </div>
@@ -243,8 +242,8 @@ export function CreateTaskWizard({
               Configure task priority and enable agentic mode for autonomous execution.
             </p>
             <div className="form-group">
-              <label>Priority</label>
-              <div className="priority-selector">
+              <span id="priority-label" className="form-label">Priority</span>
+              <div className="priority-selector" role="group" aria-labelledby="priority-label">
                 {[1, 2, 3, 4, 5].map((p) => (
                   <button
                     key={p}

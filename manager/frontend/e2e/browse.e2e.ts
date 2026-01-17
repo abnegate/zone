@@ -21,7 +21,8 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    await page.click('button.main-tab:has-text("Browse")');
+    // App defaults to Models page, just click the Browse tab
+    await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
 
@@ -37,7 +38,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: manyModels, has_more: false }),
+          body: JSON.stringify({ source, models: manyModels, next_cursor: null }),
         });
         return;
       }
@@ -81,13 +82,13 @@ test.describe('Browse Models - Virtual Scrolling', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: page1, has_more: true }),
+          body: JSON.stringify({ source, models: page1, next_cursor: 'page2' }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: page2, has_more: false }),
+          body: JSON.stringify({ source, models: page2, next_cursor: null }),
         });
       }
     });
@@ -127,7 +128,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ source, models, has_more: offset === 0 }),
+        body: JSON.stringify({ source, models, next_cursor: offset === 0 ? 'more' : null }),
       });
     });
 
@@ -163,20 +164,19 @@ test.describe('Browse Models - Virtual Scrolling', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: filteredModels, has_more: false }),
+          body: JSON.stringify({ source, models: filteredModels, next_cursor: null }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: allModels, has_more: false }),
+          body: JSON.stringify({ source, models: allModels, next_cursor: null }),
         });
       }
     });
 
-    // Trigger initial browse load
-    await page.fill('.search-container input', '');
-    await page.click('.search-container button');
+    // Click Ollama tab to test single-source behavior
+    await page.click('button[role="tab"]:has-text("Ollama")');
     // Virtual list only renders visible items, so check for first item
     await expect(page.locator('.browse-item').first()).toBeVisible();
 
@@ -220,31 +220,30 @@ test.describe('Browse Models - Virtual Scrolling', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: huggingFaceModels, has_more: false }),
+          body: JSON.stringify({ source, models: huggingFaceModels, next_cursor: null }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: ollamaModels, has_more: false }),
+          body: JSON.stringify({ source, models: ollamaModels, next_cursor: null }),
         });
       }
     });
 
-    // Trigger initial load with Ollama
-    await page.fill('.search-container input', '');
-    await page.click('.search-container button');
+    // Click Ollama tab to trigger initial load with Ollama
+    await page.click('button[role="tab"]:has-text("Ollama")');
 
     // Initial Ollama results
     await expect(page.locator('.browse-item')).toHaveCount(5);
 
     // Switch to HuggingFace
-    await page.click('.source-tab:has-text("HuggingFace")');
+    await page.click('button[role="tab"]:has-text("HuggingFace")');
     await expect(page.locator('.browse-item')).toHaveCount(1);
     await expect(page.locator('.browse-name')).toHaveText('HF Model');
 
     // Switch back to Ollama
-    await page.click('.source-tab:has-text("Ollama")');
+    await page.click('button[role="tab"]:has-text("Ollama")');
     await expect(page.locator('.browse-item')).toHaveCount(5);
   });
 
@@ -272,7 +271,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models, has_more: true }),
+          body: JSON.stringify({ source, models, next_cursor: 'more' }),
         });
       }
     });
@@ -305,7 +304,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ source, models, has_more: false }),
+        body: JSON.stringify({ source, models, next_cursor: null }),
       });
     });
 
@@ -350,7 +349,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ source, models, has_more: false }),
+        body: JSON.stringify({ source, models, next_cursor: null }),
       });
     });
 
@@ -362,7 +361,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     await page.locator('.browse-item').first().locator('.btn-primary').click();
 
     // Switch to Installed tab to see the model form input
-    await page.click('button.main-tab:has-text("Installed")');
+    await page.click('button[role="tab"]:has-text("Installed")');
 
     // Model input should be populated with the model name
     await expect(page.locator('.model-form input')).toHaveValue('model-0');
@@ -378,14 +377,16 @@ test.describe('Browse Models - Source Tab Switching', () => {
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    await page.click('button.main-tab:has-text("Browse")');
+    // App defaults to Models page, just click the Browse tab
+    await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
 
-  test('all three source tabs are visible', async ({ page }) => {
-    await expect(page.locator('.source-tab:has-text("Ollama")')).toBeVisible();
-    await expect(page.locator('.source-tab:has-text("HuggingFace")')).toBeVisible();
-    await expect(page.locator('.source-tab:has-text("ModelScope")')).toBeVisible();
+  test('all four source tabs are visible', async ({ page }) => {
+    await expect(page.locator('button[role="tab"]:has-text("Ollama")')).toBeVisible();
+    await expect(page.locator('button[role="tab"]:has-text("HuggingFace")')).toBeVisible();
+    await expect(page.locator('button[role="tab"]:has-text("GPT4All")')).toBeVisible();
+    await expect(page.locator('button[role="tab"]:has-text("OpenRouter")')).toBeVisible();
   });
 
   test('clicking source tabs sends correct source parameter', async ({ page }) => {
@@ -406,24 +407,29 @@ test.describe('Browse Models - Source Tab Switching', () => {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ source, models: [], has_more: false }),
+        body: JSON.stringify({ source, models: [], next_cursor: null }),
       });
     });
 
     // Click HuggingFace tab
-    await page.click('.source-tab:has-text("HuggingFace")');
+    await page.click('button[role="tab"]:has-text("HuggingFace")');
     await page.waitForTimeout(100);
 
-    // Click ModelScope tab
-    await page.click('.source-tab:has-text("ModelScope")');
+    // Click GPT4All tab
+    await page.click('button[role="tab"]:has-text("GPT4All")');
+    await page.waitForTimeout(100);
+
+    // Click OpenRouter tab
+    await page.click('button[role="tab"]:has-text("OpenRouter")');
     await page.waitForTimeout(100);
 
     // Click Ollama tab
-    await page.click('.source-tab:has-text("Ollama")');
+    await page.click('button[role="tab"]:has-text("Ollama")');
     await page.waitForTimeout(100);
 
     expect(requests).toContain('huggingface');
-    expect(requests).toContain('modelscope');
+    expect(requests).toContain('gpt4all');
+    expect(requests).toContain('openrouter');
     expect(requests).toContain('ollama');
   });
 });
@@ -437,7 +443,8 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    await page.click('button.main-tab:has-text("Browse")');
+    // App defaults to Models page, just click the Browse tab
+    await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
 
@@ -472,19 +479,19 @@ test.describe('Browse Models - HuggingFace Specific', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [hfModel], has_more: false }),
+          body: JSON.stringify({ source, models: [hfModel], next_cursor: null }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
+          body: JSON.stringify({ source, models: [], next_cursor: null }),
         });
       }
     });
 
     // Switch to HuggingFace tab
-    await page.click('.source-tab:has-text("HuggingFace")');
+    await page.click('button[role="tab"]:has-text("HuggingFace")');
 
     await expect(page.locator('.browse-item')).toHaveCount(1);
     await expect(page.locator('.browse-name')).toHaveText('Model-GGUF');
@@ -521,24 +528,26 @@ test.describe('Browse Models - HuggingFace Specific', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [hfModel], has_more: false }),
+          body: JSON.stringify({ source, models: [hfModel], next_cursor: null }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
+          body: JSON.stringify({ source, models: [], next_cursor: null }),
         });
       }
     });
 
     // Switch to HuggingFace tab and click model
-    await page.click('.source-tab:has-text("HuggingFace")');
+    await page.click('button[role="tab"]:has-text("HuggingFace")');
     await page.locator('.browse-item').first().click();
 
     await expect(page.locator('.modal-details')).toBeVisible();
-    // Author is displayed (as a span, not a link)
-    await expect(page.locator('.details-author-link')).toHaveText('TheBloke');
+    // Model name is displayed in header
+    await expect(page.locator('.modal-details-header h3')).toHaveText('Model-GGUF');
+    // Source badge shows HUGGINGFACE
+    await expect(page.locator('.details-source')).toContainText(/huggingface/i);
   });
 
   test('HuggingFace details shows install command', async ({ page }) => {
@@ -572,25 +581,26 @@ test.describe('Browse Models - HuggingFace Specific', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [hfModel], has_more: false }),
+          body: JSON.stringify({ source, models: [hfModel], next_cursor: null }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
+          body: JSON.stringify({ source, models: [], next_cursor: null }),
         });
       }
     });
 
-    await page.click('.source-tab:has-text("HuggingFace")');
+    await page.click('button[role="tab"]:has-text("HuggingFace")');
     await page.locator('.browse-item').first().click();
 
-    await expect(page.locator('.details-install code')).toHaveText('hf.co/TheBloke/Model-GGUF');
+    // Install command shows the model name
+    await expect(page.locator('.details-install code')).toHaveText('Model-GGUF');
   });
 });
 
-test.describe('Browse Models - ModelScope Specific', () => {
+test.describe('Browse Models - GPT4All Specific', () => {
   test.beforeEach(async ({ context, page }) => {
     // Block service worker to allow route interception to work
     await blockServiceWorker(context);
@@ -599,21 +609,18 @@ test.describe('Browse Models - ModelScope Specific', () => {
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    await page.click('button.main-tab:has-text("Browse")');
+    // App defaults to Models page, just click the Browse tab
+    await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
 
-  test('displays ModelScope model with author', async ({ page }) => {
-    const msModel = {
-      id: 'Qwen/Qwen2.5-7B-GGUF',
-      name: 'Qwen2.5-7B-GGUF',
-      description: 'A Qwen GGUF model',
+  test('displays GPT4All model', async ({ page }) => {
+    const gpt4allModel = {
+      id: 'llama3-8b-instruct',
+      name: 'Llama 3 8B Instruct',
+      description: 'Meta Llama 3 8B Instruct model',
       downloads: 100000,
-      likes: 500,
-      tags: ['gguf', 'qwen'],
-      author: 'Qwen',
-      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
-      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
+      tags: ['gguf', 'llama'],
     };
 
     await page.unroute('**/api/models*');
@@ -630,215 +637,35 @@ test.describe('Browse Models - ModelScope Specific', () => {
         return;
       }
 
-      if (source === 'modelscope') {
+      if (source === 'gpt4all') {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [msModel], has_more: false, total: 1 }),
+          body: JSON.stringify({ source, models: [gpt4allModel], next_cursor: null }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
+          body: JSON.stringify({ source, models: [], next_cursor: null }),
         });
       }
     });
 
-    // Switch to ModelScope tab
-    await page.click('.source-tab:has-text("ModelScope")');
+    // Switch to GPT4All tab
+    await page.click('button[role="tab"]:has-text("GPT4All")');
 
     await expect(page.locator('.browse-item')).toHaveCount(1);
-    await expect(page.locator('.browse-name')).toHaveText('Qwen2.5-7B-GGUF');
+    await expect(page.locator('.browse-name')).toHaveText('Llama 3 8B Instruct');
   });
 
-  test('ModelScope details modal shows author', async ({ page }) => {
-    const msModel = {
-      id: 'Qwen/Qwen2.5-7B-GGUF',
-      name: 'Qwen2.5-7B-GGUF',
-      description: 'A Qwen GGUF model',
-      downloads: 100000,
-      likes: 500,
-      tags: ['gguf', 'qwen'],
-      author: 'Qwen',
-      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
-      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
-    };
-
-    await page.unroute('**/api/models*');
-    await routeApi(page, '**/api/models*', (route) => {
-      const url = new URL(route.request().url());
-      const source = url.searchParams.get('source');
-
-      if (!source) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ models: [] }),
-        });
-        return;
-      }
-
-      if (source === 'modelscope') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [msModel], has_more: false, total: 1 }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
-        });
-      }
-    });
-
-    // Mock the model info endpoint
-    await routeApi(page, '**/api/models/modelscope/**', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          success: true,
-          content: '# Qwen2.5 Model\n\nA great model.',
-          gguf_size: 5000000000,
-        }),
-      });
-    });
-
-    // Switch to ModelScope tab and click model
-    await page.click('.source-tab:has-text("ModelScope")');
-    await page.locator('.browse-item').first().click();
-
-    await expect(page.locator('.modal-details')).toBeVisible();
-    await expect(page.locator('.details-author-link')).toHaveText('Qwen');
-  });
-
-  test('ModelScope details shows install command with modelscope prefix', async ({ page }) => {
-    const msModel = {
-      id: 'Qwen/Qwen2.5-7B-GGUF',
-      name: 'Qwen2.5-7B-GGUF',
-      description: 'A Qwen GGUF model',
-      downloads: 100000,
-      likes: 500,
-      tags: ['gguf'],
-      author: 'Qwen',
-      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
-      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
-    };
-
-    await page.unroute('**/api/models*');
-    await routeApi(page, '**/api/models*', (route) => {
-      const url = new URL(route.request().url());
-      const source = url.searchParams.get('source');
-
-      if (!source) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ models: [] }),
-        });
-        return;
-      }
-
-      if (source === 'modelscope') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [msModel], has_more: false, total: 1 }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
-        });
-      }
-    });
-
-    await routeApi(page, '**/api/models/modelscope/**', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ success: true, content: null, gguf_size: null }),
-      });
-    });
-
-    await page.click('.source-tab:has-text("ModelScope")');
-    await page.locator('.browse-item').first().click();
-
-    await expect(page.locator('.details-install code')).toHaveText('modelscope/Qwen/Qwen2.5-7B-GGUF');
-  });
-
-  test('ModelScope details shows View on ModelScope link', async ({ page }) => {
-    const msModel = {
-      id: 'Qwen/Qwen2.5-7B-GGUF',
-      name: 'Qwen2.5-7B-GGUF',
-      description: 'A Qwen GGUF model',
-      downloads: 100000,
-      likes: 500,
-      tags: ['gguf'],
-      author: 'Qwen',
-      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
-      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
-    };
-
-    await page.unroute('**/api/models*');
-    await routeApi(page, '**/api/models*', (route) => {
-      const url = new URL(route.request().url());
-      const source = url.searchParams.get('source');
-
-      if (!source) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ models: [] }),
-        });
-        return;
-      }
-
-      if (source === 'modelscope') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [msModel], has_more: false, total: 1 }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
-        });
-      }
-    });
-
-    await routeApi(page, '**/api/models/modelscope/**', (route) => {
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ success: true, content: null, gguf_size: null }),
-      });
-    });
-
-    await page.click('.source-tab:has-text("ModelScope")');
-    await page.locator('.browse-item').first().click();
-
-    await expect(page.locator('.details-link a')).toContainText('View on ModelScope');
-    await expect(page.locator('.details-link a')).toHaveAttribute('href', 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF');
-  });
-
-  test('ModelScope shows models from response', async ({ page }) => {
-    const msModels = Array.from({ length: 5 }, (_, i) => ({
-      id: `Author/Model-${i}`,
-      name: `Model-${i}`,
-      description: 'A model',
+  test('GPT4All shows models from response', async ({ page }) => {
+    const gpt4allModels = Array.from({ length: 5 }, (_, i) => ({
+      id: `model-${i}`,
+      name: `Model ${i}`,
+      description: 'A GGUF model',
       downloads: 1000 * (5 - i),
-      likes: 100,
       tags: ['gguf'],
-      author: 'Author',
-      install_name: `modelscope/Author/Model-${i}`,
-      url: `https://modelscope.cn/Author/Model-${i}`,
     }));
 
     await page.unroute('**/api/models*');
@@ -855,87 +682,130 @@ test.describe('Browse Models - ModelScope Specific', () => {
         return;
       }
 
-      if (source === 'modelscope') {
+      if (source === 'gpt4all') {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({
-            source,
-            models: msModels,
-            has_more: true,
-            total: 500, // Total available models
-          }),
+          body: JSON.stringify({ source, models: gpt4allModels, next_cursor: 'offset:5' }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
+          body: JSON.stringify({ source, models: [], next_cursor: null }),
         });
       }
     });
 
-    await page.click('.source-tab:has-text("ModelScope")');
+    await page.click('button[role="tab"]:has-text("GPT4All")');
 
-    // Wait for ModelScope results to load - check for first ModelScope model name
-    await expect(page.locator('.browse-name').first()).toHaveText('Model-0');
-
-    // Verify models are loaded by checking that at least one item is visible
+    // Wait for GPT4All results to load
+    await expect(page.locator('.browse-name').first()).toHaveText('Model 0');
     await expect(page.locator('.browse-item').first()).toBeVisible();
   });
+});
 
-  test('ModelScope install button uses modelscope install name', async ({ page }) => {
-    const msModel = {
-      id: 'Qwen/Qwen2.5-7B-GGUF',
-      name: 'Qwen2.5-7B-GGUF',
-      description: 'A Qwen GGUF model',
-      downloads: 100000,
-      likes: 500,
-      tags: ['gguf'],
-      author: 'Qwen',
-      install_name: 'modelscope/Qwen/Qwen2.5-7B-GGUF',
-      url: 'https://modelscope.cn/Qwen/Qwen2.5-7B-GGUF',
+test.describe('Browse Models - OpenRouter Specific', () => {
+  test.beforeEach(async ({ context, page }) => {
+    // Block service worker to allow route interception to work
+    await blockServiceWorker(context);
+    await mockCommonEndpoints(page);
+    await page.goto('/');
+    await setupAuth(page);
+    await page.reload();
+    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
+    // App defaults to Models page, just click the Browse tab
+    await page.click('button[role="tab"]:has-text("Browse")');
+    await expect(page.locator('.search-container')).toBeVisible();
+  });
+
+  test('displays OpenRouter model', async ({ page }) => {
+    const openrouterModel = {
+      id: 'anthropic/claude-3-opus',
+      name: 'Claude 3 Opus',
+      description: 'Anthropic Claude 3 Opus model',
+      downloads: 500000,
+      tags: ['api'],
     };
 
+    await page.unroute('**/api/models*');
     await routeApi(page, '**/api/models*', (route) => {
       const url = new URL(route.request().url());
       const source = url.searchParams.get('source');
-      const method = route.request().method();
 
-      if (method === 'POST') {
-        // Mock successful install/pull
+      if (!source) {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ success: true }),
+          body: JSON.stringify({ models: [] }),
         });
         return;
       }
 
-      if (source === 'modelscope') {
+      if (source === 'openrouter') {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'modelscope', models: [msModel], has_more: false, total: 1 }),
+          body: JSON.stringify({ source, models: [openrouterModel], next_cursor: null }),
         });
       } else {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ models: [], has_more: false }),
+          body: JSON.stringify({ source, models: [], next_cursor: null }),
         });
       }
     });
 
-    await page.click('.source-tab:has-text("ModelScope")');
+    // Switch to OpenRouter tab
+    await page.click('button[role="tab"]:has-text("OpenRouter")');
 
-    // Click install button
-    await page.locator('.browse-item').first().locator('.btn-primary').click();
+    await expect(page.locator('.browse-item')).toHaveCount(1);
+    await expect(page.locator('.browse-name')).toHaveText('Claude 3 Opus');
+  });
 
-    // Switch to Installed tab to see the model form input
-    await page.click('button.main-tab:has-text("Installed")');
+  test('OpenRouter shows models from response', async ({ page }) => {
+    const openrouterModels = Array.from({ length: 5 }, (_, i) => ({
+      id: `provider/model-${i}`,
+      name: `Model ${i}`,
+      description: 'An API model',
+      downloads: 1000 * (5 - i),
+      tags: ['api'],
+    }));
 
-    // Model input should have the modelscope install name
-    await expect(page.locator('.model-form input')).toHaveValue('modelscope/Qwen/Qwen2.5-7B-GGUF');
+    await page.unroute('**/api/models*');
+    await routeApi(page, '**/api/models*', (route) => {
+      const url = new URL(route.request().url());
+      const source = url.searchParams.get('source');
+
+      if (!source) {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: [] }),
+        });
+        return;
+      }
+
+      if (source === 'openrouter') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source, models: openrouterModels, next_cursor: 'offset:5' }),
+        });
+      } else {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source, models: [], next_cursor: null }),
+        });
+      }
+    });
+
+    await page.click('button[role="tab"]:has-text("OpenRouter")');
+
+    // Wait for OpenRouter results to load
+    await expect(page.locator('.browse-name').first()).toHaveText('Model 0');
+    await expect(page.locator('.browse-item').first()).toBeVisible();
   });
 });

@@ -1,6 +1,9 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { SearchResult, SearchOptions } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockSearchContext = mock();
 
@@ -8,6 +11,22 @@ mock.module('../../../api/knowledge', () => ({
   knowledgeApi: {
     searchContext: mockSearchContext,
   },
+}));
+
+// Mock useWorkspace to provide a test workspace
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' },
+    currentOrganization: { id: 'test-org-id', name: 'Test Org' },
+    workspaces: [],
+    organizations: [],
+    loading: false,
+    error: null,
+    setCurrentWorkspace: mock(),
+    setCurrentOrganization: mock(),
+    refreshWorkspaces: mock(),
+    refreshOrganizations: mock(),
+  }),
 }));
 
 let useContextSearch: typeof import('./useContextSearch').useContextSearch;
@@ -19,6 +38,17 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 describe('useContextSearch', () => {
   const mockResults: SearchResult[] = [
@@ -43,12 +73,12 @@ describe('useContextSearch', () => {
   ];
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockSearchContext.mockReset();
   });
 
   describe('initialization', () => {
     it('should initialize with empty state', () => {
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       expect(result.current.results).toEqual([]);
       expect(result.current.total).toBe(0);
@@ -64,7 +94,7 @@ describe('useContextSearch', () => {
         total: 2,
       });
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       const options: SearchOptions = {
         query: 'test query',
@@ -76,7 +106,7 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockSearchContext).toHaveBeenCalledWith(options);
+      expect(mockSearchContext).toHaveBeenCalledWith({ ...options, workspace_id: 'test-workspace-id' });
       expect(result.current.results).toEqual(mockResults);
       expect(result.current.total).toBe(2);
       expect(result.current.loading).toBe(false);
@@ -91,7 +121,7 @@ describe('useContextSearch', () => {
           )
       );
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       const options: SearchOptions = {
         query: 'test query',
@@ -113,7 +143,7 @@ describe('useContextSearch', () => {
     it('should handle search error', async () => {
       mockSearchContext.mockRejectedValue(new Error('Search failed'));
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       const options: SearchOptions = {
         query: 'test query',
@@ -135,7 +165,7 @@ describe('useContextSearch', () => {
         total: 2,
       });
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       const options: SearchOptions = {
         query: 'test query',
@@ -157,7 +187,7 @@ describe('useContextSearch', () => {
         total: 2,
       });
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       const options: SearchOptions = {
         query: 'test query',
@@ -179,7 +209,7 @@ describe('useContextSearch', () => {
         total: 2,
       });
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       const options: SearchOptions = {
         query: 'test query',
@@ -201,7 +231,7 @@ describe('useContextSearch', () => {
         total: 2,
       });
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       const options: SearchOptions = {
         query: 'test query',
@@ -223,7 +253,7 @@ describe('useContextSearch', () => {
         total: 2,
       });
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       await act(async () => {
         await result.current.search({ query: 'first query' });
@@ -253,7 +283,7 @@ describe('useContextSearch', () => {
         total: 2,
       });
 
-      const { result } = renderHook(() => useContextSearch());
+      const { result } = renderHook(() => useContextSearch(), { wrapper: createWrapper() });
 
       await act(async () => {
         await result.current.search({ query: 'test query' });

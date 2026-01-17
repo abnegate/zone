@@ -4,18 +4,21 @@ import VirtualBrowseList from './VirtualBrowseList';
 
 const mockModels: BrowseModel[] = [
   {
-    id: 'model-1',
-    name: 'llama2',
-    description: 'A large language model',
-    downloads: 1500000,
-    tags: ['llm', 'text-generation', 'chat'],
+    name: 'llama2:7b',
+    size: 3800000000,
+    details: {
+      family: 'llama',
+      parameter_size: '7B',
+      quantization_level: 'Q4_0',
+    },
   },
   {
-    id: 'model-2',
-    name: 'mistral',
-    description: 'Fast and efficient model',
-    downloads: 750000,
-    tags: ['llm', 'fast'],
+    name: 'mistral:latest',
+    size: 4100000000,
+    details: {
+      family: 'mistral',
+      parameter_size: '7B',
+    },
   },
 ];
 
@@ -55,58 +58,42 @@ describe('VirtualBrowseList', () => {
       />
     );
 
-    expect(screen.getByText('llama2')).toBeInTheDocument();
+    expect(screen.getByText('llama2:7b')).toBeInTheDocument();
+    expect(screen.getByText('mistral:latest')).toBeInTheDocument();
+  });
+
+  it('renders model sizes', () => {
+    render(
+      <VirtualBrowseList
+        models={mockModels}
+        onItemClick={onItemClick}
+        onInstall={onInstall}
+        hasMore={false}
+        loadingMore={false}
+        onLoadMore={onLoadMore}
+      />
+    );
+
+    expect(screen.getByText('3.5 GB')).toBeInTheDocument();
+    expect(screen.getByText('3.8 GB')).toBeInTheDocument();
+  });
+
+  it('renders model details as tags', () => {
+    render(
+      <VirtualBrowseList
+        models={mockModels}
+        onItemClick={onItemClick}
+        onInstall={onInstall}
+        hasMore={false}
+        loadingMore={false}
+        onLoadMore={onLoadMore}
+      />
+    );
+
+    expect(screen.getByText('llama')).toBeInTheDocument();
     expect(screen.getByText('mistral')).toBeInTheDocument();
-  });
-
-  it('renders model descriptions', () => {
-    render(
-      <VirtualBrowseList
-        models={mockModels}
-        onItemClick={onItemClick}
-        onInstall={onInstall}
-        hasMore={false}
-        loadingMore={false}
-        onLoadMore={onLoadMore}
-      />
-    );
-
-    expect(screen.getByText('A large language model')).toBeInTheDocument();
-    expect(screen.getByText('Fast and efficient model')).toBeInTheDocument();
-  });
-
-  it('formats downloads correctly', () => {
-    render(
-      <VirtualBrowseList
-        models={mockModels}
-        onItemClick={onItemClick}
-        onInstall={onInstall}
-        hasMore={false}
-        loadingMore={false}
-        onLoadMore={onLoadMore}
-      />
-    );
-
-    expect(screen.getByText('1.5M downloads')).toBeInTheDocument();
-    expect(screen.getByText('750.0K downloads')).toBeInTheDocument();
-  });
-
-  it('renders tags', () => {
-    render(
-      <VirtualBrowseList
-        models={mockModels}
-        onItemClick={onItemClick}
-        onInstall={onInstall}
-        hasMore={false}
-        loadingMore={false}
-        onLoadMore={onLoadMore}
-      />
-    );
-
-    // Check that tags are present (there may be multiple with same text)
-    expect(screen.getAllByText('llm').length).toBeGreaterThan(0);
-    expect(screen.getByText('text-generation')).toBeInTheDocument();
-    expect(screen.getByText('chat')).toBeInTheDocument();
+    expect(screen.getAllByText('7B').length).toBeGreaterThan(0);
+    expect(screen.getByText('Q4_0')).toBeInTheDocument();
   });
 
   it('calls onItemClick when model clicked', () => {
@@ -121,7 +108,7 @@ describe('VirtualBrowseList', () => {
       />
     );
 
-    fireEvent.click(screen.getByText('llama2').closest('.browse-item')!);
+    fireEvent.click(screen.getByText('llama2:7b').closest('.browse-item')!);
 
     expect(onItemClick).toHaveBeenCalledWith(mockModels[0]);
   });
@@ -172,26 +159,25 @@ describe('VirtualBrowseList', () => {
       />
     );
 
-    const firstItem = screen.getByText('llama2').closest('.browse-item')!;
+    const firstItem = screen.getByText('llama2:7b').closest('.browse-item')!;
     fireEvent.keyDown(firstItem, { key: 'Enter' });
 
     expect(onItemClick).toHaveBeenCalledWith(mockModels[0]);
   });
 
-  it('formats downloads less than 1000 correctly', () => {
-    const smallDownloadModels: BrowseModel[] = [
+  it('renders model without size', () => {
+    const noSizeModels: BrowseModel[] = [
       {
-        id: 'model-3',
-        name: 'small-model',
-        description: 'A model with few downloads',
-        downloads: 42,
-        tags: [],
+        name: 'no-size-model',
+        details: {
+          family: 'test',
+        },
       },
     ];
 
     render(
       <VirtualBrowseList
-        models={smallDownloadModels}
+        models={noSizeModels}
         onItemClick={onItemClick}
         onInstall={onInstall}
         hasMore={false}
@@ -200,23 +186,21 @@ describe('VirtualBrowseList', () => {
       />
     );
 
-    expect(screen.getByText('42 downloads')).toBeInTheDocument();
+    expect(screen.getByText('no-size-model')).toBeInTheDocument();
+    expect(document.querySelectorAll('.browse-size').length).toBe(0);
   });
 
-  it('renders model without description', () => {
-    const noDescModels: BrowseModel[] = [
+  it('renders model without details', () => {
+    const noDetailsModels: BrowseModel[] = [
       {
-        id: 'model-4',
-        name: 'no-desc-model',
-        description: '',
-        downloads: 1000,
-        tags: ['test'],
+        name: 'no-details-model',
+        size: 1000000000,
       },
     ];
 
     render(
       <VirtualBrowseList
-        models={noDescModels}
+        models={noDetailsModels}
         onItemClick={onItemClick}
         onInstall={onInstall}
         hasMore={false}
@@ -225,33 +209,7 @@ describe('VirtualBrowseList', () => {
       />
     );
 
-    expect(screen.getByText('no-desc-model')).toBeInTheDocument();
-    expect(document.querySelectorAll('.browse-description').length).toBe(0);
-  });
-
-  it('renders model without tags', () => {
-    const noTagsModels: BrowseModel[] = [
-      {
-        id: 'model-5',
-        name: 'no-tags-model',
-        description: 'A model',
-        downloads: 500,
-        tags: [],
-      },
-    ];
-
-    render(
-      <VirtualBrowseList
-        models={noTagsModels}
-        onItemClick={onItemClick}
-        onInstall={onInstall}
-        hasMore={false}
-        loadingMore={false}
-        onLoadMore={onLoadMore}
-      />
-    );
-
-    expect(screen.getByText('no-tags-model')).toBeInTheDocument();
+    expect(screen.getByText('no-details-model')).toBeInTheDocument();
     expect(document.querySelectorAll('.browse-tags').length).toBe(0);
   });
 });

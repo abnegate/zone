@@ -11,6 +11,15 @@ jest.mock('../../api/client', () => ({
   },
 }));
 
+// Mock the auth hook
+jest.mock('../../features/auth', () => ({
+  useAuth: jest.fn(() => ({
+    isAuthenticated: true,
+    isLoading: false,
+    user: { id: 'user-1', email: 'test@example.com' },
+  })),
+}));
+
 const mockClient = client as jest.Mocked<typeof client>;
 
 const mockOrganizations: Organization[] = [

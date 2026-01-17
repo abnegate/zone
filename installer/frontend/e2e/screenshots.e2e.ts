@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { test, expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { fillRequiredSecrets } from './helpers';
 
 const screenshotsDir = 'screenshots';
 
@@ -16,7 +17,7 @@ const goToStep = async (page: Page, step: number, heading: string) => {
 test.beforeEach(async ({ page }) => {
   ensureScreenshotsDir();
   await page.goto('/');
-  await page.waitForLoadState('networkidle');
+  await page.waitForLoadState('domcontentloaded');
 });
 
 test.describe('Screenshots - Installer Steps', () => {
@@ -58,6 +59,8 @@ test.describe('Screenshots - Installer Steps', () => {
 
 test.describe('Screenshots - Installation Modal', () => {
   test('Install complete modal', async ({ page }) => {
+    // Fill in required secrets first so validation passes
+    await fillRequiredSecrets(page);
     await goToStep(page, 7, 'Advanced Settings');
 
     await page.route('**/api/install', (route) => {
@@ -70,7 +73,7 @@ test.describe('Screenshots - Installation Modal', () => {
 
     await page.click('button:has-text("Install")');
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
-    await expect(page.getByText('Installation Complete')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('heading', { name: 'Installation Complete', exact: true })).toBeVisible({ timeout: 10000 });
 
     await page.screenshot({ path: `${screenshotsDir}/install-complete.png`, fullPage: true });
   });

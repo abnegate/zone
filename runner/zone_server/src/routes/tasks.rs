@@ -13,18 +13,7 @@ use crate::auth::AuthUser;
 use crate::db::tasks;
 use crate::state::AppState;
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-}
+use super::common::{ErrorResponse, Timestamps};
 
 /// Task response
 #[derive(Debug, Serialize)]
@@ -44,6 +33,8 @@ pub struct TaskData {
     status: String,
     priority: Option<i32>,
     is_agentic: bool,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 /// Tasks list response
@@ -64,6 +55,7 @@ impl From<tasks::TaskRow> for TaskData {
             status: row.status,
             priority: row.priority,
             is_agentic: row.is_agentic,
+            timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }
@@ -134,6 +126,7 @@ pub struct TaskRunLogData {
     agent_type: String,
     log_level: String,
     message: String,
+    created_at: String,
 }
 
 /// Task run logs list response
@@ -150,6 +143,10 @@ impl From<tasks::TaskRunLogRow> for TaskRunLogData {
             agent_type: row.agent_type,
             log_level: row.log_level,
             message: row.message,
+            created_at: row
+                .created_at
+                .map(|dt| dt.and_utc().to_rfc3339())
+                .unwrap_or_default(),
         }
     }
 }
@@ -199,7 +196,14 @@ pub async fn list(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
-    match tasks::list_tasks(state.db(), workspace_id, query.project_id, query.status.as_deref()).await {
+    match tasks::list_tasks(
+        state.db(),
+        workspace_id,
+        query.project_id,
+        query.status.as_deref(),
+    )
+    .await
+    {
         Ok(items) => Json(TasksListResponse {
             tasks: items.into_iter().map(TaskData::from).collect(),
         })

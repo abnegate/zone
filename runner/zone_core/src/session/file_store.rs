@@ -90,10 +90,10 @@ impl SessionStore for FileSessionStore {
             }
 
             // Try to parse the session
-            if let Ok(json) = fs::read_to_string(&path).await {
-                if let Ok(session) = serde_json::from_str::<Session>(&json) {
-                    summaries.push(SessionSummary::from(&session));
-                }
+            if let Ok(json) = fs::read_to_string(&path).await
+                && let Ok(session) = serde_json::from_str::<Session>(&json)
+            {
+                summaries.push(SessionSummary::from(&session));
             }
         }
 

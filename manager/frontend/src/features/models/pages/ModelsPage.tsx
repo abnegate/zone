@@ -7,7 +7,6 @@ import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
 import type { BrowseModel, InstalledModel } from '../types';
-import { formatNumber } from '../utils/formatters';
 import './ModelsPage.css';
 
 function formatBytes(bytes: number): string {
@@ -71,10 +70,9 @@ export default function ModelsPage() {
   };
 
   const handleInstall = async (model: BrowseModel) => {
-    const name = model.install_name ?? model.name;
-    setModelInput(name);
+    setModelInput(model.name);
     setDetailsModel(null);
-    const success = await pull.pull(name);
+    const success = await pull.pull(model.name);
     if (success) {
       setModelInput('');
       refresh();
@@ -87,15 +85,13 @@ export default function ModelsPage() {
     setModelCardExpanded(false);
     setModelSize(null);
 
-    // Load model info for remote sources (HuggingFace, ModelScope)
-    if (
-      !isInstalledModel(model) &&
-      (browse.source === 'huggingface' || browse.source === 'modelscope')
-    ) {
+    // Load model info for remote sources (HuggingFace only - has README content)
+    // Check the model's source when in "all" mode, otherwise check browse.source
+    const modelSource = !isInstalledModel(model) && model.source ? model.source : browse.source;
+    if (!isInstalledModel(model) && modelSource === 'huggingface') {
       setModelCardLoading(true);
       try {
-        // Prefix with source for proper routing
-        const modelId = browse.source === 'modelscope' ? `modelscope/${model.id}` : model.id;
+        const modelId = model.name;
         const info = await modelsApi.getModelInfo(modelId);
         setModelCard(info.content);
         setModelSize(info.gguf_size);
@@ -114,7 +110,8 @@ export default function ModelsPage() {
   };
 
   const isInstalledModel = (model: InstalledModel | BrowseModel): model is InstalledModel => {
-    return 'size' in model && 'modified_at' in model;
+    // InstalledModel has required modified_at, BrowseModel has optional
+    return typeof model.modified_at === 'string' && model.modified_at.length > 0;
   };
 
   return (
@@ -248,8 +245,8 @@ export default function ModelsPage() {
                     <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
                 }
-                title="Cannot connect to Ollama"
-                description="Unable to fetch models. Make sure Ollama is running and accessible."
+                title={modelsError.includes('401') ? 'Authentication required' : 'Cannot connect to Ollama'}
+                description={modelsError.includes('401') ? 'Please log in to view installed models.' : 'Unable to fetch models. Make sure Ollama is running and accessible.'}
                 action={<Button onClick={refresh} variant="secondary">Retry</Button>}
               />
             ) : models.length === 0 ? (
@@ -321,56 +318,19 @@ export default function ModelsPage() {
       {/* Browse Tab Content */}
       {activeTab === 'browse' && (
         <section className="card">
-          <div className="source-tabs">
-            <button
-              className={`source-tab ${browse.source === 'ollama' ? 'active' : ''}`}
-              onClick={() => browse.changeSource('ollama')}
-              type="button"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                width="16"
-                height="16"
-                aria-hidden="true"
-              >
-                <circle cx="12" cy="12" r="10" />
-              </svg>
-              Ollama Library
-            </button>
-            <button
-              className={`source-tab ${browse.source === 'huggingface' ? 'active' : ''}`}
-              onClick={() => browse.changeSource('huggingface')}
-              type="button"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                width="16"
-                height="16"
-                aria-hidden="true"
-              >
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" />
-              </svg>
-              HuggingFace
-            </button>
-            <button
-              className={`source-tab ${browse.source === 'modelscope' ? 'active' : ''}`}
-              onClick={() => browse.changeSource('modelscope')}
-              type="button"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                width="16"
-                height="16"
-                aria-hidden="true"
-              >
-                <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
-              </svg>
-              ModelScope
-            </button>
-          </div>
+          <Tabs
+            value={browse.source}
+            onValueChange={(v) => browse.changeSource(v as typeof browse.source)}
+            className="mb-4"
+          >
+            <TabsList>
+              <TabsTrigger value="all">All</TabsTrigger>
+              <TabsTrigger value="ollama">Ollama</TabsTrigger>
+              <TabsTrigger value="huggingface">HuggingFace</TabsTrigger>
+              <TabsTrigger value="gpt4all">GPT4All</TabsTrigger>
+              <TabsTrigger value="openrouter">OpenRouter</TabsTrigger>
+            </TabsList>
+          </Tabs>
 
           <form className="search-container" onSubmit={handleSearch}>
             <input
@@ -459,9 +419,9 @@ export default function ModelsPage() {
             </button>
 
             <div className="modal-details-header">
-              <h3>{isInstalledModel(detailsModel) ? detailsModel.name : detailsModel.name}</h3>
+              <h3>{detailsModel.name}</h3>
               <span className="details-source">
-                {isInstalledModel(detailsModel) ? 'Installed' : browse.source}
+                {isInstalledModel(detailsModel) ? 'Installed' : (detailsModel.source || browse.source)}
               </span>
             </div>
 
@@ -497,52 +457,60 @@ export default function ModelsPage() {
               </>
             ) : (
               <>
-                <p className="details-description">{detailsModel.description}</p>
-
-                {detailsModel.author && (
-                  <div className="details-author">
-                    <span className="details-label">Author</span>
-                    <span className="details-author-link">{detailsModel.author}</span>
-                  </div>
-                )}
-
-                <div className="details-stats">
-                  <div className="details-stat">
-                    <span className="details-stat-value">
-                      {formatNumber(detailsModel.downloads)}
-                    </span>
-                    <span className="details-stat-label">Downloads</span>
-                  </div>
-                  {detailsModel.likes != null && (
-                    <div className="details-stat">
-                      <span className="details-stat-value">{formatNumber(detailsModel.likes)}</span>
-                      <span className="details-stat-label">Likes</span>
+                <div className="details-meta">
+                  {detailsModel.size && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Size</span>
+                      <span>{formatBytes(detailsModel.size)}</span>
                     </div>
                   )}
-                  {modelSize && (
-                    <div className="details-stat">
-                      <span className="details-stat-value">{formatBytes(modelSize)}</span>
-                      <span className="details-stat-label">Size</span>
+                  {modelSize && !detailsModel.size && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Size</span>
+                      <span>{formatBytes(modelSize)}</span>
+                    </div>
+                  )}
+                  {detailsModel.details?.family && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Family</span>
+                      <span>{detailsModel.details.family}</span>
+                    </div>
+                  )}
+                  {detailsModel.details?.parameter_size && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Parameters</span>
+                      <span>{detailsModel.details.parameter_size}</span>
+                    </div>
+                  )}
+                  {detailsModel.details?.quantization_level && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Quantization</span>
+                      <span>{detailsModel.details.quantization_level}</span>
                     </div>
                   )}
                 </div>
 
-                {detailsModel.tags.length > 0 && (
+                {detailsModel.details && (
                   <div className="details-tags">
-                    {detailsModel.tags.map((tag) => (
-                      <span key={tag} className="tag">
-                        {tag}
-                      </span>
-                    ))}
+                    {detailsModel.details.family && (
+                      <span className="tag">{detailsModel.details.family}</span>
+                    )}
+                    {detailsModel.details.parameter_size && (
+                      <span className="tag">{detailsModel.details.parameter_size}</span>
+                    )}
+                    {detailsModel.details.quantization_level && (
+                      <span className="tag">{detailsModel.details.quantization_level}</span>
+                    )}
+                    {detailsModel.details.format && (
+                      <span className="tag">{detailsModel.details.format}</span>
+                    )}
                   </div>
                 )}
 
-                {detailsModel.install_name && (
-                  <div className="details-install">
-                    <span className="details-label">Install command</span>
-                    <code>{detailsModel.install_name}</code>
-                  </div>
-                )}
+                <div className="details-install">
+                  <span className="details-label">Install command</span>
+                  <code>{detailsModel.name}</code>
+                </div>
 
                 {modelCard !== null && (
                   <div className="details-card">
@@ -580,25 +548,6 @@ export default function ModelsPage() {
                 {modelCardLoading && (
                   <div className="details-card-loading">
                     <span className="spinner" /> Loading model card...
-                  </div>
-                )}
-
-                {detailsModel.url && (
-                  <div className="details-link">
-                    <a href={detailsModel.url} target="_blank" rel="noopener noreferrer">
-                      View on {browse.source === 'modelscope' ? 'ModelScope' : 'HuggingFace'}
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        width="14"
-                        height="14"
-                        aria-hidden="true"
-                      >
-                        <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
-                      </svg>
-                    </a>
                   </div>
                 )}
 

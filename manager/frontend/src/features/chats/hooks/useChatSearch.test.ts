@@ -1,6 +1,9 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { ChatSearchResult } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockSearchChatMessages = mock();
 
@@ -19,6 +22,17 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 describe('useChatSearch', () => {
   const mockSearchResults: ChatSearchResult[] = [
@@ -43,7 +57,7 @@ describe('useChatSearch', () => {
   ];
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockSearchChatMessages.mockReset();
   });
 
   it('should not search on mount', () => {
@@ -52,7 +66,7 @@ describe('useChatSearch', () => {
       total: 2,
     });
 
-    const { result } = renderHook(() => useChatSearch());
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
 
     expect(result.current.results).toEqual([]);
     expect(result.current.searching).toBe(false);
@@ -66,7 +80,7 @@ describe('useChatSearch', () => {
       total: 2,
     });
 
-    const { result } = renderHook(() => useChatSearch());
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
 
     act(() => {
       result.current.search('hello');
@@ -88,7 +102,7 @@ describe('useChatSearch', () => {
       total: 1,
     });
 
-    const { result } = renderHook(() => useChatSearch());
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
 
     act(() => {
       result.current.search('hello', { chat_id: 'c1' });
@@ -109,7 +123,7 @@ describe('useChatSearch', () => {
       total: 2,
     });
 
-    const { result } = renderHook(() => useChatSearch());
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
 
     act(() => {
       result.current.search('hello', { limit: 1 });
@@ -128,7 +142,7 @@ describe('useChatSearch', () => {
     const error = new Error('Search failed');
     mockSearchChatMessages.mockRejectedValue(error);
 
-    const { result } = renderHook(() => useChatSearch());
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
 
     act(() => {
       result.current.search('hello');
@@ -149,7 +163,7 @@ describe('useChatSearch', () => {
       total: 2,
     });
 
-    const { result } = renderHook(() => useChatSearch());
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
 
     act(() => {
       result.current.search('hello');
@@ -176,7 +190,7 @@ describe('useChatSearch', () => {
       total: 2,
     });
 
-    const { result } = renderHook(() => useChatSearch());
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
 
     act(() => {
       result.current.search('');
@@ -197,7 +211,7 @@ describe('useChatSearch', () => {
         total: 1,
       });
 
-    const { result } = renderHook(() => useChatSearch());
+    const { result } = renderHook(() => useChatSearch(), { wrapper: createWrapper() });
 
     act(() => {
       result.current.search('first');

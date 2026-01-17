@@ -279,18 +279,19 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     );
 
     // Gather context if source_ids are specified
-    if let Some(source_ids) = &task.source_ids {
-        if !source_ids.is_empty() && state.context_service().is_some() {
-            tracing::info!(
-                "Context gathering from {} sources available but not yet implemented",
-                source_ids.len()
-            );
-            // TODO: Implement context search using ContextService::search() method
-            // This would involve:
-            // 1. Creating embeddings for the task description
-            // 2. Searching the vector store for relevant chunks
-            // 3. Injecting the top results into the system prompt
-        }
+    if let Some(source_ids) = &task.source_ids
+        && !source_ids.is_empty()
+        && state.context_service().is_some()
+    {
+        tracing::info!(
+            "Context gathering from {} sources available but not yet implemented",
+            source_ids.len()
+        );
+        // TODO: Implement context search using ContextService::search() method
+        // This would involve:
+        // 1. Creating embeddings for the task description
+        // 2. Searching the vector store for relevant chunks
+        // 3. Injecting the top results into the system prompt
     }
 
     // Add acceptance criteria if available

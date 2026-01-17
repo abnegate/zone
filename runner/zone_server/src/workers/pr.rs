@@ -77,10 +77,7 @@ pub async fn create_pr_for_task(
     let repo_url = match &project.github_repo_url {
         Some(url) => url.clone(),
         None => {
-            tracing::info!(
-                "No GitHub repository configured for project {}",
-                project_id
-            );
+            tracing::info!("No GitHub repository configured for project {}", project_id);
             return PrCreationResult::NoRepository;
         }
     };

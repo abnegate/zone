@@ -327,10 +327,10 @@ pub async fn is_admin(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> Db
         .fetch_one(pool)
         .await?;
 
-    if let Some(role_str) = role {
-        if let Ok(role) = role_str.parse::<OrgRole>() {
-            return Ok(role >= OrgRole::Admin);
-        }
+    if let Some(role_str) = role
+        && let Ok(role) = role_str.parse::<OrgRole>()
+    {
+        return Ok(role >= OrgRole::Admin);
     }
 
     Ok(false)
@@ -344,10 +344,10 @@ pub async fn is_owner(pool: &PgPool, organization_id: Uuid, user_id: Uuid) -> Db
         .fetch_one(pool)
         .await?;
 
-    if let Some(role_str) = role {
-        if let Ok(role) = role_str.parse::<OrgRole>() {
-            return Ok(role == OrgRole::Owner);
-        }
+    if let Some(role_str) = role
+        && let Ok(role) = role_str.parse::<OrgRole>()
+    {
+        return Ok(role == OrgRole::Owner);
     }
 
     Ok(false)

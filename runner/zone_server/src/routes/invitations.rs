@@ -15,6 +15,8 @@ use crate::auth::{AuthUser, OrgAdmin};
 use crate::db::{invitations, organization_members, organizations};
 use crate::state::AppState;
 
+use super::common::Timestamps;
+
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     error: String,
@@ -43,6 +45,8 @@ pub struct InvitationResponse {
     token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     organization_name: Option<String>,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl InvitationResponse {
@@ -58,6 +62,7 @@ impl InvitationResponse {
             expires_at: inv.expires_at.to_rfc3339(),
             token,
             organization_name: None,
+            timestamps: Timestamps::from_utc(inv.created_at, inv.created_at),
         }
     }
 
@@ -151,15 +156,15 @@ pub async fn create_invitation(
                     )
                 })?;
 
-        if let Some(member) = existing_member {
-            if member.is_active {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::new(
-                        "User is already a member of this organization",
-                    )),
-                ));
-            }
+        if let Some(member) = existing_member
+            && member.is_active
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::new(
+                    "User is already a member of this organization",
+                )),
+            ));
         }
     }
 

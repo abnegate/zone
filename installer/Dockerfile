@@ -46,7 +46,7 @@ RUN bun run build
 # =============================================================================
 # Stage 4: Build Rust backend with dependency caching
 # =============================================================================
-FROM rust:1.85-alpine AS builder
+FROM rust:1.92-alpine3.23 AS builder
 
 WORKDIR /build
 

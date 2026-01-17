@@ -1,6 +1,9 @@
 import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { tasksApi } from '../../../api/tasks';
 import type { TaskRun, TaskRunLog } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 import { useTaskRuns } from './useTaskRuns';
 
 jest.mock('../../../api/tasks', () => ({
@@ -12,6 +15,17 @@ jest.mock('../../../api/tasks', () => ({
 }));
 
 const mockTasksApi = tasksApi as jest.Mocked<typeof tasksApi>;
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 const mockRun: TaskRun = {
   id: 'run-1',
@@ -42,7 +56,7 @@ describe('useTaskRuns', () => {
   it('loads runs on mount', async () => {
     mockTasksApi.getTaskRuns.mockResolvedValueOnce([mockRun]);
 
-    const { result } = renderHook(() => useTaskRuns('task-1'));
+    const { result } = renderHook(() => useTaskRuns('task-1'), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
 
@@ -56,7 +70,7 @@ describe('useTaskRuns', () => {
   });
 
   it('handles null taskId', async () => {
-    const { result } = renderHook(() => useTaskRuns(null));
+    const { result } = renderHook(() => useTaskRuns(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -69,7 +83,7 @@ describe('useTaskRuns', () => {
   it('handles load error', async () => {
     mockTasksApi.getTaskRuns.mockRejectedValueOnce(new Error('Failed to fetch'));
 
-    const { result } = renderHook(() => useTaskRuns('task-1'));
+    const { result } = renderHook(() => useTaskRuns('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -83,7 +97,7 @@ describe('useTaskRuns', () => {
     mockTasksApi.getTaskRuns.mockResolvedValueOnce([mockRun]);
     mockTasksApi.getTaskRun.mockResolvedValueOnce(mockRun);
 
-    const { result } = renderHook(() => useTaskRuns('task-1'));
+    const { result } = renderHook(() => useTaskRuns('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -96,7 +110,7 @@ describe('useTaskRuns', () => {
   });
 
   it('throws error when getting run without taskId', async () => {
-    const { result } = renderHook(() => useTaskRuns(null));
+    const { result } = renderHook(() => useTaskRuns(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -109,7 +123,7 @@ describe('useTaskRuns', () => {
     mockTasksApi.getTaskRuns.mockResolvedValueOnce([mockRun]);
     mockTasksApi.getTaskRunLogs.mockResolvedValueOnce([mockLog]);
 
-    const { result } = renderHook(() => useTaskRuns('task-1'));
+    const { result } = renderHook(() => useTaskRuns('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -122,7 +136,7 @@ describe('useTaskRuns', () => {
   });
 
   it('throws error when getting logs without taskId', async () => {
-    const { result } = renderHook(() => useTaskRuns(null));
+    const { result } = renderHook(() => useTaskRuns(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -134,7 +148,7 @@ describe('useTaskRuns', () => {
   it('refetches runs', async () => {
     mockTasksApi.getTaskRuns.mockResolvedValueOnce([mockRun]);
 
-    const { result } = renderHook(() => useTaskRuns('task-1'));
+    const { result } = renderHook(() => useTaskRuns('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -156,6 +170,7 @@ describe('useTaskRuns', () => {
     const { rerender } = renderHook(
       ({ taskId }: { taskId: string | null }) => useTaskRuns(taskId),
       {
+        wrapper: createWrapper(),
         initialProps: { taskId: 'task-1' },
       }
     );

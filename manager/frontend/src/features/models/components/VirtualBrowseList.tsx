@@ -1,8 +1,15 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import { FixedSizeList as List, type ListChildComponentProps } from 'react-window';
 import type { BrowseModel } from '../types';
-import { formatNumber } from '../utils/formatters';
 import './VirtualBrowseList.css';
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${Number.parseFloat((bytes / k ** i).toFixed(1))} ${sizes[i]}`;
+}
 
 interface VirtualBrowseListProps {
   models: BrowseModel[];
@@ -64,16 +71,14 @@ export default function VirtualBrowseList({
             <div className="browse-info">
               <div className="browse-header">
                 <span className="browse-name">{model.name}</span>
-                <span className="browse-downloads">{formatNumber(model.downloads)} downloads</span>
+                {model.source && <span className={`browse-source browse-source-${model.source}`}>{model.source}</span>}
+                {model.size && <span className="browse-size">{formatBytes(model.size)}</span>}
               </div>
-              {model.description && <p className="browse-description">{model.description}</p>}
-              {model.tags.length > 0 && (
+              {model.details && (
                 <div className="browse-tags">
-                  {model.tags.slice(0, 5).map((tag) => (
-                    <span key={tag} className="tag">
-                      {tag}
-                    </span>
-                  ))}
+                  {model.details.family && <span className="tag">{model.details.family}</span>}
+                  {model.details.parameter_size && <span className="tag">{model.details.parameter_size}</span>}
+                  {model.details.quantization_level && <span className="tag">{model.details.quantization_level}</span>}
                 </div>
               )}
             </div>

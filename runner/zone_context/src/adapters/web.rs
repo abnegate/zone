@@ -109,12 +109,12 @@ impl WebAdapter {
 
         // Block private IP ranges (SSRF protection) unless explicitly allowed
         if !self.allow_private_ips {
-            if let Ok(ip) = host.parse::<IpAddr>() {
-                if Self::is_private_ip(&ip) {
-                    return Err(ContextError::InvalidSourceConfig(
-                        "Private IP addresses are not allowed (SSRF protection)".to_string(),
-                    ));
-                }
+            if let Ok(ip) = host.parse::<IpAddr>()
+                && Self::is_private_ip(&ip)
+            {
+                return Err(ContextError::InvalidSourceConfig(
+                    "Private IP addresses are not allowed (SSRF protection)".to_string(),
+                ));
             }
 
             // Block localhost and common internal hostnames
@@ -255,13 +255,13 @@ impl WebAdapter {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
 
-            if let Some(len) = content_length {
-                if len > MAX_RESPONSE_SIZE {
-                    return Err(ContextError::ContentTooLarge {
-                        size_bytes: len as usize,
-                        max_bytes: MAX_RESPONSE_SIZE as usize,
-                    });
-                }
+            if let Some(len) = content_length
+                && len > MAX_RESPONSE_SIZE
+            {
+                return Err(ContextError::ContentTooLarge {
+                    size_bytes: len as usize,
+                    max_bytes: MAX_RESPONSE_SIZE as usize,
+                });
             }
 
             // Get content type
@@ -337,15 +337,15 @@ impl WebAdapter {
 
         let document = Html::parse_document(html);
 
-        if let Ok(title_selector) = Selector::parse("title") {
-            if let Some(title_el) = document.select(&title_selector).next() {
-                return title_el
-                    .text()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .trim()
-                    .to_string();
-            }
+        if let Ok(title_selector) = Selector::parse("title")
+            && let Some(title_el) = document.select(&title_selector).next()
+        {
+            return title_el
+                .text()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+                .to_string();
         }
 
         "Untitled".to_string()

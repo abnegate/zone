@@ -1,6 +1,9 @@
 import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { SyncConfig, CreateSyncConfigRequest } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockGetSyncConfigs = mock();
 const mockCreateSyncConfig = mock();
@@ -23,6 +26,17 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 const mockSyncConfigs: SyncConfig[] = [
   {
@@ -47,13 +61,15 @@ const mockSyncConfigs: SyncConfig[] = [
 
 describe('useSyncConfigs', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGetSyncConfigs.mockReset();
+    mockCreateSyncConfig.mockReset();
+    mockDeleteSyncConfig.mockReset();
   });
 
   it('should fetch sync configs on mount', async () => {
     mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
 
-    const { result } = renderHook(() => useSyncConfigs('proj-1'));
+    const { result } = renderHook(() => useSyncConfigs('proj-1'), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
 
@@ -70,7 +86,7 @@ describe('useSyncConfigs', () => {
     const error = new Error('Failed to fetch');
     mockGetSyncConfigs.mockRejectedValue(error);
 
-    const { result } = renderHook(() => useSyncConfigs('proj-1'));
+    const { result } = renderHook(() => useSyncConfigs('proj-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -91,10 +107,13 @@ describe('useSyncConfigs', () => {
       created_at: '2024-01-03T00:00:00Z',
     };
 
-    mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
+    // First call returns initial configs, second call (after refetch) returns updated list
+    mockGetSyncConfigs
+      .mockResolvedValueOnce(mockSyncConfigs)
+      .mockResolvedValueOnce([...mockSyncConfigs, newConfig]);
     mockCreateSyncConfig.mockResolvedValue(newConfig);
 
-    const { result } = renderHook(() => useSyncConfigs('proj-1'));
+    const { result } = renderHook(() => useSyncConfigs('proj-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -116,10 +135,13 @@ describe('useSyncConfigs', () => {
   });
 
   it('should delete sync config', async () => {
-    mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
+    // First call returns initial configs, second call (after refetch) returns list without deleted config
+    mockGetSyncConfigs
+      .mockResolvedValueOnce(mockSyncConfigs)
+      .mockResolvedValueOnce([mockSyncConfigs[1]]);
     mockDeleteSyncConfig.mockResolvedValue(undefined);
 
-    const { result } = renderHook(() => useSyncConfigs('proj-1'));
+    const { result } = renderHook(() => useSyncConfigs('proj-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -137,7 +159,7 @@ describe('useSyncConfigs', () => {
   it('should refetch sync configs', async () => {
     mockGetSyncConfigs.mockResolvedValue(mockSyncConfigs);
 
-    const { result } = renderHook(() => useSyncConfigs('proj-1'));
+    const { result } = renderHook(() => useSyncConfigs('proj-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -151,7 +173,7 @@ describe('useSyncConfigs', () => {
   });
 
   it('should not fetch if projectId is null', () => {
-    const { result } = renderHook(() => useSyncConfigs(null));
+    const { result } = renderHook(() => useSyncConfigs(null), { wrapper: createWrapper() });
 
     expect(result.current.configs).toEqual([]);
     expect(result.current.loading).toBe(false);

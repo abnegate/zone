@@ -9,6 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::common::Timestamps;
 use super::error::ErrorResponse;
 use crate::auth::AuthUser;
 use crate::db::sources;
@@ -112,6 +113,8 @@ pub struct SourceResponse {
     last_indexed_at: Option<chrono::NaiveDateTime>,
     /// Number of indexed items
     indexed_items_count: Option<i64>,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 /// Verification result response
@@ -170,6 +173,7 @@ impl SourceResponse {
             index_status: index_info.status,
             last_indexed_at: index_info.last_indexed_at,
             indexed_items_count: index_info.indexed_items_count,
+            timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 
@@ -778,14 +782,14 @@ pub async fn reindex(
 
     // Check for in-progress indexing
     let index_status = sources::get_source_index_status(state.db(), source_id).await;
-    if let Ok(status) = &index_status {
-        if matches!(status.status, sources::IndexStatus::Indexing) {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse::new("Source is already being indexed")),
-            )
-                .into_response();
-        }
+    if let Ok(status) = &index_status
+        && matches!(status.status, sources::IndexStatus::Indexing)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new("Source is already being indexed")),
+        )
+            .into_response();
     }
 
     // Verify source exists

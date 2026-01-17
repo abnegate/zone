@@ -1,6 +1,9 @@
 import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Project } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockGetProject = mock();
 
@@ -20,6 +23,17 @@ afterAll(() => {
   mock.restore();
 });
 
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
+
 const mockProject: Project = {
   id: '1',
   name: 'Test Project',
@@ -33,13 +47,13 @@ const mockProject: Project = {
 
 describe('useProject', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGetProject.mockReset();
   });
 
   it('should fetch project on mount', async () => {
     mockGetProject.mockResolvedValue(mockProject);
 
-    const { result } = renderHook(() => useProject('1'));
+    const { result } = renderHook(() => useProject('1'), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
 
@@ -56,7 +70,7 @@ describe('useProject', () => {
     const error = new Error('Project not found');
     mockGetProject.mockRejectedValue(error);
 
-    const { result } = renderHook(() => useProject('999'));
+    const { result } = renderHook(() => useProject('999'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -69,7 +83,7 @@ describe('useProject', () => {
   it('should refetch project', async () => {
     mockGetProject.mockResolvedValue(mockProject);
 
-    const { result } = renderHook(() => useProject('1'));
+    const { result } = renderHook(() => useProject('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -85,7 +99,7 @@ describe('useProject', () => {
   it('should update local state when project is updated externally', async () => {
     mockGetProject.mockResolvedValue(mockProject);
 
-    const { result } = renderHook(() => useProject('1'));
+    const { result } = renderHook(() => useProject('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -106,7 +120,7 @@ describe('useProject', () => {
   });
 
   it('should not fetch if id is null', () => {
-    const { result } = renderHook(() => useProject(null));
+    const { result } = renderHook(() => useProject(null), { wrapper: createWrapper() });
 
     expect(result.current.project).toBeNull();
     expect(result.current.loading).toBe(false);

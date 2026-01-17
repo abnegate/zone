@@ -64,7 +64,7 @@ describe('RegisterPage', () => {
     it('renders registration form elements', () => {
       renderRegisterPage();
 
-      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Zone');
+      expect(screen.getByText('Zone')).toBeInTheDocument();
       expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/^password$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/confirm password/i)).toBeInTheDocument();

@@ -27,7 +27,8 @@ export const modelsApi = {
     }
     try {
       const data = JSON.parse(text);
-      return parse(ModelsResponseSchema, data);
+      const wrapped = Array.isArray(data) ? { models: data } : data;
+      return parse(ModelsResponseSchema, wrapped);
     } catch (e) {
       if (e instanceof SyntaxError) {
         throw new Error('Invalid response from server');
@@ -51,19 +52,22 @@ export const modelsApi = {
 
   /**
    * Browse available models from a source
+   * @param cursor - Pagination cursor for fetching next page (from previous response's next_cursor)
    */
   async browseModels(
     source: ModelSource,
     query = '',
-    offset = 0,
+    cursor?: string | null,
     limit = 20
   ): Promise<BrowseResponse> {
     const params = new URLSearchParams({
       source,
       q: query,
-      offset: offset.toString(),
       limit: limit.toString(),
     });
+    if (cursor) {
+      params.set('cursor', cursor);
+    }
     const response = await fetch(`${API_BASE}/api/models?${params}`, {
       headers: client.getHeaders(),
     });

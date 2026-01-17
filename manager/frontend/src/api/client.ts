@@ -137,8 +137,8 @@ class Client {
     return modelsApi.deleteModel(name);
   }
 
-  async browseModels(source: ModelSource, query = '', offset = 0, limit = 20) {
-    return modelsApi.browseModels(source, query, offset, limit);
+  async browseModels(source: ModelSource, query = '', cursor?: string | null, limit = 20) {
+    return modelsApi.browseModels(source, query, cursor, limit);
   }
 
   async getModelInfo(modelId: string) {

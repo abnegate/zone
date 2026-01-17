@@ -2,7 +2,7 @@
 name = "zone-dev"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 description = "Development CLI tool for Zone - runs format/lint/test/coverage across all projects"
 
 [[bin]]

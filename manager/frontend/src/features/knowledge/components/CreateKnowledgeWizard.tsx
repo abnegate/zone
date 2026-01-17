@@ -222,7 +222,6 @@ export function CreateKnowledgeWizard({
                   }}
                   placeholder="https://example.com/article"
                   className={fieldErrors.content ? 'input-error' : ''}
-                  autoFocus
                 />
               ) : (
                 <textarea
@@ -241,7 +240,6 @@ export function CreateKnowledgeWizard({
                   placeholder="Enter your text content here..."
                   rows={8}
                   className={fieldErrors.content ? 'input-error' : ''}
-                  autoFocus
                 />
               )}
               {fieldErrors.content && <span className="field-error">{fieldErrors.content}</span>}
@@ -273,7 +271,6 @@ export function CreateKnowledgeWizard({
                 }}
                 placeholder="Give this entry a descriptive title"
                 className={fieldErrors.title ? 'input-error' : ''}
-                autoFocus
               />
               {fieldErrors.title && <span className="field-error">{fieldErrors.title}</span>}
             </div>

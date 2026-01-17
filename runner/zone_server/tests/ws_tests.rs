@@ -448,15 +448,19 @@ async fn create_test_task() -> (uuid::Uuid, uuid::Uuid, String) {
     let pool = common::create_test_pool().await;
     let token = get_ws_auth_token().await;
 
+    // Setup test data (organization, workspace, user)
+    let (_org_id, workspace_id, _user_id) = common::setup_test_data(&pool).await;
+
     // Create a project (pool, name, description, workspace_id)
-    let project = projects::create_project(&pool, "WS Test Project", None, None)
+    let project = projects::create_project(&pool, "WS Test Project", None, Some(workspace_id))
         .await
         .expect("create project");
 
-    // Create a task (pool, project_id, title, description, acceptance_criteria, priority, is_agentic)
+    // Create a task (pool, workspace_id, project_ids, title, description, acceptance_criteria, priority, is_agentic)
     let task = tasks::create_task(
         &pool,
-        project.id,
+        workspace_id,
+        &[project.id],
         "WS Test Task",
         "Test task for WebSocket",
         None,

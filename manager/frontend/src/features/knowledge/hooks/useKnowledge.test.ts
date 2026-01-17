@@ -1,6 +1,9 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { KnowledgeEntry, CreateKnowledgeRequest } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockGetKnowledge = mock();
 const mockCreateKnowledge = mock();
@@ -16,6 +19,22 @@ mock.module('../../../api/knowledge', () => ({
   },
 }));
 
+// Mock useWorkspace to provide a test workspace
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' },
+    currentOrganization: { id: 'test-org-id', name: 'Test Org' },
+    workspaces: [],
+    organizations: [],
+    loading: false,
+    error: null,
+    setCurrentWorkspace: mock(),
+    setCurrentOrganization: mock(),
+    refreshWorkspaces: mock(),
+    refreshOrganizations: mock(),
+  }),
+}));
+
 let useKnowledge: typeof import('./useKnowledge').useKnowledge;
 
 beforeAll(async () => {
@@ -25,6 +44,17 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 describe('useKnowledge', () => {
   const mockEntries: KnowledgeEntry[] = [
@@ -55,14 +85,17 @@ describe('useKnowledge', () => {
   ];
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGetKnowledge.mockReset();
+    mockCreateKnowledge.mockReset();
+    mockDeleteKnowledge.mockReset();
+    mockRefreshKnowledge.mockReset();
   });
 
   describe('initialization', () => {
     it('should load knowledge entries on mount', async () => {
       mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       expect(result.current.loading).toBe(true);
       expect(result.current.entries).toEqual([]);
@@ -79,7 +112,7 @@ describe('useKnowledge', () => {
     it('should handle load error', async () => {
       mockGetKnowledge.mockRejectedValue(new Error('Load failed'));
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
@@ -92,13 +125,13 @@ describe('useKnowledge', () => {
     it('should load with workspace ID', async () => {
       mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
 
-      const { result } = renderHook(() => useKnowledge('ws-1'));
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
       });
 
-      expect(mockGetKnowledge).toHaveBeenCalledWith('ws-1');
+      expect(mockGetKnowledge).toHaveBeenCalledWith('test-workspace-id');
     });
   });
 
@@ -113,7 +146,7 @@ describe('useKnowledge', () => {
       mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
       mockCreateKnowledge.mockResolvedValue(newEntry);
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
@@ -130,7 +163,11 @@ describe('useKnowledge', () => {
         await result.current.createEntry(request);
       });
 
-      expect(mockCreateKnowledge).toHaveBeenCalledWith(request);
+      // Hook adds workspace_id to the request
+      expect(mockCreateKnowledge).toHaveBeenCalledWith({
+        ...request,
+        workspace_id: 'test-workspace-id',
+      });
       expect(result.current.entries).toContainEqual(newEntry);
       expect(result.current.entries).toHaveLength(mockEntries.length + 1);
     });
@@ -139,7 +176,7 @@ describe('useKnowledge', () => {
       mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
       mockCreateKnowledge.mockRejectedValue(new Error('Create failed'));
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
@@ -161,7 +198,7 @@ describe('useKnowledge', () => {
       mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
       mockDeleteKnowledge.mockResolvedValue();
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
@@ -180,7 +217,7 @@ describe('useKnowledge', () => {
       mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
       mockDeleteKnowledge.mockRejectedValue(new Error('Delete failed'));
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
@@ -204,7 +241,7 @@ describe('useKnowledge', () => {
         () => new Promise((resolve) => setTimeout(() => resolve(refreshedEntry), 10))
       );
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
@@ -237,7 +274,7 @@ describe('useKnowledge', () => {
       mockGetKnowledge.mockResolvedValue({ entries: mockEntries });
       mockRefreshKnowledge.mockRejectedValue(new Error('Refresh failed'));
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
@@ -262,7 +299,7 @@ describe('useKnowledge', () => {
 
       mockGetKnowledge.mockResolvedValueOnce({ entries: mockEntries });
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);
@@ -283,7 +320,7 @@ describe('useKnowledge', () => {
     it('should handle reload error', async () => {
       mockGetKnowledge.mockResolvedValueOnce({ entries: mockEntries });
 
-      const { result } = renderHook(() => useKnowledge());
+      const { result } = renderHook(() => useKnowledge(), { wrapper: createWrapper() });
 
       await waitFor(() => {
         expect(result.current.loading).toBe(false);

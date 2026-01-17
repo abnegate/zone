@@ -166,10 +166,10 @@ impl FilesystemAdapter {
                 if pattern.contains("**") {
                     let pattern_base = pattern.trim_end_matches("/**").trim_end_matches('/');
                     for component in path.components() {
-                        if let Some(c_str) = component.as_os_str().to_str() {
-                            if c_str == pattern_base {
-                                return true;
-                            }
+                        if let Some(c_str) = component.as_os_str().to_str()
+                            && c_str == pattern_base
+                        {
+                            return true;
                         }
                     }
                 }

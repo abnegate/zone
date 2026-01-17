@@ -209,13 +209,13 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
     }
 
     // Check content length
-    if let Some(len) = response.content_length() {
-        if len as usize > MAX_CONTENT_SIZE {
-            return Err(format!(
-                "Content too large: {} bytes (max: {})",
-                len, MAX_CONTENT_SIZE
-            ));
-        }
+    if let Some(len) = response.content_length()
+        && len as usize > MAX_CONTENT_SIZE
+    {
+        return Err(format!(
+            "Content too large: {} bytes (max: {})",
+            len, MAX_CONTENT_SIZE
+        ));
     }
 
     // Get content type before consuming the response
@@ -273,21 +273,21 @@ fn extract_text_from_html(html: &str) -> String {
     ];
 
     for selector_str in &main_selectors {
-        if let Ok(selector) = Selector::parse(selector_str) {
-            if let Some(element) = document.select(&selector).next() {
-                let text = extract_text_from_element(&element);
-                if !text.trim().is_empty() {
-                    return clean_text(&text);
-                }
+        if let Ok(selector) = Selector::parse(selector_str)
+            && let Some(element) = document.select(&selector).next()
+        {
+            let text = extract_text_from_element(&element);
+            if !text.trim().is_empty() {
+                return clean_text(&text);
             }
         }
     }
 
     // Fallback: get body text
-    if let Ok(body_selector) = Selector::parse("body") {
-        if let Some(body) = document.select(&body_selector).next() {
-            return clean_text(&extract_text_from_element(&body));
-        }
+    if let Ok(body_selector) = Selector::parse("body")
+        && let Some(body) = document.select(&body_selector).next()
+    {
+        return clean_text(&extract_text_from_element(&body));
     }
 
     clean_text(&document.root_element().text().collect::<String>())

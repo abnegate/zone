@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { fillRequiredSecrets } from './helpers';
 
 test.describe('Form Validation', () => {
   test.beforeEach(async ({ page }) => {
@@ -36,6 +37,8 @@ test.describe('Form Validation', () => {
   });
 
   test('validates email format in advanced step', async ({ page }) => {
+    // Fill required secrets first so validation can reach the email check
+    await fillRequiredSecrets(page);
     // Navigate to advanced step via step pill
     await page.click('[data-step="7"]');
 

@@ -167,6 +167,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_create_and_get_gathering() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -190,6 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_update_gathering_status() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -214,6 +216,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires running PostgreSQL database
     async fn test_list_gatherings() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;

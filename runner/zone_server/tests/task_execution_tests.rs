@@ -5,31 +5,37 @@ mod common;
 use uuid::Uuid;
 use zone_server::db::tasks;
 
-/// Test helper to create a test project
-async fn create_test_project(pool: &sqlx::PgPool) -> Uuid {
+/// Test helper to create a test project and workspace
+/// Returns (workspace_id, project_id)
+async fn create_test_project(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
+    // Create workspace and related data
+    let (_org_id, workspace_id, _user_id) = common::setup_test_data(pool).await;
+
     let project_id = Uuid::new_v4();
     let _: Uuid = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO projects (id, name, description) VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO projects (id, name, description, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(project_id)
     .bind("Test Project")
     .bind("A test project")
+    .bind(workspace_id)
     .fetch_one(pool)
     .await
     .expect("Failed to create test project");
 
-    project_id
+    (workspace_id, project_id)
 }
 
 #[tokio::test]
 async fn test_create_task_run() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create a task
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Test Task",
         "This is a test task",
         Some("Should complete successfully"),
@@ -53,12 +59,13 @@ async fn test_create_task_run() {
 #[tokio::test]
 async fn test_update_task_run_progress() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task and run
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Test Task",
         "Test description",
         None,
@@ -86,12 +93,13 @@ async fn test_update_task_run_progress() {
 #[tokio::test]
 async fn test_complete_task_run_success() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task and run
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Test Task",
         "Test description",
         None,
@@ -131,12 +139,13 @@ async fn test_complete_task_run_success() {
 #[tokio::test]
 async fn test_complete_task_run_failure() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task and run
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Test Task",
         "Test description",
         None,
@@ -174,12 +183,13 @@ async fn test_complete_task_run_failure() {
 #[tokio::test]
 async fn test_add_task_run_log() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task and run
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Test Task",
         "Test description",
         None,
@@ -217,12 +227,13 @@ async fn test_add_task_run_log() {
 #[tokio::test]
 async fn test_get_task_run_logs() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task and run
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Test Task",
         "Test description",
         None,
@@ -266,12 +277,13 @@ async fn test_get_task_run_logs() {
 #[tokio::test]
 async fn test_task_run_lifecycle() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Lifecycle Test Task",
         "Test full lifecycle",
         Some("Should track all phases"),
@@ -358,12 +370,13 @@ async fn test_task_run_lifecycle() {
 #[tokio::test]
 async fn test_list_task_runs() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Test Task",
         "Test description",
         None,
@@ -395,12 +408,13 @@ async fn test_list_task_runs() {
 #[tokio::test]
 async fn test_get_task_run() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task and run
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Test Task",
         "Test description",
         None,
@@ -429,12 +443,13 @@ async fn test_get_task_run() {
 #[tokio::test]
 async fn test_task_run_with_error() {
     let pool = common::create_test_pool().await;
-    let project_id = create_test_project(&pool).await;
+    let (workspace_id, project_id) = create_test_project(&pool).await;
 
     // Create task and run
     let task = tasks::create_task(
         &pool,
-        project_id,
+        workspace_id,
+        &[project_id],
         "Error Task",
         "This task will fail",
         None,

@@ -146,51 +146,50 @@ impl Agent {
             let message = &choice.message;
 
             // Check if the model wants to use tools
-            if let Some(tool_calls) = &message.tool_calls {
-                if !tool_calls.is_empty() {
-                    // Acting phase - execute tools
-                    state.phase = AgentPhase::Acting;
-                    callback.on_phase_change(AgentPhase::Acting, None);
+            if let Some(tool_calls) = &message.tool_calls
+                && !tool_calls.is_empty()
+            {
+                // Acting phase - execute tools
+                state.phase = AgentPhase::Acting;
+                callback.on_phase_change(AgentPhase::Acting, None);
 
-                    // Add assistant message with tool calls
-                    state.add_message(Message::assistant_with_tools(tool_calls.clone()));
+                // Add assistant message with tool calls
+                state.add_message(Message::assistant_with_tools(tool_calls.clone()));
 
-                    let mut tool_results = Vec::new();
+                let mut tool_results = Vec::new();
 
-                    for tool_call in tool_calls {
-                        callback
-                            .on_tool_call(&tool_call.function.name, &tool_call.function.arguments);
+                for tool_call in tool_calls {
+                    callback.on_tool_call(&tool_call.function.name, &tool_call.function.arguments);
 
-                        let start = Instant::now();
+                    let start = Instant::now();
 
-                        let result = self.execute_tool(tool_call).await;
+                    let result = self.execute_tool(tool_call).await;
 
-                        let duration_ms = start.elapsed().as_millis() as u64;
+                    let duration_ms = start.elapsed().as_millis() as u64;
 
-                        callback.on_tool_result(&tool_call.function.name, &result);
+                    callback.on_tool_result(&tool_call.function.name, &result);
 
-                        tool_results.push(ToolCallResult {
-                            call: tool_call.clone(),
-                            result: result.to_message(),
-                            success: result.success,
-                            duration_ms,
-                        });
+                    tool_results.push(ToolCallResult {
+                        call: tool_call.clone(),
+                        result: result.to_message(),
+                        success: result.success,
+                        duration_ms,
+                    });
 
-                        // Add tool result to messages
-                        state.add_message(Message::tool_result(&tool_call.id, result.to_message()));
-                    }
-
-                    step.tool_calls = Some(tool_results);
-                    step = step.complete();
-                    state.add_step(step);
-
-                    // Observing phase
-                    state.phase = AgentPhase::Observing;
-                    callback.on_phase_change(AgentPhase::Observing, None);
-
-                    // Continue the loop to let the LLM process tool results
-                    continue;
+                    // Add tool result to messages
+                    state.add_message(Message::tool_result(&tool_call.id, result.to_message()));
                 }
+
+                step.tool_calls = Some(tool_results);
+                step = step.complete();
+                state.add_step(step);
+
+                // Observing phase
+                state.phase = AgentPhase::Observing;
+                callback.on_phase_change(AgentPhase::Observing, None);
+
+                // Continue the loop to let the LLM process tool results
+                continue;
             }
 
             // No tool calls - check if this is a final response

@@ -272,10 +272,10 @@ async fn handle_message(
             };
 
             // Send to job's stdin
-            if let Some(stdin_tx) = registry.get_stdin(&job_id) {
-                if stdin_tx.send(bytes).await.is_err() {
-                    tracing::warn!("Failed to send stdin data: job_id={}", job_id);
-                }
+            if let Some(stdin_tx) = registry.get_stdin(&job_id)
+                && stdin_tx.send(bytes).await.is_err()
+            {
+                tracing::warn!("Failed to send stdin data: job_id={}", job_id);
             }
 
             if eof {

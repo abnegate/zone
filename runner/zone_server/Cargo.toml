@@ -60,6 +60,7 @@ once_cell = { workspace = true }
 
 # HTTP client (for proxying to Ollama)
 reqwest = { workspace = true }
+urlencoding = "2.1"
 
 # HTML parsing for web content extraction
 scraper = "0.22"

@@ -72,23 +72,27 @@ const coverageReporter: Parameters<typeof defineConfig>[0]['reporter'] = [
 export default defineConfig({
   testDir: './e2e',
   testMatch: '**/*.e2e.ts',
+  timeout: 60000, // 60s per test
+  expect: { timeout: 10000 }, // 10s for assertions
   fullyParallel: !collectCoverage, // Run sequentially when collecting coverage
   forbidOnly: !!process.env.CI,
   retries: process.env.CI && !collectCoverage ? 3 : 0,
-  workers: collectCoverage ? 1 : process.env.CI ? 1 : undefined,
+  workers: collectCoverage ? 1 : 1,
   reporter: collectCoverage ? coverageReporter : defaultReporters,
   use: {
     baseURL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
+    navigationTimeout: 30000, // 30s for navigation
+    actionTimeout: 15000, // 15s for actions
   },
   projects: collectCoverage
     ? [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]
     : projects,
   webServer: {
-    command: `bun start -- --port ${port}`,
+    command: `PORT=${port} bun start`,
     url: baseURL,
     reuseExistingServer: true,
-    timeout: 120000,
+    timeout: 60000, // 60s to start server
   },
 });

@@ -1,5 +1,5 @@
-# Development overrides
-# Frontend runs locally for best DX: cd manager/frontend && bun install && bun start
+# Development overrides with hot reload for Rust and Vite
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 
 services:
   postgres:
@@ -18,15 +18,82 @@ services:
       - "6379:6379"
 
   manager:
+    build:
+      context: .
+      dockerfile: manager/Dockerfile.dev
+    container_name: manager-dev
     ports:
       - "8000:8000"
+    volumes:
+      # Mount Rust source code for hot reload
+      - ./runner:/app/runner:cached
+      # Persist cargo cache for faster rebuilds
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/app/runner/target
+    environment:
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENCODED}@postgres:5432/${MANAGER_POSTGRES_DB:-manager}
+      - REDIS_URL=redis://valkey:6379
+      - LITELLM_HOST=http://litellm:4000
+      - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
+      - OLLAMA_HOST=http://ollama:11434
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - CORS_ORIGINS=http://localhost:3001,http://console:3001
+      - SQLX_OFFLINE=true
+      - RUST_LOG=zone_server=debug,zone_core=debug,zone_context=debug
+      - RUST_BACKTRACE=1
+    healthcheck:
+      # Relax health check for development (rebuilds take time)
+      test: ["CMD", "true"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   console:
-    profiles:
-      - disabled
+    build:
+      context: .
+      dockerfile: manager/frontend/Dockerfile.dev
+    container_name: console-dev
+    ports:
+      - "3001:3001"
+    volumes:
+      # Mount frontend source for HMR
+      - ./manager/frontend/src:/app/src:cached
+      - ./manager/frontend/public:/app/public:cached
+      - ./manager/frontend/index.html:/app/index.html:cached
+      - ./manager/frontend/vite.config.ts:/app/vite.config.ts:cached
+      - ./manager/frontend/tsconfig.json:/app/tsconfig.json:cached
+      # Mount shared UI package source for development
+      - ./packages/ui/src:/ui/src:cached
+      # Preserve node_modules from image build
+      - console-node-modules:/app/node_modules
+    environment:
+      - VITE_API_URL=
+      - VITE_PROXY_TARGET=http://manager:8000
+    depends_on:
+      manager:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3001/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 networks:
   internal:
     name: zone_internal
   edge:
     name: zone_edge
+
+volumes:
+  cargo-registry:
+    name: zone_dev_cargo_registry
+  cargo-git:
+    name: zone_dev_cargo_git
+  cargo-target:
+    name: zone_dev_cargo_target
+  console-node-modules:
+    name: zone_dev_console_node_modules

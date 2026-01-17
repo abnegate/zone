@@ -81,7 +81,7 @@ zone_context
 
 ### Prerequisites
 
-- Rust 1.85+
+- Rust 1.92+
 - PostgreSQL 15+ with pgvector extension
 - Redis 7+
 - Docker (optional, for development)
