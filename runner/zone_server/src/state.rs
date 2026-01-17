@@ -243,6 +243,7 @@ mod tests {
             jwt_refresh_lifetime: 604800,
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
+            ollama_host: "http://localhost:11434".to_string(),
             encryption_key: "12345678901234567890123456789012".to_string(),
             cors_origins: vec!["*".to_string()],
             cors_allow_credentials: false,

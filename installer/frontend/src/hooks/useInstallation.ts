@@ -38,7 +38,7 @@ export function useInstallation() {
     abortControllerRef.current?.abort();
     abortControllerRef.current = new AbortController();
 
-    const initialLines = [
+    const initialLines: StatusLine[] = [
       {
         id: 'prepare',
         message: 'Preparing installation...',

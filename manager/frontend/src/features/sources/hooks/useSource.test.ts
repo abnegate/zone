@@ -4,8 +4,11 @@
 
 import { renderHook, waitFor } from '@testing-library/react';
 import { act } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Source } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockGetSource = mock();
 const mockUpdateSource = mock();
@@ -19,6 +22,22 @@ mock.module('../../../api/sources', () => ({
   },
 }));
 
+// Mock useWorkspace to provide a test workspace
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' },
+    currentOrganization: { id: 'test-org-id', name: 'Test Org' },
+    workspaces: [],
+    organizations: [],
+    loading: false,
+    error: null,
+    setCurrentWorkspace: mock(),
+    setCurrentOrganization: mock(),
+    refreshWorkspaces: mock(),
+    refreshOrganizations: mock(),
+  }),
+}));
+
 let useSource: typeof import('./useSource').useSource;
 
 beforeAll(async () => {
@@ -28,6 +47,17 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 describe('useSource', () => {
   const mockSource: Source = {
@@ -46,13 +76,15 @@ describe('useSource', () => {
   };
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGetSource.mockReset();
+    mockUpdateSource.mockReset();
+    mockVerifySource.mockReset();
   });
 
   it('should fetch source on mount', async () => {
     mockGetSource.mockResolvedValue(mockSource);
 
-    const { result } = renderHook(() => useSource('1'));
+    const { result } = renderHook(() => useSource('1'), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
     expect(result.current.source).toBeNull();
@@ -63,14 +95,14 @@ describe('useSource', () => {
 
     expect(result.current.source).toEqual(mockSource);
     expect(result.current.error).toBeNull();
-    expect(mockGetSource).toHaveBeenCalledWith('1');
+    expect(mockGetSource).toHaveBeenCalledWith('test-workspace-id', '1');
   });
 
   it('should handle fetch error', async () => {
     const errorMessage = 'Failed to fetch source';
     mockGetSource.mockRejectedValue(new Error(errorMessage));
 
-    const { result } = renderHook(() => useSource('1'));
+    const { result } = renderHook(() => useSource('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -85,7 +117,7 @@ describe('useSource', () => {
     mockGetSource.mockResolvedValue(mockSource);
     mockUpdateSource.mockResolvedValue(updatedSource);
 
-    const { result } = renderHook(() => useSource('1'));
+    const { result } = renderHook(() => useSource('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -111,7 +143,7 @@ describe('useSource', () => {
     mockGetSource.mockResolvedValueOnce(mockSource); // Initial load
     mockGetSource.mockResolvedValueOnce(verifiedSource); // After verify
 
-    const { result } = renderHook(() => useSource('1'));
+    const { result } = renderHook(() => useSource('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -131,7 +163,7 @@ describe('useSource', () => {
     mockGetSource.mockResolvedValueOnce(mockSource); // Initial load
     mockGetSource.mockResolvedValueOnce(refreshedSource); // After refresh
 
-    const { result } = renderHook(() => useSource('1'));
+    const { result } = renderHook(() => useSource('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -148,7 +180,7 @@ describe('useSource', () => {
   });
 
   it('should not fetch if id is null', () => {
-    const { result } = renderHook(() => useSource(null));
+    const { result } = renderHook(() => useSource(null), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(false);
     expect(result.current.source).toBeNull();

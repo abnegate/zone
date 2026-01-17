@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
@@ -124,19 +124,24 @@ describe('InterfaceStep', () => {
   });
 
   it('renders language select with default value', () => {
-    renderWithForm(createMockConfig());
-
-    const select = screen.getByLabelText(/default language/i);
-    expect(select).toHaveValue('en-US');
-  });
-
-  it('updates language selection', () => {
     const { methods } = renderWithForm(createMockConfig());
 
-    fireEvent.change(screen.getByLabelText(/default language/i), {
-      target: { value: 'fr-FR' },
-    });
+    expect(methods.getValues('WEBUI_DEFAULT_LOCALE')).toBe('en-US');
+    expect(screen.getByLabelText(/default language/i)).toHaveTextContent('English (US)');
+  });
 
-    expect(methods.getValues('WEBUI_DEFAULT_LOCALE')).toBe('fr-FR');
+  it('updates language selection', async () => {
+    const { methods } = renderWithForm(createMockConfig());
+
+    // Radix UI Select requires clicking to open, then selecting an option
+    fireEvent.click(screen.getByLabelText(/default language/i));
+    await waitFor(() => {
+      expect(screen.getByText('French')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('French'));
+
+    await waitFor(() => {
+      expect(methods.getValues('WEBUI_DEFAULT_LOCALE')).toBe('fr-FR');
+    });
   });
 });

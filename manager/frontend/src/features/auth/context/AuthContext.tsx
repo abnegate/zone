@@ -66,6 +66,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const user = userJson ? JSON.parse(userJson) : null;
     const payload = accessToken ? decodeJwt(accessToken) : null;
 
+    // Set client token synchronously to avoid race condition where
+    // components fetch before useEffect runs
+    client.setAccessToken(accessToken);
+
     return {
       user,
       roles: payload?.roles || [],

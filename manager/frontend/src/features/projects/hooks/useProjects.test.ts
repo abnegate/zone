@@ -1,6 +1,9 @@
 import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Project, CreateProjectRequest, UpdateProjectRequest } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockGetProjects = mock();
 const mockCreateProject = mock();
@@ -16,6 +19,22 @@ mock.module('../../../api/projects', () => ({
   },
 }));
 
+// Mock useWorkspace to provide a test workspace
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' },
+    currentOrganization: { id: 'test-org-id', name: 'Test Org' },
+    workspaces: [],
+    organizations: [],
+    loading: false,
+    error: null,
+    setCurrentWorkspace: mock(),
+    setCurrentOrganization: mock(),
+    refreshWorkspaces: mock(),
+    refreshOrganizations: mock(),
+  }),
+}));
+
 let useProjects: typeof import('./useProjects').useProjects;
 
 beforeAll(async () => {
@@ -25,6 +44,18 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+// Create a wrapper with QueryClientProvider for testing hooks
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 const mockProjects: Project[] = [
   {
@@ -51,13 +82,16 @@ const mockProjects: Project[] = [
 
 describe('useProjects', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGetProjects.mockReset();
+    mockCreateProject.mockReset();
+    mockUpdateProject.mockReset();
+    mockDeleteProject.mockReset();
   });
 
   it('should fetch projects on mount', async () => {
     mockGetProjects.mockResolvedValue(mockProjects);
 
-    const { result } = renderHook(() => useProjects());
+    const { result } = renderHook(() => useProjects(), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
 
@@ -67,27 +101,27 @@ describe('useProjects', () => {
 
     expect(result.current.projects).toEqual(mockProjects);
     expect(result.current.error).toBeNull();
-    expect(mockGetProjects).toHaveBeenCalledWith(undefined);
+    expect(mockGetProjects).toHaveBeenCalledWith('test-workspace-id', undefined);
   });
 
   it('should fetch projects with status filter', async () => {
     mockGetProjects.mockResolvedValue([mockProjects[0]]);
 
-    const { result } = renderHook(() => useProjects('active'));
+    const { result } = renderHook(() => useProjects('active'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
     });
 
     expect(result.current.projects).toEqual([mockProjects[0]]);
-    expect(mockGetProjects).toHaveBeenCalledWith('active');
+    expect(mockGetProjects).toHaveBeenCalledWith('test-workspace-id', 'active');
   });
 
   it('should handle fetch error', async () => {
     const error = new Error('Failed to fetch');
     mockGetProjects.mockRejectedValue(error);
 
-    const { result } = renderHook(() => useProjects());
+    const { result } = renderHook(() => useProjects(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -109,10 +143,13 @@ describe('useProjects', () => {
       updated_at: '2024-01-05T00:00:00Z',
     };
 
-    mockGetProjects.mockResolvedValue(mockProjects);
+    // First call returns initial projects, second call (after refetch) returns updated list
+    mockGetProjects
+      .mockResolvedValueOnce(mockProjects)
+      .mockResolvedValueOnce([...mockProjects, newProject]);
     mockCreateProject.mockResolvedValue(newProject);
 
-    const { result } = renderHook(() => useProjects());
+    const { result } = renderHook(() => useProjects(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -140,10 +177,13 @@ describe('useProjects', () => {
       status: 'on_hold',
     };
 
-    mockGetProjects.mockResolvedValue(mockProjects);
+    // First call returns initial projects, second call (after refetch) returns updated list
+    mockGetProjects
+      .mockResolvedValueOnce(mockProjects)
+      .mockResolvedValueOnce([updatedProject, mockProjects[1]]);
     mockUpdateProject.mockResolvedValue(updatedProject);
 
-    const { result } = renderHook(() => useProjects());
+    const { result } = renderHook(() => useProjects(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -166,10 +206,13 @@ describe('useProjects', () => {
   });
 
   it('should delete project', async () => {
-    mockGetProjects.mockResolvedValue(mockProjects);
+    // First call returns initial projects, second call (after refetch) returns list without deleted project
+    mockGetProjects
+      .mockResolvedValueOnce(mockProjects)
+      .mockResolvedValueOnce([mockProjects[1]]);
     mockDeleteProject.mockResolvedValue(undefined);
 
-    const { result } = renderHook(() => useProjects());
+    const { result } = renderHook(() => useProjects(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -187,7 +230,7 @@ describe('useProjects', () => {
   it('should refetch projects', async () => {
     mockGetProjects.mockResolvedValue(mockProjects);
 
-    const { result } = renderHook(() => useProjects());
+    const { result } = renderHook(() => useProjects(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);

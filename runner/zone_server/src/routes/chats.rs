@@ -15,24 +15,13 @@ use crate::error::ServerError;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 
+use super::common::{ErrorResponse, Timestamps};
+
 /// Maximum search limit
 const MAX_SEARCH_LIMIT: usize = 100;
 
 /// Maximum query length
 const MAX_QUERY_LENGTH: usize = 10_000;
-
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-}
 
 /// Check if user has read access to workspace
 async fn check_workspace_read_access(
@@ -123,6 +112,8 @@ pub struct ChatResponse {
     title: String,
     model_name: String,
     archived: bool,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl From<chats::ChatRow> for ChatResponse {
@@ -133,6 +124,7 @@ impl From<chats::ChatRow> for ChatResponse {
             title: row.title,
             model_name: row.model_name,
             archived: row.archived.unwrap_or(false),
+            timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }
@@ -145,6 +137,7 @@ pub struct MessageResponse {
     role: String,
     content: String,
     metadata: Option<serde_json::Value>,
+    created_at: String,
 }
 
 impl From<chats::MessageRow> for MessageResponse {
@@ -155,6 +148,10 @@ impl From<chats::MessageRow> for MessageResponse {
             role: row.role,
             content: row.content,
             metadata: row.metadata,
+            created_at: row
+                .created_at
+                .map(|dt| dt.and_utc().to_rfc3339())
+                .unwrap_or_default(),
         }
     }
 }
@@ -285,10 +282,10 @@ pub async fn update(
     };
 
     // Verify write access to workspace
-    if let Some(workspace_id) = chat.workspace_id {
-        if let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await {
-            return e.into_response();
-        }
+    if let Some(workspace_id) = chat.workspace_id
+        && let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await
+    {
+        return e.into_response();
     }
 
     match chats::update_chat(state.db(), id, req.title.as_deref()).await {
@@ -322,10 +319,10 @@ pub async fn delete(
     };
 
     // Verify write access to workspace
-    if let Some(workspace_id) = chat.workspace_id {
-        if let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await {
-            return e.into_response();
-        }
+    if let Some(workspace_id) = chat.workspace_id
+        && let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await
+    {
+        return e.into_response();
     }
 
     match chats::delete_chat(state.db(), id).await {
@@ -359,10 +356,10 @@ pub async fn archive(
     };
 
     // Verify write access to workspace
-    if let Some(workspace_id) = chat.workspace_id {
-        if let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await {
-            return e.into_response();
-        }
+    if let Some(workspace_id) = chat.workspace_id
+        && let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await
+    {
+        return e.into_response();
     }
 
     match chats::archive_chat(state.db(), id).await {
@@ -396,10 +393,10 @@ pub async fn unarchive(
     };
 
     // Verify write access to workspace
-    if let Some(workspace_id) = chat.workspace_id {
-        if let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await {
-            return e.into_response();
-        }
+    if let Some(workspace_id) = chat.workspace_id
+        && let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await
+    {
+        return e.into_response();
     }
 
     match chats::unarchive_chat(state.db(), id).await {
@@ -461,10 +458,10 @@ pub async fn create_message(
     };
 
     // Verify write access to workspace
-    if let Some(workspace_id) = chat.workspace_id {
-        if let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await {
-            return e.into_response();
-        }
+    if let Some(workspace_id) = chat.workspace_id
+        && let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await
+    {
+        return e.into_response();
     }
 
     match chats::create_message(state.db(), id, &req.role, &req.content, req.metadata).await {
@@ -499,10 +496,10 @@ pub async fn delete_message(
     };
 
     // Verify write access to workspace
-    if let Some(workspace_id) = chat.workspace_id {
-        if let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await {
-            return e.into_response();
-        }
+    if let Some(workspace_id) = chat.workspace_id
+        && let Err(e) = check_workspace_write_access(&state, &auth, workspace_id).await
+    {
+        return e.into_response();
     }
 
     match chats::delete_message(state.db(), chat_id, message_id).await {
@@ -563,7 +560,8 @@ pub struct MessageSearchResponse {
     similarity: f32,
     role: String,
     content: String,
-    created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl From<message_embeddings::MessageSearchResult> for MessageSearchResponse {
@@ -574,7 +572,7 @@ impl From<message_embeddings::MessageSearchResult> for MessageSearchResponse {
             similarity: result.similarity,
             role: result.role,
             content: result.content,
-            created_at: result.created_at,
+            timestamps: Timestamps::from_utc(result.created_at, result.created_at),
         }
     }
 }
@@ -701,7 +699,11 @@ pub async fn search_messages(
                 .collect();
             let total = response.len();
 
-            Json(MessageSearchListResponse { results: response, total }).into_response()
+            Json(MessageSearchListResponse {
+                results: response,
+                total,
+            })
+            .into_response()
         }
         Err(e) => {
             tracing::error!("Database error during message search: {}", e);

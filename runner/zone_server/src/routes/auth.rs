@@ -17,19 +17,7 @@ use crate::db::{
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
 
-/// Error response
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    error: String,
-}
-
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-}
+use super::common::{ErrorResponse, Timestamps};
 
 /// Register request
 #[derive(Debug, Deserialize)]
@@ -73,9 +61,25 @@ pub struct UserResponse {
     is_admin: bool,
     is_active: bool,
     email_verified: bool,
-    created_at: String,
-    updated_at: String,
+    #[serde(flatten)]
+    timestamps: Timestamps,
     last_login_at: Option<String>,
+}
+
+impl UserResponse {
+    /// Create a UserResponse from UserWithPermissions
+    pub fn from_user(user: &users::UserWithPermissions) -> Self {
+        Self {
+            id: user.user.id,
+            email: user.user.email.clone(),
+            display_name: user.user.display_name.clone(),
+            is_admin: user.user.is_admin.unwrap_or(false),
+            is_active: user.user.is_active.unwrap_or(true),
+            email_verified: user.user.email_verified,
+            timestamps: Timestamps::from_naive(user.user.created_at, user.user.updated_at),
+            last_login_at: user.user.last_login_at.map(|dt| dt.and_utc().to_rfc3339()),
+        }
+    }
 }
 
 /// POST /api/auth/register
@@ -169,8 +173,16 @@ pub async fn register(
         }
     };
 
-    // If this is the first user (admin), create a default organization and workspace
-    if is_admin {
+    // Assign the default "user" role to give basic permissions
+    if let Err(e) = users::assign_user_role(state.db(), user.id, "user").await {
+        tracing::error!(
+            "Failed to assign user role: {}. User may have limited permissions.",
+            e
+        );
+    }
+
+    // Create a default organization and workspace for every new user
+    {
         // Generate organization name based on user's display name or email
         let org_name = req
             .display_name
@@ -178,8 +190,8 @@ pub async fn register(
             .map(|name| format!("{}'s Organization", name))
             .unwrap_or_else(|| "My Organization".to_string());
 
-        // Generate slug from organization name
-        let org_slug = org_name
+        // Generate slug from organization name with user id suffix for uniqueness
+        let base_slug = org_name
             .to_lowercase()
             .replace(' ', "-")
             .replace('\'', "")
@@ -187,30 +199,34 @@ pub async fn register(
             .filter(|c| c.is_alphanumeric() || *c == '-')
             .collect::<String>();
 
+        // Add a short unique suffix to ensure slug uniqueness across users
+        let org_slug = format!("{}-{}", base_slug, &user.id.to_string()[..8]);
+
         // Create the default organization
         match organizations::create_organization(state.db(), &org_name, &org_slug, None).await {
             Ok(org) => {
                 tracing::info!(
-                    "Created default organization '{}' for admin user {}",
+                    "Created default organization '{}' for user {}",
                     org.name,
                     user.id
                 );
 
-                // Add admin as owner of the organization
-                if let Err(e) =
-                    organization_members::add_member(state.db(), org.id, user.id, OrgRole::Owner, None)
-                        .await
+                // Add user as owner of the organization
+                if let Err(e) = organization_members::add_member(
+                    state.db(),
+                    org.id,
+                    user.id,
+                    OrgRole::Owner,
+                    None,
+                )
+                .await
                 {
                     tracing::error!(
-                        "Failed to add admin as organization owner: {}. User can manually create organization.",
+                        "Failed to add user as organization owner: {}. User can manually create organization.",
                         e
                     );
                 } else {
-                    tracing::info!(
-                        "Added admin user {} as owner of organization {}",
-                        user.id,
-                        org.id
-                    );
+                    tracing::info!("Added user {} as owner of organization {}", user.id, org.id);
 
                     // Create a default workspace within the organization
                     match workspaces::create_workspace(
@@ -229,7 +245,7 @@ pub async fn register(
                                 org.id
                             );
 
-                            // Add admin as owner of the workspace
+                            // Add user as owner of the workspace
                             if let Err(e) = workspace_members::add_member(
                                 state.db(),
                                 workspace.id,
@@ -240,12 +256,12 @@ pub async fn register(
                             .await
                             {
                                 tracing::error!(
-                                    "Failed to add admin as workspace owner: {}. User can manually join workspace.",
+                                    "Failed to add user as workspace owner: {}. User can manually join workspace.",
                                     e
                                 );
                             } else {
                                 tracing::info!(
-                                    "Added admin user {} as owner of workspace {}",
+                                    "Added user {} as owner of workspace {}",
                                     user.id,
                                     workspace.id
                                 );
@@ -303,28 +319,7 @@ pub async fn register(
             refresh_token,
             token_type: "Bearer",
             expires_in: state.config().jwt_access_lifetime,
-            user: UserResponse {
-                id: user_perms.user.id,
-                email: user_perms.user.email.clone(),
-                display_name: user_perms.user.display_name.clone(),
-                is_admin: user_perms.user.is_admin.unwrap_or(false),
-                is_active: user_perms.user.is_active.unwrap_or(true),
-                email_verified: user_perms.user.email_verified,
-                created_at: user_perms
-                    .user
-                    .created_at
-                    .map(|dt| dt.and_utc().to_rfc3339())
-                    .unwrap_or_default(),
-                updated_at: user_perms
-                    .user
-                    .updated_at
-                    .map(|dt| dt.and_utc().to_rfc3339())
-                    .unwrap_or_default(),
-                last_login_at: user_perms
-                    .user
-                    .last_login_at
-                    .map(|dt| dt.and_utc().to_rfc3339()),
-            },
+            user: UserResponse::from_user(&user_perms),
             roles: user_perms.roles.clone(),
             permissions: user_perms.permissions.clone(),
         }),
@@ -423,28 +418,7 @@ pub async fn login(
         refresh_token,
         token_type: "Bearer",
         expires_in: state.config().jwt_access_lifetime,
-        user: UserResponse {
-            id: user_perms.user.id,
-            email: user_perms.user.email.clone(),
-            display_name: user_perms.user.display_name.clone(),
-            is_admin: user_perms.user.is_admin.unwrap_or(false),
-            is_active: user_perms.user.is_active.unwrap_or(true),
-            email_verified: user_perms.user.email_verified,
-            created_at: user_perms
-                .user
-                .created_at
-                .map(|dt| dt.and_utc().to_rfc3339())
-                .unwrap_or_default(),
-            updated_at: user_perms
-                .user
-                .updated_at
-                .map(|dt| dt.and_utc().to_rfc3339())
-                .unwrap_or_default(),
-            last_login_at: user_perms
-                .user
-                .last_login_at
-                .map(|dt| dt.and_utc().to_rfc3339()),
-        },
+        user: UserResponse::from_user(&user_perms),
         roles: user_perms.roles.clone(),
         permissions: user_perms.permissions.clone(),
     })
@@ -516,28 +490,7 @@ pub async fn refresh(
         refresh_token,
         token_type: "Bearer",
         expires_in: state.config().jwt_access_lifetime,
-        user: UserResponse {
-            id: user_perms.user.id,
-            email: user_perms.user.email.clone(),
-            display_name: user_perms.user.display_name.clone(),
-            is_admin: user_perms.user.is_admin.unwrap_or(false),
-            is_active: user_perms.user.is_active.unwrap_or(true),
-            email_verified: user_perms.user.email_verified,
-            created_at: user_perms
-                .user
-                .created_at
-                .map(|dt| dt.and_utc().to_rfc3339())
-                .unwrap_or_default(),
-            updated_at: user_perms
-                .user
-                .updated_at
-                .map(|dt| dt.and_utc().to_rfc3339())
-                .unwrap_or_default(),
-            last_login_at: user_perms
-                .user
-                .last_login_at
-                .map(|dt| dt.and_utc().to_rfc3339()),
-        },
+        user: UserResponse::from_user(&user_perms),
         roles: user_perms.roles.clone(),
         permissions: user_perms.permissions.clone(),
     })

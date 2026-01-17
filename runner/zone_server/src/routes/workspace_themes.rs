@@ -13,6 +13,8 @@ use crate::auth::AuthUser;
 use crate::db::workspace_themes;
 use crate::state::AppState;
 
+use super::common::Timestamps;
+
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
@@ -37,6 +39,8 @@ pub struct ThemeResponse {
     font_family: Option<String>,
     font_size_base: Option<String>,
     border_radius: Option<String>,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl From<workspace_themes::WorkspaceThemeRow> for ThemeResponse {
@@ -50,6 +54,7 @@ impl From<workspace_themes::WorkspaceThemeRow> for ThemeResponse {
             font_family: row.font_family,
             font_size_base: row.font_size_base,
             border_radius: row.border_radius,
+            timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }

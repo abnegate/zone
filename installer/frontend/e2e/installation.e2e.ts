@@ -1,8 +1,11 @@
 import { test, expect } from '@playwright/test';
+import { fillRequiredSecrets } from './helpers';
 
 test.describe('Installation Process', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
+    // Fill in required security secrets so Install validation passes
+    await fillRequiredSecrets(page);
   });
 
   test('shows Install button on final step', async ({ page }) => {
@@ -68,8 +71,8 @@ test.describe('Installation Process', () => {
 
     // First verify modal opens
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
-    // Then check for completion
-    await expect(page.locator('text=Installation Complete')).toBeVisible({ timeout: 10000 });
+    // Then check for completion (use exact match to avoid matching dialog title with different casing)
+    await expect(page.getByRole('heading', { name: 'Installation Complete', exact: true })).toBeVisible({ timeout: 10000 });
   });
 
   test('shows error message on failure', async ({ page }) => {
@@ -105,7 +108,7 @@ test.describe('Installation Process', () => {
 
     await page.click('button:has-text("Install")');
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
-    await expect(page.locator('text=Installation Complete')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('heading', { name: 'Installation Complete', exact: true })).toBeVisible({ timeout: 10000 });
 
     await page.click('button:has-text("Close")');
     await expect(page.getByRole('dialog')).toHaveCount(0);

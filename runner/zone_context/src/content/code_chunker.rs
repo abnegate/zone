@@ -587,12 +587,11 @@ pub fn chunk_code_with_config(
     // 3. API surface chunk (Rule 12)
     if config.generate_api_surface {
         let public_symbols: Vec<_> = symbols.iter().filter(|s| s.is_public).collect();
-        if !public_symbols.is_empty() {
-            if let Some(api_chunk) = build_api_surface_chunk(&public_symbols, config, language) {
-                if !seen_hashes.contains(&api_chunk.metadata.content_hash) {
-                    chunks.push(api_chunk);
-                }
-            }
+        if !public_symbols.is_empty()
+            && let Some(api_chunk) = build_api_surface_chunk(&public_symbols, config, language)
+            && !seen_hashes.contains(&api_chunk.metadata.content_hash)
+        {
+            chunks.push(api_chunk);
         }
     }
 
@@ -642,21 +641,21 @@ fn extract_file_context(root: &Node, source: &[u8], language: CodeLanguage) -> F
             let kind = node.kind();
 
             // Check for file-level docstring (first comment/string)
-            if comment_types.contains(&kind) && context.file_docstring.is_none() {
-                if let Ok(text) = node.utf8_text(source) {
-                    context.file_docstring = Some(text.to_string());
-                }
+            if comment_types.contains(&kind)
+                && context.file_docstring.is_none()
+                && let Ok(text) = node.utf8_text(source)
+            {
+                context.file_docstring = Some(text.to_string());
             }
 
             // Check for module/package declaration
-            if kind.contains("module")
+            if (kind.contains("module")
                 || kind.contains("package")
                 || kind == "mod_item"
-                || kind == "package_header"
+                || kind == "package_header")
+                && let Ok(text) = node.utf8_text(source)
             {
-                if let Ok(text) = node.utf8_text(source) {
-                    context.module_declaration = Some(text.to_string());
-                }
+                context.module_declaration = Some(text.to_string());
             }
 
             // Collect imports
@@ -806,21 +805,21 @@ fn extract_visibility(
     if cursor.goto_first_child() {
         loop {
             let child = cursor.node();
-            if visibility_types.contains(&child.kind()) {
-                if let Ok(text) = child.utf8_text(source) {
-                    let text = text.to_lowercase();
-                    if text.contains("pub") || text.contains("public") || text.contains("export") {
-                        return Visibility::Public;
-                    }
-                    if text.contains("private") {
-                        return Visibility::Private;
-                    }
-                    if text.contains("protected") {
-                        return Visibility::Protected;
-                    }
-                    if text.contains("internal") {
-                        return Visibility::Internal;
-                    }
+            if visibility_types.contains(&child.kind())
+                && let Ok(text) = child.utf8_text(source)
+            {
+                let text = text.to_lowercase();
+                if text.contains("pub") || text.contains("public") || text.contains("export") {
+                    return Visibility::Public;
+                }
+                if text.contains("private") {
+                    return Visibility::Private;
+                }
+                if text.contains("protected") {
+                    return Visibility::Protected;
+                }
+                if text.contains("internal") {
+                    return Visibility::Internal;
                 }
             }
             if !cursor.goto_next_sibling() {
@@ -830,12 +829,11 @@ fn extract_visibility(
     }
 
     // Go: exported if starts with uppercase
-    if language == CodeLanguage::Go {
-        if let Some(name) = extract_name(node, source, language) {
-            if is_exported_go(&name) {
-                return Visibility::Public;
-            }
-        }
+    if language == CodeLanguage::Go
+        && let Some(name) = extract_name(node, source, language)
+        && is_exported_go(&name)
+    {
+        return Visibility::Public;
     }
 
     Visibility::Private

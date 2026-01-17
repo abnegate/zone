@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
 import { client } from '../../../api/client';
@@ -38,7 +38,7 @@ describe('ForgotPasswordPage', () => {
     it('renders forgot password form', () => {
       renderPage();
 
-      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Zone');
+      expect(screen.getByText('Zone')).toBeInTheDocument();
       expect(screen.getByText(/reset your password/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /send reset link/i })).toBeInTheDocument();
@@ -73,10 +73,17 @@ describe('ForgotPasswordPage', () => {
     it('shows error when submitting invalid email format', async () => {
       renderPage();
 
-      await userEvent.type(screen.getByLabelText(/email/i), 'not-an-email');
-      await userEvent.click(screen.getByRole('button', { name: /send reset link/i }));
+      const emailInput = screen.getByLabelText(/email/i);
+      fireEvent.change(emailInput, { target: { value: 'not-an-email' } });
 
-      expect(screen.getByText(/invalid email address/i)).toBeInTheDocument();
+      // Submit the form
+      const form = emailInput.closest('form');
+      fireEvent.submit(form!);
+
+      // Wait for the validation error to appear
+      await waitFor(() => {
+        expect(screen.getByText(/invalid email address/i)).toBeInTheDocument();
+      });
       expect(client.forgotPassword).not.toHaveBeenCalled();
     });
   });

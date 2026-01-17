@@ -32,12 +32,29 @@ export default defineConfig({
     }),
   ],
   server: {
-    port: 3000,
-    open: true,
+    port: 3001,
+    host: true, // Listen on all interfaces (required for Docker)
+    open: !process.env.VITE_API_URL, // Don't open browser in Docker container
+    // HMR configuration for Docker
+    hmr: {
+      host: 'localhost',
+      port: 3001,
+      protocol: 'ws',
+    },
+    // Watch configuration for Docker volumes
+    watch: {
+      usePolling: true, // Required for Docker volume mounts
+      interval: 1000, // Poll every second
+    },
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
         changeOrigin: true,
+      },
+      '/ws': {
+        target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
+        changeOrigin: true,
+        ws: true, // Enable WebSocket proxying
       },
     },
   },

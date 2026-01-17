@@ -16,18 +16,7 @@ use crate::db::subscriptions::{Subscription, get_org_limits, get_org_subscriptio
 use crate::db::usage::get_usage_for_period;
 use crate::state::AppState;
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-}
+use super::common::{ErrorResponse, Timestamps};
 
 /// Safe subscription data without sensitive Stripe information
 #[derive(Debug, Serialize)]
@@ -42,9 +31,8 @@ pub struct SafeSubscription {
     pub canceled_at: Option<chrono::DateTime<chrono::Utc>>,
     pub trial_start: Option<chrono::DateTime<chrono::Utc>>,
     pub trial_end: Option<chrono::DateTime<chrono::Utc>>,
-    // Omit stripe_subscription_id and stripe_customer_id
-    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(flatten)]
+    pub timestamps: Timestamps,
 }
 
 impl From<Subscription> for SafeSubscription {
@@ -60,8 +48,7 @@ impl From<Subscription> for SafeSubscription {
             canceled_at: sub.canceled_at,
             trial_start: sub.trial_start,
             trial_end: sub.trial_end,
-            created_at: sub.created_at,
-            updated_at: sub.updated_at,
+            timestamps: Timestamps::from_utc_opt(sub.created_at, sub.updated_at),
         }
     }
 }

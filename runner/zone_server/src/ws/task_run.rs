@@ -291,11 +291,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                 if let Ok(logs) = tasks::get_task_run_logs(state.db(), run_id).await {
                     for log in logs {
                         // Skip logs we've already sent
-                        if let Some(last_id) = last_log_id {
-                            if log.id <= last_id {
+                        if let Some(last_id) = last_log_id
+                            && log.id <= last_id {
                                 continue;
                             }
-                        }
 
                         last_log_id = Some(log.id);
 

@@ -93,18 +93,60 @@
 
 .browse-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--ui-space-2);
   flex-wrap: wrap;
-  margin-bottom: var(--ui-space-1);
+  margin-bottom: var(--ui-space-2);
 }
 
 .browse-name {
   font-family: var(--ui-font-mono);
-  font-size: var(--ui-text-sm);
-  font-weight: 500;
+  font-size: var(--ui-text-base);
+  font-weight: 600;
   color: var(--ui-text-primary);
   word-break: break-all;
+  line-height: var(--ui-leading-tight);
+}
+
+.browse-size {
+  font-size: 11px;
+  font-weight: 600;
+  color: #e0e7ef;
+  background-color: #3b6b9a;
+  padding: 4px 10px;
+  border-radius: var(--ui-radius-md);
+}
+
+.browse-source {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 4px 10px;
+  border-radius: 4px;
+  color: white;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  flex-shrink: 0;
+  background-color: #6B7280;
+}
+
+.browse-source.browse-source-ollama {
+  background-color: #2563EB;
+}
+
+.browse-source.browse-source-huggingface {
+  background-color: #F59E0B;
+  color: #1a1a1a;
+}
+
+.browse-source.browse-source-gpt4all {
+  background-color: #10B981;
+}
+
+.browse-source.browse-source-openrouter {
+  background-color: #8B5CF6;
 }
 
 .browse-downloads {
@@ -132,11 +174,11 @@
 .tag {
   display: inline-flex;
   align-items: center;
-  padding: var(--ui-space-0-5) var(--ui-space-2);
-  font-size: var(--ui-text-xs);
-  font-weight: 500;
-  color: var(--ui-text-muted);
-  background: var(--ui-bg-muted);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #e0e7ef;
+  background-color: #3b6b9a;
   border-radius: var(--ui-radius-full);
 }
 

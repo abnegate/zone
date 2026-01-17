@@ -646,7 +646,7 @@ var ProgressBar = import_react11.default.forwardRef(
           "%"
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(Progress, { value: percentage })
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(Progress, { value: percentage, "aria-label": label || "Progress" })
     ] });
   }
 );

@@ -25,6 +25,25 @@ const mockGetProjects = mock(() => Promise.resolve([] as Project[]));
 // Create mock functions for client
 const mockGetSources = mock(() => Promise.resolve([] as Source[]));
 
+// Mock workspace context
+const mockWorkspace = {
+  id: 'workspace-1',
+  name: 'Test Workspace',
+  organization_id: 'org-1',
+  slug: 'test-workspace',
+  description: null,
+  is_active: true,
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
+};
+
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: mock(() => ({
+    currentWorkspace: mockWorkspace,
+    loading: false,
+  })),
+}));
+
 // Mock APIs
 mock.module('../../../api/tasks', () => ({
   tasksApi: {
@@ -113,7 +132,8 @@ const mockSources: Source[] = [
 const mockTasks: Task[] = [
   {
     id: 'task-1',
-    project_id: 'proj-1',
+    workspace_id: 'workspace-1',
+    project_ids: ['proj-1'],
     title: 'Implement login',
     description: 'Add user authentication',
     acceptance_criteria: null,
@@ -138,7 +158,8 @@ const mockTasks: Task[] = [
   },
   {
     id: 'task-2',
-    project_id: 'proj-2',
+    workspace_id: 'workspace-1',
+    project_ids: ['proj-2'],
     title: 'Fix button styling',
     description: 'Update CSS for buttons',
     acceptance_criteria: null,
@@ -187,7 +208,7 @@ describe('TasksPage', () => {
     mockGetTasks.mockImplementation(() => Promise.resolve([]));
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('No tasks found. Create a task to get started!')).toBeInTheDocument();
+      expect(screen.getByText('No tasks yet')).toBeInTheDocument();
     });
   });
 
@@ -276,7 +297,7 @@ describe('TasksPage', () => {
     });
 
     await waitFor(() => {
-      expect(mockGetTasks).toHaveBeenCalledWith('proj-1', undefined);
+      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', undefined);
     });
   });
 
@@ -291,7 +312,7 @@ describe('TasksPage', () => {
     });
 
     await waitFor(() => {
-      expect(mockGetTasks).toHaveBeenCalledWith(undefined, 'complete');
+      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', undefined, 'complete');
     });
   });
 

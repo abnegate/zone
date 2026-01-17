@@ -13,18 +13,7 @@ use crate::auth::{OrgMember, WorkspaceAdmin, WorkspaceMember};
 use crate::db::{workspace_members, workspaces};
 use crate::state::AppState;
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-}
+use super::common::{ErrorResponse, Timestamps};
 
 // ============================================================================
 // Workspace Endpoints
@@ -39,6 +28,8 @@ pub struct WorkspaceResponse {
     slug: String,
     description: Option<String>,
     is_active: bool,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl From<workspaces::WorkspaceRow> for WorkspaceResponse {
@@ -50,6 +41,7 @@ impl From<workspaces::WorkspaceRow> for WorkspaceResponse {
             slug: row.slug,
             description: row.description,
             is_active: row.is_active.unwrap_or(true),
+            timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }
@@ -183,7 +175,8 @@ pub struct WorkspaceMemberResponse {
     role: String,
     is_active: bool,
     invited_by: Option<Uuid>,
-    created_at: String,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl From<workspace_members::WorkspaceMemberRow> for WorkspaceMemberResponse {
@@ -195,7 +188,7 @@ impl From<workspace_members::WorkspaceMemberRow> for WorkspaceMemberResponse {
             role: row.role.as_str().to_string(),
             is_active: row.is_active,
             invited_by: row.invited_by,
-            created_at: row.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            timestamps: Timestamps::from_naive(Some(row.created_at), Some(row.updated_at)),
         }
     }
 }

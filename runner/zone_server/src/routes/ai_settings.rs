@@ -184,24 +184,23 @@ pub async fn upsert_org(
     Json(req): Json<UpdateAiSettingsRequest>,
 ) -> impl IntoResponse {
     // Validate provider if provided
-    if let Some(ref provider) = req.provider {
-        if ![
+    if let Some(ref provider) = req.provider
+        && ![
             PROVIDER_SELF_HOSTED,
             PROVIDER_OPENAI,
             PROVIDER_ANTHROPIC,
             PROVIDER_BEDROCK,
         ]
         .contains(&provider.as_str())
-        {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(format!(
-                    "Invalid provider. Must be one of: {}, {}, {}, {}",
-                    PROVIDER_SELF_HOSTED, PROVIDER_OPENAI, PROVIDER_ANTHROPIC, PROVIDER_BEDROCK
-                ))),
-            )
-                .into_response();
-        }
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(format!(
+                "Invalid provider. Must be one of: {}, {}, {}, {}",
+                PROVIDER_SELF_HOSTED, PROVIDER_OPENAI, PROVIDER_ANTHROPIC, PROVIDER_BEDROCK
+            ))),
+        )
+            .into_response();
     }
 
     match ai_settings::upsert_org_ai_settings(
@@ -316,24 +315,23 @@ pub async fn upsert_workspace(
     Json(req): Json<UpdateAiSettingsRequest>,
 ) -> impl IntoResponse {
     // Validate provider if provided
-    if let Some(ref provider) = req.provider {
-        if ![
+    if let Some(ref provider) = req.provider
+        && ![
             PROVIDER_SELF_HOSTED,
             PROVIDER_OPENAI,
             PROVIDER_ANTHROPIC,
             PROVIDER_BEDROCK,
         ]
         .contains(&provider.as_str())
-        {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(format!(
-                    "Invalid provider. Must be one of: {}, {}, {}, {}",
-                    PROVIDER_SELF_HOSTED, PROVIDER_OPENAI, PROVIDER_ANTHROPIC, PROVIDER_BEDROCK
-                ))),
-            )
-                .into_response();
-        }
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(format!(
+                "Invalid provider. Must be one of: {}, {}, {}, {}",
+                PROVIDER_SELF_HOSTED, PROVIDER_OPENAI, PROVIDER_ANTHROPIC, PROVIDER_BEDROCK
+            ))),
+        )
+            .into_response();
     }
 
     match ai_settings::upsert_workspace_ai_settings(

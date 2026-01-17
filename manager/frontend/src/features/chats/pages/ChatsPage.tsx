@@ -71,7 +71,18 @@ export default function ChatsPage() {
 
   const handleCreateChat = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isAuthenticated || !newChatModel || !currentWorkspace) return;
+    if (!isAuthenticated) {
+      setOperationError('You must be logged in to create a chat');
+      return;
+    }
+    if (!currentWorkspace) {
+      setOperationError('No workspace selected. Please select or create a workspace first.');
+      return;
+    }
+    if (!newChatModel) {
+      setOperationError('Please select a model');
+      return;
+    }
 
     setOperationError(null);
     try {
@@ -171,7 +182,7 @@ export default function ChatsPage() {
       <div className="chats-sidebar">
         <div className="chats-sidebar-header">
           <h1 className="text-2xl font-semibold text-foreground">Chats</h1>
-          <Button variant="primary" size="sm" onClick={() => setShowNewChatModal(true)}>
+          <Button variant="primary" size="sm" onClick={() => { setOperationError(null); setShowNewChatModal(true); }}>
             + New
           </Button>
         </div>
@@ -275,7 +286,7 @@ export default function ChatsPage() {
             }
             title={showArchived ? 'No archived chats' : 'No chats yet'}
             description={showArchived ? 'Your archived conversations will appear here' : 'Start a new conversation to get started'}
-            action={!showArchived ? <Button onClick={() => setShowNewChatModal(true)}>New Chat</Button> : undefined}
+            action={!showArchived ? <Button onClick={() => { setOperationError(null); setShowNewChatModal(true); }}>New Chat</Button> : undefined}
           />
         ) : (
           <div className="chats-list">
@@ -440,7 +451,7 @@ export default function ChatsPage() {
             </div>
             <h3>Select a chat to start</h3>
             <p>Choose an existing conversation or create a new one</p>
-            <Button variant="primary" onClick={() => setShowNewChatModal(true)}>
+            <Button variant="primary" onClick={() => { setOperationError(null); setShowNewChatModal(true); }}>
               Start New Chat
             </Button>
           </div>
@@ -450,6 +461,9 @@ export default function ChatsPage() {
       {/* New Chat Modal */}
       <Modal isOpen={showNewChatModal} onClose={() => setShowNewChatModal(false)} title="New Chat">
         <form onSubmit={handleCreateChat}>
+          {operationError && (
+            <div className="modal-error">{operationError}</div>
+          )}
           <Select
             label="Select Model"
             value={newChatModel}

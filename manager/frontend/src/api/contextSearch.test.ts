@@ -1,6 +1,8 @@
 import { client } from './client';
 
 describe('Context Search API', () => {
+  const testWorkspaceId = 'ws-test-123';
+
   beforeEach(() => {
     global.fetch = jest.fn();
     global.WebSocket = jest.fn() as unknown as typeof WebSocket;
@@ -32,16 +34,19 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      const result = await client.searchContext({ query: 'test query' });
+      const result = await client.searchContext({ workspace_id: testWorkspaceId, query: 'test query' });
 
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/context/search?query=test+query'),
+        expect.stringContaining('/api/context/search?'),
         expect.objectContaining({
           headers: expect.objectContaining({
             'Content-Type': 'application/json',
           }),
         })
       );
+      const call = (global.fetch as jest.Mock).mock.calls[0][0];
+      expect(call).toContain(`workspace_id=${testWorkspaceId}`);
+      expect(call).toContain('q=test+query');
       expect(result).toEqual(mockResponse);
     });
 
@@ -53,7 +58,7 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      await client.searchContext({ query: 'test', mode: 'semantic' });
+      await client.searchContext({ workspace_id: testWorkspaceId, query: 'test', mode: 'semantic' });
 
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('mode=semantic'),
@@ -69,7 +74,7 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      await client.searchContext({ query: 'test', source_ids: ['s1', 's2'] });
+      await client.searchContext({ workspace_id: testWorkspaceId, query: 'test', source_ids: ['s1', 's2'] });
 
       const call = (global.fetch as jest.Mock).mock.calls[0][0];
       expect(call).toContain('source_ids=s1');
@@ -84,7 +89,7 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      await client.searchContext({ query: 'test', limit: 50 });
+      await client.searchContext({ workspace_id: testWorkspaceId, query: 'test', limit: 50 });
 
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('limit=50'),
@@ -100,10 +105,10 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      await client.searchContext({ query: 'test query with spaces & symbols' });
+      await client.searchContext({ workspace_id: testWorkspaceId, query: 'test query with spaces & symbols' });
 
       const call = (global.fetch as jest.Mock).mock.calls[0][0];
-      expect(call).toContain('query=test+query+with+spaces+%26+symbols');
+      expect(call).toContain('q=test+query+with+spaces+%26+symbols');
     });
 
     it('should throw error on failed request', async () => {
@@ -113,7 +118,7 @@ describe('Context Search API', () => {
         json: async () => ({ message: 'Server error' }),
       });
 
-      await expect(client.searchContext({ query: 'test' })).rejects.toThrow('Server error');
+      await expect(client.searchContext({ workspace_id: testWorkspaceId, query: 'test' })).rejects.toThrow('Server error');
     });
   });
 

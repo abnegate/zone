@@ -1,7 +1,7 @@
 # =============================================================================
 # Stage 1: Build Rust application
 # =============================================================================
-FROM rust:1.85-alpine AS builder
+FROM rust:1.92-alpine3.23 AS builder
 
 WORKDIR /build
 

@@ -20,7 +20,7 @@ A web-based configuration wizard for the Zone AI Stack.
 ## Development
 
 ### Prerequisites
-- Rust 1.85+
+- Rust 1.92+
 - Bun 1.0+
 
 ### Build Locally

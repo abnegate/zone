@@ -1,0 +1,30 @@
+# Development Dockerfile for Vite HMR
+FROM oven/bun:1-alpine
+
+# Build shared UI package first
+WORKDIR /ui
+COPY --chown=bun:bun packages/ui/package.json ./
+RUN bun install
+COPY --chown=bun:bun packages/ui/ ./
+RUN bun run build
+
+# Setup frontend application
+WORKDIR /app
+
+# Copy package.json and install dependencies
+COPY --chown=bun:bun manager/frontend/package.json ./package.json.orig
+
+# Remove workspace reference to @zone/ui and install dependencies
+RUN sed 's/"@zone\/ui": "\*",//' package.json.orig > package.json && \
+    bun install
+
+# Add the built UI package
+RUN bun add /ui
+
+# Copy config files (source will be mounted as volumes)
+COPY --chown=bun:bun manager/frontend/tsconfig.json manager/frontend/index.html ./
+
+EXPOSE 3001
+
+# Run Vite dev server with host binding for Docker
+CMD ["bun", "run", "dev", "--host", "0.0.0.0"]

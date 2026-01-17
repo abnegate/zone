@@ -21,7 +21,7 @@ const ProgressBar = React.forwardRef<HTMLDivElement, ProgressBarProps>(
             {showPercentage && <span>{percentage}%</span>}
           </div>
         )}
-        <Progress value={percentage} />
+        <Progress value={percentage} aria-label={label || 'Progress'} />
       </div>
     );
   }

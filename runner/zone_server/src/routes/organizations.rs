@@ -14,18 +14,7 @@ use crate::db::workspace_members::WorkspaceRole;
 use crate::db::{organization_members, organizations, workspace_members, workspaces};
 use crate::state::AppState;
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
-    }
-}
+use super::common::{ErrorResponse, Timestamps};
 
 /// Organization response
 #[derive(Debug, Serialize)]
@@ -35,6 +24,8 @@ pub struct OrganizationResponse {
     slug: String,
     description: Option<String>,
     is_active: bool,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl From<organizations::OrganizationRow> for OrganizationResponse {
@@ -45,6 +36,7 @@ impl From<organizations::OrganizationRow> for OrganizationResponse {
             slug: row.slug,
             description: row.description,
             is_active: row.is_active.unwrap_or(true),
+            timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }
@@ -58,6 +50,8 @@ pub struct WorkspaceResponse {
     slug: String,
     description: Option<String>,
     is_active: bool,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl From<workspaces::WorkspaceRow> for WorkspaceResponse {
@@ -69,6 +63,7 @@ impl From<workspaces::WorkspaceRow> for WorkspaceResponse {
             slug: row.slug,
             description: row.description,
             is_active: row.is_active.unwrap_or(true),
+            timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
 }
@@ -105,6 +100,12 @@ pub struct UpdateWorkspaceRequest {
     is_active: Option<bool>,
 }
 
+/// Organizations list response wrapper
+#[derive(Debug, Serialize)]
+struct OrganizationsListResponse {
+    organizations: Vec<OrganizationResponse>,
+}
+
 /// GET /api/organizations - List user's organizations
 pub async fn list(State(state): State<AppState>, auth: AuthUser) -> impl IntoResponse {
     let user_id = match Uuid::parse_str(&auth.0.sub) {
@@ -119,11 +120,9 @@ pub async fn list(State(state): State<AppState>, auth: AuthUser) -> impl IntoRes
     };
 
     match organization_members::list_user_organizations(state.db(), user_id).await {
-        Ok(orgs) => Json(
-            orgs.into_iter()
-                .map(OrganizationResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(orgs) => Json(OrganizationsListResponse {
+            organizations: orgs.into_iter().map(OrganizationResponse::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
@@ -293,17 +292,21 @@ pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl Into
     }
 }
 
+/// Workspaces list response wrapper
+#[derive(Debug, Serialize)]
+struct WorkspacesListResponse {
+    workspaces: Vec<WorkspaceResponse>,
+}
+
 /// GET /api/organizations/:org_id/workspaces
 pub async fn list_workspaces(
     State(state): State<AppState>,
     member: OrgMember,
 ) -> impl IntoResponse {
     match workspaces::list_workspaces(state.db(), member.org_id).await {
-        Ok(ws) => Json(
-            ws.into_iter()
-                .map(WorkspaceResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(ws) => Json(WorkspacesListResponse {
+            workspaces: ws.into_iter().map(WorkspaceResponse::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
@@ -446,7 +449,8 @@ pub struct OrganizationMemberResponse {
     role: String,
     is_active: bool,
     invited_by: Option<Uuid>,
-    created_at: String,
+    #[serde(flatten)]
+    timestamps: Timestamps,
 }
 
 impl From<organization_members::OrganizationMemberRow> for OrganizationMemberResponse {
@@ -458,7 +462,7 @@ impl From<organization_members::OrganizationMemberRow> for OrganizationMemberRes
             role: row.role.as_str().to_string(),
             is_active: row.is_active,
             invited_by: row.invited_by,
-            created_at: row.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            timestamps: Timestamps::from_naive(Some(row.created_at), Some(row.updated_at)),
         }
     }
 }

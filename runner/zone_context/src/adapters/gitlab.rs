@@ -459,10 +459,10 @@ impl GitLabAdapter {
     ) -> Result<Vec<GitLabTreeEntry>> {
         Self::validate_gitlab_identifier(project, "project")?;
         Self::validate_gitlab_identifier(branch, "branch")?;
-        if let Some(p) = path {
-            if !p.is_empty() {
-                Self::validate_path(p)?;
-            }
+        if let Some(p) = path
+            && !p.is_empty()
+        {
+            Self::validate_path(p)?;
         }
 
         let client = self.build_client(token)?;
@@ -474,13 +474,13 @@ impl GitLabAdapter {
             self.base_url, encoded_project, encoded_branch
         );
 
-        if let Some(p) = path {
-            if !p.is_empty() {
-                url.push_str(&format!(
-                    "&path={}",
-                    utf8_percent_encode(p, NON_ALPHANUMERIC)
-                ));
-            }
+        if let Some(p) = path
+            && !p.is_empty()
+        {
+            url.push_str(&format!(
+                "&path={}",
+                utf8_percent_encode(p, NON_ALPHANUMERIC)
+            ));
         }
 
         // GitLab paginates results, so we may need to fetch multiple pages
@@ -708,10 +708,8 @@ impl GitLabAdapter {
         item = item.with_metadata(content_metadata);
 
         // Set content if provided
-        if !metadata_only {
-            if let Some(content) = content {
-                item = item.with_content(content);
-            }
+        if !metadata_only && let Some(content) = content {
+            item = item.with_content(content);
         }
 
         Ok(item)
@@ -807,10 +805,11 @@ impl SourceAdapter for GitLabAdapter {
             }
 
             // Apply path filter if specified
-            if let Some(ref path_filter) = config.path {
-                if !path_filter.is_empty() && !entry.path.starts_with(path_filter) {
-                    continue;
-                }
+            if let Some(ref path_filter) = config.path
+                && !path_filter.is_empty()
+                && !entry.path.starts_with(path_filter)
+            {
+                continue;
             }
 
             // Estimate tokens from size (using conservative estimate)
@@ -866,10 +865,11 @@ impl SourceAdapter for GitLabAdapter {
                 }
 
                 // Apply path filter
-                if let Some(ref path_filter) = config.path {
-                    if !path_filter.is_empty() && !entry.path.starts_with(path_filter) {
-                        return false;
-                    }
+                if let Some(ref path_filter) = config.path
+                    && !path_filter.is_empty()
+                    && !entry.path.starts_with(path_filter)
+                {
+                    return false;
                 }
 
                 // Apply include/exclude patterns

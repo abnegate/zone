@@ -177,7 +177,7 @@ export async function setupModelsMock(page: Page) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ source, models: [], has_more: false }),
+        body: JSON.stringify({ source, models: [], next_cursor: null }),
       });
       return;
     }

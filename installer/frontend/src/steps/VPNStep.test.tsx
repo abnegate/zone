@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
@@ -83,37 +83,47 @@ const renderWithForm = (defaultValues: InstallerConfig) => {
 
 describe('VPNStep', () => {
   it('renders provider select with current value', () => {
-    renderWithForm(createMockConfig());
-
-    const select = screen.getByLabelText(/vpn provider/i);
-    expect(select).toHaveValue('surfshark');
-  });
-
-  it('updates provider selection', () => {
     const { methods } = renderWithForm(createMockConfig());
 
-    fireEvent.change(screen.getByLabelText(/vpn provider/i), {
-      target: { value: 'nordvpn' },
-    });
+    expect(methods.getValues('VPN_SERVICE_PROVIDER')).toBe('surfshark');
+    expect(screen.getByLabelText(/vpn provider/i)).toHaveTextContent('Surfshark');
+  });
 
-    expect(methods.getValues('VPN_SERVICE_PROVIDER')).toBe('nordvpn');
+  it('updates provider selection', async () => {
+    const { methods } = renderWithForm(createMockConfig());
+
+    // Radix UI Select requires clicking to open, then selecting an option
+    fireEvent.click(screen.getByLabelText(/vpn provider/i));
+    await waitFor(() => {
+      expect(screen.getByText('NordVPN')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('NordVPN'));
+
+    await waitFor(() => {
+      expect(methods.getValues('VPN_SERVICE_PROVIDER')).toBe('nordvpn');
+    });
   });
 
   it('renders protocol select with current value', () => {
-    renderWithForm(createMockConfig());
-
-    const select = screen.getByLabelText(/protocol/i);
-    expect(select).toHaveValue('openvpn');
-  });
-
-  it('updates protocol selection', () => {
     const { methods } = renderWithForm(createMockConfig());
 
-    fireEvent.change(screen.getByLabelText(/protocol/i), {
-      target: { value: 'wireguard' },
-    });
+    expect(methods.getValues('VPN_TYPE')).toBe('openvpn');
+    expect(screen.getByLabelText(/protocol/i)).toHaveTextContent('OpenVPN');
+  });
 
-    expect(methods.getValues('VPN_TYPE')).toBe('wireguard');
+  it('updates protocol selection', async () => {
+    const { methods } = renderWithForm(createMockConfig());
+
+    // Radix UI Select requires clicking to open, then selecting an option
+    fireEvent.click(screen.getByLabelText(/protocol/i));
+    await waitFor(() => {
+      expect(screen.getByText('WireGuard')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('WireGuard'));
+
+    await waitFor(() => {
+      expect(methods.getValues('VPN_TYPE')).toBe('wireguard');
+    });
   });
 
   it('shows OpenVPN fields when protocol is openvpn', () => {

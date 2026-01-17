@@ -1,6 +1,9 @@
 import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Chat } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 
 const mockGetChats = mock();
 const mockCreateChat = mock();
@@ -18,6 +21,22 @@ mock.module('../../../api/chats', () => ({
   },
 }));
 
+// Mock useWorkspace to provide a test workspace
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: 'test-workspace-id', name: 'Test Workspace' },
+    currentOrganization: { id: 'test-org-id', name: 'Test Org' },
+    workspaces: [],
+    organizations: [],
+    loading: false,
+    error: null,
+    setCurrentWorkspace: mock(),
+    setCurrentOrganization: mock(),
+    refreshWorkspaces: mock(),
+    refreshOrganizations: mock(),
+  }),
+}));
+
 let useChats: typeof import('./useChats').useChats;
 
 beforeAll(async () => {
@@ -27,6 +46,17 @@ beforeAll(async () => {
 afterAll(() => {
   mock.restore();
 });
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 describe('useChats', () => {
   const mockChats: Chat[] = [
@@ -49,13 +79,17 @@ describe('useChats', () => {
   ];
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mockGetChats.mockReset();
+    mockCreateChat.mockReset();
+    mockDeleteChat.mockReset();
+    mockArchiveChat.mockReset();
+    mockUnarchiveChat.mockReset();
   });
 
   it('should fetch chats on mount', async () => {
     mockGetChats.mockResolvedValue(mockChats);
 
-    const { result } = renderHook(() => useChats());
+    const { result } = renderHook(() => useChats(), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
 
@@ -65,7 +99,7 @@ describe('useChats', () => {
 
     expect(result.current.chats).toEqual(mockChats);
     expect(result.current.error).toBeNull();
-    expect(mockGetChats).toHaveBeenCalledWith(false);
+    expect(mockGetChats).toHaveBeenCalledWith('test-workspace-id', false);
   });
 
   it('should fetch archived chats when archived is true', async () => {
@@ -81,21 +115,21 @@ describe('useChats', () => {
     ];
     mockGetChats.mockResolvedValue(archivedChats);
 
-    const { result } = renderHook(() => useChats({ archived: true }));
+    const { result } = renderHook(() => useChats({ archived: true }), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
     });
 
     expect(result.current.chats).toEqual(archivedChats);
-    expect(mockGetChats).toHaveBeenCalledWith(true);
+    expect(mockGetChats).toHaveBeenCalledWith('test-workspace-id', true);
   });
 
   it('should handle errors when fetching chats', async () => {
     const error = new Error('Failed to fetch chats');
     mockGetChats.mockRejectedValue(error);
 
-    const { result } = renderHook(() => useChats());
+    const { result } = renderHook(() => useChats(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -117,7 +151,7 @@ describe('useChats', () => {
     mockGetChats.mockResolvedValue(mockChats);
     mockCreateChat.mockResolvedValue(newChat);
 
-    const { result } = renderHook(() => useChats());
+    const { result } = renderHook(() => useChats(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -136,7 +170,7 @@ describe('useChats', () => {
     mockGetChats.mockResolvedValue(mockChats);
     mockDeleteChat.mockResolvedValue(undefined);
 
-    const { result } = renderHook(() => useChats());
+    const { result } = renderHook(() => useChats(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -156,7 +190,7 @@ describe('useChats', () => {
     mockGetChats.mockResolvedValue(mockChats);
     mockArchiveChat.mockResolvedValue(archivedChat);
 
-    const { result } = renderHook(() => useChats());
+    const { result } = renderHook(() => useChats(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -176,7 +210,7 @@ describe('useChats', () => {
     mockGetChats.mockResolvedValue(archivedChats);
     mockUnarchiveChat.mockResolvedValue(unarchivedChat);
 
-    const { result } = renderHook(() => useChats({ archived: true }));
+    const { result } = renderHook(() => useChats({ archived: true }), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -193,7 +227,7 @@ describe('useChats', () => {
   it('should refresh chats', async () => {
     mockGetChats.mockResolvedValue(mockChats);
 
-    const { result } = renderHook(() => useChats());
+    const { result } = renderHook(() => useChats(), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);

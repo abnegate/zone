@@ -4,7 +4,7 @@ import tailwind from '@tailwindcss/vite';
 
 const asyncCssPlugin = () => ({
   name: 'async-css',
-  apply: 'build',
+  apply: 'build' as const,
   transformIndexHtml(html: string) {
     return html.replace(
       /<link\s+rel="stylesheet"[^>]*href="(\/assets\/[^"]+\.css)"[^>]*>/g,

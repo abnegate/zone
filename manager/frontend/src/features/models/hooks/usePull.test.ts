@@ -1,34 +1,43 @@
 import { act, renderHook } from '@testing-library/react';
-import { modelsApi } from '../../../api/models';
-import { usePull } from './usePull';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
-// Mock the modelsApi
-jest.mock('../../../api/models', () => ({
+const mockCreatePullWebSocket = mock();
+
+// State container for auth mock that can be updated per test
+let authState = {
+  isAuthenticated: true,
+};
+
+mock.module('../../../api/models', () => ({
   modelsApi: {
-    createPullWebSocket: jest.fn(),
+    createPullWebSocket: mockCreatePullWebSocket,
   },
 }));
 
-// Mock useAuth hook
-jest.mock('../../auth/context', () => ({
-  useAuth: jest.fn(() => ({
-    isAuthenticated: true,
-  })),
+mock.module('../../../features/auth', () => ({
+  useAuth: () => ({
+    isAuthenticated: authState.isAuthenticated,
+  }),
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-import { useAuth } from '../../auth';
+let usePull: typeof import('./usePull').usePull;
 
-const mockModelsApi = modelsApi as jest.Mocked<typeof modelsApi>;
-const mockUseAuth = useAuth as jest.Mock;
+beforeAll(async () => {
+  ({ usePull } = await import('./usePull'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 interface MockWebSocket {
   onopen: (() => void) | null;
   onmessage: ((event: MessageEvent) => void) | null;
   onclose: (() => void) | null;
   onerror: ((error: Event) => void) | null;
-  send: jest.Mock;
-  close: jest.Mock;
+  send: ReturnType<typeof mock>;
+  close: ReturnType<typeof mock>;
 }
 
 function createMockWebSocket(): MockWebSocket {
@@ -37,17 +46,18 @@ function createMockWebSocket(): MockWebSocket {
     onmessage: null,
     onclose: null,
     onerror: null,
-    send: jest.fn(),
-    close: jest.fn(),
+    send: mock(),
+    close: mock(),
   };
 }
 
 describe('usePull', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockUseAuth.mockReturnValue({
+    mockCreatePullWebSocket.mockReset();
+    // Reset auth state to default
+    authState = {
       isAuthenticated: true,
-    });
+    };
   });
 
   it('initializes with default state', () => {
@@ -60,9 +70,7 @@ describe('usePull', () => {
   });
 
   it('does not pull when not authenticated', async () => {
-    mockUseAuth.mockReturnValue({
-      isAuthenticated: false,
-    });
+    authState = { isAuthenticated: false };
 
     const { result } = renderHook(() => usePull());
 
@@ -72,7 +80,7 @@ describe('usePull', () => {
     });
 
     expect(pullResult).toBe(false);
-    expect(mockModelsApi.createPullWebSocket).not.toHaveBeenCalled();
+    expect(mockCreatePullWebSocket).not.toHaveBeenCalled();
   });
 
   it('does not pull with empty model name', async () => {
@@ -84,7 +92,7 @@ describe('usePull', () => {
     });
 
     expect(pullResult).toBe(false);
-    expect(mockModelsApi.createPullWebSocket).not.toHaveBeenCalled();
+    expect(mockCreatePullWebSocket).not.toHaveBeenCalled();
   });
 
   it('resets state', () => {
@@ -112,7 +120,7 @@ describe('usePull', () => {
 
   it('calls createPullWebSocket when authenticated with valid model name', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -120,12 +128,12 @@ describe('usePull', () => {
       result.current.pull('llama2');
     });
 
-    expect(mockModelsApi.createPullWebSocket).toHaveBeenCalledWith('llama2');
+    expect(mockCreatePullWebSocket).toHaveBeenCalledWith('llama2');
   });
 
   it('sets pulling to true when pull starts', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -138,7 +146,7 @@ describe('usePull', () => {
 
   it('sends pull request on WebSocket open', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -156,7 +164,7 @@ describe('usePull', () => {
 
   it('handles authenticated message and sends pull request', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -174,7 +182,7 @@ describe('usePull', () => {
 
   it('handles progress message', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -194,7 +202,7 @@ describe('usePull', () => {
 
   it('handles step message - new step', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -223,7 +231,7 @@ describe('usePull', () => {
 
   it('handles step message - update existing step', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -255,7 +263,7 @@ describe('usePull', () => {
 
   it('handles complete message', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -280,7 +288,7 @@ describe('usePull', () => {
 
   it('handles complete message with default values', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -301,7 +309,7 @@ describe('usePull', () => {
 
   it('handles error message', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -326,7 +334,7 @@ describe('usePull', () => {
 
   it('handles error message with default message', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -344,7 +352,7 @@ describe('usePull', () => {
 
   it('handles WebSocket error', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -366,7 +374,7 @@ describe('usePull', () => {
 
   it('ignores invalid JSON in message', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -386,7 +394,7 @@ describe('usePull', () => {
 
   it('cancels pull with active WebSocket', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -407,7 +415,7 @@ describe('usePull', () => {
 
   it('trims model name before creating WebSocket', async () => {
     const mockWs = createMockWebSocket();
-    mockModelsApi.createPullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
+    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
     const { result } = renderHook(() => usePull());
 
@@ -415,6 +423,6 @@ describe('usePull', () => {
       result.current.pull('  llama2  ');
     });
 
-    expect(mockModelsApi.createPullWebSocket).toHaveBeenCalledWith('llama2');
+    expect(mockCreatePullWebSocket).toHaveBeenCalledWith('llama2');
   });
 });

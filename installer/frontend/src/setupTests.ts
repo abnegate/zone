@@ -44,17 +44,19 @@ expect.extend({
           : `expected element to have attribute "${attr}"${value !== undefined ? ` with value "${value}"` : ''}`,
     };
   },
-  toHaveValue(received: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null, value: string | number) {
+  toHaveValue(received: HTMLElement | null, value: string | number) {
     if (received === null) {
       return { pass: false, message: () => 'element is null' };
     }
-    const pass = received.value === String(value);
+    // Support both native form elements and Radix UI components
+    const elementValue = 'value' in received ? (received as HTMLInputElement).value : received.textContent?.trim();
+    const pass = elementValue === String(value);
     return {
       pass,
       message: () =>
         pass
           ? `expected element not to have value "${value}"`
-          : `expected element to have value "${value}", but got "${received.value}"`,
+          : `expected element to have value "${value}", but got "${elementValue}"`,
     };
   },
   toBeDisabled(received: HTMLElement | null) {
@@ -70,11 +72,16 @@ expect.extend({
           : `expected element to be disabled`,
     };
   },
-  toBeChecked(received: HTMLInputElement | null) {
+  toBeChecked(received: HTMLElement | null) {
     if (received === null) {
       return { pass: false, message: () => 'element is null' };
     }
-    const pass = received.checked === true;
+    // Support both native checkboxes and Radix UI checkbox (which uses data-state="checked")
+    const isNativeCheckbox = 'checked' in received;
+    const pass = isNativeCheckbox
+      ? (received as HTMLInputElement).checked === true
+      : received.getAttribute('data-state') === 'checked' ||
+        received.getAttribute('aria-checked') === 'true';
     return {
       pass,
       message: () =>

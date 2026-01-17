@@ -657,10 +657,8 @@ impl GitHubAdapter {
         item = item.with_metadata(content_metadata);
 
         // Set content if provided
-        if !metadata_only {
-            if let Some(content) = content {
-                item = item.with_content(content);
-            }
+        if !metadata_only && let Some(content) = content {
+            item = item.with_content(content);
         }
 
         Ok(item)
@@ -748,17 +746,18 @@ impl SourceAdapter for GitHubAdapter {
             }
 
             // Skip files exceeding max size
-            if let Some(size) = entry.size {
-                if size > MAX_FILE_SIZE_BYTES {
-                    continue;
-                }
+            if let Some(size) = entry.size
+                && size > MAX_FILE_SIZE_BYTES
+            {
+                continue;
             }
 
             // Apply path filter if specified
-            if let Some(ref path_filter) = config.path {
-                if !path_filter.is_empty() && !entry.path.starts_with(path_filter) {
-                    continue;
-                }
+            if let Some(ref path_filter) = config.path
+                && !path_filter.is_empty()
+                && !entry.path.starts_with(path_filter)
+            {
+                continue;
             }
 
             // Estimate tokens from size
@@ -816,17 +815,18 @@ impl SourceAdapter for GitHubAdapter {
                 }
 
                 // Skip files exceeding max size
-                if let Some(size) = entry.size {
-                    if size > MAX_FILE_SIZE_BYTES {
-                        return false;
-                    }
+                if let Some(size) = entry.size
+                    && size > MAX_FILE_SIZE_BYTES
+                {
+                    return false;
                 }
 
                 // Apply path filter
-                if let Some(ref path_filter) = config.path {
-                    if !path_filter.is_empty() && !entry.path.starts_with(path_filter) {
-                        return false;
-                    }
+                if let Some(ref path_filter) = config.path
+                    && !path_filter.is_empty()
+                    && !entry.path.starts_with(path_filter)
+                {
+                    return false;
                 }
 
                 // Apply include/exclude patterns

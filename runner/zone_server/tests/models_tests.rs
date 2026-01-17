@@ -260,8 +260,9 @@ async fn test_list_models_ollama_success() {
 
 #[tokio::test]
 async fn test_list_models_ollama_with_source_param() {
-    let ollama_addr = start_mock_ollama_server().await;
-    let router = create_test_router_with_ollama(&format!("http://{}", ollama_addr)).await;
+    // When source=ollama is explicitly provided, it enters "browse" mode
+    // which uses the OllamaLibraryProvider and returns a BrowseResponse
+    let router = create_test_router_with_ollama("http://localhost:9999").await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
@@ -275,9 +276,10 @@ async fn test_list_models_ollama_with_source_param() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(models.len(), 2);
+    // Browse mode returns a BrowseResponse with "models" array
+    assert!(result["models"].is_array());
 }
 
 #[tokio::test]
@@ -296,14 +298,13 @@ async fn test_list_models_huggingface() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    // Should return placeholder HuggingFace models
+    // Browse mode returns a BrowseResponse with "models" array
+    let models = result["models"].as_array().expect("models should be array");
+
+    // Should return HuggingFace models
     assert!(!models.is_empty());
-    assert!(
-        models[0]["name"].as_str().unwrap().contains("llama")
-            || models[0]["name"].as_str().unwrap().contains("Llama")
-    );
 }
 
 #[tokio::test]
@@ -323,13 +324,13 @@ async fn test_list_models_huggingface_with_search() {
 }
 
 #[tokio::test]
-async fn test_list_models_modelscope() {
+async fn test_list_models_gpt4all() {
     let router = create_test_router_with_ollama("http://localhost:9999").await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/models?source=modelscope")
+        .uri("/api/models?source=gpt4all")
         .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
@@ -338,24 +339,23 @@ async fn test_list_models_modelscope() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    // Should return placeholder ModelScope models
+    // Browse mode returns a BrowseResponse with "models" array
+    let models = result["models"].as_array().expect("models should be array");
+
+    // Should return GPT4All models
     assert!(!models.is_empty());
-    assert!(
-        models[0]["name"].as_str().unwrap().contains("qwen")
-            || models[0]["name"].as_str().unwrap().contains("Qwen")
-    );
 }
 
 #[tokio::test]
-async fn test_list_models_modelscope_with_search() {
+async fn test_list_models_gpt4all_with_search() {
     let router = create_test_router_with_ollama("http://localhost:9999").await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/models?source=modelscope&search=qwen")
+        .uri("/api/models?source=gpt4all&search=llama")
         .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
@@ -400,13 +400,13 @@ async fn test_list_models_unauthorized() {
 
 #[tokio::test]
 async fn test_list_models_ollama_connection_error() {
-    // Use a port that's not listening
+    // Use a port that's not listening - test without source param to use local Ollama
     let router = create_test_router_with_ollama("http://127.0.0.1:59999").await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/models?source=ollama")
+        .uri("/api/models")
         .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
@@ -426,13 +426,14 @@ async fn test_list_models_ollama_connection_error() {
 
 #[tokio::test]
 async fn test_list_models_ollama_service_unavailable() {
+    // Test without source param to use local Ollama
     let ollama_addr = start_error_ollama_server().await;
     let router = create_test_router_with_ollama(&format!("http://{}", ollama_addr)).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/models?source=ollama")
+        .uri("/api/models")
         .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
@@ -443,13 +444,14 @@ async fn test_list_models_ollama_service_unavailable() {
 
 #[tokio::test]
 async fn test_list_models_ollama_invalid_json() {
+    // Test without source param to use local Ollama
     let ollama_addr = start_invalid_json_ollama_server().await;
     let router = create_test_router_with_ollama(&format!("http://{}", ollama_addr)).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/models?source=ollama")
+        .uri("/api/models")
         .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();

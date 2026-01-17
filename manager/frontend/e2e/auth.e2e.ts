@@ -101,7 +101,7 @@ async function mockModelsAndBrowse(page: Page) {
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ source, models: [], has_more: false }),
+        body: JSON.stringify({ source, models: [], next_cursor: null }),
       });
       return;
     }
@@ -113,46 +113,7 @@ async function mockModelsAndBrowse(page: Page) {
     });
   });
 
-  await routeApi(page, '**/api/organizations', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        organizations: [
-          {
-            id: '00000000-0000-0000-0000-000000000001',
-            name: 'Default Org',
-            slug: 'default',
-            description: null,
-            is_active: true,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-        ],
-      }),
-    });
-  });
-
-  await routeApi(page, '**/api/organizations/*/workspaces', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        workspaces: [
-          {
-            id: '00000000-0000-0000-0000-000000000001',
-            organization_id: '00000000-0000-0000-0000-000000000001',
-            name: 'Default Workspace',
-            slug: 'default',
-            description: null,
-            is_active: true,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-        ],
-      }),
-    });
-  });
+  // Organization routes are now set up in fixtures.ts
 }
 
 test.describe('Login Page', () => {
@@ -207,7 +168,8 @@ test.describe('Login Page', () => {
     await page.fill('input[type="password"]', 'wrongpassword');
     await page.click('button[type="submit"]');
 
-    await expect(page.locator('.auth-error')).toBeVisible();
+    // Error message is displayed in the form (not in toast notification)
+    await expect(page.locator('form').getByText('Invalid email or password')).toBeVisible();
   });
 
   test('shows loading state during authentication', async ({ page }) => {
@@ -671,7 +633,7 @@ test.describe('Permission-Based UI', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], has_more: false }),
+          body: JSON.stringify({ source, models: [], next_cursor: null }),
         });
         return;
       }
@@ -697,8 +659,8 @@ test.describe('Permission-Based UI', () => {
 
     await page.goto('/');
 
-    // Wait for models page to load
-    await expect(page.locator('.page-header h1')).toHaveText('Models');
+    // Wait for models page to load (use role-based selector for reliability)
+    await expect(page.getByRole('heading', { name: 'Models', level: 1 })).toBeVisible();
 
     // The delete button for installed models should not be visible
     // (This depends on how the PermissionGate is used in ModelsPage)

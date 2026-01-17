@@ -11,7 +11,7 @@ use super::DbResult;
 pub struct TaskRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
-    pub project_ids: Vec<Uuid>,    // Associated projects via task_projects join table
+    pub project_ids: Vec<Uuid>, // Associated projects via task_projects join table
     pub title: String,
     pub description: String,
     pub acceptance_criteria: Option<String>,
@@ -128,7 +128,11 @@ pub async fn add_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[Uuid
 }
 
 /// Remove project associations from a task
-pub async fn remove_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[Uuid]) -> DbResult<()> {
+pub async fn remove_task_projects(
+    pool: &PgPool,
+    task_id: Uuid,
+    project_ids: &[Uuid],
+) -> DbResult<()> {
     for project_id in project_ids {
         sqlx::query!(
             r#"
@@ -146,12 +150,9 @@ pub async fn remove_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[U
 /// Set the exact project associations for a task (replaces existing)
 pub async fn set_task_projects(pool: &PgPool, task_id: Uuid, project_ids: &[Uuid]) -> DbResult<()> {
     // Delete all existing associations
-    sqlx::query!(
-        r#"DELETE FROM task_projects WHERE task_id = $1"#,
-        task_id
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query!(r#"DELETE FROM task_projects WHERE task_id = $1"#, task_id)
+        .execute(pool)
+        .await?;
 
     // Add new associations
     add_task_projects(pool, task_id, project_ids).await
@@ -184,7 +185,9 @@ pub async fn list_tasks(
             )
             .fetch_all(pool)
             .await?;
-            rows.into_iter().map(|r| map_task_row!(r)).collect::<Vec<_>>()
+            rows.into_iter()
+                .map(|r| map_task_row!(r))
+                .collect::<Vec<_>>()
         }
         (Some(pid), None) => {
             // Filter by project via join table
@@ -204,7 +207,9 @@ pub async fn list_tasks(
             )
             .fetch_all(pool)
             .await?;
-            rows.into_iter().map(|r| map_task_row!(r)).collect::<Vec<_>>()
+            rows.into_iter()
+                .map(|r| map_task_row!(r))
+                .collect::<Vec<_>>()
         }
         (None, Some(s)) => {
             let rows = sqlx::query!(
@@ -222,7 +227,9 @@ pub async fn list_tasks(
             )
             .fetch_all(pool)
             .await?;
-            rows.into_iter().map(|r| map_task_row!(r)).collect::<Vec<_>>()
+            rows.into_iter()
+                .map(|r| map_task_row!(r))
+                .collect::<Vec<_>>()
         }
         (None, None) => {
             let rows = sqlx::query!(
@@ -239,7 +246,9 @@ pub async fn list_tasks(
             )
             .fetch_all(pool)
             .await?;
-            rows.into_iter().map(|r| map_task_row!(r)).collect::<Vec<_>>()
+            rows.into_iter()
+                .map(|r| map_task_row!(r))
+                .collect::<Vec<_>>()
         }
     };
 

@@ -2,55 +2,63 @@
 //!
 //! Handles listing, pulling, and deleting models from various sources.
 
+mod providers;
+mod types;
+
+pub use providers::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ModelProvider, ProviderError, get_provider};
+pub use types::{BrowseResponse, ErrorResponse, ListModelsQuery, ModelDetails, ModelResponse};
+
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
-use serde::{Deserialize, Serialize};
+use once_cell::sync::Lazy;
+use serde::Serialize;
+use std::time::Duration;
 
 use crate::auth::AuthUser;
 use crate::state::AppState;
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
+// =============================================================================
+// Constants
+// =============================================================================
 
-impl ErrorResponse {
-    fn new(error: impl Into<String>) -> Self {
-        Self {
-            error: error.into(),
-        }
+const MAX_MODEL_NAME_LENGTH: usize = 256;
+
+// =============================================================================
+// Shared HTTP Client for Ollama API calls
+// =============================================================================
+
+static OLLAMA_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .expect("Failed to build Ollama HTTP client")
+});
+
+// =============================================================================
+// Validation
+// =============================================================================
+
+/// Validate model name to prevent injection attacks
+fn validate_model_name(name: &str) -> Result<(), ErrorResponse> {
+    if name.is_empty() || name.len() > MAX_MODEL_NAME_LENGTH {
+        return Err(ErrorResponse::new("Invalid model name length"));
     }
-}
 
-/// Model info response
-#[derive(Debug, Serialize)]
-pub struct ModelResponse {
-    name: String,
-    size: Option<u64>,
-    digest: Option<String>,
-    modified_at: Option<String>,
-    details: Option<ModelDetails>,
-}
+    // Allow alphanumeric, hyphens, underscores, dots, colons, and forward slashes
+    // These are common in model names like "llama3.2", "user/model", "model:tag"
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
+    {
+        return Err(ErrorResponse::new("Invalid characters in model name"));
+    }
 
-#[derive(Debug, Serialize)]
-pub struct ModelDetails {
-    format: Option<String>,
-    family: Option<String>,
-    parameter_size: Option<String>,
-    quantization_level: Option<String>,
-}
-
-/// Query parameters for listing models
-#[derive(Debug, Deserialize)]
-pub struct ListModelsQuery {
-    /// Source to list from (ollama, huggingface, modelscope)
-    source: Option<String>,
-    /// Search query for browsing
-    search: Option<String>,
+    Ok(())
 }
 
 /// GET /api/models
@@ -60,11 +68,44 @@ pub async fn list(
     Query(query): Query<ListModelsQuery>,
 ) -> impl IntoResponse {
     let source = query.source.as_deref().unwrap_or("ollama");
+    let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE).min(MAX_PAGE_SIZE);
+
+    // Check if we're in "browse" mode (source param explicitly provided)
+    let is_browse_mode = query.source.is_some();
 
     match source {
-        "ollama" => list_ollama_models(state).await,
-        "huggingface" => list_huggingface_models(query.search).await,
-        "modelscope" => list_modelscope_models(query.search).await,
+        "ollama" => {
+            if is_browse_mode {
+                // Browse the Ollama library for available models
+                match get_provider("ollama") {
+                    Ok(provider) => {
+                        match provider
+                            .search(query.search.as_deref(), query.cursor.as_deref(), limit)
+                            .await
+                        {
+                            Ok(response) => Json(response).into_response(),
+                            Err(e) => e.into_response(),
+                        }
+                    }
+                    Err(e) => e.into_response(),
+                }
+            } else {
+                // List locally installed models
+                list_ollama_models(state).await
+            }
+        }
+        "huggingface" | "gpt4all" | "openrouter" => match get_provider(source) {
+            Ok(provider) => {
+                match provider
+                    .search(query.search.as_deref(), query.cursor.as_deref(), limit)
+                    .await
+                {
+                    Ok(response) => Json(response).into_response(),
+                    Err(e) => e.into_response(),
+                }
+            }
+            Err(e) => e.into_response(),
+        },
         _ => (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(format!("Unknown source: {}", source))),
@@ -78,10 +119,9 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
     let ollama_host = &state.config().ollama_host;
 
     // Try to fetch from Ollama API
-    let client = reqwest::Client::new();
     let url = format!("{}/api/tags", ollama_host);
 
-    match client.get(&url).send().await {
+    match OLLAMA_HTTP_CLIENT.get(&url).send().await {
         Ok(response) => {
             if response.status().is_success() {
                 match response.json::<OllamaTagsResponse>().await {
@@ -133,12 +173,12 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct OllamaTagsResponse {
     models: Vec<OllamaModel>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct OllamaModel {
     name: String,
     size: u64,
@@ -147,7 +187,7 @@ struct OllamaModel {
     details: Option<OllamaModelDetails>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct OllamaModelDetails {
     format: Option<String>,
     family: Option<String>,
@@ -155,57 +195,9 @@ struct OllamaModelDetails {
     quantization_level: Option<String>,
 }
 
-/// List models from HuggingFace (placeholder - returns sample data)
-async fn list_huggingface_models(search: Option<String>) -> axum::response::Response {
-    // In production, this would call the HuggingFace API
-    let _ = search;
-    Json(vec![
-        ModelResponse {
-            name: "meta-llama/Llama-2-7b-chat-hf".to_string(),
-            size: None,
-            digest: None,
-            modified_at: None,
-            details: Some(ModelDetails {
-                format: Some("safetensors".to_string()),
-                family: Some("llama".to_string()),
-                parameter_size: Some("7B".to_string()),
-                quantization_level: None,
-            }),
-        },
-        ModelResponse {
-            name: "mistralai/Mistral-7B-Instruct-v0.2".to_string(),
-            size: None,
-            digest: None,
-            modified_at: None,
-            details: Some(ModelDetails {
-                format: Some("safetensors".to_string()),
-                family: Some("mistral".to_string()),
-                parameter_size: Some("7B".to_string()),
-                quantization_level: None,
-            }),
-        },
-    ])
-    .into_response()
-}
-
-/// List models from ModelScope (placeholder - returns sample data)
-async fn list_modelscope_models(search: Option<String>) -> axum::response::Response {
-    // In production, this would call the ModelScope API
-    let _ = search;
-    Json(vec![ModelResponse {
-        name: "qwen/Qwen-7B-Chat".to_string(),
-        size: None,
-        digest: None,
-        modified_at: None,
-        details: Some(ModelDetails {
-            format: None,
-            family: Some("qwen".to_string()),
-            parameter_size: Some("7B".to_string()),
-            quantization_level: None,
-        }),
-    }])
-    .into_response()
-}
+// =============================================================================
+// Model Details & Management
+// =============================================================================
 
 /// GET /api/models/:name
 pub async fn get(
@@ -213,9 +205,12 @@ pub async fn get(
     _auth: AuthUser,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let ollama_host = &state.config().ollama_host;
+    // Validate model name
+    if let Err(e) = validate_model_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(e)).into_response();
+    }
 
-    let client = reqwest::Client::new();
+    let ollama_host = &state.config().ollama_host;
     let url = format!("{}/api/show", ollama_host);
 
     #[derive(Serialize)]
@@ -223,7 +218,7 @@ pub async fn get(
         name: String,
     }
 
-    match client
+    match OLLAMA_HTTP_CLIENT
         .post(&url)
         .json(&ShowRequest { name: name.clone() })
         .send()
@@ -273,9 +268,12 @@ pub async fn delete(
     _auth: AuthUser,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let ollama_host = &state.config().ollama_host;
+    // Validate model name
+    if let Err(e) = validate_model_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(e)).into_response();
+    }
 
-    let client = reqwest::Client::new();
+    let ollama_host = &state.config().ollama_host;
     let url = format!("{}/api/delete", ollama_host);
 
     #[derive(Serialize)]
@@ -283,7 +281,7 @@ pub async fn delete(
         name: String,
     }
 
-    match client
+    match OLLAMA_HTTP_CLIENT
         .delete(&url)
         .json(&DeleteRequest { name: name.clone() })
         .send()

@@ -1,6 +1,9 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { tasksApi } from '../../../api/tasks';
 import type { Task } from '../types';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 import { useTask } from './useTask';
 
 jest.mock('../../../api/tasks', () => ({
@@ -14,6 +17,17 @@ jest.mock('../../../api/tasks', () => ({
 }));
 
 const mockTasksApi = tasksApi as jest.Mocked<typeof tasksApi>;
+
+const createWrapper = () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client: queryClient }, children);
+};
 
 const mockTask: Task = {
   id: 'task-1',
@@ -49,7 +63,7 @@ describe('useTask', () => {
   it('loads task on mount', async () => {
     mockTasksApi.getTask.mockResolvedValueOnce(mockTask);
 
-    const { result } = renderHook(() => useTask('task-1'));
+    const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
 
     expect(result.current.loading).toBe(true);
 
@@ -63,7 +77,7 @@ describe('useTask', () => {
   });
 
   it('handles null id', async () => {
-    const { result } = renderHook(() => useTask(null));
+    const { result } = renderHook(() => useTask(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -76,7 +90,7 @@ describe('useTask', () => {
   it('handles load error', async () => {
     mockTasksApi.getTask.mockRejectedValueOnce(new Error('Not found'));
 
-    const { result } = renderHook(() => useTask('task-1'));
+    const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -91,7 +105,7 @@ describe('useTask', () => {
     const updatedTask = { ...mockTask, title: 'Updated Task' };
     mockTasksApi.updateTask.mockResolvedValueOnce(updatedTask);
 
-    const { result } = renderHook(() => useTask('task-1'));
+    const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -107,7 +121,7 @@ describe('useTask', () => {
   });
 
   it('throws error when updating without id', async () => {
-    const { result } = renderHook(() => useTask(null));
+    const { result } = renderHook(() => useTask(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -122,7 +136,7 @@ describe('useTask', () => {
     mockTasksApi.getTask.mockResolvedValueOnce(mockTask);
     mockTasksApi.deleteTask.mockResolvedValueOnce();
 
-    const { result } = renderHook(() => useTask('task-1'));
+    const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -137,7 +151,7 @@ describe('useTask', () => {
   });
 
   it('throws error when deleting without id', async () => {
-    const { result } = renderHook(() => useTask(null));
+    const { result } = renderHook(() => useTask(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -150,7 +164,7 @@ describe('useTask', () => {
     mockTasksApi.getTask.mockResolvedValueOnce(mockTask);
     mockTasksApi.runTask.mockResolvedValueOnce({ run_id: 'run-1' });
 
-    const { result } = renderHook(() => useTask('task-1'));
+    const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -163,7 +177,7 @@ describe('useTask', () => {
   });
 
   it('throws error when running without id', async () => {
-    const { result } = renderHook(() => useTask(null));
+    const { result } = renderHook(() => useTask(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -176,7 +190,7 @@ describe('useTask', () => {
     mockTasksApi.getTask.mockResolvedValueOnce(mockTask);
     mockTasksApi.cancelTaskRun.mockResolvedValueOnce();
 
-    const { result } = renderHook(() => useTask('task-1'));
+    const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -188,7 +202,7 @@ describe('useTask', () => {
   });
 
   it('throws error when cancelling without id', async () => {
-    const { result } = renderHook(() => useTask(null));
+    const { result } = renderHook(() => useTask(null), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -200,7 +214,7 @@ describe('useTask', () => {
   it('refetches task', async () => {
     mockTasksApi.getTask.mockResolvedValueOnce(mockTask);
 
-    const { result } = renderHook(() => useTask('task-1'));
+    const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -219,6 +233,7 @@ describe('useTask', () => {
     mockTasksApi.getTask.mockResolvedValue(mockTask);
 
     const { rerender } = renderHook(({ id }: { id: string | null }) => useTask(id), {
+      wrapper: createWrapper(),
       initialProps: { id: 'task-1' },
     });
 

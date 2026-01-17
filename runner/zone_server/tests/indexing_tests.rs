@@ -431,7 +431,8 @@ async fn test_list_sources_includes_index_status() {
 
     response.assert_status(StatusCode::OK);
 
-    let sources: Vec<serde_json::Value> = response.json();
+    let body = response.json_value();
+    let sources = body["sources"].as_array().expect("sources should be array");
     assert_eq!(sources.len(), 3);
 
     for source in sources {

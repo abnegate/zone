@@ -38,7 +38,7 @@
 .context-switcher-button:focus {
   outline: none;
   border-color: var(--ui-accent-500);
-  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1);
+  box-shadow: 0 0 0 3px var(--ui-accent-muted);
 }
 
 .context-label {
@@ -142,7 +142,7 @@
 }
 
 .dropdown-item.active {
-  background: rgba(6, 182, 212, 0.08);
+  background: var(--ui-accent-muted);
   color: var(--ui-accent-500);
 }
 
