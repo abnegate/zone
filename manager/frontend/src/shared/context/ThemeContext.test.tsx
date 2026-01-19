@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { WorkspaceTheme } from '../../types';
 import { FONT_MAP, RADIUS_MAP, ThemeProvider, useTheme } from './ThemeContext';
 
@@ -54,11 +55,11 @@ describe('ThemeContext', () => {
     it('uses system theme when no stored theme (dark mode)', () => {
       // Mock matchMedia to return dark mode
       const originalMatchMedia = window.matchMedia;
-      window.matchMedia = jest.fn().mockImplementation((query) => ({
+      window.matchMedia = mock().mockImplementation((query) => ({
         matches: query === '(prefers-color-scheme: dark)',
         media: query,
-        addEventListener: jest.fn(),
-        removeEventListener: jest.fn(),
+        addEventListener: mock(),
+        removeEventListener: mock(),
       }));
 
       render(
@@ -74,11 +75,11 @@ describe('ThemeContext', () => {
     it('uses system theme when no stored theme (light mode)', () => {
       // Mock matchMedia to return light mode
       const originalMatchMedia = window.matchMedia;
-      window.matchMedia = jest.fn().mockImplementation((query) => ({
+      window.matchMedia = mock().mockImplementation((query) => ({
         matches: false, // Not dark mode
         media: query,
-        addEventListener: jest.fn(),
-        removeEventListener: jest.fn(),
+        addEventListener: mock(),
+        removeEventListener: mock(),
       }));
 
       render(
@@ -252,7 +253,7 @@ describe('ThemeContext', () => {
   describe('useTheme hook', () => {
     it('throws error when used outside provider', () => {
       const consoleError = console.error;
-      console.error = jest.fn();
+      console.error = mock();
 
       expect(() => {
         render(<TestComponent />);

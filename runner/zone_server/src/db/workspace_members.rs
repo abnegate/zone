@@ -469,7 +469,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_is_member_returns_true_for_active_member() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -488,7 +491,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_is_member_returns_false_for_non_member() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
@@ -515,7 +521,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_is_member_returns_false_for_inactive_member() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -542,7 +551,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_get_role_returns_correct_role() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -561,7 +573,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_get_role_returns_none_for_non_member() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
@@ -588,7 +603,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_has_role_or_higher_works_correctly() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -632,7 +650,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_verify_sources_in_workspace_returns_true_for_empty_list() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
@@ -659,7 +680,10 @@ mod tests {
     // }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_add_member_creates_membership() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -680,7 +704,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_remove_member_deactivates_membership() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;

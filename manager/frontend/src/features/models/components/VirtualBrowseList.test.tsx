@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { BrowseModel } from '../types';
 import VirtualBrowseList from './VirtualBrowseList';
 
@@ -23,12 +24,12 @@ const mockModels: BrowseModel[] = [
 ];
 
 describe('VirtualBrowseList', () => {
-  const onItemClick = jest.fn();
-  const onInstall = jest.fn();
-  const onLoadMore = jest.fn();
+  const onItemClick = mock();
+  const onInstall = mock();
+  const onLoadMore = mock();
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
   });
 
   it('shows empty state when no models', () => {

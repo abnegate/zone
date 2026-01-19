@@ -18,7 +18,7 @@ use crate::embeddings::{
     Embedding, EmbeddingService, HybridSearchConfig, PgVectorStore, SearchFilters, VectorStore,
     hybrid_search, keyword_only_search, semantic_only_search,
 };
-use crate::error::Result;
+use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
 use crate::stream::{AnalysisStage, GatheringCallback, GatheringEvent};
 use zone_core::Source;
@@ -506,17 +506,38 @@ impl ContextService {
     /// Analyze a specific content item
     ///
     /// Retrieves the item from storage and runs heuristic analysis.
+    ///
+    /// Note: This is a simplified implementation. In practice, heuristic analysis
+    /// is performed during content indexing and stored in the database. This method
+    /// re-analyzes the content on-demand if needed for debugging or verification.
     pub async fn analyze_content(&self, content_item_id: Uuid) -> Result<HeuristicAnalysis> {
-        // In a real implementation, we'd fetch from DB
-        // For now, return a placeholder
-        Ok(HeuristicAnalysis {
+        use crate::heuristics::HeuristicAnalyzer;
+
+        // Fetch the content item from vector store
+        let item = self
+            .vector_store
+            .get_content_item(content_item_id)
+            .await?
+            .ok_or_else(|| {
+                ContextError::VectorStore(format!("Content item {} not found", content_item_id))
+            })?;
+
+        // Get content text for analysis
+        let text = item.content.as_deref().unwrap_or("");
+
+        // Perform comprehensive heuristic analysis
+        // Note: We use "unknown" for source_type since we don't have direct access
+        // to the Source record from the context service. In production, the source
+        // type would be stored in content metadata or fetched separately.
+        let analysis = HeuristicAnalyzer::analyze(
             content_item_id,
-            entities: Default::default(),
-            categorization: Default::default(),
-            quality: Default::default(),
-            relevance: None,
-            analyzed_at: Utc::now(),
-        })
+            text,
+            &item.content_type,
+            "unknown", // Source type not available without additional query
+            item.modified_at,
+        );
+
+        Ok(analysis)
     }
 
     /// Store and embed a content item

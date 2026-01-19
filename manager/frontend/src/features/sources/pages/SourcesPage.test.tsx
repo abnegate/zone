@@ -40,6 +40,7 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
 }));
 
 let SourcesPage: typeof import('./SourcesPage').default;
+let mockConfirm: ReturnType<typeof mock>;
 
 beforeAll(async () => {
   SourcesPage = (await import('./SourcesPage')).default;
@@ -104,7 +105,8 @@ describe('SourcesPage', () => {
     mockGetSource.mockReset();
     mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
     // Mock window.confirm
-    window.confirm = mock(() => true);
+    mockConfirm = mock(() => true);
+    window.confirm = mockConfirm as typeof window.confirm;
   });
 
   it('shows loading state with skeleton cards', async () => {
@@ -235,8 +237,7 @@ describe('SourcesPage', () => {
     });
   });
 
-  // Note: Tests time out due to mock isolation issues in bun:test
-  it.skip('verifies a source', async () => {
+  it('verifies a source', async () => {
     mockVerifySource.mockImplementation(() => Promise.resolve({ success: true, message: 'OK' }));
     mockGetSource.mockImplementation(() => Promise.resolve(mockSources[0]));
 
@@ -249,12 +250,11 @@ describe('SourcesPage', () => {
     fireEvent.click(verifyButtons[0]);
 
     await waitFor(() => {
-      expect(mockVerifySource).toHaveBeenCalledWith('src-1');
+      expect(mockVerifySource).toHaveBeenCalledWith('test-workspace-id', 'src-1');
     });
   });
 
-  // Note: Tests time out due to mock isolation issues in bun:test
-  it.skip('disables an active source', async () => {
+  it('disables an active source', async () => {
     const updatedSource = { ...mockSources[0], is_active: false };
     mockUpdateSource.mockImplementation(() => Promise.resolve(updatedSource));
 
@@ -267,12 +267,11 @@ describe('SourcesPage', () => {
     fireEvent.click(disableButtons[0]);
 
     await waitFor(() => {
-      expect(mockUpdateSource).toHaveBeenCalledWith('src-1', { is_active: false });
+      expect(mockUpdateSource).toHaveBeenCalledWith('test-workspace-id', 'src-1', { is_active: false });
     });
   });
 
-  // Note: Tests time out due to mock isolation issues in bun:test
-  it.skip('enables an inactive source', async () => {
+  it('enables an inactive source', async () => {
     const updatedSource = { ...mockSources[1], is_active: true };
     mockUpdateSource.mockImplementation(() => Promise.resolve(updatedSource));
 
@@ -285,12 +284,11 @@ describe('SourcesPage', () => {
     fireEvent.click(enableButton);
 
     await waitFor(() => {
-      expect(mockUpdateSource).toHaveBeenCalledWith('src-2', { is_active: true });
+      expect(mockUpdateSource).toHaveBeenCalledWith('test-workspace-id', 'src-2', { is_active: true });
     });
   });
 
-  // Note: Tests time out due to mock isolation issues in bun:test
-  it.skip('deletes a source with confirmation', async () => {
+  it('deletes a source with confirmation', async () => {
     mockDeleteSource.mockImplementation(() => Promise.resolve(undefined));
 
     render(<SourcesPage />);
@@ -303,12 +301,12 @@ describe('SourcesPage', () => {
 
     expect(window.confirm).toHaveBeenCalled();
     await waitFor(() => {
-      expect(mockDeleteSource).toHaveBeenCalledWith('src-1');
+      expect(mockDeleteSource).toHaveBeenCalledWith('test-workspace-id', 'src-1');
     });
   });
 
   it('cancels delete when confirm is rejected', async () => {
-    (window.confirm as jest.Mock).mockReturnValueOnce(false);
+    mockConfirm.mockReturnValueOnce(false);
 
     render(<SourcesPage />);
     await waitFor(() => {

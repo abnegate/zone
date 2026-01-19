@@ -1,20 +1,21 @@
 import { render, screen, waitFor } from '@testing-library/react';
-import { BrowserRouter } from 'react-router-dom';
-import { client } from '../../../api/client';
-import EmailVerificationPage from './EmailVerificationPage';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Mock client
-jest.mock('../../../api/client', () => ({
-  client: {
-    verifyEmail: jest.fn(),
-  },
+const mockVerifyEmail = mock();
+const mockClient = {
+  verifyEmail: mockVerifyEmail,
+};
+
+mock.module('../../../api/client', () => ({
+  client: mockClient,
 }));
 
 // Mock useNavigate and useSearchParams
-const mockNavigate = jest.fn();
+const mockNavigate = mock();
 const mockSearchParams = new URLSearchParams();
 
-jest.mock('react-router-dom', () => ({
+mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
     <a href={to}>{children}</a>
@@ -22,6 +23,18 @@ jest.mock('react-router-dom', () => ({
   useNavigate: () => mockNavigate,
   useSearchParams: () => [mockSearchParams],
 }));
+
+let EmailVerificationPage: typeof import('./EmailVerificationPage').default;
+
+beforeAll(async () => {
+  EmailVerificationPage = (await import('./EmailVerificationPage')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
+
+const BrowserRouter = ({ children }: { children: React.ReactNode }) => <>{children}</>;
 
 const renderPage = () => {
   return render(
@@ -32,40 +45,55 @@ const renderPage = () => {
 };
 
 // TODO: Fix timing issues with async useEffect in happy-dom
-describe.skip('EmailVerificationPage', () => {
+describe('EmailVerificationPage', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     mockSearchParams.delete('token');
   });
 
   describe('Rendering', () => {
-    it('shows loading state initially when token is present', () => {
+    it('shows loading state initially when token is present', async () => {
+      let resolveVerify: (value: { success: boolean; message: string }) => void;
+      const pendingVerify = new Promise<{ success: boolean; message: string }>((resolve) => {
+        resolveVerify = resolve;
+      });
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
+      mockVerifyEmail.mockImplementation(() => pendingVerify);
       renderPage();
 
       expect(screen.getByText(/verifying your email/i)).toBeInTheDocument();
+
+      resolveVerify({ success: true, message: 'Email verified successfully' });
+
+      await waitFor(() => {
+        expect(screen.getByText('Email Verified')).toBeInTheDocument();
+      });
     });
 
-    it('shows error when token is missing', () => {
+    it('shows error when token is missing', async () => {
       renderPage();
 
-      expect(screen.getByText(/invalid verification link/i)).toBeInTheDocument();
-      expect(screen.getByText(/no token provided/i)).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByText(/invalid verification link/i)).toBeInTheDocument();
+        expect(screen.getByText(/no token provided/i)).toBeInTheDocument();
+      });
     });
 
-    it('shows error when token has invalid format', () => {
+    it('shows error when token has invalid format', async () => {
       mockSearchParams.set('token', 'invalid');
       renderPage();
 
-      expect(screen.getAllByText(/verification failed/i).length).toBeGreaterThan(0);
-      expect(screen.getByText(/invalid token format/i)).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getAllByText(/verification failed/i).length).toBeGreaterThan(0);
+        expect(screen.getByText(/invalid token format/i)).toBeInTheDocument();
+      });
     });
   });
 
   describe('Verification Process', () => {
     it('calls verifyEmail with token from URL', async () => {
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      (client.verifyEmail as jest.Mock).mockResolvedValue({
+      mockVerifyEmail.mockResolvedValue({
         success: true,
         message: 'Email verified successfully',
       });
@@ -73,13 +101,13 @@ describe.skip('EmailVerificationPage', () => {
       renderPage();
 
       await waitFor(() => {
-        expect(client.verifyEmail).toHaveBeenCalledWith('valid-token-1234567890abcdef');
+        expect(mockVerifyEmail).toHaveBeenCalledWith('valid-token-1234567890abcdef');
       });
     });
 
     it('shows success message on successful verification', async () => {
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      (client.verifyEmail as jest.Mock).mockResolvedValue({
+      mockVerifyEmail.mockResolvedValue({
         success: true,
         message: 'Email verified successfully',
       });
@@ -94,7 +122,7 @@ describe.skip('EmailVerificationPage', () => {
 
     it('shows success icon on successful verification', async () => {
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      (client.verifyEmail as jest.Mock).mockResolvedValue({
+      mockVerifyEmail.mockResolvedValue({
         success: true,
         message: 'Email verified successfully',
       });
@@ -108,9 +136,8 @@ describe.skip('EmailVerificationPage', () => {
     });
 
     it('redirects to login after 3 seconds on success', async () => {
-      jest.useFakeTimers();
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      (client.verifyEmail as jest.Mock).mockResolvedValue({
+      mockVerifyEmail.mockResolvedValue({
         success: true,
         message: 'Email verified successfully',
       });
@@ -121,16 +148,17 @@ describe.skip('EmailVerificationPage', () => {
         expect(screen.getByText('Email Verified')).toBeInTheDocument();
       });
 
-      jest.advanceTimersByTime(3000);
-
-      expect(mockNavigate).toHaveBeenCalledWith('/login');
-
-      jest.useRealTimers();
+      await waitFor(
+        () => {
+          expect(mockNavigate).toHaveBeenCalledWith('/login');
+        },
+        { timeout: 5000 }
+      );
     });
 
     it('shows error message on verification failure', async () => {
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      (client.verifyEmail as jest.Mock).mockRejectedValue(new Error('Invalid or expired token'));
+      mockVerifyEmail.mockRejectedValue(new Error('Invalid or expired token'));
 
       renderPage();
 
@@ -142,7 +170,7 @@ describe.skip('EmailVerificationPage', () => {
 
     it('shows error icon on verification failure', async () => {
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      (client.verifyEmail as jest.Mock).mockRejectedValue(new Error('Invalid token'));
+      mockVerifyEmail.mockRejectedValue(new Error('Invalid token'));
 
       renderPage();
 
@@ -154,7 +182,7 @@ describe.skip('EmailVerificationPage', () => {
 
     it('provides link to login page on error', async () => {
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      (client.verifyEmail as jest.Mock).mockRejectedValue(new Error('Invalid token'));
+      mockVerifyEmail.mockRejectedValue(new Error('Invalid token'));
 
       renderPage();
 
@@ -166,7 +194,7 @@ describe.skip('EmailVerificationPage', () => {
 
     it('handles non-Error objects in catch block', async () => {
       mockSearchParams.set('token', 'valid-token-1234567890abcdef');
-      (client.verifyEmail as jest.Mock).mockRejectedValue('String error');
+      mockVerifyEmail.mockRejectedValue('String error');
 
       renderPage();
 
@@ -178,16 +206,24 @@ describe.skip('EmailVerificationPage', () => {
   });
 
   describe('UI Elements', () => {
-    it('displays Zone branding', () => {
+    it('displays Zone branding', async () => {
       renderPage();
 
-      expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Zone');
+      expect(screen.getByText('Zone')).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByText(/invalid verification link/i)).toBeInTheDocument();
+      });
     });
 
-    it('has proper page structure with auth-page class', () => {
+    it('has proper page structure with auth-page class', async () => {
       const { container } = renderPage();
 
       expect(container.querySelector('.auth-page')).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByText(/invalid verification link/i)).toBeInTheDocument();
+      });
     });
   });
 });

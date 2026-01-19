@@ -56,7 +56,10 @@ fn create_test_embedding(
 }
 
 #[tokio::test]
-#[ignore] // Requires database
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_pgvector_store_and_search() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
@@ -94,7 +97,10 @@ async fn test_pgvector_store_and_search() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_pgvector_search_with_filters() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
@@ -177,7 +183,10 @@ async fn test_pgvector_search_with_filters() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_pgvector_delete_operations() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
@@ -256,7 +265,10 @@ async fn test_pgvector_delete_operations() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_pgvector_dimension_validation() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
@@ -281,7 +293,10 @@ async fn test_pgvector_dimension_validation() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_pgvector_get_content_item() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
@@ -312,7 +327,10 @@ async fn test_pgvector_get_content_item() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_pgvector_upsert_behavior() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
@@ -353,7 +371,10 @@ async fn test_pgvector_upsert_behavior() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_pgvector_batch_operations() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());

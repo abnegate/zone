@@ -1,15 +1,20 @@
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { client } from './client';
 
 describe('Context Search API', () => {
   const testWorkspaceId = 'ws-test-123';
+  let mockFetch: ReturnType<typeof mock>;
+  let mockWebSocket: ReturnType<typeof mock>;
 
   beforeEach(() => {
-    global.fetch = jest.fn();
-    global.WebSocket = jest.fn() as unknown as typeof WebSocket;
+    mockFetch = mock();
+    mockWebSocket = mock();
+    global.fetch = mockFetch as typeof fetch;
+    global.WebSocket = mockWebSocket as unknown as typeof WebSocket;
   });
 
   afterEach(() => {
-    jest.resetAllMocks();
+    mock.clearAllMocks();
   });
 
   describe('searchContext', () => {
@@ -29,7 +34,7 @@ describe('Context Search API', () => {
         total: 1,
       };
 
-      (global.fetch as jest.Mock).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: true,
         json: async () => mockResponse,
       });
@@ -44,7 +49,7 @@ describe('Context Search API', () => {
           }),
         })
       );
-      const call = (global.fetch as jest.Mock).mock.calls[0][0];
+      const call = mockFetch.mock.calls[0][0];
       expect(call).toContain(`workspace_id=${testWorkspaceId}`);
       expect(call).toContain('q=test+query');
       expect(result).toEqual(mockResponse);
@@ -53,7 +58,7 @@ describe('Context Search API', () => {
     it('should search context with mode parameter', async () => {
       const mockResponse = { results: [], total: 0 };
 
-      (global.fetch as jest.Mock).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: true,
         json: async () => mockResponse,
       });
@@ -69,14 +74,14 @@ describe('Context Search API', () => {
     it('should search context with source_ids filter', async () => {
       const mockResponse = { results: [], total: 0 };
 
-      (global.fetch as jest.Mock).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: true,
         json: async () => mockResponse,
       });
 
       await client.searchContext({ workspace_id: testWorkspaceId, query: 'test', source_ids: ['s1', 's2'] });
 
-      const call = (global.fetch as jest.Mock).mock.calls[0][0];
+      const call = mockFetch.mock.calls[0][0];
       expect(call).toContain('source_ids=s1');
       expect(call).toContain('source_ids=s2');
     });
@@ -84,7 +89,7 @@ describe('Context Search API', () => {
     it('should search context with limit', async () => {
       const mockResponse = { results: [], total: 0 };
 
-      (global.fetch as jest.Mock).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: true,
         json: async () => mockResponse,
       });
@@ -100,19 +105,19 @@ describe('Context Search API', () => {
     it('should URL encode query parameters', async () => {
       const mockResponse = { results: [], total: 0 };
 
-      (global.fetch as jest.Mock).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: true,
         json: async () => mockResponse,
       });
 
       await client.searchContext({ workspace_id: testWorkspaceId, query: 'test query with spaces & symbols' });
 
-      const call = (global.fetch as jest.Mock).mock.calls[0][0];
+      const call = mockFetch.mock.calls[0][0];
       expect(call).toContain('q=test+query+with+spaces+%26+symbols');
     });
 
     it('should throw error on failed request', async () => {
-      (global.fetch as jest.Mock).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: false,
         status: 500,
         json: async () => ({ message: 'Server error' }),
@@ -126,7 +131,7 @@ describe('Context Search API', () => {
     it('should gather context from sources', async () => {
       const mockResponse = { gathering_id: 'g123' };
 
-      (global.fetch as jest.Mock).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: true,
         json: async () => mockResponse,
       });
@@ -144,7 +149,7 @@ describe('Context Search API', () => {
     });
 
     it('should throw error on failed gather', async () => {
-      (global.fetch as jest.Mock).mockResolvedValue({
+      mockFetch.mockResolvedValue({
         ok: false,
         status: 400,
         json: async () => ({ message: 'Invalid request' }),
@@ -158,7 +163,6 @@ describe('Context Search API', () => {
     it('should create WebSocket with correct URL', () => {
       const ws = client.createContextGatheringWebSocket('g123');
 
-      const mockWebSocket = global.WebSocket as unknown as jest.Mock;
       const call = mockWebSocket.mock.calls[0][0];
       expect(call).toContain('/ws/context/g123');
     });
@@ -166,7 +170,6 @@ describe('Context Search API', () => {
     it('should URL encode gathering ID', () => {
       const ws = client.createContextGatheringWebSocket('g/123');
 
-      const mockWebSocket = global.WebSocket as unknown as jest.Mock;
       const call = mockWebSocket.mock.calls[0][0];
       expect(call).toContain('g%2F123');
     });

@@ -1,20 +1,32 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { client } from '../../../api/client';
-import VerificationPendingBanner from './VerificationPendingBanner';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Mock client
-jest.mock('../../../api/client', () => ({
-  client: {
-    resendVerification: jest.fn(),
-  },
+const mockResendVerification = mock();
+const mockClient = {
+  resendVerification: mockResendVerification,
+};
+
+mock.module('../../../api/client', () => ({
+  client: mockClient,
 }));
+
+let VerificationPendingBanner: typeof import('./VerificationPendingBanner').default;
+
+beforeAll(async () => {
+  VerificationPendingBanner = (await import('./VerificationPendingBanner')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('VerificationPendingBanner', () => {
   const mockEmail = 'test@example.com';
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
   });
 
   describe('Rendering', () => {
@@ -45,7 +57,7 @@ describe('VerificationPendingBanner', () => {
 
   describe('Resend Verification', () => {
     it('calls resendVerification with email when button is clicked', async () => {
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Verification email sent',
       });
@@ -54,11 +66,11 @@ describe('VerificationPendingBanner', () => {
 
       await userEvent.click(screen.getByRole('button', { name: /resend verification email/i }));
 
-      expect(client.resendVerification).toHaveBeenCalledWith(mockEmail);
+      expect(mockResendVerification).toHaveBeenCalledWith(mockEmail);
     });
 
     it('shows loading state during resend', async () => {
-      (client.resendVerification as jest.Mock).mockImplementation(
+      mockResendVerification.mockImplementation(
         () => new Promise((resolve) => setTimeout(resolve, 1000))
       );
 
@@ -70,7 +82,7 @@ describe('VerificationPendingBanner', () => {
     });
 
     it('shows success message after successful resend', async () => {
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Verification email sent',
       });
@@ -85,7 +97,7 @@ describe('VerificationPendingBanner', () => {
     });
 
     it('shows success icon after successful resend', async () => {
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Verification email sent',
       });
@@ -100,7 +112,7 @@ describe('VerificationPendingBanner', () => {
     });
 
     it('hides resend button after successful resend', async () => {
-      (client.resendVerification as jest.Mock).mockResolvedValue({
+      mockResendVerification.mockResolvedValue({
         success: true,
         message: 'Verification email sent',
       });
@@ -117,7 +129,7 @@ describe('VerificationPendingBanner', () => {
     });
 
     it('shows error message on resend failure', async () => {
-      (client.resendVerification as jest.Mock).mockRejectedValue(new Error('Rate limit exceeded'));
+      mockResendVerification.mockRejectedValue(new Error('Rate limit exceeded'));
 
       render(<VerificationPendingBanner email={mockEmail} />);
 
@@ -129,7 +141,7 @@ describe('VerificationPendingBanner', () => {
     });
 
     it('re-enables button after error', async () => {
-      (client.resendVerification as jest.Mock).mockRejectedValue(new Error('Server error'));
+      mockResendVerification.mockRejectedValue(new Error('Server error'));
 
       render(<VerificationPendingBanner email={mockEmail} />);
 
@@ -143,7 +155,7 @@ describe('VerificationPendingBanner', () => {
     });
 
     it('handles non-Error objects in catch block', async () => {
-      (client.resendVerification as jest.Mock).mockRejectedValue('String error');
+      mockResendVerification.mockRejectedValue('String error');
 
       render(<VerificationPendingBanner email={mockEmail} />);
 
@@ -173,7 +185,7 @@ describe('VerificationPendingBanner', () => {
     });
 
     it('calls onDismiss when dismiss button is clicked', async () => {
-      const onDismiss = jest.fn();
+      const onDismiss = mock();
       render(<VerificationPendingBanner email={mockEmail} onDismiss={onDismiss} />);
 
       await userEvent.click(screen.getByRole('button', { name: /dismiss/i }));

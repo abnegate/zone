@@ -624,7 +624,11 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
                     project: *project,
                     name: format!("Test {}", project.display_name()),
                     command: "bun".to_string(),
-                    args: vec!["test".to_string(), "src".to_string()],
+                    args: vec![
+                        "test".to_string(),
+                        "--max-concurrency=1".to_string(),
+                        "src".to_string(),
+                    ],
                     working_dir,
                 });
             }

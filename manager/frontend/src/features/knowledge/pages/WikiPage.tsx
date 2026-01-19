@@ -117,7 +117,11 @@ export default function WikiPage() {
       </Tabs>
 
       {(error || deleteError || refreshError) && (
-        <div className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive mb-4">
+        <div
+          className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive mb-4"
+          role="alert"
+          aria-live="assertive"
+        >
           {error || deleteError || refreshError}
         </div>
       )}

@@ -1,7 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
 // Allow configurable port for running alongside other services
-const port = process.env.PORT || '3000';
+const isCI = !!process.env.CI;
+const defaultPort = isCI ? '4173' : '3000';
+const port = process.env.PLAYWRIGHT_PORT || process.env.PORT || defaultPort;
 const baseURL = `http://localhost:${port}`;
 
 export default defineConfig({
@@ -36,9 +38,12 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `PORT=${port} bun start`,
+    command: `bun start -- --port ${port}`,
     url: baseURL,
     reuseExistingServer: true,
     timeout: 60000, // 60s to start server
+    env: {
+      PORT: port,
+    },
   },
 });

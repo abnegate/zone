@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useWorkspace } from '../../context/WorkspaceContext';
 import './ContextSwitcher.css';
 
-export default function ContextSwitcher() {
+type ContextSwitcherProps = {
+  useWorkspaceHook?: typeof useWorkspace;
+};
+
+export default function ContextSwitcher({
+  useWorkspaceHook = useWorkspace,
+}: ContextSwitcherProps) {
   const {
     organizations,
     currentOrganization,
@@ -11,7 +17,7 @@ export default function ContextSwitcher() {
     setCurrentOrganization,
     setCurrentWorkspace,
     loading,
-  } = useWorkspace();
+  } = useWorkspaceHook();
 
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);

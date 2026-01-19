@@ -87,8 +87,13 @@ pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    // Validate email
-    if !req.email.contains('@') {
+    // Validate email with proper regex
+    // RFC 5322 simplified: local@domain with basic constraints
+    let email_regex = regex::Regex::new(
+        r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
+    ).unwrap();
+
+    if !email_regex.is_match(&req.email) || req.email.len() > 254 {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("Invalid email format")),
@@ -96,11 +101,25 @@ pub async fn register(
             .into_response();
     }
 
-    // Validate password
+    // Validate password - require length, uppercase, lowercase, and number
     if req.password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new("Password must be at least 8 characters")),
+        )
+            .into_response();
+    }
+
+    let has_uppercase = req.password.chars().any(|c| c.is_uppercase());
+    let has_lowercase = req.password.chars().any(|c| c.is_lowercase());
+    let has_digit = req.password.chars().any(|c| c.is_ascii_digit());
+
+    if !has_uppercase || !has_lowercase || !has_digit {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "Password must contain at least one uppercase letter, one lowercase letter, and one number"
+            )),
         )
             .into_response();
     }

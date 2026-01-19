@@ -1,7 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, } from 'bun:test';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import type React from 'react';
 import { client } from '../../../api/client';
 import ResetPasswordPage from './ResetPasswordPage';
 
@@ -9,6 +9,17 @@ const validToken = 'valid-token-1234567890abcdef';
 
 const mockResetPassword = mock();
 const originalResetPassword = client.resetPassword;
+
+const mockNavigate = mock();
+const mockSearchParams = new URLSearchParams();
+
+mock.module('react-router-dom', () => ({
+  Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
+    <a href={to}>{children}</a>
+  ),
+  useNavigate: () => mockNavigate,
+  useSearchParams: () => [mockSearchParams],
+}));
 
 beforeAll(() => {
   client.resetPassword = mockResetPassword as typeof client.resetPassword;
@@ -21,29 +32,15 @@ afterAll(() => {
 
 beforeEach(() => {
   mockResetPassword.mockReset();
+  mockNavigate.mockReset();
+  mockSearchParams.delete('token');
 });
 
-const LocationDisplay = () => {
-  const location = useLocation();
-  return (
-    <div data-testid="location">
-      {location.pathname}
-      {location.search}
-    </div>
-  );
-};
-
 const renderPage = (token?: string) => {
-  const path = token ? `/reset-password?token=${token}` : '/reset-password';
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <Routes>
-        <Route path="/reset-password" element={<ResetPasswordPage />} />
-        <Route path="/login" element={<div>Login Page</div>} />
-      </Routes>
-      <LocationDisplay />
-    </MemoryRouter>
-  );
+  if (token) {
+    mockSearchParams.set('token', token);
+  }
+  return render(<ResetPasswordPage />);
 };
 
 describe('ResetPasswordPage', () => {
@@ -232,11 +229,12 @@ describe('ResetPasswordPage', () => {
         expect(screen.getByText(/password reset successful/i)).toBeInTheDocument();
       });
 
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 3100));
-      });
-
-      expect(screen.getByTestId('location')).toHaveTextContent('/login');
+      await waitFor(
+        () => {
+          expect(mockNavigate).toHaveBeenCalledWith('/login');
+        },
+        { timeout: 5000 }
+      );
     });
 
     it('shows error message on reset failure', async () => {

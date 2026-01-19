@@ -74,12 +74,15 @@ test.describe('Chats Page', () => {
 
   test.describe('Empty State', () => {
     test('shows empty state when no chats exist', async ({ page }) => {
-      await expect(page.locator('.chats-empty')).toBeVisible();
-      await expect(page.locator('.chats-empty')).toContainText('No chats yet');
+      await expect(page.getByText('No chats yet')).toBeVisible();
+      await expect(page.getByText('Start a new conversation to get started')).toBeVisible();
     });
 
     test('shows start new chat button in empty state', async ({ page }) => {
-      await expect(page.locator('.chat-placeholder button')).toContainText('Start New Chat');
+      await expect(page.getByRole('heading', { name: 'No chats yet' })).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'New Chat', exact: true })
+      ).toBeVisible();
     });
   });
 
@@ -155,11 +158,13 @@ test.describe('Chats Page', () => {
       await page.click('a[href="/chats"]');
 
       // Check active chats
-      await expect(page.locator('.filter-btn.active')).toContainText('Active');
+      const activeTab = page.getByRole('tab', { name: 'Active' });
+      const archivedTab = page.getByRole('tab', { name: 'Archived' });
+      await expect(activeTab).toHaveAttribute('data-state', 'active');
       await expect(page.locator('.chat-title').first()).toContainText('Active Chat');
 
       // Switch to archived
-      await page.click('.filter-btn:has-text("Archived")');
+      await archivedTab.click();
       await expect(page.locator('.chat-title').first()).toContainText('Archived Chat');
     });
 
@@ -213,11 +218,14 @@ test.describe('Chats Page', () => {
     test('shows available models in dropdown', async ({ page }) => {
       await page.getByRole('button', { name: /\+ New/i }).click();
 
-      const options = page.locator('#select-model option');
-      await expect(options).toHaveCount(4); // Including "Choose a model..." option
-      await expect(options.nth(1)).toContainText('llama3.2');
-      await expect(options.nth(2)).toContainText('codellama');
-      await expect(options.nth(3)).toContainText('mistral');
+      const selectTrigger = page.getByLabel('Select Model');
+      await selectTrigger.click();
+
+      const options = page.getByRole('option');
+      await expect(options).toHaveCount(3);
+      await expect(page.getByRole('option', { name: 'llama3.2' })).toBeVisible();
+      await expect(page.getByRole('option', { name: 'codellama' })).toBeVisible();
+      await expect(page.getByRole('option', { name: 'mistral' })).toBeVisible();
     });
 
     test('creates new chat successfully', async ({ page }) => {
@@ -253,7 +261,8 @@ test.describe('Chats Page', () => {
       });
 
       await page.getByRole('button', { name: /\+ New/i }).click();
-      await page.selectOption('#select-model', 'llama3.2');
+      await page.getByLabel('Select Model').click();
+      await page.getByRole('option', { name: 'llama3.2' }).click();
       await page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
         name: 'Create Chat',
       }).click();

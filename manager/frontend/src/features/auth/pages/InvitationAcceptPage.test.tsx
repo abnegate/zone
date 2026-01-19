@@ -20,6 +20,10 @@ mock.module('../hooks', () => ({
 }));
 
 mock.module('react-router-dom', () => ({
+  BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
+    <a href={to}>{children}</a>
+  ),
   useNavigate: () => mockNavigate,
   useSearchParams: () => mockUseSearchParams(),
 }));
@@ -45,7 +49,7 @@ describe('InvitationAcceptPage', () => {
   };
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     mockUseAuth.mockReset();
     mockUseAuth.mockReturnValue({ isAuthenticated: false });
     mockUseSearchParams.mockReset();
@@ -59,9 +63,21 @@ describe('InvitationAcceptPage', () => {
     return render(<InvitationAcceptPage />);
   };
 
-  it('renders loading state initially', () => {
+  it('renders loading state initially', async () => {
+    let resolveInvitation: (details: InvitationDetails) => void;
+    const pendingInvitation = new Promise<InvitationDetails>((resolve) => {
+      resolveInvitation = resolve;
+    });
+    mockGetInvitationByToken.mockImplementation(() => pendingInvitation);
+
     renderPage();
     expect(screen.getByText('Loading invitation...')).toBeInTheDocument();
+
+    resolveInvitation(mockDetails);
+
+    await waitFor(() => {
+      expect(screen.getByText("You've Been Invited!")).toBeInTheDocument();
+    });
   });
 
   it('fetches and displays invitation details', async () => {

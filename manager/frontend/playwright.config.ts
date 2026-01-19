@@ -1,13 +1,19 @@
 import { defineConfig, devices } from '@playwright/test';
+import os from 'node:os';
 
 // Allow configurable port for running alongside other services
-const defaultPort = '3001';
+const isCI = !!process.env.CI;
+const defaultPort = isCI ? '4174' : '3001';
 const port = process.env.PLAYWRIGHT_PORT || process.env.PORT || defaultPort;
 const baseURL = `http://localhost:${port}`;
 
 // Allow running specific browser via environment variable (for CI matrix)
 const browserProject = process.env.BROWSER;
 const collectCoverage = process.env.COLLECT_COVERAGE === 'true';
+const localWorkers = Math.max(1, os.cpus().length);
+const workerOverride = process.env.PLAYWRIGHT_WORKERS
+  ? Number.parseInt(process.env.PLAYWRIGHT_WORKERS, 10)
+  : undefined;
 
 const allProjects = [
   {
@@ -77,7 +83,7 @@ export default defineConfig({
   fullyParallel: !collectCoverage, // Run sequentially when collecting coverage
   forbidOnly: !!process.env.CI,
   retries: process.env.CI && !collectCoverage ? 3 : 0,
-  workers: collectCoverage ? 1 : 1,
+  workers: workerOverride ?? (collectCoverage ? 1 : localWorkers),
   reporter: collectCoverage ? coverageReporter : defaultReporters,
   use: {
     baseURL,
@@ -90,9 +96,12 @@ export default defineConfig({
     ? [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]
     : projects,
   webServer: {
-    command: `PORT=${port} bun start`,
+    command: `bun start -- --port ${port}`,
     url: baseURL,
     reuseExistingServer: true,
-    timeout: 60000, // 60s to start server
+    timeout: 120000, // 120s to start server
+    env: {
+      PORT: port,
+    },
   },
 });

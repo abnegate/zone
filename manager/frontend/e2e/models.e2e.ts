@@ -291,17 +291,17 @@ test.describe('Models Page', () => {
     await page.locator('.model-item .btn-danger-icon').first().click();
 
     // Use role-based selector for the modal heading
-    await expect(page.getByRole('heading', { name: 'Delete Model', level: 3 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Delete Model' })).toBeVisible();
     // Use strong element selector to find the model name in the modal
     await expect(page.locator('strong:has-text("llama3.2:latest")')).toBeVisible();
   });
 
   test('cancels delete confirmation', async ({ page }) => {
     await page.locator('.model-item .btn-danger-icon').first().click();
-    await expect(page.getByRole('heading', { name: 'Delete Model', level: 3 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Delete Model' })).toBeVisible();
 
     await page.click('button:has-text("Cancel")');
-    await expect(page.getByRole('heading', { name: 'Delete Model', level: 3 })).not.toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Delete Model' })).toHaveCount(0);
     await expect(page.locator('.model-item')).toHaveCount(2);
   });
 
@@ -345,10 +345,8 @@ test.describe('Models Page', () => {
       }
     });
 
-    await page.click('.card-header .btn-icon');
-    // Wait for the request to complete
-    await page.waitForTimeout(500);
-    expect(requestCount).toBeGreaterThan(0);
+    await page.locator('.card-header button[title="Refresh"]').click();
+    await expect.poll(() => requestCount).toBeGreaterThan(0);
   });
 
   test('shows loading state while fetching models', async ({ page }) => {
@@ -394,9 +392,9 @@ test.describe('Models Page', () => {
     });
 
     // Click refresh to trigger error
-    await page.click('.card-header .btn-icon');
+    await page.locator('.card-header button[title="Refresh"]').click();
 
-    await expect(page.locator('.error-placeholder')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Cannot connect to Ollama' })).toBeVisible();
   });
 
   test('shows empty state when no models installed', async ({ page }) => {
@@ -424,7 +422,7 @@ test.describe('Models Page', () => {
     await page.reload();
     await expect(page.getByRole('navigation')).toBeVisible();
 
-    await expect(page.locator('.empty-placeholder')).toHaveText('No models installed');
+    await expect(page.getByRole('heading', { name: 'No models installed' })).toBeVisible();
   });
 
   test('shows error when browse API fails', async ({ page }) => {
@@ -692,13 +690,13 @@ test.describe('Models Page', () => {
     await expect(page.locator('.model-meta').nth(2)).toContainText('500 MB');
   });
 
-  test('download count formats correctly for different values', async ({ page }) => {
+  test('browse size formats correctly for different values', async ({ page }) => {
     await switchToBrowseTab(page);
 
-    const modelsWithDownloads = [
-      { id: 'low', name: 'low', description: '', downloads: 500, tags: [] },
-      { id: 'medium', name: 'medium', description: '', downloads: 50000, tags: [] },
-      { id: 'high', name: 'high', description: '', downloads: 5000000, tags: [] },
+    const modelsWithSizes = [
+      { name: 'low', size: 500 },
+      { name: 'medium', size: 1024 * 500 },
+      { name: 'high', size: 1024 * 1024 * 500 },
     ];
 
     await page.unroute('**/api/models**');
@@ -708,7 +706,7 @@ test.describe('Models Page', () => {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ source: 'ollama', models: modelsWithDownloads, next_cursor: null }),
+          body: JSON.stringify({ source: 'ollama', models: modelsWithSizes, next_cursor: null }),
         });
       } else if (route.request().method() === 'GET') {
         route.fulfill({
@@ -725,8 +723,8 @@ test.describe('Models Page', () => {
     await page.fill('.search-container input', 'test');
     await page.click('.search-container button');
 
-    await expect(page.locator('.browse-downloads').nth(0)).toContainText('500 downloads');
-    await expect(page.locator('.browse-downloads').nth(1)).toContainText('50.0K downloads');
-    await expect(page.locator('.browse-downloads').nth(2)).toContainText('5.0M downloads');
+    await expect(page.locator('.browse-size').nth(0)).toContainText('500 B');
+    await expect(page.locator('.browse-size').nth(1)).toContainText('500 KB');
+    await expect(page.locator('.browse-size').nth(2)).toContainText('500 MB');
   });
 });

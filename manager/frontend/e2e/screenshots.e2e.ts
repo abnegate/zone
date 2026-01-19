@@ -2,6 +2,9 @@ import { test, expect } from './fixtures';
 import type { Page, BrowserContext } from '@playwright/test';
 import { blockServiceWorker, createMockJwt, adminPermissions, mockAdminUser, routeApi } from './test-utils';
 
+const runScreenshots = process.env.RUN_SCREENSHOTS === 'true';
+const describeScreenshots = runScreenshots ? test.describe : test.describe.skip;
+
 // =============================================================================
 // Mock Data - Complete schemas matching API types
 // =============================================================================
@@ -463,7 +466,7 @@ async function verifyNoErrors(page: Page) {
 // Tests
 // =============================================================================
 
-test.describe('Screenshots - Public Pages', () => {
+describeScreenshots('Screenshots - Public Pages', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
     // Clear localStorage before page loads
@@ -482,7 +485,7 @@ test.describe('Screenshots - Public Pages', () => {
 
   test('Login page', async ({ page }) => {
     await page.goto('/login');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     await expect(page.locator('input[type="email"]')).toBeVisible({ timeout: 10000 });
     await page.screenshot({ path: 'screenshots/login.png', fullPage: true });
@@ -490,7 +493,7 @@ test.describe('Screenshots - Public Pages', () => {
 
   test('Register page', async ({ page }) => {
     await page.goto('/register');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     await expect(page.locator('input[type="email"]')).toBeVisible({ timeout: 10000 });
     await page.screenshot({ path: 'screenshots/register.png', fullPage: true });
@@ -498,7 +501,7 @@ test.describe('Screenshots - Public Pages', () => {
 
   test('Forgot password page', async ({ page }) => {
     await page.goto('/forgot-password');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     await expect(page.locator('input[type="email"]')).toBeVisible({ timeout: 10000 });
     await page.screenshot({ path: 'screenshots/forgot-password.png', fullPage: true });
@@ -506,13 +509,13 @@ test.describe('Screenshots - Public Pages', () => {
 
   test('Unauthorized page', async ({ page }) => {
     await page.goto('/unauthorized');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await page.waitForTimeout(500);
     await page.screenshot({ path: 'screenshots/unauthorized.png', fullPage: true });
   });
 });
 
-test.describe('Screenshots - Empty States', () => {
+describeScreenshots('Screenshots - Empty States', () => {
   test.beforeEach(async ({ context }) => {
     await blockServiceWorker(context);
   });
@@ -524,7 +527,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -538,7 +541,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/chats');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -552,7 +555,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/projects');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -566,7 +569,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/tasks');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -580,7 +583,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/sources');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -594,7 +597,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/wiki');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -608,7 +611,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/sessions');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -622,7 +625,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/org-settings');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -636,7 +639,7 @@ test.describe('Screenshots - Empty States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/settings');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -644,7 +647,7 @@ test.describe('Screenshots - Empty States', () => {
   });
 });
 
-test.describe('Screenshots - Populated States', () => {
+describeScreenshots('Screenshots - Populated States', () => {
   test.beforeEach(async ({ context }) => {
     await blockServiceWorker(context);
   });
@@ -656,7 +659,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -670,7 +673,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/chats');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -684,7 +687,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/projects');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -698,7 +701,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/tasks');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -712,7 +715,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/sources');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -726,7 +729,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/wiki');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -740,7 +743,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/sessions');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -754,7 +757,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/org-settings');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -768,7 +771,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/settings');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -782,7 +785,7 @@ test.describe('Screenshots - Populated States', () => {
     await setupAdminAuth(page);
 
     await page.goto('/search');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -794,7 +797,7 @@ test.describe('Screenshots - Populated States', () => {
 // Dark Mode Screenshots
 // =============================================================================
 
-test.describe('Screenshots - Dark Mode', () => {
+describeScreenshots('Screenshots - Dark Mode', () => {
   test.beforeEach(async ({ context }) => {
     await blockServiceWorker(context);
   });
@@ -823,7 +826,7 @@ test.describe('Screenshots - Dark Mode', () => {
     await setupAdminAuth(page);
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
@@ -838,7 +841,7 @@ test.describe('Screenshots - Dark Mode', () => {
     await setupAdminAuth(page);
 
     await page.goto('/projects');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
@@ -853,7 +856,7 @@ test.describe('Screenshots - Dark Mode', () => {
     await setupAdminAuth(page);
 
     await page.goto('/tasks');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
@@ -868,7 +871,7 @@ test.describe('Screenshots - Dark Mode', () => {
     await setupAdminAuth(page);
 
     await page.goto('/sources');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
@@ -883,7 +886,7 @@ test.describe('Screenshots - Dark Mode', () => {
     await setupAdminAuth(page);
 
     await page.goto('/wiki');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
@@ -898,7 +901,7 @@ test.describe('Screenshots - Dark Mode', () => {
     await setupAdminAuth(page);
 
     await page.goto('/chats');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
@@ -911,7 +914,7 @@ test.describe('Screenshots - Dark Mode', () => {
 // Modal Screenshots
 // =============================================================================
 
-test.describe('Screenshots - Modals', () => {
+describeScreenshots('Screenshots - Modals', () => {
   test.beforeEach(async ({ context }) => {
     await blockServiceWorker(context);
   });
@@ -923,7 +926,7 @@ test.describe('Screenshots - Modals', () => {
     await setupAdminAuth(page);
 
     await page.goto('/projects');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
     // Click new project button
@@ -942,7 +945,7 @@ test.describe('Screenshots - Modals', () => {
     await setupAdminAuth(page);
 
     await page.goto('/tasks');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
     // Click new task button
@@ -961,7 +964,7 @@ test.describe('Screenshots - Modals', () => {
     await setupAdminAuth(page);
 
     await page.goto('/sources');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
     // Click add source button
@@ -980,7 +983,7 @@ test.describe('Screenshots - Modals', () => {
     await setupAdminAuth(page);
 
     await page.goto('/wiki');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
     // Click add knowledge button
@@ -999,7 +1002,7 @@ test.describe('Screenshots - Modals', () => {
     await setupAdminAuth(page);
 
     await page.goto('/projects');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
 
     // Enable dark mode

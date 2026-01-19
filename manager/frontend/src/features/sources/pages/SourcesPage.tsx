@@ -54,8 +54,7 @@ export default function SourcesPage() {
     try {
       const result = await verifySource(sourceId);
       if (!result.success) {
-        // Error handling could be improved here
-        console.error(`Verification failed: ${result.message}`);
+        setOperationError(result.message || 'Verification failed');
       }
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to verify source');

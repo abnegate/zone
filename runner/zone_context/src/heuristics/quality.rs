@@ -121,11 +121,83 @@ impl QualityAnalyzer {
 
     /// Calculate duplication score
     /// 0.0 = unique, 1.0 = exact duplicate
-    /// Placeholder implementation - would use content hashing in production
-    pub fn calculate_duplication(_text: &str, _hash: &str) -> f32 {
-        // TODO: Implement actual content hash comparison
-        // For now, always return 0.0 (unique)
-        0.0
+    ///
+    /// Uses SimHash for near-duplicate detection:
+    /// - Computes a 64-bit fingerprint of the text
+    /// - Compares fingerprints using Hamming distance
+    /// - Returns similarity score based on matching bits
+    pub fn calculate_duplication(text: &str, existing_hash: &str) -> f32 {
+        if text.is_empty() || existing_hash.is_empty() {
+            return 0.0;
+        }
+
+        // Compute SimHash fingerprint of the text
+        let new_hash = Self::simhash(text);
+
+        // Parse existing hash (expecting hex string)
+        let existing_fingerprint = match u64::from_str_radix(existing_hash, 16) {
+            Ok(fp) => fp,
+            Err(_) => return 0.0, // Invalid hash format, assume unique
+        };
+
+        // Calculate Hamming distance (number of differing bits)
+        let hamming_distance = (new_hash ^ existing_fingerprint).count_ones();
+
+        // Convert to similarity score (0.0 = very different, 1.0 = identical)
+        // Threshold: < 3 bits different = likely duplicate (similarity > 0.95)
+        let similarity = 1.0 - (hamming_distance as f32 / 64.0);
+
+        similarity.clamp(0.0, 1.0)
+    }
+
+    /// Compute SimHash fingerprint for text
+    ///
+    /// SimHash algorithm:
+    /// 1. Tokenize text into words
+    /// 2. Hash each word to 64-bit value
+    /// 3. For each hash bit, increment or decrement a counter
+    /// 4. Final fingerprint: bit is 1 if counter > 0, else 0
+    fn simhash(text: &str) -> u64 {
+        let mut v = [0i32; 64];
+
+        // Tokenize and process each word
+        for word in text.split_whitespace() {
+            let word_lower = word.to_lowercase();
+            // Simple hash using Rust's default hasher
+            let hash = Self::hash_word(&word_lower);
+
+            // Update counters for each bit
+            for (i, count) in v.iter_mut().enumerate() {
+                if (hash & (1u64 << i)) != 0 {
+                    *count += 1;
+                } else {
+                    *count -= 1;
+                }
+            }
+        }
+
+        // Generate final fingerprint
+        let mut fingerprint = 0u64;
+        for (i, &count) in v.iter().enumerate() {
+            if count > 0 {
+                fingerprint |= 1u64 << i;
+            }
+        }
+
+        fingerprint
+    }
+
+    /// Simple hash function for a word (FNV-1a hash)
+    fn hash_word(word: &str) -> u64 {
+        const FNV_OFFSET: u64 = 14695981039346656037;
+        const FNV_PRIME: u64 = 1099511628211;
+
+        let mut hash = FNV_OFFSET;
+        for byte in word.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
     }
 }
 
@@ -279,10 +351,67 @@ mod tests {
 
     // Duplication tests
     #[test]
-    fn test_duplication_placeholder() {
-        // Current implementation always returns 0.0
-        let dup = QualityAnalyzer::calculate_duplication("some text", "hash123");
+    fn test_duplication_identical() {
+        let text = "The quick brown fox jumps over the lazy dog";
+        let hash = QualityAnalyzer::simhash(text);
+        let hash_str = format!("{:016x}", hash);
+
+        let dup = QualityAnalyzer::calculate_duplication(text, &hash_str);
+        assert_eq!(dup, 1.0); // Exact match
+    }
+
+    #[test]
+    fn test_duplication_similar() {
+        let text1 = "The quick brown fox jumps over the lazy dog";
+        let text2 = "The quick brown fox jumps over a lazy dog"; // Very similar
+        let hash1 = QualityAnalyzer::simhash(text1);
+        let hash_str = format!("{:016x}", hash1);
+
+        let dup = QualityAnalyzer::calculate_duplication(text2, &hash_str);
+        assert!(dup > 0.8); // Should be very similar
+    }
+
+    #[test]
+    fn test_duplication_different() {
+        let text1 = "The quick brown fox jumps over the lazy dog";
+        let text2 = "Rust is a systems programming language";
+        let hash1 = QualityAnalyzer::simhash(text1);
+        let hash_str = format!("{:016x}", hash1);
+
+        let dup = QualityAnalyzer::calculate_duplication(text2, &hash_str);
+        assert!(dup < 0.5); // Should be different
+    }
+
+    #[test]
+    fn test_duplication_empty() {
+        let dup = QualityAnalyzer::calculate_duplication("", "");
         assert_eq!(dup, 0.0);
+
+        let dup2 = QualityAnalyzer::calculate_duplication("some text", "");
+        assert_eq!(dup2, 0.0);
+    }
+
+    #[test]
+    fn test_duplication_invalid_hash() {
+        let dup = QualityAnalyzer::calculate_duplication("some text", "invalid_hex");
+        assert_eq!(dup, 0.0);
+    }
+
+    #[test]
+    fn test_simhash_consistency() {
+        let text = "Hello world this is a test";
+        let hash1 = QualityAnalyzer::simhash(text);
+        let hash2 = QualityAnalyzer::simhash(text);
+        assert_eq!(hash1, hash2); // Same text should produce same hash
+    }
+
+    #[test]
+    fn test_simhash_different_texts() {
+        let text1 = "Hello world";
+        let text2 = "Goodbye world";
+        let hash1 = QualityAnalyzer::simhash(text1);
+        let hash2 = QualityAnalyzer::simhash(text2);
+        assert_ne!(hash1, hash2); // Different texts should produce different hashes
     }
 
     // Overall quality tests

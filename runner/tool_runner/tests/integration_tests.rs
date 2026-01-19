@@ -629,7 +629,7 @@ async fn test_duration_tracking() {
     let (tx, mut rx) = mpsc::channel(100);
 
     // Sleep for a known duration
-    let request = create_bash_request("duration-1", "sleep 0.1");
+    let request = create_bash_request("duration-1", "sleep 0.15");
     let _handle = executor.spawn(&request, tx).await.unwrap();
 
     let messages = collect_messages(&mut rx, Duration::from_secs(5)).await;
@@ -643,10 +643,10 @@ async fn test_duration_tracking() {
     assert!(duration.is_some());
     let duration_ms = duration.unwrap();
 
-    // Should be at least 100ms (the sleep time)
+    // Should be at least 120ms (sleep time with jitter allowance)
     assert!(
-        duration_ms >= 100,
-        "Duration should be at least 100ms, got {}ms",
+        duration_ms >= 120,
+        "Duration should be at least 120ms, got {}ms",
         duration_ms
     );
     // But not too long (less than 5 seconds)

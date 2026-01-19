@@ -1,27 +1,38 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../../../api/client';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { OrganizationMember } from '../types';
-import OrgMembersSection from './OrgMembersSection';
 
 // Mock client
-jest.mock('../../../../api/client', () => ({
-  client: {
-    getOrgMembers: jest.fn(),
-    addOrgMember: jest.fn(),
-    updateOrgMemberRole: jest.fn(),
-    removeOrgMember: jest.fn(),
-  },
+const mockClient = {
+  getOrgMembers: mock(),
+  addOrgMember: mock(),
+  updateOrgMemberRole: mock(),
+  removeOrgMember: mock(),
+};
+
+mock.module('../../../../api/client', () => ({
+  client: mockClient,
 }));
 
 // Mock useAuth
-jest.mock('../../../auth', () => ({
-  useAuth: () => ({
-    isAuthenticated: true,
-    user: { id: 'user-1', email: 'owner@test.com' },
-  }),
+const mockUseAuth = mock(() => ({
+  isAuthenticated: true,
+  user: { id: 'user-1', email: 'owner@test.com' },
 }));
 
-const mockClient = client as jest.Mocked<typeof client>;
+mock.module('../../../auth', () => ({
+  useAuth: mockUseAuth,
+}));
+
+let OrgMembersSection: typeof import('./OrgMembersSection').default;
+
+beforeAll(async () => {
+  OrgMembersSection = (await import('./OrgMembersSection')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const mockOwner: OrganizationMember = {
   id: 'member-1',
@@ -55,7 +66,7 @@ const mockMember: OrganizationMember = {
 
 describe('OrgMembersSection', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     mockClient.getOrgMembers.mockResolvedValue({
       members: [mockOwner, mockAdmin, mockMember],
     });

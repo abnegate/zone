@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor, cleanup } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, afterAll, mock, beforeAll, beforeEach, describe, it, expect } from 'bun:test';
@@ -73,8 +74,8 @@ afterEach(() => {
 const createWrapper = () => {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false, gcTime: 0 },
     },
   });
   return ({ children }: { children: React.ReactNode }) => (
@@ -92,6 +93,9 @@ const renderWikiPage = () => {
     </Wrapper>
   );
 };
+
+const getAddKnowledgeButton = () =>
+  screen.getByRole('button', { name: /add knowledge/i });
 
 describe('WikiPage', () => {
   const defaultEntries: KnowledgeEntry[] = [
@@ -218,38 +222,50 @@ describe('WikiPage', () => {
       expect(screen.getByRole('tab', { name: 'URL' })).toBeInTheDocument();
     });
 
-    it.skip('filters by text type', () => {
+    it('filters by text type', async () => {
+      const user = userEvent.setup();
       renderWikiPage();
       const textFilter = screen.getByRole('tab', { name: 'Text' });
-      fireEvent.click(textFilter);
-      expect(screen.getByText('Text Entry')).toBeInTheDocument();
-      expect(screen.queryByText('URL Entry')).not.toBeInTheDocument();
+      await user.click(textFilter);
+      await waitFor(() => {
+        expect(screen.getByText('Text Entry')).toBeInTheDocument();
+        expect(screen.queryByText('URL Entry')).not.toBeInTheDocument();
+      });
     });
 
-    it.skip('filters by url type', () => {
+    it('filters by url type', async () => {
+      const user = userEvent.setup();
       renderWikiPage();
       const urlFilter = screen.getByRole('tab', { name: 'URL' });
-      fireEvent.click(urlFilter);
-      expect(screen.queryByText('Text Entry')).not.toBeInTheDocument();
-      expect(screen.getByText('URL Entry')).toBeInTheDocument();
+      await user.click(urlFilter);
+      await waitFor(() => {
+        expect(screen.queryByText('Text Entry')).not.toBeInTheDocument();
+        expect(screen.getByText('URL Entry')).toBeInTheDocument();
+      });
     });
 
-    it.skip('shows all entries when All filter is active', () => {
+    it('shows all entries when All filter is active', async () => {
+      const user = userEvent.setup();
       renderWikiPage();
       const urlFilter = screen.getByRole('tab', { name: 'URL' });
-      fireEvent.click(urlFilter);
+      await user.click(urlFilter);
       const allFilter = screen.getByRole('tab', { name: 'All' });
-      fireEvent.click(allFilter);
-      expect(screen.getByText('Text Entry')).toBeInTheDocument();
-      expect(screen.getByText('URL Entry')).toBeInTheDocument();
+      await user.click(allFilter);
+      await waitFor(() => {
+        expect(screen.getByText('Text Entry')).toBeInTheDocument();
+        expect(screen.getByText('URL Entry')).toBeInTheDocument();
+      });
     });
 
-    it.skip('applies data-state to selected filter', () => {
+    it('applies data-state to selected filter', async () => {
+      const user = userEvent.setup();
       renderWikiPage();
       const textFilter = screen.getByRole('tab', { name: 'Text' });
       expect(textFilter).not.toHaveAttribute('data-state', 'active');
-      fireEvent.click(textFilter);
-      expect(textFilter).toHaveAttribute('data-state', 'active');
+      await user.click(textFilter);
+      await waitFor(() => {
+        expect(textFilter).toHaveAttribute('data-state', 'active');
+      });
     });
   });
 
@@ -294,17 +310,17 @@ describe('WikiPage', () => {
     });
   });
 
-  describe.skip('Create Knowledge Wizard', () => {
+  describe('Create Knowledge Wizard', () => {
     it('opens create wizard when Add Knowledge button is clicked', () => {
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       expect(screen.getByText('Add Knowledge Entry')).toBeInTheDocument();
     });
 
     it('renders wizard steps', () => {
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       expect(screen.getByText('Text Content')).toBeInTheDocument();
       expect(screen.getByText('URL / Web Page')).toBeInTheDocument();
@@ -312,7 +328,7 @@ describe('WikiPage', () => {
 
     it('closes wizard when Cancel button is clicked', async () => {
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       const cancelButton = screen.getByRole('button', { name: 'Cancel' });
       fireEvent.click(cancelButton);
@@ -323,7 +339,7 @@ describe('WikiPage', () => {
 
     it('closes wizard when close icon is clicked', async () => {
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       const closeButton = screen.getByRole('button', { name: 'Close wizard' });
       fireEvent.click(closeButton);
@@ -333,12 +349,14 @@ describe('WikiPage', () => {
     });
 
     it('closes wizard when clicking overlay', async () => {
+      const user = userEvent.setup();
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
-      fireEvent.click(addButton);
-      const overlay = document.querySelector('.ui-wizard-overlay');
+      const addButton = getAddKnowledgeButton();
+      await user.click(addButton);
+      const dialog = await screen.findByRole('dialog');
+      const overlay = dialog.parentElement;
       if (overlay) {
-        fireEvent.click(overlay);
+        await user.click(overlay);
       }
       await waitFor(() => {
         expect(screen.queryByText('Add Knowledge Entry')).not.toBeInTheDocument();
@@ -347,7 +365,7 @@ describe('WikiPage', () => {
 
     it('shows URL input when URL type is selected', async () => {
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       fireEvent.click(screen.getByText('URL / Web Page'));
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
@@ -358,8 +376,9 @@ describe('WikiPage', () => {
     });
   });
 
-  describe.skip('Create Knowledge Submission', () => {
+  describe('Create Knowledge Submission', () => {
     it('creates text knowledge entry via wizard', async () => {
+      const user = userEvent.setup();
       const newEntry: KnowledgeEntry = {
         ...defaultEntries[0],
         id: 'kb-new',
@@ -368,24 +387,25 @@ describe('WikiPage', () => {
       };
       mockCreateEntry.mockResolvedValueOnce(newEntry);
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
-      fireEvent.click(addButton);
-      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+      const addButton = getAddKnowledgeButton();
+      await user.click(addButton);
+      await user.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
         expect(screen.getByLabelText(/Content/)).toBeInTheDocument();
       });
       const contentInput = screen.getByLabelText(/Content/);
-      fireEvent.change(contentInput, { target: { value: 'New content' } });
-      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+      await user.type(contentInput, 'New content');
+      await user.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
         expect(screen.getByLabelText('Title')).toBeInTheDocument();
       });
       const titleInput = screen.getByLabelText('Title');
-      fireEvent.change(titleInput, { target: { value: 'New Entry' } });
+      await user.type(titleInput, 'New Entry');
       const submitButton = screen.getByRole('button', { name: 'Create Entry' });
-      fireEvent.click(submitButton);
+      await user.click(submitButton);
       await waitFor(() => {
         expect(mockCreateEntry).toHaveBeenCalledWith({
+          workspace_id: '00000000-0000-0000-0000-000000000001',
           title: 'New Entry',
           type: 'text',
           content: 'New content',
@@ -395,6 +415,7 @@ describe('WikiPage', () => {
     });
 
     it('creates URL knowledge entry via wizard', async () => {
+      const user = userEvent.setup();
       const newEntry: KnowledgeEntry = {
         ...defaultEntries[1],
         id: 'kb-new',
@@ -403,25 +424,26 @@ describe('WikiPage', () => {
       };
       mockCreateEntry.mockResolvedValueOnce(newEntry);
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
-      fireEvent.click(addButton);
-      fireEvent.click(screen.getByText('URL / Web Page'));
-      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+      const addButton = getAddKnowledgeButton();
+      await user.click(addButton);
+      await user.click(screen.getByText('URL / Web Page'));
+      await user.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
         expect(screen.getByLabelText('URL')).toBeInTheDocument();
       });
       const urlInput = screen.getByLabelText('URL');
-      fireEvent.change(urlInput, { target: { value: 'https://newurl.com' } });
-      fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+      await user.type(urlInput, 'https://newurl.com');
+      await user.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
         expect(screen.getByLabelText('Title')).toBeInTheDocument();
       });
       const titleInput = screen.getByLabelText('Title');
-      fireEvent.change(titleInput, { target: { value: 'New URL' } });
+      await user.type(titleInput, 'New URL');
       const submitButton = screen.getByRole('button', { name: 'Create Entry' });
-      fireEvent.click(submitButton);
+      await user.click(submitButton);
       await waitFor(() => {
         expect(mockCreateEntry).toHaveBeenCalledWith({
+          workspace_id: '00000000-0000-0000-0000-000000000001',
           title: 'New URL',
           type: 'url',
           content: 'https://newurl.com',
@@ -438,7 +460,7 @@ describe('WikiPage', () => {
       };
       mockCreateEntry.mockResolvedValueOnce(newEntry);
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
@@ -470,7 +492,7 @@ describe('WikiPage', () => {
 
     it('removes tags when tag remove button is clicked', async () => {
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
@@ -497,7 +519,7 @@ describe('WikiPage', () => {
 
     it('wizard requires content before proceeding', async () => {
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
@@ -510,7 +532,7 @@ describe('WikiPage', () => {
     it('displays error message on creation failure', async () => {
       mockCreateEntry.mockRejectedValueOnce(new Error('Creation failed'));
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
@@ -536,7 +558,7 @@ describe('WikiPage', () => {
         () => new Promise((resolve) => setTimeout(resolve, 100))
       );
       renderWikiPage();
-      const addButton = screen.getAllByText('Add Knowledge')[0];
+      const addButton = getAddKnowledgeButton();
       fireEvent.click(addButton);
       fireEvent.click(screen.getByRole('button', { name: 'Next' }));
       await waitFor(() => {
@@ -688,7 +710,7 @@ describe('WikiPage', () => {
       expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument();
     });
 
-    it.skip('includes role="alert" for error messages', () => {
+    it('includes role="alert" for error messages', () => {
       getMockState = () => ({ entries: [], loading: false, error: 'Load error' });
       renderWikiPage();
       const alert = screen.getByRole('alert');

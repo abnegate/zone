@@ -10,21 +10,22 @@ mock.module('../hooks', () => ({
 }));
 
 // Mock useNavigate
-const mockNavigate = jest.fn();
-const mockUseLocation = jest.fn(() => ({
+const mockNavigate = mock();
+const mockUseLocation = mock(() => ({
   state: null,
   pathname: '/login',
   search: '',
   hash: '',
   key: '',
 }));
-jest.mock('react-router-dom', () => ({
+mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
     <a href={to}>{children}</a>
   ),
   useNavigate: () => mockNavigate,
   useLocation: () => mockUseLocation(),
+  useSearchParams: () => [new URLSearchParams(), mock()],
 }));
 
 let LoginPage: typeof import('./LoginPage').default;
@@ -46,10 +47,10 @@ const renderLoginPage = () => {
 };
 
 describe('LoginPage', () => {
-  const mockLogin = jest.fn();
+  const mockLogin = mock();
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     mockUseAuth.mockReturnValue({
       isAuthenticated: false,
       isLoading: false,
@@ -59,12 +60,12 @@ describe('LoginPage', () => {
       roles: [],
       permissions: [],
       login: mockLogin,
-      register: jest.fn(),
-      logout: jest.fn(),
-      hasPermission: jest.fn(),
-      hasAnyPermission: jest.fn(),
-      hasAllPermissions: jest.fn(),
-      hasRole: jest.fn(),
+      register: mock(),
+      logout: mock(),
+      hasPermission: mock(),
+      hasAnyPermission: mock(),
+      hasAllPermissions: mock(),
+      hasRole: mock(),
     });
   });
 
@@ -271,12 +272,12 @@ describe('LoginPage', () => {
         roles: [],
         permissions: [],
         login: mockLogin,
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+        register: mock(),
+        logout: mock(),
+        hasPermission: mock(),
+        hasAnyPermission: mock(),
+        hasAllPermissions: mock(),
+        hasRole: mock(),
       });
       renderLoginPage();
 
@@ -297,12 +298,12 @@ describe('LoginPage', () => {
         roles: [],
         permissions: [],
         login: mockLogin,
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+        register: mock(),
+        logout: mock(),
+        hasPermission: mock(),
+        hasAnyPermission: mock(),
+        hasAllPermissions: mock(),
+        hasRole: mock(),
       });
       renderLoginPage();
 

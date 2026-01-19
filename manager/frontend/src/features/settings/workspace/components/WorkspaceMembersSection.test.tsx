@@ -1,28 +1,39 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../../../api/client';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { OrganizationMember, WorkspaceMember } from '../types';
-import WorkspaceMembersSection from './WorkspaceMembersSection';
 
 // Mock client
-jest.mock('../../../../api/client', () => ({
-  client: {
-    getWorkspaceMembers: jest.fn(),
-    getOrgMembers: jest.fn(),
-    addWorkspaceMember: jest.fn(),
-    updateWorkspaceMemberRole: jest.fn(),
-    removeWorkspaceMember: jest.fn(),
-  },
+const mockClient = {
+  getWorkspaceMembers: mock(),
+  getOrgMembers: mock(),
+  addWorkspaceMember: mock(),
+  updateWorkspaceMemberRole: mock(),
+  removeWorkspaceMember: mock(),
+};
+
+mock.module('../../../../api/client', () => ({
+  client: mockClient,
 }));
 
 // Mock useAuth
-jest.mock('../../../auth', () => ({
-  useAuth: () => ({
-    isAuthenticated: true,
-    user: { id: 'user-1', email: 'owner@test.com' },
-  }),
+const mockUseAuth = mock(() => ({
+  isAuthenticated: true,
+  user: { id: 'user-1', email: 'owner@test.com' },
 }));
 
-const mockClient = client as jest.Mocked<typeof client>;
+mock.module('../../../auth', () => ({
+  useAuth: mockUseAuth,
+}));
+
+let WorkspaceMembersSection: typeof import('./WorkspaceMembersSection').default;
+
+beforeAll(async () => {
+  WorkspaceMembersSection = (await import('./WorkspaceMembersSection')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const mockOwner: WorkspaceMember = {
   id: 'ws-member-1',
@@ -76,7 +87,7 @@ const mockOrgMember1: OrganizationMember = {
 
 describe('WorkspaceMembersSection', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     mockClient.getWorkspaceMembers.mockResolvedValue({
       members: [mockOwner, mockAdmin, mockMember, mockViewer],
     });

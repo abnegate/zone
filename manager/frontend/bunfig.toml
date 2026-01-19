@@ -1,6 +1,6 @@
 [test]
 preload = ["./src/happyDomSetup.ts", "./src/setupTests.ts"]
 exclude = ["e2e/**", "**/e2e/**"]
-coverage = true
+coverage = false
 coverageReporter = ["text", "lcov"]
 maxConcurrency = 1

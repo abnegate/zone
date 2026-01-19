@@ -1,7 +1,33 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { BrowserRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+
+mock.module('react-router-dom', () => ({
+  BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
+    <a href={to}>{children}</a>
+  ),
+  NavLink: ({
+    to,
+    children,
+    onClick,
+    className,
+    title,
+  }: {
+    to: string;
+    children: React.ReactNode;
+    onClick?: React.MouseEventHandler<HTMLAnchorElement>;
+    className?: string | ((args: { isActive: boolean }) => string);
+    title?: string;
+  }) => {
+    const resolvedClassName = typeof className === 'function' ? className({ isActive: false }) : className;
+    return (
+      <a href={to} onClick={onClick} className={resolvedClassName} title={title}>
+        {children}
+      </a>
+    );
+  },
+}));
 
 // Mock the client
 mock.module('../../../api/client', () => ({
@@ -9,13 +35,6 @@ mock.module('../../../api/client', () => ({
     getOrganizations: mock(() => Promise.resolve([])),
     getWorkspaces: mock(() => Promise.resolve([])),
     setAccessToken: mock(),
-  },
-}));
-
-// Mock ContextSwitcher to simplify tests
-mock.module('../ContextSwitcher/ContextSwitcher', () => ({
-  default: function MockContextSwitcher() {
-    return <div data-testid="context-switcher">Context Switcher</div>;
   },
 }));
 
@@ -80,13 +99,13 @@ afterAll(() => {
 const createWrapper = () => {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false, gcTime: 0 },
     },
   });
   return ({ children }: { children: React.ReactNode }) => (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>{children}</BrowserRouter>
+      {children}
     </QueryClientProvider>
   );
 };
@@ -100,8 +119,7 @@ const renderSidebar = () => {
   );
 };
 
-// Note: Tests pass when run individually but fail in full suite due to bun:test mock isolation issues
-describe.skip('Sidebar', () => {
+describe('Sidebar', () => {
   beforeEach(() => {
     localStorage.clear();
     localStorage.setItem('manager_theme', 'light');
@@ -145,7 +163,8 @@ describe.skip('Sidebar', () => {
 
     it('renders context switcher', () => {
       renderSidebar();
-      expect(screen.getByTestId('context-switcher')).toBeInTheDocument();
+      expect(screen.getByText('Test Org')).toBeInTheDocument();
+      expect(screen.getByText('Test Workspace')).toBeInTheDocument();
     });
 
     it('renders mobile menu button', () => {
@@ -285,7 +304,7 @@ describe.skip('Sidebar', () => {
         expect(screen.getByRole('button', { name: 'Close menu' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByText('Chats'));
+      fireEvent.click(screen.getByRole('link', { name: 'Chats' }));
 
       await waitFor(() => {
         expect(screen.queryByRole('button', { name: 'Close menu' })).not.toBeInTheDocument();
