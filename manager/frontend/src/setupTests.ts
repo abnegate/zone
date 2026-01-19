@@ -1,4 +1,4 @@
-import { mock, expect, afterEach, jest } from 'bun:test';
+import { mock, expect, afterEach, vi } from 'bun:test';
 import '@testing-library/dom';
 import { cleanup } from '@testing-library/react';
 
@@ -13,8 +13,9 @@ if (typeof globalThis.NodeFilter === 'undefined') {
   };
 }
 
-// Cleanup after each test to prevent DOM accumulation
+// Cleanup after each test to prevent DOM accumulation.
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
 });
 
@@ -81,6 +82,19 @@ expect.extend({
           : 'expected element to be disabled',
     };
   },
+  toBeEnabled(received: HTMLElement | null) {
+    if (received === null) {
+      return { pass: false, message: () => 'element is null' };
+    }
+    const pass = (received as HTMLButtonElement).disabled !== true;
+    return {
+      pass,
+      message: () =>
+        pass
+          ? 'expected element not to be enabled'
+          : 'expected element to be enabled',
+    };
+  },
   toBeChecked(received: HTMLInputElement | null) {
     if (received === null) {
       return { pass: false, message: () => 'element is null' };
@@ -123,8 +137,6 @@ expect.extend({
   },
 });
 
-// Expose Bun's jest-compatible helpers for legacy tests.
-(globalThis as Record<string, unknown>).jest = jest;
 
 // Mock window.matchMedia globally for all tests
 Object.defineProperty(window, 'matchMedia', {
@@ -141,8 +153,15 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 });
 
-// Mock fetch
-global.fetch = mock(() => Promise.resolve(new Response()));
+// Mock fetch with a minimal response to avoid open body streams.
+global.fetch = mock(() =>
+  Promise.resolve({
+    ok: true,
+    status: 200,
+    json: async () => ({}),
+    text: async () => '',
+  } as Response)
+);
 
 // Mock localStorage
 const localStorageMock = (() => {

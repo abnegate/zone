@@ -79,7 +79,7 @@ describe('InvitationsSection', () => {
   ];
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     mockGetInvitations.mockResolvedValue({ invitations: mockInvitations });
   });
 
@@ -242,10 +242,10 @@ describe('InvitationsSection', () => {
     expect(screen.getByRole('heading', { name: /invite member/i })).toBeInTheDocument();
   });
 
-  // Note: Uses Jest syntax (jest.fn) for global.confirm mock
+  // Note: Uses mock() for global.confirm mock
   it.skip('revokes invitation when revoke button clicked', async () => {
     mockRevokeInvitation.mockResolvedValue();
-    global.confirm = jest.fn(() => true);
+    global.confirm = mock(() => true) as typeof global.confirm;
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 
@@ -266,9 +266,9 @@ describe('InvitationsSection', () => {
     expect(mockGetInvitations).toHaveBeenCalledTimes(2);
   });
 
-  // Note: Uses Jest syntax (jest.fn) for global.confirm mock
+  // Note: Uses mock() for global.confirm mock
   it.skip('does not revoke invitation when user cancels confirmation', async () => {
-    global.confirm = jest.fn(() => false);
+    global.confirm = mock(() => false) as typeof global.confirm;
 
     render(<InvitationsSection orgId={orgId} workspaces={mockWorkspaces} />);
 

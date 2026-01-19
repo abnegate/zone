@@ -32,6 +32,21 @@ jobs:
           - os: macos-latest
             rust: beta
 
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zone_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -52,19 +67,35 @@ jobs:
             ${{ runner.os }}-${{ matrix.rust }}-cargo-
             ${{ runner.os }}-cargo-
 
+      - name: Run database migrations
+        if: runner.os == 'Linux'
+        run: |
+          cd zone_server
+          psql -h localhost -U postgres -d zone_test -f migrations/001_initial_schema.sql
+        env:
+          PGPASSWORD: postgres
+
       - name: Build
         run: cargo build --all-targets
 
       - name: Run unit tests
         run: cargo test --lib --all-features
+        env:
+          DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
+          TEST_DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
 
       - name: Run integration tests
         run: cargo test --test '*' --all-features
         env:
+          DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
+          TEST_DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
           RUST_BACKTRACE: 1
 
       - name: Run doc tests
         run: cargo test --doc
+        env:
+          DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
+          TEST_DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
 
   # Ensure minimum supported Rust version compiles
   msrv:

@@ -1,16 +1,17 @@
 import type { ReactNode } from 'react';
+import { mock } from 'bun:test';
 
 // Mock implementations
-export const useNavigate = jest.fn(() => jest.fn());
-export const useLocation = jest.fn(() => ({
+export const useNavigate = mock(() => mock());
+export const useLocation = mock(() => ({
   pathname: '/',
   state: null,
   search: '',
   hash: '',
   key: '',
 }));
-export const useParams = jest.fn(() => ({}));
-export const useSearchParams = jest.fn(() => [new URLSearchParams(), jest.fn()]);
+export const useParams = mock(() => ({}));
+export const useSearchParams = mock(() => [new URLSearchParams(), mock()]);
 
 // Mock components
 export const BrowserRouter = ({ children }: { children: ReactNode }) => <>{children}</>;

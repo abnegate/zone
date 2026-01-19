@@ -87,39 +87,45 @@ test.describe('Wiki Page', () => {
 
   test.describe('Page Header', () => {
     test('displays page title', async ({ page }) => {
-      await expect(page.locator('.wiki-header h1')).toContainText('Knowledge Base');
+      await expect(page.getByRole('heading', { name: 'Knowledge Base' })).toBeVisible();
     });
 
     test('displays subtitle', async ({ page }) => {
-      await expect(page.locator('.wiki-subtitle')).toContainText('Manage documentation');
+      await expect(
+        page.getByText('Manage documentation, links, and content for your AI models')
+      ).toBeVisible();
     });
   });
 
   test.describe('Page Actions', () => {
     test('shows search input', async ({ page }) => {
-      await expect(page.locator('.wiki-search input')).toBeVisible();
-      await expect(page.locator('.wiki-search input')).toHaveAttribute('placeholder', 'Search knowledge...');
+      const searchInput = page.getByRole('textbox', { name: 'Search knowledge' });
+      await expect(searchInput).toBeVisible();
+      await expect(searchInput).toHaveAttribute('placeholder', 'Search knowledge...');
     });
 
     test('shows add knowledge button', async ({ page }) => {
-      await expect(page.locator('.add-knowledge-btn').first()).toContainText('Add Knowledge');
+      await expect(page.getByRole('button', { name: /Add Knowledge/ })).toBeVisible();
     });
   });
 
   test.describe('Filters', () => {
     test('shows all filter buttons', async ({ page }) => {
-      const filters = page.locator('.wiki-filters .filter-btn');
-      await expect(filters).toHaveCount(3);
-      await expect(filters.nth(0)).toContainText('All');
-      await expect(filters.nth(1)).toContainText('Text');
-      await expect(filters.nth(2)).toContainText('URL');
+      await expect(page.getByRole('tab', { name: 'All' })).toBeVisible();
+      await expect(page.getByRole('tab', { name: 'Text' })).toBeVisible();
+      await expect(page.getByRole('tab', { name: 'URL' })).toBeVisible();
     });
   });
 
   test.describe('Empty State', () => {
     test('shows empty state when no entries exist', async ({ page }) => {
-      await expect(page.locator('.wiki-empty h2')).toContainText('No knowledge entries found');
-      await expect(page.locator('.wiki-empty')).toContainText('Get started by adding your first knowledge entry');
+      await expect(
+        page.getByRole('heading', { name: 'No knowledge entries found' })
+      ).toBeVisible();
+      await expect(
+        page.getByText('Add your first knowledge entry to build your knowledge base')
+      ).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Add Entry' })).toBeVisible();
     });
   });
 });

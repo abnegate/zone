@@ -1,28 +1,37 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { tasksApi } from '../../../api/tasks';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Task } from '../types';
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
-import { useTask } from './useTask';
 
-jest.mock('../../../api/tasks', () => ({
-  tasksApi: {
-    getTask: jest.fn(),
-    updateTask: jest.fn(),
-    deleteTask: jest.fn(),
-    runTask: jest.fn(),
-    cancelTaskRun: jest.fn(),
-  },
+const mockTasksApi = {
+  getTask: mock(),
+  updateTask: mock(),
+  deleteTask: mock(),
+  runTask: mock(),
+  cancelTaskRun: mock(),
+};
+
+mock.module('../../../api/tasks', () => ({
+  tasksApi: mockTasksApi,
 }));
 
-const mockTasksApi = tasksApi as jest.Mocked<typeof tasksApi>;
+let useTask: typeof import('./useTask').useTask;
+
+beforeAll(async () => {
+  ({ useTask } = await import('./useTask'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const createWrapper = () => {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false, gcTime: 0 },
     },
   });
   return ({ children }: { children: ReactNode }) =>
@@ -57,7 +66,7 @@ const mockTask: Task = {
 
 describe('useTask', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
   });
 
   it('loads task on mount', async () => {
@@ -222,7 +231,9 @@ describe('useTask', () => {
 
     mockTasksApi.getTask.mockResolvedValueOnce({ ...mockTask, title: 'Refetched' });
 
-    result.current.refetch();
+    act(() => {
+      result.current.refetch();
+    });
 
     await waitFor(() => {
       expect(result.current.task?.title).toBe('Refetched');
@@ -242,7 +253,9 @@ describe('useTask', () => {
     });
 
     mockTasksApi.getTask.mockResolvedValue({ ...mockTask, id: 'task-2' });
-    rerender({ id: 'task-2' });
+    act(() => {
+      rerender({ id: 'task-2' });
+    });
 
     await waitFor(() => {
       expect(mockTasksApi.getTask).toHaveBeenCalledWith('task-2');

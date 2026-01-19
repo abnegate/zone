@@ -424,7 +424,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_create_and_get_knowledge() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -464,7 +467,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_list_knowledge() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;
@@ -511,7 +517,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_delete_knowledge() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, user_id) = setup_test_data(&pool).await;

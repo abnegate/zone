@@ -1,6 +1,17 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, jest } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setSystemTime,
+  vi,
+} from 'bun:test';
 import { client } from '../../../api/client';
 import type { SessionsResponse } from '../types';
 import type SessionsPageType from './SessionsPage';
@@ -41,8 +52,8 @@ afterAll(() => {
 const createQueryClient = () =>
   new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false, gcTime: 0 },
     },
   });
 
@@ -656,12 +667,12 @@ describe('SessionsPage', () => {
 
   describe('formatRelativeTime Edge Cases', () => {
     beforeEach(() => {
-      jest.useFakeTimers();
-      jest.setSystemTime(new Date('2024-01-15T12:00:00Z'));
+      vi.useFakeTimers();
+      setSystemTime(new Date('2024-01-15T12:00:00Z'));
     });
 
     afterEach(() => {
-      jest.useRealTimers();
+      vi.useRealTimers();
     });
 
     it('returns "Invalid date" for invalid timestamp', () => {

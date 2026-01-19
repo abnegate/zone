@@ -139,7 +139,10 @@ async fn setup_test_data(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid), sqlx::Erro
 }
 
 #[tokio::test]
-#[ignore] // Requires database setup
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_keyword_only_search() {
     let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
@@ -178,7 +181,10 @@ async fn test_keyword_only_search() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database setup
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_semantic_only_search() {
     let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
@@ -222,7 +228,10 @@ async fn test_semantic_only_search() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database setup
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_hybrid_search() {
     let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
@@ -269,7 +278,10 @@ async fn test_hybrid_search() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database setup
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_hybrid_search_weighting() {
     let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
@@ -326,7 +338,10 @@ async fn test_hybrid_search_weighting() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database setup
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_hybrid_search_no_keyword_matches() {
     let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
@@ -359,7 +374,10 @@ async fn test_hybrid_search_no_keyword_matches() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database setup
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_hybrid_search_phrase_search() {
     let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
@@ -391,7 +409,10 @@ async fn test_hybrid_search_phrase_search() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database setup
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_hybrid_search_source_filter() {
     let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
     let (workspace_id, source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
@@ -423,7 +444,10 @@ async fn test_hybrid_search_source_filter() {
 }
 
 #[tokio::test]
-#[ignore] // Requires database setup
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
 async fn test_hybrid_search_limit() {
     let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();

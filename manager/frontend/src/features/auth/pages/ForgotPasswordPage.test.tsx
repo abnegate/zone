@@ -1,25 +1,38 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { BrowserRouter } from 'react-router-dom';
-import { client } from '../../../api/client';
-import ForgotPasswordPage from './ForgotPasswordPage';
 
 // Mock client
-jest.mock('../../../api/client', () => ({
-  client: {
-    forgotPassword: jest.fn(),
-  },
+const mockForgotPassword = mock();
+const mockClient = {
+  forgotPassword: mockForgotPassword,
+};
+
+mock.module('../../../api/client', () => ({
+  client: mockClient,
 }));
 
 // Mock useNavigate
-const mockNavigate = jest.fn();
-jest.mock('react-router-dom', () => ({
+const mockNavigate = mock();
+mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
     <a href={to}>{children}</a>
   ),
   useNavigate: () => mockNavigate,
+  useSearchParams: () => [new URLSearchParams(), mock()],
 }));
+
+let ForgotPasswordPage: typeof import('./ForgotPasswordPage').default;
+
+beforeAll(async () => {
+  ForgotPasswordPage = (await import('./ForgotPasswordPage')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const renderPage = () => {
   return render(
@@ -31,7 +44,7 @@ const renderPage = () => {
 
 describe('ForgotPasswordPage', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
   });
 
   describe('Rendering', () => {
@@ -67,7 +80,7 @@ describe('ForgotPasswordPage', () => {
       await userEvent.click(screen.getByRole('button', { name: /send reset link/i }));
 
       expect(screen.getByText(/invalid email address/i)).toBeInTheDocument();
-      expect(client.forgotPassword).not.toHaveBeenCalled();
+      expect(mockForgotPassword).not.toHaveBeenCalled();
     });
 
     it('shows error when submitting invalid email format', async () => {
@@ -84,13 +97,13 @@ describe('ForgotPasswordPage', () => {
       await waitFor(() => {
         expect(screen.getByText(/invalid email address/i)).toBeInTheDocument();
       });
-      expect(client.forgotPassword).not.toHaveBeenCalled();
+      expect(mockForgotPassword).not.toHaveBeenCalled();
     });
   });
 
   describe('Form Submission', () => {
     it('calls forgotPassword with correct email', async () => {
-      (client.forgotPassword as jest.Mock).mockResolvedValue({
+      mockForgotPassword.mockResolvedValue({
         success: true,
         message: 'Password reset email sent',
       });
@@ -100,11 +113,11 @@ describe('ForgotPasswordPage', () => {
       await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
       await userEvent.click(screen.getByRole('button', { name: /send reset link/i }));
 
-      expect(client.forgotPassword).toHaveBeenCalledWith('test@example.com');
+      expect(mockForgotPassword).toHaveBeenCalledWith('test@example.com');
     });
 
     it('trims email before submission', async () => {
-      (client.forgotPassword as jest.Mock).mockResolvedValue({
+      mockForgotPassword.mockResolvedValue({
         success: true,
         message: 'Password reset email sent',
       });
@@ -114,11 +127,11 @@ describe('ForgotPasswordPage', () => {
       await userEvent.type(screen.getByLabelText(/email/i), '  test@example.com  ');
       await userEvent.click(screen.getByRole('button', { name: /send reset link/i }));
 
-      expect(client.forgotPassword).toHaveBeenCalledWith('test@example.com');
+      expect(mockForgotPassword).toHaveBeenCalledWith('test@example.com');
     });
 
     it('shows loading state during submission', async () => {
-      (client.forgotPassword as jest.Mock).mockImplementation(
+      mockForgotPassword.mockImplementation(
         () => new Promise((resolve) => setTimeout(resolve, 1000))
       );
 
@@ -132,7 +145,7 @@ describe('ForgotPasswordPage', () => {
     });
 
     it('shows success message after successful submission', async () => {
-      (client.forgotPassword as jest.Mock).mockResolvedValue({
+      mockForgotPassword.mockResolvedValue({
         success: true,
         message: 'Password reset email sent',
       });
@@ -150,7 +163,7 @@ describe('ForgotPasswordPage', () => {
     });
 
     it('hides form and shows success state', async () => {
-      (client.forgotPassword as jest.Mock).mockResolvedValue({
+      mockForgotPassword.mockResolvedValue({
         success: true,
         message: 'Password reset email sent',
       });
@@ -167,7 +180,7 @@ describe('ForgotPasswordPage', () => {
     });
 
     it('provides link to login after success', async () => {
-      (client.forgotPassword as jest.Mock).mockResolvedValue({
+      mockForgotPassword.mockResolvedValue({
         success: true,
         message: 'Password reset email sent',
       });
@@ -184,7 +197,7 @@ describe('ForgotPasswordPage', () => {
     });
 
     it('shows error message on submission failure', async () => {
-      (client.forgotPassword as jest.Mock).mockRejectedValue(new Error('User not found'));
+      mockForgotPassword.mockRejectedValue(new Error('User not found'));
 
       renderPage();
 
@@ -197,7 +210,7 @@ describe('ForgotPasswordPage', () => {
     });
 
     it('re-enables form after error', async () => {
-      (client.forgotPassword as jest.Mock).mockRejectedValue(new Error('Server error'));
+      mockForgotPassword.mockRejectedValue(new Error('Server error'));
 
       renderPage();
 
@@ -211,7 +224,7 @@ describe('ForgotPasswordPage', () => {
     });
 
     it('handles non-Error objects in catch block', async () => {
-      (client.forgotPassword as jest.Mock).mockRejectedValue('String error');
+      mockForgotPassword.mockRejectedValue('String error');
 
       renderPage();
 
@@ -226,7 +239,7 @@ describe('ForgotPasswordPage', () => {
 
   describe('Keyboard Navigation', () => {
     it('submits form on Enter key', async () => {
-      (client.forgotPassword as jest.Mock).mockResolvedValue({
+      mockForgotPassword.mockResolvedValue({
         success: true,
         message: 'Sent',
       });
@@ -235,7 +248,7 @@ describe('ForgotPasswordPage', () => {
 
       await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com{enter}');
 
-      expect(client.forgotPassword).toHaveBeenCalled();
+      expect(mockForgotPassword).toHaveBeenCalled();
     });
   });
 });

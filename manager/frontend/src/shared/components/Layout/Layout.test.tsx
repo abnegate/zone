@@ -13,6 +13,7 @@ mock.module('react-router-dom', () => ({
   Outlet: () => <div data-testid="outlet">Outlet content</div>,
   useLocation: () => ({ pathname: '/', search: '', hash: '', state: null, key: 'default' }),
   useNavigate: () => mock(),
+  useSearchParams: () => [new URLSearchParams(), mock()],
   BrowserRouter: ({ children }: { children: React.ReactNode }) => children,
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
   NavLink: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,

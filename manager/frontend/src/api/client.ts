@@ -1088,7 +1088,10 @@ class Client {
   // =============================================================================
 
   async getKnowledge(workspaceId?: string) {
-    return knowledgeApi.getKnowledge(workspaceId || '00000000-0000-0000-0000-000000000001');
+    if (!workspaceId) {
+      throw new Error('Workspace ID is required');
+    }
+    return knowledgeApi.getKnowledge(workspaceId);
   }
 
   async createKnowledge(request: CreateKnowledgeRequest) {

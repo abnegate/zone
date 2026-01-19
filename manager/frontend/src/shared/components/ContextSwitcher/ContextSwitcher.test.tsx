@@ -1,13 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { useWorkspace } from '../../context/WorkspaceContext';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import ContextSwitcher from './ContextSwitcher';
-
-// Mock useWorkspace
-jest.mock('../../context/WorkspaceContext', () => ({
-  useWorkspace: jest.fn(),
-}));
-
-const mockUseWorkspace = useWorkspace as jest.Mock;
 
 const mockOrganizations = [
   { id: 'org-1', name: 'Org 1', slug: 'org-1', is_active: true, created_at: '', updated_at: '' },
@@ -35,15 +29,36 @@ const mockWorkspaces = [
   },
 ];
 
-// Note: Tests pass when run individually but fail in full suite due to bun:test mock isolation issues
-// and Jest syntax incompatibility (jest.mock, jest.fn)
-describe.skip('ContextSwitcher', () => {
-  const setCurrentOrganization = jest.fn();
-  const setCurrentWorkspace = jest.fn();
+type WorkspaceState = {
+  organizations: typeof mockOrganizations;
+  currentOrganization: (typeof mockOrganizations)[number] | null;
+  workspaces: typeof mockWorkspaces;
+  currentWorkspace: (typeof mockWorkspaces)[number] | null;
+  setCurrentOrganization: (org: (typeof mockOrganizations)[number]) => void;
+  setCurrentWorkspace: (ws: (typeof mockWorkspaces)[number]) => void;
+  loading: boolean;
+};
 
+let setCurrentOrganizationCalls: Array<(typeof mockOrganizations)[number]> = [];
+let setCurrentWorkspaceCalls: Array<(typeof mockWorkspaces)[number]> = [];
+
+const setCurrentOrganization = (org: (typeof mockOrganizations)[number]) => {
+  setCurrentOrganizationCalls.push(org);
+};
+
+const setCurrentWorkspace = (ws: (typeof mockWorkspaces)[number]) => {
+  setCurrentWorkspaceCalls.push(ws);
+};
+
+let workspaceState: WorkspaceState;
+
+const useWorkspaceHook = () => workspaceState;
+
+describe('ContextSwitcher', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockUseWorkspace.mockReturnValue({
+    setCurrentOrganizationCalls = [];
+    setCurrentWorkspaceCalls = [];
+    workspaceState = {
       organizations: mockOrganizations,
       currentOrganization: mockOrganizations[0],
       workspaces: mockWorkspaces,
@@ -51,98 +66,110 @@ describe.skip('ContextSwitcher', () => {
       setCurrentOrganization,
       setCurrentWorkspace,
       loading: false,
-    });
+    };
   });
 
   it('shows loading state', () => {
-    mockUseWorkspace.mockReturnValue({
-      loading: true,
+    workspaceState = {
       organizations: [],
       currentOrganization: null,
       workspaces: [],
       currentWorkspace: null,
       setCurrentOrganization,
       setCurrentWorkspace,
-    });
+      loading: true,
+    };
 
-    render(<ContextSwitcher />);
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
     expect(screen.getByText('Loading...')).toBeInTheDocument();
   });
 
   it('shows no organization state', () => {
-    mockUseWorkspace.mockReturnValue({
-      loading: false,
+    workspaceState = {
       organizations: [],
       currentOrganization: null,
       workspaces: [],
       currentWorkspace: null,
       setCurrentOrganization,
       setCurrentWorkspace,
-    });
+      loading: false,
+    };
 
-    render(<ContextSwitcher />);
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
     expect(screen.getByText('No organization')).toBeInTheDocument();
   });
 
   it('displays current organization name', () => {
-    render(<ContextSwitcher />);
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
     expect(screen.getByText('Org 1')).toBeInTheDocument();
   });
 
   it('displays current workspace name when set', () => {
-    render(<ContextSwitcher />);
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
     expect(screen.getByText('Workspace 1')).toBeInTheDocument();
   });
 
-  it('opens dropdown on click', () => {
-    render(<ContextSwitcher />);
+  it('opens dropdown on click', async () => {
+    const user = userEvent.setup();
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
 
-    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    await user.click(screen.getByRole('button', { expanded: false }));
 
     expect(screen.getByRole('listbox')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Organizations' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Workspaces' })).toBeInTheDocument();
   });
 
-  it('shows all organizations in dropdown', () => {
-    render(<ContextSwitcher />);
+  it('shows all organizations in dropdown', async () => {
+    const user = userEvent.setup();
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
 
-    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    await user.click(screen.getByRole('button', { expanded: false }));
 
     const options = screen.getAllByRole('option');
     expect(options).toHaveLength(4); // 2 orgs + 2 workspaces
   });
 
-  it('calls setCurrentOrganization when org clicked', () => {
-    render(<ContextSwitcher />);
+  it('calls setCurrentOrganization when org clicked', async () => {
+    const user = userEvent.setup();
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
 
-    fireEvent.click(screen.getByRole('button', { expanded: false }));
-    fireEvent.click(screen.getByText('Org 2'));
+    await user.click(screen.getByRole('button', { expanded: false }));
+    await user.click(screen.getByText('Org 2'));
 
-    expect(setCurrentOrganization).toHaveBeenCalledWith(mockOrganizations[1]);
+    await waitFor(() => {
+      expect(setCurrentOrganizationCalls).toEqual([mockOrganizations[1]]);
+    });
   });
 
-  it('calls setCurrentWorkspace when workspace clicked', () => {
-    render(<ContextSwitcher />);
+  it('calls setCurrentWorkspace when workspace clicked', async () => {
+    const user = userEvent.setup();
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
 
-    fireEvent.click(screen.getByRole('button', { expanded: false }));
-    fireEvent.click(screen.getByText('Workspace 2'));
+    await user.click(screen.getByRole('button', { expanded: false }));
+    await user.click(screen.getByText('Workspace 2'));
 
-    expect(setCurrentWorkspace).toHaveBeenCalledWith(mockWorkspaces[1]);
+    await waitFor(() => {
+      expect(setCurrentWorkspaceCalls).toEqual([mockWorkspaces[1]]);
+    });
   });
 
-  it('closes dropdown when item clicked', () => {
-    render(<ContextSwitcher />);
+  it('closes dropdown when item clicked', async () => {
+    const user = userEvent.setup();
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
 
-    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    await user.click(screen.getByRole('button', { expanded: false }));
     expect(screen.getByRole('listbox')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('Org 2'));
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    await user.click(screen.getByText('Org 2'));
+    await waitFor(() => {
+      expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    });
   });
 
-  it('hides workspaces section when no workspaces', () => {
-    mockUseWorkspace.mockReturnValue({
+  it('hides workspaces section when no workspaces', async () => {
+    const user = userEvent.setup();
+    workspaceState = {
       organizations: mockOrganizations,
       currentOrganization: mockOrganizations[0],
       workspaces: [],
@@ -150,28 +177,31 @@ describe.skip('ContextSwitcher', () => {
       setCurrentOrganization,
       setCurrentWorkspace,
       loading: false,
-    });
+    };
 
-    render(<ContextSwitcher />);
+    render(<ContextSwitcher useWorkspaceHook={useWorkspaceHook} />);
 
-    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    await user.click(screen.getByRole('button', { expanded: false }));
 
     expect(screen.getByRole('heading', { name: 'Organizations' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Workspaces' })).not.toBeInTheDocument();
   });
 
-  it('closes dropdown on outside click', () => {
+  it('closes dropdown on outside click', async () => {
+    const user = userEvent.setup();
     render(
       <div>
-        <ContextSwitcher />
+        <ContextSwitcher useWorkspaceHook={useWorkspaceHook} />
         <button data-testid="outside">Outside</button>
       </div>
     );
 
-    fireEvent.click(screen.getByRole('button', { expanded: false }));
+    await user.click(screen.getByRole('button', { expanded: false }));
     expect(screen.getByRole('listbox')).toBeInTheDocument();
 
-    fireEvent.mouseDown(screen.getByTestId('outside'));
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    await user.click(screen.getByTestId('outside'));
+    await waitFor(() => {
+      expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    });
   });
 });

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import type { AuditLog, AuditLogsResponse } from '../types';
 
 const mockGetAuditLogs = mock();
@@ -13,6 +13,7 @@ mock.module('../../../../api/client', () => ({
 }));
 
 let AuditLogsSection: typeof import('./AuditLogsSection').AuditLogsSection;
+let createElementSpy: ReturnType<typeof spyOn> | null = null;
 
 beforeAll(async () => {
   ({ AuditLogsSection } = await import('./AuditLogsSection'));
@@ -62,7 +63,7 @@ describe('AuditLogsSection', () => {
   ];
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
   });
 
   describe('Initial Load', () => {
@@ -644,22 +645,23 @@ describe('AuditLogsSection', () => {
       });
 
       // Mock URL.createObjectURL and revokeObjectURL
-      global.URL.createObjectURL = jest.fn(() => 'blob:mock-url');
-      global.URL.revokeObjectURL = jest.fn();
+      global.URL.createObjectURL = mock(() => 'blob:mock-url') as typeof global.URL.createObjectURL;
+      global.URL.revokeObjectURL = mock() as typeof global.URL.revokeObjectURL;
 
       // Mock document.createElement to track anchor creation
       const originalCreateElement = document.createElement.bind(document);
-      jest.spyOn(document, 'createElement').mockImplementation((tagName) => {
+      createElementSpy = spyOn(document, 'createElement').mockImplementation((tagName) => {
         const element = originalCreateElement(tagName);
         if (tagName === 'a') {
-          element.click = jest.fn();
+          element.click = mock();
         }
         return element;
       });
     });
 
     afterEach(() => {
-      jest.restoreAllMocks();
+      createElementSpy?.mockRestore();
+      createElementSpy = null;
     });
 
     it('exports audit logs as CSV', async () => {

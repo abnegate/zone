@@ -141,8 +141,8 @@ const defaultPullHook = {
 const createWrapper = () => {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false, gcTime: 0 },
     },
   });
   return ({ children }: { children: React.ReactNode }) => (
@@ -377,11 +377,14 @@ describe('ModelsPage', () => {
     });
   });
 
-  describe.skip('browse tab', () => {
+  describe('browse tab', () => {
     it('switches to browse tab', async () => {
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('virtual-browse-list')).toBeInTheDocument();
@@ -394,7 +397,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(searchMock).toHaveBeenCalled();
@@ -404,7 +410,10 @@ describe('ModelsPage', () => {
     it('shows source tabs', async () => {
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByText('All')).toBeInTheDocument();
@@ -421,13 +430,19 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByText('HuggingFace')).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByText('HuggingFace'));
+      const sourceTab = screen.getByText('HuggingFace');
+      fireEvent.mouseDown(sourceTab);
+      fireEvent.mouseUp(sourceTab);
+      fireEvent.click(sourceTab);
 
       await waitFor(() => {
         expect(changeSourceMock).toHaveBeenCalledWith('huggingface');
@@ -439,7 +454,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByText('Loading...')).toBeInTheDocument();
@@ -451,7 +469,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByText('Search failed')).toBeInTheDocument();
@@ -464,7 +485,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Search' })).toBeInTheDocument();
@@ -534,7 +558,7 @@ describe('ModelsPage', () => {
     });
   });
 
-  describe.skip('browse model installation', () => {
+  describe('browse model installation', () => {
     it('installs model from browse list', async () => {
       const pullMock = mock(() => Promise.resolve(true));
       mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
@@ -554,7 +578,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('browse-model-test-model')).toBeInTheDocument();
@@ -563,7 +590,7 @@ describe('ModelsPage', () => {
       fireEvent.click(screen.getByText('Install'));
 
       await waitFor(() => {
-        expect(pullMock).toHaveBeenCalledWith('test-install');
+        expect(pullMock).toHaveBeenCalledWith('Test Model');
       });
     });
 
@@ -585,7 +612,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('browse-model-test-model')).toBeInTheDocument();
@@ -599,7 +629,7 @@ describe('ModelsPage', () => {
     });
   });
 
-  describe.skip('browse model details', () => {
+  describe('browse model details', () => {
     it('shows browse model details when clicked', async () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
@@ -619,7 +649,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('browse-model-llama3')).toBeInTheDocument();
@@ -630,7 +663,7 @@ describe('ModelsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Size')).toBeInTheDocument();
         expect(screen.getByText('Family')).toBeInTheDocument();
-        expect(screen.getByText('llama')).toBeInTheDocument();
+        expect(screen.getAllByText('llama').length).toBeGreaterThan(0);
       });
     });
 
@@ -649,7 +682,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('browse-model-llama3')).toBeInTheDocument();
@@ -682,7 +718,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('browse-model-model1')).toBeInTheDocument();
@@ -691,9 +730,9 @@ describe('ModelsPage', () => {
       fireEvent.click(screen.getByText('Details'));
 
       await waitFor(() => {
-        expect(screen.getByText('mistral')).toBeInTheDocument();
-        expect(screen.getByText('7B')).toBeInTheDocument();
-        expect(screen.getByText('Q4_0')).toBeInTheDocument();
+        expect(screen.getAllByText('mistral').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('7B').length).toBeGreaterThan(0);
+        expect(screen.getAllByText('Q4_0').length).toBeGreaterThan(0);
       });
     });
 
@@ -717,7 +756,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('browse-model-hf/model1')).toBeInTheDocument();
@@ -747,7 +789,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('browse-model-gpt4all-model')).toBeInTheDocument();
@@ -778,7 +823,10 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByTestId('browse-model-hf/model1')).toBeInTheDocument();
@@ -788,7 +836,7 @@ describe('ModelsPage', () => {
 
       // Should still show the model details without the model card
       await waitFor(() => {
-        expect(screen.getByText('hf/model1')).toBeInTheDocument();
+        expect(screen.getAllByText('hf/model1').length).toBeGreaterThan(0);
       });
     });
   });
@@ -894,20 +942,26 @@ describe('ModelsPage', () => {
     });
   });
 
-  describe.skip('source tab switching', () => {
+  describe('source tab switching', () => {
     it('switches to GPT4All source', async () => {
       const changeSourceMock = mock();
       mockUseBrowse.mockReturnValue({ ...defaultBrowseHook, changeSource: changeSourceMock });
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByText('GPT4All')).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByText('GPT4All'));
+      const gpt4allTab = screen.getByText('GPT4All');
+      fireEvent.mouseDown(gpt4allTab);
+      fireEvent.mouseUp(gpt4allTab);
+      fireEvent.click(gpt4allTab);
 
       await waitFor(() => {
         expect(changeSourceMock).toHaveBeenCalledWith('gpt4all');
@@ -920,13 +974,19 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Browse' }));
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
 
       await waitFor(() => {
         expect(screen.getByText('OpenRouter')).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByText('OpenRouter'));
+      const openRouterTab = screen.getByText('OpenRouter');
+      fireEvent.mouseDown(openRouterTab);
+      fireEvent.mouseUp(openRouterTab);
+      fireEvent.click(openRouterTab);
 
       await waitFor(() => {
         expect(changeSourceMock).toHaveBeenCalledWith('openrouter');

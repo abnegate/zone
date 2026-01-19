@@ -35,6 +35,10 @@ interface AuthContextType extends AuthState {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+type AuthApi = Pick<typeof authApi, 'login' | 'register' | 'refreshToken' | 'logout'>;
+type ClientApi = Pick<typeof client, 'setAccessToken'>;
+type StorageApi = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+
 const ACCESS_TOKEN_KEY = 'manager_access_token';
 const REFRESH_TOKEN_KEY = 'manager_refresh_token';
 const USER_KEY = 'manager_user';
@@ -58,17 +62,30 @@ function isTokenExpired(token: string): boolean {
   return payload.exp * 1000 < Date.now() + 30000;
 }
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+export function AuthProvider({
+  children,
+  authApiOverride,
+  clientOverride,
+  storageOverride,
+}: {
+  children: ReactNode;
+  authApiOverride?: AuthApi;
+  clientOverride?: ClientApi;
+  storageOverride?: StorageApi;
+}) {
+  const auth = authApiOverride ?? authApi;
+  const apiClient = clientOverride ?? client;
+  const storage = storageOverride ?? localStorage;
   const [state, setState] = useState<AuthState>(() => {
-    const accessToken = localStorage.getItem(ACCESS_TOKEN_KEY);
-    const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-    const userJson = localStorage.getItem(USER_KEY);
+    const accessToken = storage.getItem(ACCESS_TOKEN_KEY);
+    const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
+    const userJson = storage.getItem(USER_KEY);
     const user = userJson ? JSON.parse(userJson) : null;
     const payload = accessToken ? decodeJwt(accessToken) : null;
 
     // Set client token synchronously to avoid race condition where
     // components fetch before useEffect runs
-    client.setAccessToken(accessToken);
+    apiClient.setAccessToken(accessToken);
 
     return {
       user,
@@ -86,17 +103,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Update API client token whenever it changes
   useEffect(() => {
-    client.setAccessToken(state.accessToken);
-  }, [state.accessToken]);
+    apiClient.setAccessToken(state.accessToken);
+  }, [apiClient, state.accessToken]);
 
   const handleLogout = useCallback(() => {
     if (refreshTimeoutRef.current) {
       clearTimeout(refreshTimeoutRef.current);
     }
 
-    localStorage.removeItem(ACCESS_TOKEN_KEY);
-    localStorage.removeItem(REFRESH_TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
+    storage.removeItem(ACCESS_TOKEN_KEY);
+    storage.removeItem(REFRESH_TOKEN_KEY);
+    storage.removeItem(USER_KEY);
 
     setState({
       user: null,
@@ -107,12 +124,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: false,
       isLoading: false,
     });
-  }, []);
+  }, [storage]);
 
   const handleAuthResponse = useCallback((response: AuthResponse) => {
-    localStorage.setItem(ACCESS_TOKEN_KEY, response.access_token);
-    localStorage.setItem(REFRESH_TOKEN_KEY, response.refresh_token);
-    localStorage.setItem(USER_KEY, JSON.stringify(response.user));
+    storage.setItem(ACCESS_TOKEN_KEY, response.access_token);
+    storage.setItem(REFRESH_TOKEN_KEY, response.refresh_token);
+    storage.setItem(USER_KEY, JSON.stringify(response.user));
 
     setState({
       user: response.user,
@@ -125,7 +142,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     scheduleRefreshRef.current?.(response.expires_in);
-  }, []);
+  }, [storage]);
 
   const scheduleRefresh = useCallback(
     (expiresIn: number) => {
@@ -137,10 +154,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const refreshTime = (expiresIn - 60) * 1000;
       if (refreshTime > 0) {
         refreshTimeoutRef.current = setTimeout(async () => {
-          const currentRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+          const currentRefreshToken = storage.getItem(REFRESH_TOKEN_KEY);
           if (currentRefreshToken) {
             try {
-              const response = await authApi.refreshToken(currentRefreshToken);
+              const response = await auth.refreshToken(currentRefreshToken);
               handleAuthResponse(response);
             } catch {
               handleLogout();
@@ -149,7 +166,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }, refreshTime);
       }
     },
-    [handleAuthResponse, handleLogout]
+    [auth, handleAuthResponse, handleLogout, storage]
   );
 
   // Store scheduleRefresh in ref synchronously before effects run
@@ -160,8 +177,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Verify/refresh token on mount
   useEffect(() => {
     const verify = async () => {
-      const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-      const accessToken = localStorage.getItem(ACCESS_TOKEN_KEY);
+      const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
+      const accessToken = storage.getItem(ACCESS_TOKEN_KEY);
 
       if (!refreshToken) {
         handleLogout();
@@ -180,7 +197,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Access token expired or invalid, try refresh
       try {
-        const response = await authApi.refreshToken(refreshToken);
+        const response = await auth.refreshToken(refreshToken);
         handleAuthResponse(response);
       } catch {
         handleLogout();
@@ -194,31 +211,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearTimeout(refreshTimeoutRef.current);
       }
     };
-  }, [handleAuthResponse, handleLogout, scheduleRefresh]);
+  }, [auth, handleAuthResponse, handleLogout, scheduleRefresh, storage]);
 
   const login = useCallback(
     async (request: LoginRequest) => {
-      const response = await authApi.login(request);
+      const response = await auth.login(request);
       handleAuthResponse(response);
     },
-    [handleAuthResponse]
+    [auth, handleAuthResponse]
   );
 
   const register = useCallback(
     async (request: RegisterRequest) => {
-      const response = await authApi.register(request);
+      const response = await auth.register(request);
       handleAuthResponse(response);
     },
-    [handleAuthResponse]
+    [auth, handleAuthResponse]
   );
 
   const logout = useCallback(async () => {
-    const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+    const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
     if (refreshToken) {
-      await authApi.logout(refreshToken);
+      await auth.logout(refreshToken);
     }
     handleLogout();
-  }, [handleLogout]);
+  }, [auth, handleLogout, storage]);
 
   const hasPermission = useCallback(
     (permission: string) => state.permissions.includes(permission),

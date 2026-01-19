@@ -1,26 +1,35 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../api/client';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Organization, Workspace } from '../../types';
-import { WorkspaceProvider, useWorkspace } from './WorkspaceContext';
 
-// Mock the client
-jest.mock('../../api/client', () => ({
-  client: {
-    getOrganizations: jest.fn(),
-    getWorkspaces: jest.fn(),
-  },
+const mockClient = {
+  getOrganizations: mock(),
+  getWorkspaces: mock(),
+};
+
+let authState = {
+  isAuthenticated: true,
+  isLoading: false,
+  user: { id: 'user-1', email: 'test@example.com' },
+};
+const useAuthHook = () => authState;
+
+mock.module('../../api/client', () => ({
+  client: mockClient,
 }));
 
-// Mock the auth hook
-jest.mock('../../features/auth', () => ({
-  useAuth: jest.fn(() => ({
-    isAuthenticated: true,
-    isLoading: false,
-    user: { id: 'user-1', email: 'test@example.com' },
-  })),
-}));
+let WorkspaceProvider: typeof import('./WorkspaceContext').WorkspaceProvider;
+let useWorkspace: typeof import('./WorkspaceContext').useWorkspace;
 
-const mockClient = client as jest.Mocked<typeof client>;
+beforeAll(async () => {
+  const ctx = await import('./WorkspaceContext');
+  WorkspaceProvider = ctx.WorkspaceProvider;
+  useWorkspace = ctx.useWorkspace;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const mockOrganizations: Organization[] = [
   {
@@ -87,8 +96,13 @@ function TestComponent() {
 
 describe('WorkspaceContext', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     localStorage.clear();
+    authState = {
+      isAuthenticated: true,
+      isLoading: false,
+      user: { id: 'user-1', email: 'test@example.com' },
+    };
   });
 
   describe('WorkspaceProvider', () => {
@@ -97,7 +111,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockResolvedValueOnce(mockWorkspaces);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -118,7 +132,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockResolvedValueOnce([]);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -133,7 +147,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockResolvedValueOnce(mockWorkspaces);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -151,7 +165,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockResolvedValueOnce(mockWorkspaces);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -165,7 +179,7 @@ describe('WorkspaceContext', () => {
       mockClient.getOrganizations.mockRejectedValueOnce(new Error('Network error'));
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -180,7 +194,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockRejectedValueOnce(new Error('Workspace error'));
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -194,7 +208,7 @@ describe('WorkspaceContext', () => {
       mockClient.getOrganizations.mockResolvedValueOnce([]);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -212,7 +226,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockResolvedValueOnce([]);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -231,7 +245,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockResolvedValueOnce(mockWorkspaces).mockResolvedValueOnce([]);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -257,7 +271,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockResolvedValueOnce(mockWorkspaces);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -289,7 +303,7 @@ describe('WorkspaceContext', () => {
       mockClient.getWorkspaces.mockResolvedValue([]);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -325,7 +339,7 @@ describe('WorkspaceContext', () => {
       ]);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -345,7 +359,7 @@ describe('WorkspaceContext', () => {
       mockClient.getOrganizations.mockResolvedValueOnce([]);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -363,7 +377,7 @@ describe('WorkspaceContext', () => {
       mockClient.getOrganizations.mockResolvedValueOnce([]);
 
       render(
-        <WorkspaceProvider>
+        <WorkspaceProvider useAuthHook={useAuthHook}>
           <TestComponent />
         </WorkspaceProvider>
       );
@@ -386,7 +400,7 @@ describe('WorkspaceContext', () => {
   describe('useWorkspace hook', () => {
     it('throws error when used outside provider', () => {
       const consoleError = console.error;
-      console.error = jest.fn();
+      console.error = mock();
 
       expect(() => {
         render(<TestComponent />);

@@ -1,12 +1,13 @@
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { login, logout, refreshToken, register } from './auth';
 
 // Mock fetch
-global.fetch = jest.fn();
-const mockFetch = global.fetch as jest.Mock;
+const mockFetch = mock();
+global.fetch = mockFetch as typeof fetch;
 
 describe('auth API', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
   });
 
   describe('login', () => {

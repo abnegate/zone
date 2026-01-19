@@ -290,12 +290,20 @@ async fn test_check_limit_free_plan() {
     let org_id = create_test_org(&pool).await;
     let free_plan = get_plan_by_slug(&pool, "free").await.unwrap().unwrap();
 
-    let now = Utc::now();
-    let period_end = now + Duration::days(30);
+    let period_start = Utc::now() - Duration::minutes(1);
+    let period_end = period_start + Duration::days(30);
 
-    create_subscription(&pool, org_id, free_plan.id, None, None, now, period_end)
-        .await
-        .unwrap();
+    create_subscription(
+        &pool,
+        org_id,
+        free_plan.id,
+        None,
+        None,
+        period_start,
+        period_end,
+    )
+    .await
+    .unwrap();
 
     // Free plan has 100 chats per month limit
     // Record 99 chats - should be under limit
@@ -323,12 +331,20 @@ async fn test_check_limit_pro_plan() {
     let org_id = create_test_org(&pool).await;
     let pro_plan = get_plan_by_slug(&pool, "pro").await.unwrap().unwrap();
 
-    let now = Utc::now();
-    let period_end = now + Duration::days(30);
+    let period_start = Utc::now() - Duration::minutes(1);
+    let period_end = period_start + Duration::days(30);
 
-    create_subscription(&pool, org_id, pro_plan.id, None, None, now, period_end)
-        .await
-        .unwrap();
+    create_subscription(
+        &pool,
+        org_id,
+        pro_plan.id,
+        None,
+        None,
+        period_start,
+        period_end,
+    )
+    .await
+    .unwrap();
 
     // Pro plan has 5000 chats per month limit
     // Record 100 chats - should be well under limit
@@ -351,12 +367,20 @@ async fn test_check_limit_enterprise_plan_unlimited() {
         .unwrap()
         .unwrap();
 
-    let now = Utc::now();
-    let period_end = now + Duration::days(30);
+    let period_start = Utc::now() - Duration::minutes(1);
+    let period_end = period_start + Duration::days(30);
 
-    create_subscription(&pool, org_id, ent_plan.id, None, None, now, period_end)
-        .await
-        .unwrap();
+    create_subscription(
+        &pool,
+        org_id,
+        ent_plan.id,
+        None,
+        None,
+        period_start,
+        period_end,
+    )
+    .await
+    .unwrap();
 
     // Enterprise plan has unlimited chats (-1)
     // Record many chats - should never hit limit

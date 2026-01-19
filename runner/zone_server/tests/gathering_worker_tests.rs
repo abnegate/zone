@@ -275,13 +275,24 @@ async fn test_execute_gathering_with_multiple_sources() {
     )
     .await;
 
-    // Allow async event persistence to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Then: Should have events for both sources
-    let events = gathering_events::get_events_since(&pool, gathering_id, None, None)
-        .await
-        .expect("Failed to get events");
+    // Then: Should have events for both sources (poll until persisted)
+    let events = timeout(Duration::from_secs(2), async {
+        loop {
+            let events = gathering_events::get_events_since(&pool, gathering_id, None, None)
+                .await
+                .expect("Failed to get events");
+            let source_started_count = events
+                .iter()
+                .filter(|e| e.event_type == "source_started")
+                .count();
+            if source_started_count >= 2 {
+                break events;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Timed out waiting for source_started events");
 
     let source_started_count = events
         .iter()
@@ -378,14 +389,21 @@ async fn test_database_callback_handles_all_event_types() {
         timestamp: chrono::Utc::now(),
     });
 
-    // Give async tasks time to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let events = timeout(Duration::from_secs(2), async {
+        loop {
+            let events = gathering_events::get_events_since(&pool, gathering_id, None, None)
+                .await
+                .expect("Failed to get events");
+            if events.len() >= 5 {
+                break events;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Timed out waiting for events");
 
     // Then: All events should be persisted with correct types
-    let events = gathering_events::get_events_since(&pool, gathering_id, None, None)
-        .await
-        .expect("Failed to get events");
-
     assert!(events.len() >= 5, "Should have persisted all events");
 
     let event_types: Vec<String> = events.iter().map(|e| e.event_type.clone()).collect();

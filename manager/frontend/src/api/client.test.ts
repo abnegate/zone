@@ -1,9 +1,10 @@
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Limits, Plan, Subscription, Usage } from '../types';
 import { client } from './client';
 
 // Mock fetch globally
-const mockFetch = jest.fn();
-global.fetch = mockFetch;
+const mockFetch = mock();
+global.fetch = mockFetch as typeof fetch;
 
 // Mock WebSocket
 class MockWebSocket {
@@ -18,8 +19,8 @@ class MockWebSocket {
     this.url = url;
   }
 
-  send = jest.fn();
-  close = jest.fn();
+  send = mock();
+  close = mock();
 }
 
 (global as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket;

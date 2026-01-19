@@ -7,6 +7,7 @@ interface ProtectedRouteProps {
   requiredPermission?: string;
   requiredPermissions?: string[];
   requireAll?: boolean;
+  useAuthHook?: typeof useAuth;
 }
 
 export default function ProtectedRoute({
@@ -14,9 +15,10 @@ export default function ProtectedRoute({
   requiredPermission,
   requiredPermissions,
   requireAll = false,
+  useAuthHook,
 }: ProtectedRouteProps) {
-  const { isAuthenticated, isLoading, hasPermission, hasAnyPermission, hasAllPermissions } =
-    useAuth();
+  const auth = (useAuthHook ?? useAuth)();
+  const { isAuthenticated, isLoading, hasPermission, hasAnyPermission, hasAllPermissions } = auth;
   const location = useLocation();
 
   if (isLoading) {

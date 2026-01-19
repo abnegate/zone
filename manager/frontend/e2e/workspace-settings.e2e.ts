@@ -16,6 +16,8 @@ const mockTheme = {
   updated_at: new Date().toISOString(),
 };
 
+const themeRoutePattern = /\/api\/workspaces\/[^/]+\/theme/;
+
 test.describe('Workspace Settings Page', () => {
   test.beforeEach(async ({ context, page }) => {
     // Block service worker first
@@ -64,37 +66,32 @@ test.describe('Workspace Settings Page', () => {
     );
 
     // Mock theme endpoint - use context routing for precedence over service worker
-    // Use wildcard pattern that matches any character in path segments
-    await routeApiContext(
-      context,
-      '**/**/api/organizations/**/workspaces/**/settings/theme**',
-      (route) => {
-        const method = route.request().method();
+    await routeApiContext(context, themeRoutePattern, (route) => {
+      const method = route.request().method();
 
-        if (method === 'GET') {
-          route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ theme: mockTheme }),
-          });
-        } else if (method === 'PUT') {
-          const body = route.request().postDataJSON();
-          route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({
-              theme: { ...mockTheme, ...body },
-            }),
-          });
-        } else if (method === 'DELETE') {
-          route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ theme: mockTheme }),
-          });
-        }
+      if (method === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ theme: mockTheme }),
+        });
+      } else if (method === 'PUT') {
+        const body = route.request().postDataJSON();
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            theme: { ...mockTheme, ...body },
+          }),
+        });
+      } else if (method === 'DELETE') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ theme: mockTheme }),
+        });
       }
-    );
+    });
 
     // Navigate and set up auth
     await page.goto('/');
@@ -240,10 +237,10 @@ test.describe('Workspace Settings Page', () => {
     });
 
     test('shows loading state while saving', async ({ context, page }) => {
-      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.unroute(themeRoutePattern);
       await routeApiContext(
         context,
-        /\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/,
+        themeRoutePattern,
         async (route) => {
           const method = route.request().method();
           if (method === 'PUT') {
@@ -269,10 +266,10 @@ test.describe('Workspace Settings Page', () => {
     });
 
     test('shows error when save fails', async ({ context, page }) => {
-      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.unroute(themeRoutePattern);
       await routeApiContext(
         context,
-        /\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/,
+        themeRoutePattern,
         (route) => {
           const method = route.request().method();
           if (method === 'GET') {
@@ -310,10 +307,10 @@ test.describe('Workspace Settings Page', () => {
     });
 
     test('shows error when reset fails', async ({ context, page }) => {
-      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.unroute(themeRoutePattern);
       await routeApiContext(
         context,
-        /\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/,
+        themeRoutePattern,
         (route) => {
           const method = route.request().method();
           if (method === 'GET') {
@@ -340,10 +337,10 @@ test.describe('Workspace Settings Page', () => {
 
   test.describe('Loading State', () => {
     test('shows loading state while fetching theme', async ({ context, page }) => {
-      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.unroute(themeRoutePattern);
       await routeApiContext(
         context,
-        /\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/,
+        themeRoutePattern,
         async (route) => {
           await new Promise((resolve) => setTimeout(resolve, 500));
           route.fulfill({
@@ -363,10 +360,10 @@ test.describe('Workspace Settings Page', () => {
 
   test.describe('Error State', () => {
     test('shows error when loading theme fails', async ({ context, page }) => {
-      await context.unroute(/\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/);
+      await context.unroute(themeRoutePattern);
       await routeApiContext(
         context,
-        /\/api\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/theme/,
+        themeRoutePattern,
         (route) => {
           route.fulfill({
             status: 500,

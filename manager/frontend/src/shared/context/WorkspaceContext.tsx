@@ -21,8 +21,14 @@ const WorkspaceContext = createContext<WorkspaceContextType | undefined>(undefin
 const ORG_STORAGE_KEY = 'manager_current_org';
 const WS_STORAGE_KEY = 'manager_current_workspace';
 
-export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isLoading: authLoading } = useAuth();
+export function WorkspaceProvider({
+  children,
+  useAuthHook,
+}: {
+  children: ReactNode;
+  useAuthHook?: typeof useAuth;
+}) {
+  const { isAuthenticated, isLoading: authLoading } = (useAuthHook ?? useAuth)();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [currentOrganization, setCurrentOrgState] = useState<Organization | null>(null);

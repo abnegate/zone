@@ -1,10 +1,14 @@
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { client } from './client';
 import type { CreateSyncConfigRequest, SyncConfig } from '../features/projects/types';
 
 describe('Client - Sync Configuration API', () => {
+  let mockFetch: ReturnType<typeof mock>;
+
   beforeEach(() => {
-    jest.clearAllMocks();
-    global.fetch = jest.fn();
+    mock.clearAllMocks();
+    mockFetch = mock();
+    global.fetch = mockFetch as typeof fetch;
     client.setAccessToken('test-token');
   });
 
@@ -22,7 +26,7 @@ describe('Client - Sync Configuration API', () => {
         },
       ];
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ configs: mockConfigs }),
       });
@@ -41,7 +45,7 @@ describe('Client - Sync Configuration API', () => {
     });
 
     it('should handle fetch errors', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 404,
         json: async () => ({ message: 'Project not found' }),
@@ -67,7 +71,7 @@ describe('Client - Sync Configuration API', () => {
         created_at: '2024-01-01T00:00:00Z',
       };
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ config: mockConfig }),
       });
@@ -103,7 +107,7 @@ describe('Client - Sync Configuration API', () => {
         created_at: '2024-01-01T00:00:00Z',
       };
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ config: mockConfig }),
       });
@@ -122,7 +126,7 @@ describe('Client - Sync Configuration API', () => {
         // Missing external_repo_url
       };
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 400,
         json: async () => ({ message: 'Validation error' }),
@@ -134,7 +138,7 @@ describe('Client - Sync Configuration API', () => {
 
   describe('deleteSyncConfig', () => {
     it('should delete a sync config', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
       });
 
@@ -152,7 +156,7 @@ describe('Client - Sync Configuration API', () => {
     });
 
     it('should handle delete errors', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 403,
         json: async () => ({ message: 'Forbidden' }),

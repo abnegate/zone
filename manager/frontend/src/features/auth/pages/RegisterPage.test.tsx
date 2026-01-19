@@ -10,13 +10,14 @@ mock.module('../hooks', () => ({
 }));
 
 // Mock useNavigate
-const mockNavigate = jest.fn();
-jest.mock('react-router-dom', () => ({
+const mockNavigate = mock();
+mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
     <a href={to}>{children}</a>
   ),
   useNavigate: () => mockNavigate,
+  useSearchParams: () => [new URLSearchParams(), mock()],
 }));
 
 let RegisterPage: typeof import('./RegisterPage').default;
@@ -38,10 +39,10 @@ const renderRegisterPage = () => {
 };
 
 describe('RegisterPage', () => {
-  const mockRegister = jest.fn();
+  const mockRegister = mock();
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     mockUseAuth.mockReturnValue({
       isAuthenticated: false,
       isLoading: false,
@@ -50,13 +51,13 @@ describe('RegisterPage', () => {
       refreshToken: null,
       roles: [],
       permissions: [],
-      login: jest.fn(),
+      login: mock(),
       register: mockRegister,
-      logout: jest.fn(),
-      hasPermission: jest.fn(),
-      hasAnyPermission: jest.fn(),
-      hasAllPermissions: jest.fn(),
-      hasRole: jest.fn(),
+      logout: mock(),
+      hasPermission: mock(),
+      hasAnyPermission: mock(),
+      hasAllPermissions: mock(),
+      hasRole: mock(),
     });
   });
 
@@ -220,13 +221,13 @@ describe('RegisterPage', () => {
         refreshToken: null,
         roles: [],
         permissions: [],
-        login: jest.fn(),
+        login: mock(),
         register: mockRegister,
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+        logout: mock(),
+        hasPermission: mock(),
+        hasAnyPermission: mock(),
+        hasAllPermissions: mock(),
+        hasRole: mock(),
       });
       renderRegisterPage();
 
@@ -252,13 +253,13 @@ describe('RegisterPage', () => {
         refreshToken: 'refresh',
         roles: [],
         permissions: [],
-        login: jest.fn(),
+        login: mock(),
         register: mockRegister,
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+        logout: mock(),
+        hasPermission: mock(),
+        hasAnyPermission: mock(),
+        hasAllPermissions: mock(),
+        hasRole: mock(),
       });
       renderRegisterPage();
 

@@ -27,10 +27,24 @@ const TASK_TIMEOUT_SECS: u64 = 3600;
 const MAX_FILE_SIZE: usize = 10 * 1024 * 1024; // 10MB
 const COMMAND_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
-// LLM configuration constants
-const DEFAULT_TEMPERATURE: f32 = 0.7;
-const DEFAULT_MAX_TOKENS: u32 = 8192;
-const DEFAULT_MODEL: &str = "gpt-4";
+// LLM configuration defaults (overridable via environment variables)
+fn default_temperature() -> f32 {
+    std::env::var("ZONE_TASK_LLM_TEMPERATURE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.7)
+}
+
+fn default_max_tokens() -> u32 {
+    std::env::var("ZONE_TASK_LLM_MAX_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8192)
+}
+
+fn default_model() -> String {
+    std::env::var("ZONE_TASK_LLM_MODEL").unwrap_or_else(|_| "gpt-4".to_string())
+}
 
 // Safe environment variables to pass to agent tools
 // Only include variables needed for basic command execution
@@ -281,17 +295,59 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     // Gather context if source_ids are specified
     if let Some(source_ids) = &task.source_ids
         && !source_ids.is_empty()
-        && state.context_service().is_some()
+        && let Some(context_service) = state.context_service()
     {
         tracing::info!(
-            "Context gathering from {} sources available but not yet implemented",
-            source_ids.len()
+            "Gathering context from {} sources for task {}",
+            source_ids.len(),
+            task_id
         );
-        // TODO: Implement context search using ContextService::search() method
-        // This would involve:
-        // 1. Creating embeddings for the task description
-        // 2. Searching the vector store for relevant chunks
-        // 3. Injecting the top results into the system prompt
+
+        // Build search query from task title and description
+        let search_query = format!("{}\n\n{}", task.title, task.description);
+
+        // Search for relevant context with source filtering
+        match context_service
+            .search(
+                &search_query,
+                20, // Limit to top 20 most relevant chunks
+                Some(zone_context::embeddings::SearchFilters {
+                    source_ids: Some(source_ids.clone()),
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(results) if !results.is_empty() => {
+                system_prompt.push_str("\n# Relevant Context\n\n");
+                system_prompt.push_str("The following context has been retrieved from the knowledge base to help with this task:\n\n");
+
+                for (idx, result) in results.iter().enumerate() {
+                    system_prompt.push_str(&format!(
+                        "## Context {} (Relevance: {:.2})\n{}\n\n",
+                        idx + 1,
+                        result.similarity,
+                        result.chunk_text
+                    ));
+                }
+
+                tracing::info!(
+                    "Added {} context chunks to task {} system prompt",
+                    results.len(),
+                    task_id
+                );
+            }
+            Ok(_) => {
+                tracing::info!("No relevant context found for task {}", task_id);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to gather context for task {}: {}. Proceeding without context.",
+                    task_id,
+                    e
+                );
+            }
+        }
     }
 
     // Add acceptance criteria if available
@@ -321,16 +377,18 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     // Create tool registry with defaults
     let tools = ToolRegistry::with_defaults();
 
+    // Get LLM configuration (from task, then environment, then defaults)
+    let temperature = default_temperature();
+    let max_tokens = default_max_tokens();
+    let model = task.model_name.clone().unwrap_or_else(default_model);
+
     // Configure LLM client
     let llm_config = LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
-        default_model: task
-            .model_name
-            .clone()
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        temperature: DEFAULT_TEMPERATURE,
-        max_tokens: DEFAULT_MAX_TOKENS,
+        default_model: model,
+        temperature,
+        max_tokens,
     };
 
     let llm = LlmClient::new(llm_config);
@@ -338,8 +396,8 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     // Configure agent
     let agent_config = AgentConfig {
         max_iterations: 50,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        temperature: DEFAULT_TEMPERATURE,
+        max_tokens,
+        temperature,
         stream: false,
         system_prompt: Some(system_prompt),
     };

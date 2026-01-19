@@ -1,21 +1,22 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../../../api/client';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { AiSettings } from '../types';
-import OrgSettingsPage from './OrgSettingsPage';
 
 // Mock client
-jest.mock('../../../../api/client', () => ({
-  client: {
-    getOrgAiSettings: jest.fn(),
-    updateOrgAiSettings: jest.fn(),
-    resetOrgAiSettings: jest.fn(),
-    getOrgMembers: jest.fn(),
-    getWorkspaces: jest.fn(),
-  },
+const mockClient = {
+  getOrgAiSettings: mock(),
+  updateOrgAiSettings: mock(),
+  resetOrgAiSettings: mock(),
+  getOrgMembers: mock(),
+  getWorkspaces: mock(),
+};
+
+mock.module('../../../../api/client', () => ({
+  client: mockClient,
 }));
 
 // Mock OrgMembersSection, InvitationsSection, BillingSection, and AuditLogsSection components
-jest.mock('../components', () => ({
+mock.module('../components', () => ({
   Button: ({ children, ...props }: React.ComponentProps<'button'>) => (
     <button {...props}>{children}</button>
   ),
@@ -36,38 +37,57 @@ jest.mock('../components', () => ({
 }));
 
 // Mock useAuth
-jest.mock('../../../auth', () => ({
-  useAuth: () => ({
-    isAuthenticated: true,
-    user: { id: '1', email: 'test@test.com' },
-  }),
+const mockUseAuth = mock(() => ({
+  isAuthenticated: true,
+  user: { id: '1', email: 'test@test.com' },
+}));
+
+mock.module('../../../auth', () => ({
+  useAuth: mockUseAuth,
 }));
 
 // Mock useWorkspace
-jest.mock('../../../../shared/context/WorkspaceContext', () => ({
-  useWorkspace: () => ({
-    currentOrganization: {
-      id: '00000000-0000-0000-0000-000000000001',
-      name: 'Test Org',
-      slug: 'test-org',
-      description: null,
-      is_active: true,
-      created_at: '2024-01-01T00:00:00Z',
-      updated_at: '2024-01-01T00:00:00Z',
-    },
-    organizations: [],
-    currentWorkspace: null,
-    workspaces: [],
-    loading: false,
-    error: null,
-    setCurrentOrganization: jest.fn(),
-    setCurrentWorkspace: jest.fn(),
-    refreshOrganizations: jest.fn(),
-    refreshWorkspaces: jest.fn(),
-  }),
+const mockSetCurrentOrganization = mock();
+const mockSetCurrentWorkspace = mock();
+const mockRefreshOrganizations = mock();
+const mockRefreshWorkspaces = mock();
+
+const mockCurrentOrganization = {
+  id: '00000000-0000-0000-0000-000000000001',
+  name: 'Test Org',
+  slug: 'test-org',
+  description: null,
+  is_active: true,
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
+};
+
+const mockWorkspaceContext = {
+  currentOrganization: mockCurrentOrganization,
+  organizations: [],
+  currentWorkspace: null,
+  workspaces: [],
+  loading: false,
+  error: null,
+  setCurrentOrganization: mockSetCurrentOrganization,
+  setCurrentWorkspace: mockSetCurrentWorkspace,
+  refreshOrganizations: mockRefreshOrganizations,
+  refreshWorkspaces: mockRefreshWorkspaces,
+};
+
+mock.module('../../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => mockWorkspaceContext,
 }));
 
-const mockClient = client as jest.Mocked<typeof client>;
+let OrgSettingsPage: typeof import('./OrgSettingsPage').default;
+
+beforeAll(async () => {
+  OrgSettingsPage = (await import('./OrgSettingsPage')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const mockAiSettings: AiSettings = {
   provider: 'self_hosted',
@@ -85,10 +105,9 @@ const mockAiSettings: AiSettings = {
   model_embedding: 'nomic-embed-text',
 };
 
-// Note: File uses Jest syntax (jest.mock, jest.fn) - needs conversion to bun:test
-describe.skip('OrgSettingsPage', () => {
+describe('OrgSettingsPage', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
     mockClient.getOrgAiSettings.mockResolvedValue(mockAiSettings);
     mockClient.getWorkspaces.mockResolvedValue([]);
   });

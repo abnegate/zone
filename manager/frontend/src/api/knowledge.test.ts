@@ -1,11 +1,12 @@
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { knowledgeApi } from './knowledge';
 import type { CreateKnowledgeRequest, GatherContextRequest } from '../features/knowledge/types';
 
 describe('KnowledgeApi', () => {
-  let mockFetch: jest.SpyInstance;
+  let mockFetch: ReturnType<typeof spyOn>;
 
   beforeEach(() => {
-    mockFetch = jest.spyOn(global, 'fetch');
+    mockFetch = spyOn(global, 'fetch');
     knowledgeApi.setGetAccessToken(() => 'test-token');
   });
 

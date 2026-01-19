@@ -2,6 +2,16 @@ import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
+const tasksRoutePattern = /\/api\/workspaces\/[^/]+\/tasks/;
+const tasksListPattern = /\/api\/workspaces\/[^/]+\/tasks\/?$/;
+const sourcesRoutePattern = /\/api\/workspaces\/[^/]+\/sources/;
+const sourcesListPattern = /\/api\/workspaces\/[^/]+\/sources\/?$/;
+
+const isTasksListRequest = (requestUrl: string) =>
+  tasksListPattern.test(new URL(requestUrl).pathname);
+const isSourcesListRequest = (requestUrl: string) =>
+  sourcesListPattern.test(new URL(requestUrl).pathname);
+
 test.describe('Navigation', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
@@ -31,8 +41,11 @@ test.describe('Navigation', () => {
       }
     });
 
-    await routeApi(page, '**/api/tasks*', (route) => {
-      if (route.request().method() === 'GET') {
+    await routeApi(page, tasksRoutePattern, (route) => {
+      if (
+        route.request().method() === 'GET' &&
+        isTasksListRequest(route.request().url())
+      ) {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -43,18 +56,19 @@ test.describe('Navigation', () => {
       }
     });
 
-    await routeApi(page, '**/api/sources*', (route) => {
-      const url = new URL(route.request().url());
-      if (url.pathname.endsWith('/types')) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ success: true, types: [] }),
-        });
-        return;
-      }
+    await routeApi(page, '**/api/sources/types', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, types: [] }),
+      });
+    });
 
-      if (route.request().method() === 'GET') {
+    await routeApi(page, sourcesRoutePattern, (route) => {
+      if (
+        route.request().method() === 'GET' &&
+        isSourcesListRequest(route.request().url())
+      ) {
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -112,6 +126,14 @@ test.describe('Navigation', () => {
       });
     });
 
+    await routeApi(page, '**/api/workspaces/*/theme', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ theme: 'light' }),
+      });
+    });
+
     await page.goto('/');
     await setupAuth(page, { isAdmin: true });
 
@@ -141,43 +163,53 @@ test.describe('Navigation', () => {
 
   test('Models page is default route', async ({ page }) => {
     await expect(page.locator('.nav-item:has-text("Models")')).toHaveClass(/active/);
-    await expect(page.locator('.page-header h1')).toHaveText('Models');
+    await expect(
+      page.getByRole('heading', { name: 'Models', exact: true })
+    ).toBeVisible();
   });
 
   test('navigates to Chats page', async ({ page }) => {
-    await page.click('text=Chats');
+    await page.click('a[href="/chats"]');
     await expect(page).toHaveURL('/chats');
-    await expect(page.locator('.chats-sidebar-header h2')).toHaveText('Chats');
+    await expect(
+      page.getByRole('heading', { name: 'Chats', exact: true })
+    ).toBeVisible();
   });
 
   test('navigates to Projects page', async ({ page }) => {
-    await page.click('text=Projects');
+    await page.click('a[href="/projects"]');
     await expect(page).toHaveURL('/projects');
-    await expect(page.locator('.page-header h1')).toHaveText('Projects');
+    await expect(
+      page.getByRole('heading', { name: 'Projects', exact: true })
+    ).toBeVisible();
   });
 
   test('navigates to Tasks page', async ({ page }) => {
-    await page.click('text=Tasks');
+    await page.click('a[href="/tasks"]');
     await expect(page).toHaveURL('/tasks');
-    await expect(page.locator('.page-header h1')).toHaveText('Tasks');
+    await expect(
+      page.getByRole('heading', { name: 'Tasks', exact: true })
+    ).toBeVisible();
   });
 
   test('navigates to Sources page', async ({ page }) => {
-    await page.click('text=Sources');
+    await page.click('a[href="/sources"]');
     await expect(page).toHaveURL('/sources');
-    await expect(page.locator('.page-header h1')).toHaveText('Sources');
+    await expect(
+      page.getByRole('heading', { name: 'Sources', exact: true })
+    ).toBeVisible();
   });
 
   test('navigates to Search page', async ({ page }) => {
-    await page.click('text=Search');
+    await page.click('a[href="/search"]');
     await expect(page).toHaveURL('/search');
-    await expect(page.locator('.page-header h1')).toHaveText('Context Search');
+    await expect(page.getByRole('heading', { name: 'Context Search' })).toBeVisible();
   });
 
   test('navigates to Wiki page', async ({ page }) => {
-    await page.click('text=Wiki');
+    await page.click('a[href="/wiki"]');
     await expect(page).toHaveURL('/wiki');
-    await expect(page.locator('.wiki-header h1')).toHaveText('Knowledge Base');
+    await expect(page.getByRole('heading', { name: 'Knowledge Base' })).toBeVisible();
   });
 
   test('navigates to Organization settings page', async ({ page }) => {
@@ -189,28 +221,30 @@ test.describe('Navigation', () => {
   });
 
   test('navigates to Workspace settings page', async ({ page }) => {
-    await page.click('text=Workspace');
-    await expect(page).toHaveURL('/settings');
+    await page.click('a[href="/settings"]');
+    await page.waitForURL('/settings', { timeout: 10000 });
     await expect(page.locator('.page-header .page-title')).toHaveText('Workspace Settings');
   });
 
   test('active nav item updates on navigation', async ({ page }) => {
     await expect(page.locator('.nav-item:has-text("Models")')).toHaveClass(/active/);
 
-    await page.click('text=Chats');
+    await page.click('a[href="/chats"]');
     await expect(page.locator('.nav-item:has-text("Chats")')).toHaveClass(/active/);
     await expect(page.locator('.nav-item:has-text("Models")')).not.toHaveClass(/active/);
   });
 
   test('direct URL navigation works', async ({ page }) => {
     await page.goto('/projects');
-    await expect(page.locator('.page-header h1')).toHaveText('Projects');
+    await expect(
+      page.getByRole('heading', { name: 'Projects', exact: true })
+    ).toBeVisible();
     await expect(page.locator('.nav-item:has-text("Projects")')).toHaveClass(/active/);
   });
 
   test('handles unknown routes gracefully', async ({ page }) => {
     // Click on any nav item first, then use history API to test unknown route
-    await page.click('text=Chats');
+    await page.click('a[href="/chats"]');
     await expect(page).toHaveURL('/chats');
 
     // Navigate to unknown route via link or history
@@ -222,10 +256,10 @@ test.describe('Navigation', () => {
   });
 
   test('browser back button works correctly', async ({ page }) => {
-    await page.click('text=Chats');
+    await page.click('a[href="/chats"]');
     await expect(page).toHaveURL('/chats');
 
-    await page.click('text=Projects');
+    await page.click('a[href="/projects"]');
     await expect(page).toHaveURL('/projects');
 
     await page.goBack();
@@ -233,7 +267,7 @@ test.describe('Navigation', () => {
   });
 
   test('browser forward button works correctly', async ({ page }) => {
-    await page.click('text=Chats');
+    await page.click('a[href="/chats"]');
     await expect(page).toHaveURL('/chats');
 
     await page.goBack();
@@ -248,13 +282,13 @@ test.describe('Navigation', () => {
   });
 
   test('navigation preserves auth state', async ({ page }) => {
-    await page.click('text=Chats');
+    await page.click('a[href="/chats"]');
     await expect(page).not.toHaveURL('/login');
 
-    await page.click('text=Projects');
+    await page.click('a[href="/projects"]');
     await expect(page).not.toHaveURL('/login');
 
-    await page.click('text=Tasks');
+    await page.click('a[href="/tasks"]');
     await expect(page).not.toHaveURL('/login');
   });
 });

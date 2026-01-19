@@ -1,32 +1,36 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../../../api/client';
+import userEvent from '@testing-library/user-event';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { AiSettings, WorkspaceTheme } from '../types';
-import WorkspaceSettingsPage from './WorkspaceSettingsPage';
 
 // Mock client
-jest.mock('../../../../api/client', () => ({
-  client: {
-    getWorkspaceTheme: jest.fn(),
-    updateWorkspaceTheme: jest.fn(),
-    resetWorkspaceTheme: jest.fn(),
-    getWorkspaceAiSettings: jest.fn(),
-    updateWorkspaceAiSettings: jest.fn(),
-    resetWorkspaceAiSettings: jest.fn(),
-    getEffectiveAiSettings: jest.fn(),
-  },
+const mockClient = {
+  getWorkspaceTheme: mock(),
+  updateWorkspaceTheme: mock(),
+  resetWorkspaceTheme: mock(),
+  getWorkspaceAiSettings: mock(),
+  updateWorkspaceAiSettings: mock(),
+  resetWorkspaceAiSettings: mock(),
+  getEffectiveAiSettings: mock(),
+};
+
+mock.module('../../../../api/client', () => ({
+  client: mockClient,
 }));
 
 // Mock useAuth
-jest.mock('../../../auth', () => ({
-  useAuth: () => ({
-    isAuthenticated: true,
-    user: { id: '1', email: 'test@test.com' },
-  }),
+const mockUseAuth = mock(() => ({
+  isAuthenticated: true,
+  user: { id: '1', email: 'test@test.com' },
+}));
+
+mock.module('../../../auth', () => ({
+  useAuth: mockUseAuth,
 }));
 
 // Mock useTheme
-const mockSetWorkspaceTheme = jest.fn();
-jest.mock('../../../../shared/context/ThemeContext', () => ({
+const mockSetWorkspaceTheme = mock();
+mock.module('../../../../shared/context/ThemeContext', () => ({
   useTheme: () => ({
     theme: 'light',
     workspaceTheme: null,
@@ -34,7 +38,15 @@ jest.mock('../../../../shared/context/ThemeContext', () => ({
   }),
 }));
 
-const mockClient = client as jest.Mocked<typeof client>;
+let WorkspaceSettingsPage: typeof import('./WorkspaceSettingsPage').default;
+
+beforeAll(async () => {
+  WorkspaceSettingsPage = (await import('./WorkspaceSettingsPage')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const mockTheme: WorkspaceTheme = {
   id: 'theme-1',
@@ -66,10 +78,9 @@ const mockAiSettings: AiSettings = {
   model_embedding: 'nomic-embed-text',
 };
 
-// Note: File uses Jest syntax (jest.mock, jest.fn) - needs conversion to bun:test
-describe.skip('WorkspaceSettingsPage', () => {
+describe('WorkspaceSettingsPage', () => {
   beforeEach(() => {
-    jest.resetAllMocks();
+    mock.clearAllMocks();
     mockClient.getWorkspaceTheme.mockResolvedValue(mockTheme);
     mockClient.getWorkspaceAiSettings.mockResolvedValue(mockAiSettings);
     mockClient.getEffectiveAiSettings.mockResolvedValue(mockAiSettings);
@@ -379,14 +390,23 @@ describe.skip('WorkspaceSettingsPage', () => {
 
   // AI Settings Tests
   describe('AI Settings', () => {
+    const openAiTab = async (user: ReturnType<typeof userEvent.setup>) => {
+      const aiTab = await screen.findByRole('tab', { name: /AI Settings/i });
+      await user.click(aiTab);
+    };
+
+    const enableOverride = async (user: ReturnType<typeof userEvent.setup>) => {
+      const overrideCheckbox = await screen.findByRole('checkbox', {
+        name: /Override organization AI settings/i,
+      });
+      await user.click(overrideCheckbox);
+    };
+
     it('renders AI Provider Settings section', async () => {
+      const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
 
-      // Click AI Settings tab
-      await waitFor(() => {
-        const aiTab = screen.getByRole('tab', { name: /AI Settings/i });
-        fireEvent.click(aiTab);
-      });
+      await openAiTab(user);
 
       await waitFor(() => {
         expect(screen.getByText('AI Provider Settings')).toBeInTheDocument();
@@ -394,13 +414,10 @@ describe.skip('WorkspaceSettingsPage', () => {
     });
 
     it('renders override checkbox', async () => {
+      const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
 
-      // Click AI Settings tab
-      await waitFor(() => {
-        const aiTab = screen.getByRole('tab', { name: /AI Settings/i });
-        fireEvent.click(aiTab);
-      });
+      await openAiTab(user);
 
       await waitFor(() => {
         expect(screen.getByText('Override organization AI settings')).toBeInTheDocument();
@@ -426,13 +443,10 @@ describe.skip('WorkspaceSettingsPage', () => {
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
+      const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
 
-      // Click AI Settings tab
-      await waitFor(() => {
-        const aiTab = screen.getByRole('tab', { name: /AI Settings/i });
-        fireEvent.click(aiTab);
-      });
+      await openAiTab(user);
 
       await waitFor(() => {
         expect(screen.getByText(/Effective Settings/)).toBeInTheDocument();
@@ -458,13 +472,10 @@ describe.skip('WorkspaceSettingsPage', () => {
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
+      const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
 
-      // Click AI Settings tab
-      await waitFor(() => {
-        const aiTab = screen.getByRole('tab', { name: /AI Settings/i });
-        fireEvent.click(aiTab);
-      });
+      await openAiTab(user);
 
       await waitFor(() => {
         expect(screen.getByText('Self-Hosted (Ollama via LiteLLM)')).toBeInTheDocument();
@@ -490,21 +501,16 @@ describe.skip('WorkspaceSettingsPage', () => {
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
+      const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
 
-      // Click AI Settings tab
-      await waitFor(() => {
-        const aiTab = screen.getByRole('tab', { name: /AI Settings/i });
-        fireEvent.click(aiTab);
-      });
+      await openAiTab(user);
 
       await waitFor(() => {
         expect(screen.getByText('Override organization AI settings')).toBeInTheDocument();
       });
 
-      // Find the specific checkbox by its associated text
-      const checkboxes = screen.getAllByRole('checkbox');
-      fireEvent.click(checkboxes[0]); // The override checkbox is the first one
+      await enableOverride(user);
 
       await waitFor(() => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
@@ -530,20 +536,16 @@ describe.skip('WorkspaceSettingsPage', () => {
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
+      const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
 
-      // Click AI Settings tab
-      await waitFor(() => {
-        const aiTab = screen.getByRole('tab', { name: /AI Settings/i });
-        fireEvent.click(aiTab);
-      });
+      await openAiTab(user);
 
       await waitFor(() => {
         expect(screen.getByText('Override organization AI settings')).toBeInTheDocument();
       });
 
-      const checkboxes = screen.getAllByRole('checkbox');
-      fireEvent.click(checkboxes[0]);
+      await enableOverride(user);
 
       await waitFor(() => {
         expect(screen.getByText('Credentials')).toBeInTheDocument();
@@ -570,26 +572,22 @@ describe.skip('WorkspaceSettingsPage', () => {
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
+      const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
 
-      // Click AI Settings tab
-      await waitFor(() => {
-        const aiTab = screen.getByRole('tab', { name: /AI Settings/i });
-        fireEvent.click(aiTab);
-      });
+      await openAiTab(user);
 
       await waitFor(() => {
         expect(screen.getByText('Override organization AI settings')).toBeInTheDocument();
       });
 
-      const checkboxes = screen.getAllByRole('checkbox');
-      fireEvent.click(checkboxes[0]);
+      await enableOverride(user);
 
       await waitFor(() => {
         expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
       });
 
-      fireEvent.change(screen.getByLabelText('AI Provider'), { target: { value: 'openai' } });
+      await user.selectOptions(screen.getByLabelText('AI Provider'), 'openai');
 
       await waitFor(() => {
         // Look for OpenAI-specific content (model options change to OpenAI models)
@@ -616,20 +614,16 @@ describe.skip('WorkspaceSettingsPage', () => {
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
+      const user = userEvent.setup();
       render(<WorkspaceSettingsPage />);
 
-      // Click AI Settings tab
-      await waitFor(() => {
-        const aiTab = screen.getByRole('tab', { name: /AI Settings/i });
-        fireEvent.click(aiTab);
-      });
+      await openAiTab(user);
 
       await waitFor(() => {
         expect(screen.getByText('Override organization AI settings')).toBeInTheDocument();
       });
 
-      const checkboxes = screen.getAllByRole('checkbox');
-      fireEvent.click(checkboxes[0]);
+      await enableOverride(user);
 
       await waitFor(() => {
         expect(screen.getByText('Default Models')).toBeInTheDocument();

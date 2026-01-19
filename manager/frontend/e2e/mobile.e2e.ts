@@ -4,6 +4,7 @@ import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 
 // Use iPhone 12 viewport dimensions for mobile tests
 test.describe('Mobile Responsiveness', () => {
+  test.skip(({ browserName }) => browserName === 'firefox', 'Firefox does not support isMobile.');
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
   test.beforeEach(async ({ page }) => {
@@ -77,7 +78,7 @@ test.describe('Mobile Responsiveness', () => {
       await page.click('a[href="/projects"]');
 
       await expect(page).toHaveURL('/projects');
-      await expect(page.locator('.page-header h1')).toContainText('Projects');
+      await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
     });
 
     test('maintains navigation state after sidebar closes', async ({ page }) => {
@@ -110,13 +111,13 @@ test.describe('Mobile Responsiveness', () => {
     });
 
     test('page header is visible on mobile', async ({ page }) => {
-      await expect(page.locator('.page-header')).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible();
     });
   });
 
   test.describe('Models Page Mobile', () => {
     test('models page renders correctly on mobile', async ({ page }) => {
-      await expect(page.locator('.page-header h1')).toContainText('Models');
+      await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible();
     });
 
     test('model form is visible on mobile', async ({ page }) => {
@@ -146,11 +147,13 @@ test.describe('Tablet Responsiveness', () => {
     await page.reload();
 
     // Wait for page to load
-    await expect(page.locator('.page-header')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
   });
 
   test('page loads correctly on tablet', async ({ page }) => {
-    await expect(page.locator('.page-header')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible();
   });
 
   test('content adjusts to tablet width', async ({ page }) => {

@@ -1,72 +1,96 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
+import { AuthProvider, useAuth } from './AuthContext';
 
-const mockLogin = mock();
-const mockRegister = mock();
-const mockRefreshToken = mock();
-const mockLogout = mock();
-const mockSetAccessToken = mock();
+let loginImpl: (request: { email: string; password: string }) => Promise<unknown>;
+let registerImpl: (request: { email: string; password: string }) => Promise<unknown>;
+let refreshTokenImpl: (token: string) => Promise<unknown>;
+let logoutImpl: (token: string) => Promise<void>;
+let setAccessTokenCalls: Array<string | null>;
+let storage: {
+  getItem: (key: string) => string | null;
+  setItem: (key: string, value: string) => void;
+  removeItem: (key: string) => void;
+};
 
-mock.module('../../../api/auth', () => ({
-  login: mockLogin,
-  register: mockRegister,
-  refreshToken: mockRefreshToken,
-  logout: mockLogout,
-}));
+const createStorage = () => {
+  let store: Record<string, string> = {};
+  return {
+    getItem: (key: string) => store[key] ?? null,
+    setItem: (key: string, value: string) => {
+      store[key] = value;
+    },
+    removeItem: (key: string) => {
+      delete store[key];
+    },
+  };
+};
 
-mock.module('../../../api/client', () => ({
-  client: {
-    setAccessToken: mockSetAccessToken,
+const mockAuthApi = {
+  login: (request: { email: string; password: string }) => loginImpl(request),
+  register: (request: { email: string; password: string }) => registerImpl(request),
+  refreshToken: (token: string) => refreshTokenImpl(token),
+  logout: (token: string) => logoutImpl(token),
+};
+
+const mockClient = {
+  setAccessToken: (token: string | null) => {
+    setAccessTokenCalls.push(token);
   },
-}));
+};
 
-let AuthProvider: typeof import('./AuthContext').AuthProvider;
-let useAuth: typeof import('./AuthContext').useAuth;
+const wrapper = ({ children }: { children: ReactNode }) => (
+  <AuthProvider authApiOverride={mockAuthApi} clientOverride={mockClient} storageOverride={storage}>
+    {children}
+  </AuthProvider>
+);
 
-beforeAll(async () => {
-  const authContext = await import('./AuthContext');
-  AuthProvider = authContext.AuthProvider;
-  useAuth = authContext.useAuth;
-});
-
-afterAll(() => {
-  mock.restore();
-});
-
-const wrapper = ({ children }: { children: ReactNode }) => <AuthProvider>{children}</AuthProvider>;
+const flushEffects = async () => {
+  await act(async () => {});
+};
 
 beforeEach(() => {
-  mockLogin.mockReset();
-  mockRegister.mockReset();
-  mockRefreshToken.mockReset();
-  mockLogout.mockReset();
-  mockSetAccessToken.mockReset();
-  window.localStorage.clear();
+  loginImpl = async () => {
+    throw new Error('login not mocked');
+  };
+  registerImpl = async () => {
+    throw new Error('register not mocked');
+  };
+  refreshTokenImpl = async () => {
+    throw new Error('refresh not mocked');
+  };
+  logoutImpl = async () => {};
+  setAccessTokenCalls = [];
+  storage = createStorage();
 });
 
 describe('AuthContext', () => {
   describe('Initial State', () => {
-    it('starts with unauthenticated state', () => {
+    it('starts with unauthenticated state', async () => {
       const { result } = renderHook(() => useAuth(), { wrapper });
 
       expect(result.current.isAuthenticated).toBe(false);
       expect(result.current.user).toBeNull();
       expect(result.current.accessToken).toBeNull();
+
+      await flushEffects();
     });
 
-    it('starts in loading state when checking stored tokens', () => {
-      window.localStorage.setItem('manager_access_token', 'stored-token');
-      window.localStorage.setItem('manager_refresh_token', 'refresh-token');
-      window.localStorage.setItem(
+    it('starts in loading state when checking stored tokens', async () => {
+      storage.setItem('manager_access_token', 'stored-token');
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      storage.setItem(
         'manager_user',
         JSON.stringify({ id: '1', email: 'test@test.com' })
       );
-      mockRefreshToken.mockImplementation(() => new Promise(() => {}));
+      refreshTokenImpl = () => new Promise(() => {});
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
       expect(result.current.isLoading).toBe(true);
+
+      await flushEffects();
     });
 
     it('restores auth state from localStorage', async () => {
@@ -90,9 +114,9 @@ describe('AuthContext', () => {
       };
       const validToken = `header.${btoa(JSON.stringify(payload))}.signature`;
 
-      window.localStorage.setItem('manager_access_token', validToken);
-      window.localStorage.setItem('manager_refresh_token', 'refresh-token');
-      window.localStorage.setItem('manager_user', JSON.stringify(mockUser));
+      storage.setItem('manager_access_token', validToken);
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      storage.setItem('manager_user', JSON.stringify(mockUser));
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
@@ -104,27 +128,31 @@ describe('AuthContext', () => {
       expect(result.current.user).toEqual(mockUser);
     });
 
-    it('handles invalid JWT token format gracefully', () => {
+    it('handles invalid JWT token format gracefully', async () => {
       const invalidToken = 'not-a-valid-jwt';
-      window.localStorage.setItem('manager_access_token', invalidToken);
+      storage.setItem('manager_access_token', invalidToken);
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
       expect(result.current.isAuthenticated).toBe(false);
       expect(result.current.roles).toEqual([]);
       expect(result.current.permissions).toEqual([]);
+
+      await flushEffects();
     });
 
-    it('handles malformed JWT payload gracefully', () => {
+    it('handles malformed JWT payload gracefully', async () => {
       const malformedToken = 'header.not_valid_base64!!!.signature';
-      window.localStorage.setItem('manager_access_token', malformedToken);
+      storage.setItem('manager_access_token', malformedToken);
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
       expect(result.current.isAuthenticated).toBe(false);
+
+      await flushEffects();
     });
 
-    it('treats expired token as unauthenticated', () => {
+    it('treats expired token as unauthenticated', async () => {
       const payload = {
         sub: '1',
         email: 'test@test.com',
@@ -134,12 +162,14 @@ describe('AuthContext', () => {
       };
       const expiredToken = `header.${btoa(JSON.stringify(payload))}.signature`;
 
-      window.localStorage.setItem('manager_access_token', expiredToken);
-      window.localStorage.setItem('manager_refresh_token', 'refresh-token');
+      storage.setItem('manager_access_token', expiredToken);
+      storage.setItem('manager_refresh_token', 'refresh-token');
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
       expect(result.current.isAuthenticated).toBe(false);
+
+      await flushEffects();
     });
   });
 
@@ -164,7 +194,7 @@ describe('AuthContext', () => {
         permissions: ['chats:read', 'chats:create'],
       };
 
-      mockLogin.mockResolvedValue(mockResponse);
+      loginImpl = async () => mockResponse;
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
@@ -178,12 +208,14 @@ describe('AuthContext', () => {
       expect(result.current.roles).toEqual(['user']);
       expect(result.current.permissions).toEqual(['chats:read', 'chats:create']);
 
-      expect(window.localStorage.getItem('manager_access_token')).toBe('new-access-token');
-      expect(window.localStorage.getItem('manager_refresh_token')).toBe('new-refresh-token');
+      expect(storage.getItem('manager_access_token')).toBe('new-access-token');
+      expect(storage.getItem('manager_refresh_token')).toBe('new-refresh-token');
     });
 
     it('login failure throws error and maintains unauthenticated state', async () => {
-      mockLogin.mockRejectedValue(new Error('Invalid credentials'));
+      loginImpl = async () => {
+        throw new Error('Invalid credentials');
+      };
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
@@ -206,7 +238,9 @@ describe('AuthContext', () => {
     it('login with empty credentials throws error', async () => {
       const { result } = renderHook(() => useAuth(), { wrapper });
 
-      mockLogin.mockRejectedValue(new Error('Email and password required'));
+      loginImpl = async () => {
+        throw new Error('Email and password required');
+      };
 
       let error: unknown;
       await act(async () => {
@@ -242,7 +276,7 @@ describe('AuthContext', () => {
         permissions: ['chats:read', 'chats:create', 'users:delete'],
       };
 
-      mockRegister.mockResolvedValue(mockResponse);
+      registerImpl = async () => mockResponse;
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
@@ -260,7 +294,9 @@ describe('AuthContext', () => {
     });
 
     it('register failure throws error and maintains unauthenticated state', async () => {
-      mockRegister.mockRejectedValue(new Error('Email already exists'));
+      registerImpl = async () => {
+        throw new Error('Email already exists');
+      };
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
@@ -302,7 +338,7 @@ describe('AuthContext', () => {
         permissions: ['chats:read', 'chats:create'],
       };
 
-      mockLogin.mockResolvedValue(mockResponse);
+      loginImpl = async () => mockResponse;
 
       const { result } = renderHook(() => useAuth(), { wrapper });
 
@@ -319,9 +355,9 @@ describe('AuthContext', () => {
       expect(result.current.accessToken).toBeNull();
       expect(result.current.refreshToken).toBeNull();
 
-      expect(window.localStorage.getItem('manager_access_token')).toBeNull();
-      expect(window.localStorage.getItem('manager_refresh_token')).toBeNull();
-      expect(window.localStorage.getItem('manager_user')).toBeNull();
+      expect(storage.getItem('manager_access_token')).toBeNull();
+      expect(storage.getItem('manager_refresh_token')).toBeNull();
+      expect(storage.getItem('manager_user')).toBeNull();
     });
   });
 });

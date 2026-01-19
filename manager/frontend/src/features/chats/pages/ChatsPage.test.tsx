@@ -365,15 +365,17 @@ describe('ChatsPage', () => {
   });
 
   describe('archive filter', () => {
-    // Skip: Radix UI Tabs state changes don't trigger re-render correctly in test environment
-    it.skip('switches to archived filter', async () => {
+    it('switches to archived filter', async () => {
       renderChatsPage();
 
       await waitFor(() => {
         expect(screen.getByRole('tab', { name: 'Archived' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Archived' }));
+      const archivedTab = screen.getByRole('tab', { name: 'Archived' });
+      fireEvent.mouseDown(archivedTab);
+      fireEvent.mouseUp(archivedTab);
+      fireEvent.click(archivedTab);
 
       await waitFor(() => {
         expect(mockClient.getChats).toHaveBeenCalledWith('ws-1', true);
@@ -457,8 +459,7 @@ describe('ChatsPage', () => {
       });
     });
 
-    // Skip: Radix UI Dialog backdrop clicks don't work correctly in HappyDOM test environment
-    it.skip('closes modal on backdrop click', async () => {
+    it('closes modal on backdrop click', async () => {
       renderChatsPage();
 
       await waitFor(() => {
@@ -467,8 +468,16 @@ describe('ChatsPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: '+ New' }));
 
-      // Click the overlay (backdrop)
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+
+      // Click the overlay (backdrop) - try multiple events to trigger Radix UI's handler
       const overlay = document.querySelector('.ui-dialog-overlay');
+      fireEvent.pointerDown(overlay!, { isPrimary: true, pointerType: 'mouse' });
+      fireEvent.pointerUp(overlay!, { isPrimary: true, pointerType: 'mouse' });
+      fireEvent.mouseDown(overlay!);
+      fireEvent.mouseUp(overlay!);
       fireEvent.click(overlay!);
 
       await waitFor(() => {
@@ -493,8 +502,7 @@ describe('ChatsPage', () => {
       });
     });
 
-    // Skip: Form submission with Radix UI Dialog and bun mocks doesn't trigger correctly
-    it.skip('creates chat when form is submitted', async () => {
+    it('creates chat when form is submitted', async () => {
       const newChat: Chat = {
         id: 'new-chat',
         title: 'Chat with llama2',
@@ -514,8 +522,29 @@ describe('ChatsPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: '+ New' }));
 
-      fireEvent.change(screen.getByLabelText('Select Model'), { target: { value: 'llama2' } });
-      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+
+      // Open the select dropdown by clicking the trigger
+      const selectTrigger = screen.getByRole('combobox');
+      fireEvent.mouseDown(selectTrigger);
+      fireEvent.mouseUp(selectTrigger);
+      fireEvent.click(selectTrigger);
+
+      // Wait for options to appear and click the llama2 option
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
+      });
+
+      const option = screen.getByRole('option', { name: 'llama2' });
+      fireEvent.mouseDown(option);
+      fireEvent.mouseUp(option);
+      fireEvent.click(option);
+
+      // Now submit the form
+      const createButton = screen.getByRole('button', { name: 'Create Chat' });
+      fireEvent.click(createButton);
 
       await waitFor(() => {
         expect(mockClient.createChat).toHaveBeenCalledWith({
@@ -538,8 +567,7 @@ describe('ChatsPage', () => {
       expect(screen.getByRole('button', { name: 'Create Chat' })).toBeDisabled();
     });
 
-    // Skip: Form submission with Radix UI Dialog and bun mocks doesn't trigger correctly
-    it.skip('shows error when create chat fails', async () => {
+    it('shows error when create chat fails', async () => {
       mockClient.createChat.mockRejectedValueOnce(new Error('Failed to create'));
 
       renderChatsPage();
@@ -549,11 +577,34 @@ describe('ChatsPage', () => {
       });
 
       fireEvent.click(screen.getByRole('button', { name: '+ New' }));
-      fireEvent.change(screen.getByLabelText('Select Model'), { target: { value: 'llama2' } });
-      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
 
       await waitFor(() => {
-        expect(screen.getByText('Failed to create')).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+
+      // Open the select dropdown by clicking the trigger
+      const selectTrigger = screen.getByRole('combobox');
+      fireEvent.mouseDown(selectTrigger);
+      fireEvent.mouseUp(selectTrigger);
+      fireEvent.click(selectTrigger);
+
+      // Wait for options to appear and click the llama2 option
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
+      });
+
+      const option = screen.getByRole('option', { name: 'llama2' });
+      fireEvent.mouseDown(option);
+      fireEvent.mouseUp(option);
+      fireEvent.click(option);
+
+      // Now submit the form
+      const createButton = screen.getByRole('button', { name: 'Create Chat' });
+      fireEvent.click(createButton);
+
+      await waitFor(() => {
+        const errorMessages = screen.getAllByText('Failed to create');
+        expect(errorMessages.length).toBeGreaterThan(0);
       });
     });
   });
@@ -726,8 +777,7 @@ describe('ChatsPage', () => {
       });
     });
 
-    // Skip: Radix UI Tabs state changes don't trigger re-render correctly in test environment
-    it.skip('unarchives chat when in archived view', async () => {
+    it('unarchives chat when in archived view', async () => {
       const archivedChats: Chat[] = [
         {
           id: 'chat-archived',
@@ -755,7 +805,10 @@ describe('ChatsPage', () => {
         expect(screen.getByRole('tab', { name: 'Archived' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Archived' }));
+      const archivedTab = screen.getByRole('tab', { name: 'Archived' });
+      fireEvent.mouseDown(archivedTab);
+      fireEvent.mouseUp(archivedTab);
+      fireEvent.click(archivedTab);
 
       await waitFor(() => {
         expect(screen.getByText('Archived Chat')).toBeInTheDocument();
@@ -769,8 +822,7 @@ describe('ChatsPage', () => {
       });
     });
 
-    // Skip: Radix UI Tabs state changes don't trigger re-render correctly in test environment
-    it.skip('shows error when unarchive fails', async () => {
+    it('shows error when unarchive fails', async () => {
       const archivedChats: Chat[] = [
         {
           id: 'chat-archived',
@@ -790,7 +842,10 @@ describe('ChatsPage', () => {
         expect(screen.getByRole('tab', { name: 'Archived' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Archived' }));
+      const archivedTab = screen.getByRole('tab', { name: 'Archived' });
+      fireEvent.mouseDown(archivedTab);
+      fireEvent.mouseUp(archivedTab);
+      fireEvent.click(archivedTab);
 
       await waitFor(() => {
         expect(screen.getByText('Archived Chat')).toBeInTheDocument();
@@ -803,8 +858,7 @@ describe('ChatsPage', () => {
       });
     });
 
-    // Skip: Radix UI Tabs state changes don't trigger re-render correctly in test environment
-    it.skip('shows no archived chats message', async () => {
+    it('shows no archived chats message', async () => {
       mockClient.getChats.mockResolvedValueOnce(mockChats).mockResolvedValueOnce([]);
 
       renderChatsPage();
@@ -813,7 +867,10 @@ describe('ChatsPage', () => {
         expect(screen.getByRole('tab', { name: 'Archived' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Archived' }));
+      const archivedTab = screen.getByRole('tab', { name: 'Archived' });
+      fireEvent.mouseDown(archivedTab);
+      fireEvent.mouseUp(archivedTab);
+      fireEvent.click(archivedTab);
 
       await waitFor(() => {
         expect(screen.getByText('No archived chats')).toBeInTheDocument();
@@ -891,8 +948,7 @@ describe('ChatsPage', () => {
       expect(mockClient.deleteChat).not.toHaveBeenCalled();
     });
 
-    // Skip: Radix UI Dialog backdrop clicks don't work correctly in HappyDOM test environment
-    it.skip('cancels delete on backdrop click', async () => {
+    it('cancels delete on backdrop click', async () => {
       renderChatsPage();
 
       await waitFor(() => {
@@ -902,8 +958,16 @@ describe('ChatsPage', () => {
       const deleteButtons = screen.getAllByTitle('Delete');
       fireEvent.click(deleteButtons[0]);
 
-      // Click the backdrop (overlay)
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'Delete Chat' })).toBeInTheDocument();
+      });
+
+      // Click the backdrop (overlay) - try multiple events to trigger Radix UI's handler
       const overlay = document.querySelector('.ui-dialog-overlay');
+      fireEvent.pointerDown(overlay!, { isPrimary: true, pointerType: 'mouse' });
+      fireEvent.pointerUp(overlay!, { isPrimary: true, pointerType: 'mouse' });
+      fireEvent.mouseDown(overlay!);
+      fireEvent.mouseUp(overlay!);
       fireEvent.click(overlay!);
 
       await waitFor(() => {

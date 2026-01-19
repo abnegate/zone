@@ -1,16 +1,18 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterAll, mock, beforeEach, describe, it, expect } from 'bun:test';
+import { afterAll, mock, beforeAll, beforeEach, describe, it, expect, spyOn } from 'bun:test';
 import type { Project } from '../types';
 import type { Source } from '../../../types';
 import type React from 'react';
-import ProjectsPage from './ProjectsPage';
+
+let ProjectsPage: typeof import('./ProjectsPage').default;
 
 const createWrapper = () => {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false, gcTime: 0 },
     },
   });
   return ({ children }: { children: React.ReactNode }) => (
@@ -75,7 +77,23 @@ mock.module('../../../features/auth', () => ({
     setAccessToken: mock(() => {}),
   }),
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+  ResendVerificationButton: () => null,
+  VerificationPendingBanner: () => null,
 }));
+
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: {
+      id: 'workspace-1',
+      name: 'Test Workspace',
+    },
+    loading: false,
+  }),
+}));
+
+beforeAll(async () => {
+  ProjectsPage = (await import('./ProjectsPage')).default;
+});
 
 afterAll(() => {
   mock.restore();
@@ -174,27 +192,28 @@ describe('ProjectsPage', () => {
     expect(screen.getByText('Organize work with GitHub integration')).toBeInTheDocument();
   });
 
-  // Note: Filters use TabsTrigger which has role="tab" not role="button"
-  it.skip('renders filter buttons', async () => {
+  // Note: Filters use TabsTrigger which has role="tab"
+  it('renders filter buttons', async () => {
     renderWithQueryClient(<ProjectsPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'All' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'All' })).toBeInTheDocument();
     });
-    expect(screen.getByRole('button', { name: 'Active' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'On Hold' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Cancelled' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Active' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'On Hold' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Cancelled' })).toBeInTheDocument();
   });
 
-  // Note: Filters use TabsTrigger which has role="tab" not role="button"
-  it.skip('filters projects by status', async () => {
+  // Note: Filters use TabsTrigger which has role="tab"
+  it('filters projects by status', async () => {
+    const user = userEvent.setup();
     renderWithQueryClient(<ProjectsPage />);
     await waitFor(() => {
       expect(screen.getByText('Project Alpha')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Active' }));
+    await user.click(screen.getByRole('tab', { name: 'Active' }));
     await waitFor(() => {
-      expect(mockGetProjects).toHaveBeenCalledWith('active');
+      expect(mockGetProjects).toHaveBeenCalledWith('workspace-1', 'active');
     });
   });
 
@@ -209,7 +228,7 @@ describe('ProjectsPage', () => {
   });
 
   // Note: Wizard step progression doesn't work correctly in test environment
-  it.skip('creates new project via wizard', async () => {
+  it('creates new project via wizard', async () => {
     const newProject: Project = {
       id: 'proj-3',
       name: 'New Project',
@@ -258,6 +277,7 @@ describe('ProjectsPage', () => {
         description: 'New description',
         status: 'active',
         source_id: undefined,
+        workspace_id: 'workspace-1',
       });
     });
   });
@@ -543,7 +563,7 @@ describe('ProjectsPage', () => {
   });
 
   it('handles update project error', async () => {
-    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
+    const consoleErrorSpy = spyOn(console, 'error').mockImplementation();
     mockUpdateProject.mockImplementation(() => Promise.reject(new Error('Update failed')));
 
     renderWithQueryClient(<ProjectsPage />);
@@ -567,7 +587,7 @@ describe('ProjectsPage', () => {
   });
 
   it('handles delete project error', async () => {
-    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
+    const consoleErrorSpy = spyOn(console, 'error').mockImplementation();
     mockDeleteProject.mockImplementation(() => Promise.reject(new Error('Delete failed')));
 
     renderWithQueryClient(<ProjectsPage />);
@@ -605,7 +625,8 @@ describe('ProjectsPage', () => {
   });
 
   // Note: Filters use TabsTrigger which has role="tab" not role="button"
-  it.skip('filters by on_hold status', async () => {
+  it('filters by on_hold status', async () => {
+    const user = userEvent.setup();
     const projectsWithOnHold: Project[] = [
       ...mockProjects,
       {
@@ -626,15 +647,16 @@ describe('ProjectsPage', () => {
       expect(screen.getByText('On Hold Project')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'On Hold' }));
+    await user.click(screen.getByRole('tab', { name: 'On Hold' }));
 
     await waitFor(() => {
-      expect(mockGetProjects).toHaveBeenCalledWith('on_hold');
+      expect(mockGetProjects).toHaveBeenCalledWith('workspace-1', 'on_hold');
     });
   });
 
   // Note: Filters use TabsTrigger which has role="tab" not role="button"
-  it.skip('filters by cancelled status', async () => {
+  it('filters by cancelled status', async () => {
+    const user = userEvent.setup();
     const projectsWithCancelled: Project[] = [
       {
         id: 'proj-4',
@@ -655,13 +677,13 @@ describe('ProjectsPage', () => {
 
     renderWithQueryClient(<ProjectsPage />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Cancelled' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'Cancelled' })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Cancelled' }));
+    await user.click(screen.getByRole('tab', { name: 'Cancelled' }));
 
     await waitFor(() => {
-      expect(mockGetProjects).toHaveBeenCalledWith('cancelled');
+      expect(mockGetProjects).toHaveBeenCalledWith('workspace-1', 'cancelled');
     });
   });
 

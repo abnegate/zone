@@ -1,26 +1,35 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { tasksApi } from '../../../api/tasks';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { TaskRun, TaskRunLog } from '../types';
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
-import { useTaskRuns } from './useTaskRuns';
 
-jest.mock('../../../api/tasks', () => ({
-  tasksApi: {
-    getTaskRuns: jest.fn(),
-    getTaskRun: jest.fn(),
-    getTaskRunLogs: jest.fn(),
-  },
+const mockTasksApi = {
+  getTaskRuns: mock(),
+  getTaskRun: mock(),
+  getTaskRunLogs: mock(),
+};
+
+mock.module('../../../api/tasks', () => ({
+  tasksApi: mockTasksApi,
 }));
 
-const mockTasksApi = tasksApi as jest.Mocked<typeof tasksApi>;
+let useTaskRuns: typeof import('./useTaskRuns').useTaskRuns;
+
+beforeAll(async () => {
+  ({ useTaskRuns } = await import('./useTaskRuns'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 const createWrapper = () => {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false, gcTime: 0 },
     },
   });
   return ({ children }: { children: ReactNode }) =>
@@ -50,7 +59,7 @@ const mockLog: TaskRunLog = {
 
 describe('useTaskRuns', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
   });
 
   it('loads runs on mount', async () => {
@@ -157,7 +166,9 @@ describe('useTaskRuns', () => {
     const newRun = { ...mockRun, id: 'run-2' };
     mockTasksApi.getTaskRuns.mockResolvedValueOnce([mockRun, newRun]);
 
-    result.current.refetch();
+    act(() => {
+      result.current.refetch();
+    });
 
     await waitFor(() => {
       expect(result.current.runs).toHaveLength(2);
@@ -179,7 +190,9 @@ describe('useTaskRuns', () => {
       expect(mockTasksApi.getTaskRuns).toHaveBeenCalledWith('task-1');
     });
 
-    rerender({ taskId: 'task-2' });
+    act(() => {
+      rerender({ taskId: 'task-2' });
+    });
 
     await waitFor(() => {
       expect(mockTasksApi.getTaskRuns).toHaveBeenCalledWith('task-2');

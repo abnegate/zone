@@ -401,7 +401,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_create_source_sets_workspace_id() {
         let pool = create_test_pool().await;
         let (_org_id, workspace_id, _user_id) = setup_test_data(&pool).await;
@@ -430,7 +433,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_list_sources_filters_by_workspace() {
         let pool = create_test_pool().await;
         let (org_id, workspace_id1, _user_id) = setup_test_data(&pool).await;
@@ -487,7 +493,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_get_source_requires_matching_workspace() {
         let pool = create_test_pool().await;
         let (org_id, workspace_id1, _user_id) = setup_test_data(&pool).await;
@@ -539,7 +548,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_update_source_requires_matching_workspace() {
         let pool = create_test_pool().await;
         let (org_id, workspace_id1, _user_id) = setup_test_data(&pool).await;
@@ -611,7 +623,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_delete_source_requires_matching_workspace() {
         let pool = create_test_pool().await;
         let (org_id, workspace_id1, _user_id) = setup_test_data(&pool).await;
@@ -669,7 +684,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Requires running PostgreSQL database
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "PostgreSQL not available on this platform"
+    )]
     async fn test_get_sources_by_ids_filters_by_workspace() {
         let pool = create_test_pool().await;
         let (org_id, workspace_id1, _user_id) = setup_test_data(&pool).await;

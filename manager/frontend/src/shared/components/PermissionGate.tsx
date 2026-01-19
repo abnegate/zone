@@ -7,6 +7,7 @@ interface PermissionGateProps {
   permissions?: string[];
   requireAll?: boolean;
   fallback?: ReactNode;
+  useAuthHook?: typeof useAuth;
 }
 
 export default function PermissionGate({
@@ -15,8 +16,10 @@ export default function PermissionGate({
   permissions,
   requireAll = false,
   fallback = null,
+  useAuthHook,
 }: PermissionGateProps) {
-  const { hasPermission, hasAnyPermission, hasAllPermissions } = useAuth();
+  const auth = (useAuthHook ?? useAuth)();
+  const { hasPermission, hasAnyPermission, hasAllPermissions } = auth;
 
   // Check single permission
   if (permission) {

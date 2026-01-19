@@ -1,21 +1,64 @@
 import { render, screen } from '@testing-library/react';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
+import PermissionGate from './PermissionGate';
 
-const mockUseAuth = mock();
+type AuthState = {
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  user: {
+    id: string;
+    email: string;
+    display_name: string | null;
+    is_admin: boolean;
+    is_active: boolean;
+    email_verified: boolean;
+    created_at: string;
+    updated_at: string;
+    last_login_at: string | null;
+  } | null;
+  accessToken: string | null;
+  refreshToken: string | null;
+  roles: string[];
+  permissions: string[];
+  login: () => Promise<void>;
+  register: () => Promise<void>;
+  logout: () => Promise<void>;
+  hasPermission: (permission: string) => boolean;
+  hasAnyPermission: (permissions: string[]) => boolean;
+  hasAllPermissions: (permissions: string[]) => boolean;
+  hasRole: (role: string) => boolean;
+};
 
-mock.module('../../features/auth', () => ({
-  useAuth: mockUseAuth,
-}));
-
-let PermissionGate: typeof import('./PermissionGate').default;
-
-beforeAll(async () => {
-  PermissionGate = (await import('./PermissionGate')).default;
+const createAuthState = (overrides: Partial<AuthState> = {}): AuthState => ({
+  isAuthenticated: true,
+  isLoading: false,
+  user: {
+    id: '1',
+    email: 'test@test.com',
+    display_name: 'Test',
+    is_admin: false,
+    is_active: true,
+    email_verified: true,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    last_login_at: null,
+  },
+  accessToken: 'token',
+  refreshToken: 'refresh',
+  roles: ['user'],
+  permissions: [],
+  login: async () => {},
+  register: async () => {},
+  logout: async () => {},
+  hasPermission: () => false,
+  hasAnyPermission: () => false,
+  hasAllPermissions: () => false,
+  hasRole: () => false,
+  ...overrides,
 });
 
-afterAll(() => {
-  mock.restore();
-});
+let authState = createAuthState();
+const useAuthHook = () => authState;
 
 // Test components
 const ProtectedButton = () => <button data-testid="delete-button">Delete</button>;
@@ -23,40 +66,18 @@ const FallbackMessage = () => <span data-testid="fallback">You cannot delete</sp
 
 describe('PermissionGate', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    authState = createAuthState();
   });
 
   describe('Single Permission', () => {
     it('renders children when user has permission', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['user'],
+      authState = createAuthState({
         permissions: ['chats:delete'],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn().mockReturnValue(true),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+        hasPermission: () => true,
       });
 
       render(
-        <PermissionGate permission="chats:delete">
+        <PermissionGate permission="chats:delete" useAuthHook={useAuthHook}>
           <ProtectedButton />
         </PermissionGate>
       );
@@ -65,35 +86,12 @@ describe('PermissionGate', () => {
     });
 
     it('renders nothing when user lacks permission and no fallback', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['user'],
-        permissions: [],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn().mockReturnValue(false),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+      authState = createAuthState({
+        hasPermission: () => false,
       });
 
       render(
-        <PermissionGate permission="chats:delete">
+        <PermissionGate permission="chats:delete" useAuthHook={useAuthHook}>
           <ProtectedButton />
         </PermissionGate>
       );
@@ -102,35 +100,16 @@ describe('PermissionGate', () => {
     });
 
     it('renders fallback when user lacks permission', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['user'],
-        permissions: [],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn().mockReturnValue(false),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+      authState = createAuthState({
+        hasPermission: () => false,
       });
 
       render(
-        <PermissionGate permission="chats:delete" fallback={<FallbackMessage />}>
+        <PermissionGate
+          permission="chats:delete"
+          fallback={<FallbackMessage />}
+          useAuthHook={useAuthHook}
+        >
           <ProtectedButton />
         </PermissionGate>
       );
@@ -142,35 +121,16 @@ describe('PermissionGate', () => {
 
   describe('Multiple Permissions (Any)', () => {
     it('renders children when user has any of the permissions', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['user'],
+      authState = createAuthState({
         permissions: ['chats:update'],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn().mockReturnValue(true),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+        hasAnyPermission: () => true,
       });
 
       render(
-        <PermissionGate permissions={['chats:update', 'chats:delete']}>
+        <PermissionGate
+          permissions={['chats:update', 'chats:delete']}
+          useAuthHook={useAuthHook}
+        >
           <ProtectedButton />
         </PermissionGate>
       );
@@ -179,35 +139,15 @@ describe('PermissionGate', () => {
     });
 
     it('renders nothing when user has none of the permissions', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['user'],
-        permissions: [],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn().mockReturnValue(false),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+      authState = createAuthState({
+        hasAnyPermission: () => false,
       });
 
       render(
-        <PermissionGate permissions={['chats:update', 'chats:delete']}>
+        <PermissionGate
+          permissions={['chats:update', 'chats:delete']}
+          useAuthHook={useAuthHook}
+        >
           <ProtectedButton />
         </PermissionGate>
       );
@@ -218,35 +158,17 @@ describe('PermissionGate', () => {
 
   describe('Multiple Permissions (All Required)', () => {
     it('renders children when user has all permissions', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: true,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['admin'],
+      authState = createAuthState({
         permissions: ['chats:update', 'chats:delete'],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn().mockReturnValue(true),
-        hasRole: jest.fn(),
+        hasAllPermissions: () => true,
       });
 
       render(
-        <PermissionGate permissions={['chats:update', 'chats:delete']} requireAll>
+        <PermissionGate
+          permissions={['chats:update', 'chats:delete']}
+          requireAll
+          useAuthHook={useAuthHook}
+        >
           <ProtectedButton />
         </PermissionGate>
       );
@@ -255,35 +177,17 @@ describe('PermissionGate', () => {
     });
 
     it('renders nothing when user lacks one of required permissions', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['user'],
+      authState = createAuthState({
         permissions: ['chats:update'],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn().mockReturnValue(false),
-        hasRole: jest.fn(),
+        hasAllPermissions: () => false,
       });
 
       render(
-        <PermissionGate permissions={['chats:update', 'chats:delete']} requireAll>
+        <PermissionGate
+          permissions={['chats:update', 'chats:delete']}
+          requireAll
+          useAuthHook={useAuthHook}
+        >
           <ProtectedButton />
         </PermissionGate>
       );
@@ -292,31 +196,8 @@ describe('PermissionGate', () => {
     });
 
     it('renders fallback when requireAll fails', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['user'],
-        permissions: [],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn().mockReturnValue(false),
-        hasRole: jest.fn(),
+      authState = createAuthState({
+        hasAllPermissions: () => false,
       });
 
       render(
@@ -324,6 +205,7 @@ describe('PermissionGate', () => {
           permissions={['admin:read', 'admin:write']}
           requireAll
           fallback={<FallbackMessage />}
+          useAuthHook={useAuthHook}
         >
           <ProtectedButton />
         </PermissionGate>
@@ -335,35 +217,10 @@ describe('PermissionGate', () => {
 
   describe('No Permissions Specified', () => {
     it('renders children when no permission prop provided', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: [],
-        permissions: [],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
-      });
+      authState = createAuthState();
 
       render(
-        <PermissionGate>
+        <PermissionGate useAuthHook={useAuthHook}>
           <ProtectedButton />
         </PermissionGate>
       );
@@ -372,35 +229,10 @@ describe('PermissionGate', () => {
     });
 
     it('renders children when empty permissions array provided', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: [],
-        permissions: [],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn(),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
-      });
+      authState = createAuthState();
 
       render(
-        <PermissionGate permissions={[]}>
+        <PermissionGate permissions={[]} useAuthHook={useAuthHook}>
           <ProtectedButton />
         </PermissionGate>
       );
@@ -411,44 +243,19 @@ describe('PermissionGate', () => {
 
   describe('Nested PermissionGates', () => {
     it('correctly handles nested gates', () => {
-      const hasPermission = jest.fn().mockImplementation((perm) => {
-        return perm === 'projects:read';
-      });
-
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: ['user'],
+      authState = createAuthState({
         permissions: ['projects:read'],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission,
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+        hasPermission: (perm) => perm === 'projects:read',
       });
 
       render(
-        <PermissionGate permission="projects:read">
+        <PermissionGate permission="projects:read" useAuthHook={useAuthHook}>
           <div data-testid="outer">
             Outer Content
             <PermissionGate
               permission="projects:delete"
               fallback={<span data-testid="inner-fallback">No Delete</span>}
+              useAuthHook={useAuthHook}
             >
               <button data-testid="delete">Delete</button>
             </PermissionGate>
@@ -464,35 +271,12 @@ describe('PermissionGate', () => {
 
   describe('Fallback Content Types', () => {
     it('accepts string as fallback', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: [],
-        permissions: [],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn().mockReturnValue(false),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+      authState = createAuthState({
+        hasPermission: () => false,
       });
 
       render(
-        <PermissionGate permission="admin:all" fallback="Access denied">
+        <PermissionGate permission="admin:all" fallback="Access denied" useAuthHook={useAuthHook}>
           <ProtectedButton />
         </PermissionGate>
       );
@@ -501,35 +285,12 @@ describe('PermissionGate', () => {
     });
 
     it('accepts null as fallback (renders nothing)', () => {
-      mockUseAuth.mockReturnValue({
-        isAuthenticated: true,
-        isLoading: false,
-        user: {
-          id: '1',
-          email: 'test@test.com',
-          display_name: 'Test',
-          is_admin: false,
-          is_active: true,
-          email_verified: true,
-          created_at: '2024-01-01T00:00:00Z',
-          updated_at: '2024-01-01T00:00:00Z',
-          last_login_at: null,
-        },
-        accessToken: 'token',
-        refreshToken: 'refresh',
-        roles: [],
-        permissions: [],
-        login: jest.fn(),
-        register: jest.fn(),
-        logout: jest.fn(),
-        hasPermission: jest.fn().mockReturnValue(false),
-        hasAnyPermission: jest.fn(),
-        hasAllPermissions: jest.fn(),
-        hasRole: jest.fn(),
+      authState = createAuthState({
+        hasPermission: () => false,
       });
 
       const { container } = render(
-        <PermissionGate permission="admin:all" fallback={null}>
+        <PermissionGate permission="admin:all" fallback={null} useAuthHook={useAuthHook}>
           <ProtectedButton />
         </PermissionGate>
       );

@@ -1,18 +1,27 @@
 import { render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../../../api/client';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Limits, Subscription, Usage } from '../types';
-import { BillingSection } from './BillingSection';
 
 // Mock the client
-jest.mock('../../../../api/client', () => ({
-  client: {
-    getSubscription: jest.fn(),
-    getUsage: jest.fn(),
-    getLimits: jest.fn(),
-  },
+const mockClient = {
+  getSubscription: mock(),
+  getUsage: mock(),
+  getLimits: mock(),
+};
+
+mock.module('../../../../api/client', () => ({
+  client: mockClient,
 }));
 
-const mockClient = client as jest.Mocked<typeof client>;
+let BillingSection: typeof import('./BillingSection').BillingSection;
+
+beforeAll(async () => {
+  ({ BillingSection } = await import('./BillingSection'));
+});
+
+afterAll(() => {
+  mock.restore();
+});
 
 describe('BillingSection', () => {
   const orgId = 'org-123';
@@ -47,7 +56,7 @@ describe('BillingSection', () => {
   };
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    mock.clearAllMocks();
   });
 
   describe('Loading State', () => {

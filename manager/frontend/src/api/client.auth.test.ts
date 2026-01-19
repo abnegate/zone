@@ -1,15 +1,18 @@
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { client } from './client';
 
 describe('Client - Auth Methods', () => {
   const API_BASE = import.meta.env.VITE_API_URL || '';
+  let mockFetch: ReturnType<typeof mock>;
 
   beforeEach(() => {
-    global.fetch = jest.fn();
+    mockFetch = mock();
+    global.fetch = mockFetch as typeof fetch;
     client.setAccessToken('test-token');
   });
 
   afterEach(() => {
-    jest.resetAllMocks();
+    mock.clearAllMocks();
   });
 
   describe('verifyEmail', () => {
@@ -19,7 +22,7 @@ describe('Client - Auth Methods', () => {
         message: 'Email verified successfully',
       };
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockResponse,
       });
@@ -39,7 +42,7 @@ describe('Client - Auth Methods', () => {
     });
 
     it('throws error when verification fails', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 400,
       });
@@ -57,7 +60,7 @@ describe('Client - Auth Methods', () => {
         message: 'Verification email sent',
       };
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockResponse,
       });
@@ -77,7 +80,7 @@ describe('Client - Auth Methods', () => {
     });
 
     it('throws error when resend fails', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 429,
       });
@@ -95,7 +98,7 @@ describe('Client - Auth Methods', () => {
         message: 'Password reset email sent',
       };
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockResponse,
       });
@@ -114,19 +117,19 @@ describe('Client - Auth Methods', () => {
     });
 
     it('does not include Authorization header for forgot password', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true, message: 'Sent' }),
       });
 
       await client.forgotPassword('test@example.com');
 
-      const callArgs = (global.fetch as jest.Mock).mock.calls[0];
+      const callArgs = mockFetch.mock.calls[0];
       expect(callArgs[1].headers.Authorization).toBeUndefined();
     });
 
     it('throws error when forgot password fails', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 404,
       });
@@ -144,7 +147,7 @@ describe('Client - Auth Methods', () => {
         message: 'Password reset successfully',
       };
 
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockResponse,
       });
@@ -166,19 +169,19 @@ describe('Client - Auth Methods', () => {
     });
 
     it('does not include Authorization header for reset password', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true, message: 'Reset' }),
       });
 
       await client.resetPassword('token', 'newpass');
 
-      const callArgs = (global.fetch as jest.Mock).mock.calls[0];
+      const callArgs = mockFetch.mock.calls[0];
       expect(callArgs[1].headers.Authorization).toBeUndefined();
     });
 
     it('throws error when password reset fails', async () => {
-      (global.fetch as jest.Mock).mockResolvedValueOnce({
+      mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 400,
       });
