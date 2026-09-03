@@ -70,6 +70,11 @@ validate_model_name "${OLLAMA_MODEL_FAST}" "OLLAMA_MODEL_FAST"
 validate_model_name "${OLLAMA_MODEL_REASON}" "OLLAMA_MODEL_REASON"
 validate_model_name "${OLLAMA_MODEL_EMBED}" "OLLAMA_MODEL_EMBED"
 
+# Vision is optional: an install without it still runs, just without images.
+OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+OLLAMA_MODEL_VISION="${OLLAMA_MODEL_VISION:-llava:7b}"
+validate_model_name "${OLLAMA_MODEL_VISION}" "OLLAMA_MODEL_VISION"
+
 # Generate config.yaml from template with model names
 if [ -f /app/config.yaml.template ]; then
     echo "[litellm-entrypoint] Generating config.yaml from template..."
@@ -79,12 +84,16 @@ if [ -f /app/config.yaml.template ]; then
     sed -e "s|{{OLLAMA_MODEL_FAST}}|${OLLAMA_MODEL_FAST}|g" \
         -e "s|{{OLLAMA_MODEL_REASON}}|${OLLAMA_MODEL_REASON}|g" \
         -e "s|{{OLLAMA_MODEL_EMBED}}|${OLLAMA_MODEL_EMBED}|g" \
+        -e "s|{{OLLAMA_MODEL_VISION}}|${OLLAMA_MODEL_VISION}|g" \
+        -e "s|{{OLLAMA_BASE_URL}}|${OLLAMA_BASE_URL}|g" \
         /app/config.yaml.template > "${CONFIG_YAML}"
 
     echo "[litellm-entrypoint] ✓ config.yaml generated"
     echo "[litellm-entrypoint]   fast:   ${OLLAMA_MODEL_FAST}"
     echo "[litellm-entrypoint]   reason: ${OLLAMA_MODEL_REASON}"
     echo "[litellm-entrypoint]   embed:  ${OLLAMA_MODEL_EMBED}"
+    echo "[litellm-entrypoint]   vision: ${OLLAMA_MODEL_VISION}"
+    echo "[litellm-entrypoint]   engine: ${OLLAMA_BASE_URL}"
 else
     echo "[litellm-entrypoint] Warning: config.yaml.template not found"
     exit 1

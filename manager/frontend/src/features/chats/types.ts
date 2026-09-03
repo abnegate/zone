@@ -4,12 +4,23 @@
 
 export type MessageRole = 'user' | 'assistant' | 'system';
 
+export interface MessageAttachment {
+  name: string;
+  mime: string;
+  url: string;
+}
+
+export interface MessageMetadata {
+  attachments?: MessageAttachment[];
+}
+
 export interface Message {
   id: string;
   chat_id: string;
   role: MessageRole;
   content: string;
   created_at: string;
+  metadata?: MessageMetadata | null;
 }
 
 export interface Chat {
@@ -34,6 +45,7 @@ export interface CreateChatRequest {
 
 export interface SendMessageRequest {
   content: string;
+  metadata?: MessageMetadata;
 }
 
 // =============================================================================

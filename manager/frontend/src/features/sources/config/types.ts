@@ -48,6 +48,9 @@ export interface SourceDefinition {
   // Generate default name from config
   getDefaultName: (state: Record<string, unknown>) => string;
 
+  // Public URL for this source, when one can be derived from the form
+  getUrl?: (state: Record<string, unknown>) => string | undefined;
+
   // Get field IDs for state initialization
   getFieldIds: () => string[];
 }

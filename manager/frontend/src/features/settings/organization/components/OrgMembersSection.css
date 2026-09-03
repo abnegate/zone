@@ -1,24 +1,25 @@
 .org-members-section {
-  padding: 24px;
+  padding: 0;
 }
 
 .section-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 24px;
+  gap: var(--ui-space-4);
+  margin-bottom: var(--ui-space-4);
 }
 
 .section-title {
-  font-size: 24px;
+  font-size: var(--ui-text-lg);
   font-weight: 600;
-  margin: 0 0 8px 0;
-  color: var(--color-text-primary);
+  margin: 0 0 4px 0;
+  color: var(--ui-text-primary);
 }
 
 .section-description {
-  font-size: 14px;
-  color: var(--color-text-secondary);
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-secondary);
   margin: 0;
 }
 
@@ -30,23 +31,24 @@
 
 .empty-state {
   text-align: center;
-  padding: 48px;
-  color: var(--color-text-secondary);
-  background: var(--color-background-secondary);
-  border-radius: 8px;
+  padding: var(--ui-space-8) var(--ui-space-4);
+  color: var(--ui-text-secondary);
+  background: var(--ui-bg-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
 }
 
 .alert {
-  padding: 12px 16px;
-  border-radius: 6px;
-  margin-bottom: 16px;
-  font-size: 14px;
+  padding: var(--ui-space-3) var(--ui-space-4);
+  border-radius: var(--ui-radius-md);
+  margin-bottom: var(--ui-space-4);
+  font-size: var(--ui-text-sm);
 }
 
 .alert-error {
-  background: var(--color-error-bg, #fee);
-  color: var(--color-error-text, #c00);
-  border: 1px solid var(--color-error-border, #fcc);
+  background: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  color: var(--ui-error);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
 }
 
 .alert-success {

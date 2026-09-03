@@ -4,17 +4,76 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A chat message
+/// One part of a multimodal message body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// An image reference. Data URLs are accepted by OpenAI-compatible providers,
+/// which is how an uploaded image reaches a vision model without object storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+}
+
+/// A chat message.
+///
+/// `content` stays a plain string for every caller. `images` is serialised by
+/// widening the body into OpenAI content parts, the only shape vision models
+/// accept; a message with no images serialises exactly as it did before.
+#[derive(Debug, Clone, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_deserializing)]
+    pub images: Vec<String>,
+}
+
+impl Serialize for Message {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("role", &self.role)?;
+
+        if self.images.is_empty() {
+            if let Some(content) = &self.content {
+                map.serialize_entry("content", content)?;
+            }
+        } else {
+            let mut parts = Vec::with_capacity(self.images.len() + 1);
+            if let Some(content) = &self.content {
+                if !content.is_empty() {
+                    parts.push(ContentPart::Text {
+                        text: content.clone(),
+                    });
+                }
+            }
+            for url in &self.images {
+                parts.push(ContentPart::ImageUrl {
+                    image_url: ImageUrl { url: url.clone() },
+                });
+            }
+            map.serialize_entry("content", &parts)?;
+        }
+
+        if let Some(name) = &self.name {
+            map.serialize_entry("name", name)?;
+        }
+        if let Some(tool_calls) = &self.tool_calls {
+            map.serialize_entry("tool_calls", tool_calls)?;
+        }
+        if let Some(tool_call_id) = &self.tool_call_id {
+            map.serialize_entry("tool_call_id", tool_call_id)?;
+        }
+        map.end()
+    }
 }
 
 impl Message {
@@ -25,6 +84,7 @@ impl Message {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -35,6 +95,7 @@ impl Message {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -45,6 +106,7 @@ impl Message {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -55,6 +117,7 @@ impl Message {
             name: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            images: Vec::new(),
         }
     }
 
@@ -65,6 +128,7 @@ impl Message {
             name: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            images: Vec::new(),
         }
     }
 }
@@ -209,19 +273,30 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
-/// Streaming chunk
+/// Streaming chunk.
+///
+/// Only `choices` carries content. The envelope fields are optional because
+/// OpenAI-compatible providers do not all send them on every chunk -- LiteLLM
+/// omits `id` on at least one -- and a chunk that fails to deserialise aborts
+/// the whole stream, losing the reply.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatStreamChunk {
-    pub id: String,
-    pub object: String,
-    pub created: i64,
-    pub model: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub object: Option<String>,
+    #[serde(default)]
+    pub created: Option<i64>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub choices: Vec<StreamChoice>,
 }
 
 /// Streaming choice delta
 #[derive(Debug, Clone, Deserialize)]
 pub struct StreamChoice {
+    #[serde(default)]
     pub index: u32,
     pub delta: StreamDelta,
     pub finish_reason: Option<String>,
@@ -824,7 +899,7 @@ mod tests {
         }"#;
 
         let chunk: ChatStreamChunk = serde_json::from_str(json).unwrap();
-        assert_eq!(chunk.id, "chatcmpl-stream");
+        assert_eq!(chunk.id.as_deref(), Some("chatcmpl-stream"));
         assert_eq!(chunk.choices[0].delta.content, Some("Hello".to_string()));
         assert!(chunk.choices[0].finish_reason.is_none());
     }

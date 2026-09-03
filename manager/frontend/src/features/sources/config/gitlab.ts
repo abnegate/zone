@@ -56,5 +56,12 @@ export const gitlabSource: SourceDefinition = {
 
   getDefaultName: (state) => state.glProjectId as string,
 
+  getUrl: (state) => {
+    const project = state.glProjectId as string;
+    if (!project) return undefined;
+    const host = ((state.glHost as string) || 'https://gitlab.com').replace(/\/$/, '');
+    return `${host}/${project}`;
+  },
+
   getFieldIds: () => ['glHost', 'glProjectId', 'glBranch'],
 };

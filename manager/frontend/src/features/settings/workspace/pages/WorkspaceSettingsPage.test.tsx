@@ -38,6 +38,38 @@ mock.module('../../../../shared/context/ThemeContext', () => ({
   }),
 }));
 
+mock.module('../../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentOrganization: {
+      id: '00000000-0000-0000-0000-000000000001',
+      name: 'Test Org',
+      slug: 'test-org',
+      description: null,
+      is_active: true,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    },
+    currentWorkspace: {
+      id: '00000000-0000-0000-0000-000000000001',
+      organization_id: '00000000-0000-0000-0000-000000000001',
+      name: 'Test Workspace',
+      slug: 'test-workspace',
+      description: null,
+      is_active: true,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    },
+    organizations: [],
+    workspaces: [],
+    loading: false,
+    error: null,
+    setCurrentOrganization: mock(),
+    setCurrentWorkspace: mock(),
+    refreshOrganizations: mock(),
+    refreshWorkspaces: mock(),
+  }),
+}));
+
 let WorkspaceSettingsPage: typeof import('./WorkspaceSettingsPage').default;
 
 beforeAll(async () => {

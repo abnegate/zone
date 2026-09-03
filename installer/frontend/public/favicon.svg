@@ -1,11 +1,4 @@
-<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="zone-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#667eea"/>
-      <stop offset="100%" style="stop-color:#764ba2"/>
-    </linearGradient>
-  </defs>
-  <circle cx="50" cy="50" r="42" stroke="url(#zone-grad)" stroke-width="2" fill="none"/>
-  <circle cx="50" cy="50" r="24" stroke="url(#zone-grad)" stroke-width="3" fill="none"/>
-  <circle cx="50" cy="50" r="10" fill="url(#zone-grad)"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="14" fill="#1a1612"/>
+  <path fill="#d47d3f" d="M14 15h36v10L28 39h22v10H14V39l22-14H14z"/>
 </svg>

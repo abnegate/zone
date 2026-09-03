@@ -405,7 +405,7 @@ describe('WikiPage', () => {
       await user.click(submitButton);
       await waitFor(() => {
         expect(mockCreateEntry).toHaveBeenCalledWith({
-          workspace_id: '00000000-0000-0000-0000-000000000001',
+          workspace_id: 'test-ws',
           title: 'New Entry',
           type: 'text',
           content: 'New content',
@@ -443,7 +443,7 @@ describe('WikiPage', () => {
       await user.click(submitButton);
       await waitFor(() => {
         expect(mockCreateEntry).toHaveBeenCalledWith({
-          workspace_id: '00000000-0000-0000-0000-000000000001',
+          workspace_id: 'test-ws',
           title: 'New URL',
           type: 'url',
           content: 'https://newurl.com',

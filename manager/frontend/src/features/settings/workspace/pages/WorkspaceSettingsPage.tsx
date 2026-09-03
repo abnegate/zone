@@ -4,6 +4,7 @@ import { WorkspaceMembersSection } from '../components';
 import { Button, Tabs, TabsList, TabsTrigger, TabsContent } from '@zone/ui';
 import { useAuth } from '../../../auth';
 import { useTheme } from '../../../../shared/context/ThemeContext';
+import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import type {
   AiProvider,
   AiSettings,
@@ -16,9 +17,6 @@ import type {
 import './WorkspaceSettingsPage.css';
 
 type Tab = 'theme' | 'ai' | 'members';
-
-const DEFAULT_ORG_ID = '00000000-0000-0000-0000-000000000001';
-const DEFAULT_WS_ID = '00000000-0000-0000-0000-000000000001';
 
 const fontOptions: { value: FontFamily; label: string }[] = [
   { value: 'system', label: 'System Default' },
@@ -71,6 +69,9 @@ const awsRegions = ['us-east-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-n
 export default function WorkspaceSettingsPage() {
   const { isAuthenticated } = useAuth();
   const { workspaceTheme, setWorkspaceTheme } = useTheme();
+  const { currentOrganization, currentWorkspace } = useWorkspace();
+  const orgId = currentOrganization?.id ?? null;
+  const workspaceId = currentWorkspace?.id ?? null;
 
   const [activeTab, setActiveTab] = useState<Tab>('theme');
   const [loading, setLoading] = useState(true);
@@ -111,16 +112,21 @@ export default function WorkspaceSettingsPage() {
 
   // Load current theme and AI settings
   const loadTheme = useCallback(async () => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || !orgId || !workspaceId) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
       const [theme, wsAiSettings, effectiveAi] = await Promise.all([
-        client.getWorkspaceTheme(DEFAULT_ORG_ID, DEFAULT_WS_ID),
-        client.getWorkspaceAiSettings(DEFAULT_ORG_ID, DEFAULT_WS_ID),
-        client.getEffectiveAiSettings(DEFAULT_ORG_ID, DEFAULT_WS_ID),
+        client.getWorkspaceTheme(orgId, workspaceId),
+        client.getWorkspaceAiSettings(orgId, workspaceId),
+        client.getEffectiveAiSettings(orgId, workspaceId),
       ]);
-      applyThemeToForm(theme);
+      if (theme) {
+        applyThemeToForm(theme);
+      }
       setWorkspaceTheme(theme);
       applyAiSettingsToForm(wsAiSettings);
       setEffectiveSettings(effectiveAi);
@@ -129,7 +135,7 @@ export default function WorkspaceSettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, [isAuthenticated, setWorkspaceTheme]);
+  }, [isAuthenticated, orgId, workspaceId, setWorkspaceTheme]);
 
   const applyAiSettingsToForm = (settings: AiSettings) => {
     // Check if workspace has custom settings (provider != default means override)
@@ -189,7 +195,7 @@ export default function WorkspaceSettingsPage() {
 
     const previewTheme: WorkspaceTheme = {
       id: workspaceTheme?.id || '',
-      workspace_id: workspaceTheme?.workspace_id || DEFAULT_WS_ID,
+      workspace_id: workspaceTheme?.workspace_id || workspaceId || '',
       primary_color_light: primaryColorLight,
       secondary_color_light: secondaryColorLight,
       primary_color_dark: primaryColorDark,
@@ -218,7 +224,7 @@ export default function WorkspaceSettingsPage() {
 
   const handleSave = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || !orgId || !workspaceId) return;
 
     setSaving(true);
     setError(null);
@@ -235,7 +241,7 @@ export default function WorkspaceSettingsPage() {
         font_size_base: `${fontSize}px`,
         border_radius: borderRadius,
       };
-      const theme = await client.updateWorkspaceTheme(DEFAULT_ORG_ID, DEFAULT_WS_ID, themeRequest);
+      const theme = await client.updateWorkspaceTheme(orgId, workspaceId, themeRequest);
       setWorkspaceTheme(theme);
 
       // Save AI settings if overriding
@@ -264,12 +270,12 @@ export default function WorkspaceSettingsPage() {
           }
         }
         const aiSettings = await client.updateWorkspaceAiSettings(
-          DEFAULT_ORG_ID,
-          DEFAULT_WS_ID,
+          orgId,
+          workspaceId,
           aiRequest
         );
         applyAiSettingsToForm(aiSettings);
-        const effective = await client.getEffectiveAiSettings(DEFAULT_ORG_ID, DEFAULT_WS_ID);
+        const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
         setEffectiveSettings(effective);
       }
 
@@ -283,7 +289,7 @@ export default function WorkspaceSettingsPage() {
   };
 
   const handleReset = async () => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || !orgId || !workspaceId) return;
 
     setSaving(true);
     setError(null);
@@ -291,9 +297,9 @@ export default function WorkspaceSettingsPage() {
 
     try {
       const [theme, aiSettings, effective] = await Promise.all([
-        client.resetWorkspaceTheme(DEFAULT_ORG_ID, DEFAULT_WS_ID),
-        client.resetWorkspaceAiSettings(DEFAULT_ORG_ID, DEFAULT_WS_ID),
-        client.getEffectiveAiSettings(DEFAULT_ORG_ID, DEFAULT_WS_ID),
+        client.resetWorkspaceTheme(orgId, workspaceId),
+        client.resetWorkspaceAiSettings(orgId, workspaceId),
+        client.getEffectiveAiSettings(orgId, workspaceId),
       ]);
       applyThemeToForm(theme);
       setWorkspaceTheme(theme);
@@ -313,20 +319,38 @@ export default function WorkspaceSettingsPage() {
 
   if (loading) {
     return (
-      <div className="page-container">
-        <div className="page-header">
+      <div className="page page--workspace settings-page">
+        <header className="settings-page-header">
           <h1 className="page-title">Workspace Settings</h1>
+        </header>
+        <div className="settings-page-body">
+          <div className="loading-state">Loading theme settings...</div>
         </div>
-        <div className="loading-state">Loading theme settings...</div>
+      </div>
+    );
+  }
+
+  if (!orgId || !workspaceId) {
+    return (
+      <div className="page page--workspace settings-page">
+        <header className="settings-page-header">
+          <h1 className="page-title">Workspace Settings</h1>
+        </header>
+        <div className="settings-page-body">
+          <div className="alert alert-error">
+            No workspace selected. Please select or create a workspace first.
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="page-container">
-      <div className="page-header">
+    <div className="page page--workspace settings-page">
+      <header className="settings-page-header">
         <h1 className="page-title">Workspace Settings</h1>
-      </div>
+      </header>
+      <div className="settings-page-body">
 
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
@@ -339,7 +363,7 @@ export default function WorkspaceSettingsPage() {
         </TabsList>
 
         <TabsContent value="members">
-          <WorkspaceMembersSection workspaceId={DEFAULT_WS_ID} orgId={DEFAULT_ORG_ID} />
+          <WorkspaceMembersSection workspaceId={workspaceId} orgId={orgId} />
         </TabsContent>
 
         <TabsContent value="theme">
@@ -854,6 +878,7 @@ export default function WorkspaceSettingsPage() {
           </form>
         </TabsContent>
       </Tabs>
+      </div>
     </div>
   );
 }

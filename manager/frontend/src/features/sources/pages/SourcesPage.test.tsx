@@ -1,5 +1,5 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterAll, beforeAll, mock, beforeEach, describe, it, expect } from 'bun:test';
 import type { Source } from '../types';
 
 // Create mock functions for the sources API
@@ -267,7 +267,9 @@ describe('SourcesPage', () => {
     fireEvent.click(disableButtons[0]);
 
     await waitFor(() => {
-      expect(mockUpdateSource).toHaveBeenCalledWith('test-workspace-id', 'src-1', { is_active: false });
+      expect(mockUpdateSource).toHaveBeenCalledWith('test-workspace-id', 'src-1', {
+        is_active: false,
+      });
     });
   });
 
@@ -284,7 +286,9 @@ describe('SourcesPage', () => {
     fireEvent.click(enableButton);
 
     await waitFor(() => {
-      expect(mockUpdateSource).toHaveBeenCalledWith('test-workspace-id', 'src-2', { is_active: true });
+      expect(mockUpdateSource).toHaveBeenCalledWith('test-workspace-id', 'src-2', {
+        is_active: true,
+      });
     });
   });
 
@@ -378,10 +382,11 @@ describe('SourcesPage', () => {
 
   it('shows verifying state during verification', async () => {
     let resolveVerify!: (value: { success: boolean; message: string }) => void;
-    mockVerifySource.mockImplementation(() =>
-      new Promise((resolve) => {
-        resolveVerify = resolve;
-      })
+    mockVerifySource.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveVerify = resolve;
+        })
     );
     mockGetSource.mockImplementation(() => Promise.resolve(mockSources[0]));
 
@@ -478,7 +483,15 @@ describe('SourcesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add Source' }));
 
     await waitFor(() => {
-      expect(mockCreateSource).toHaveBeenCalled();
+      expect(mockCreateSource).toHaveBeenCalledWith(
+        'test-workspace-id',
+        expect.objectContaining({
+          name: 'new/repo',
+          source_type: 'github',
+          config: { owner: 'new', repo: 'repo', branch: 'main' },
+          url: 'https://github.com/new/repo',
+        })
+      );
     });
   });
 

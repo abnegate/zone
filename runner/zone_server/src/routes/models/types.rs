@@ -23,21 +23,65 @@ impl IntoResponse for ErrorResponse {
 }
 
 /// Model info response
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Clone, PartialEq, Default)]
 pub struct ModelResponse {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downloads: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub likes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_cases: Option<Vec<String>>,
+    /// Distinct downloadable sizes when a catalogue entry ships more than one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<Vec<ModelSize>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<ModelDetails>,
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq)]
+/// A concrete downloadable size for a browsed model (e.g. `llama3.2:1b`).
+#[derive(Debug, Serialize, Clone, PartialEq, Default)]
+pub struct ModelSize {
+    /// Name passed to `ollama pull`
+    pub name: String,
+    /// Human label, e.g. `1B`
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Default)]
 pub struct ModelDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parameter_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub quantization_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ram_required_gb: Option<u64>,
 }
 
 /// How to sort browse results

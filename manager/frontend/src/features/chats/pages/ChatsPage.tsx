@@ -4,6 +4,16 @@ import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { useChats, useChat, useChatSearch } from '../hooks';
+import { MessageContent } from '../components';
+import {
+  type Attachment,
+  attachmentMetadata,
+  buildMessageWithAttachments,
+  formatBytes,
+  imageAttachments,
+  isSendable,
+  readAttachment,
+} from '../utils';
 import type { ChatSearchResult } from '../types';
 import { formatDate } from '../utils';
 import './ChatsPage.css';
@@ -21,6 +31,22 @@ export default function ChatsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [messageInput, setMessageInput] = useState('');
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const addFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const read = await Promise.all(Array.from(files).map(readAttachment));
+    setAttachments((prev) => {
+      const seen = new Set(prev.map((a) => a.id));
+      return [...prev, ...read.filter((a) => !seen.has(a.id))];
+    });
+  };
+
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  };
   const [sending, setSending] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
 
@@ -38,7 +64,6 @@ export default function ChatsPage() {
 
   const {
     chat: activeChat,
-    loading: chatLoading,
     error: chatError,
     sendMessage: sendMessageFn,
   } = useChat(selectedChatId);
@@ -53,8 +78,9 @@ export default function ChatsPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Combine errors from all hooks and operations
-  const error = chatsError || chatError || searchError || operationError;
+  // Only render a conversation that matches the current selection so a
+  // previous chat never flashes in the main pane while the next one loads.
+  const displayedChat = activeChat?.id === selectedChatId ? activeChat : null;
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -101,13 +127,19 @@ export default function ChatsPage() {
 
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isAuthenticated || !activeChat || !messageInput.trim() || sending) return;
+    const sendable = attachments.filter(isSendable);
+    if (!isAuthenticated || !activeChat || sending) return;
+    if (!messageInput.trim() && sendable.length === 0) return;
 
     setSending(true);
     setOperationError(null);
     try {
-      await sendMessageFn({ content: messageInput.trim() });
+      await sendMessageFn({
+        content: buildMessageWithAttachments(messageInput.trim(), sendable),
+        metadata: attachmentMetadata(sendable),
+      });
       setMessageInput('');
+      setAttachments([]);
       // Refresh chat list to update last message time
       await refreshChats();
     } catch (err) {
@@ -175,19 +207,30 @@ export default function ChatsPage() {
     setShowSearchResults(false);
   };
 
-  const loading = chatsLoading || chatLoading;
-
   return (
-    <div className="page chats-page">
+    <div className="page page--workspace chats-page">
       <div className="chats-sidebar">
         <div className="chats-sidebar-header">
-          <h1 className="text-2xl font-semibold text-foreground">Chats</h1>
+          <h1>Chats</h1>
           <Button variant="primary" size="sm" onClick={() => { setOperationError(null); setShowNewChatModal(true); }}>
-            + New
+            New chat
           </Button>
         </div>
 
         <form className="chat-search" onSubmit={handleSearch}>
+          <svg
+            className="chat-search-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            width="16"
+            height="16"
+            aria-hidden="true"
+          >
+            <circle cx="11" cy="11" r="7" />
+            <path d="M21 21l-4.3-4.3" />
+          </svg>
           <input
             type="text"
             placeholder="Search messages..."
@@ -231,13 +274,19 @@ export default function ChatsPage() {
           </Tabs>
         )}
 
+        {operationError && !showNewChatModal && (
+          <div className="chats-error" role="alert">
+            {operationError}
+          </div>
+        )}
+
         {showSearchResults ? (
           searching ? (
             <div className="chats-loading">
               <span className="spinner" /> Searching...
             </div>
-          ) : error ? (
-            <div className="chats-error">{error}</div>
+          ) : searchError ? (
+            <div className="chats-error">{searchError}</div>
           ) : searchResults.length === 0 ? (
             <div className="chats-empty">No messages found</div>
           ) : (
@@ -264,12 +313,12 @@ export default function ChatsPage() {
               ))}
             </div>
           )
-        ) : loading ? (
+        ) : chatsLoading ? (
           <div className="chats-loading">
             <span className="spinner" /> Loading...
           </div>
-        ) : error ? (
-          <div className="chats-error">{error}</div>
+        ) : chatsError ? (
+          <div className="chats-error">{chatsError}</div>
         ) : chats.length === 0 ? (
           <EmptyState
             icon={
@@ -377,64 +426,179 @@ export default function ChatsPage() {
       </div>
 
       <div className="chats-main">
-        {activeChat ? (
+        {displayedChat ? (
           <>
             <div className="chat-header">
               <div className="chat-header-info">
-                <h3>{activeChat.title}</h3>
-                <span className="chat-model">{activeChat.model_name}</span>
+                <h3>{displayedChat.title}</h3>
+                <span className="chat-model">{displayedChat.model_name}</span>
               </div>
             </div>
 
             <div className="messages-container">
-              {activeChat.messages.length === 0 ? (
+              {displayedChat.messages.length === 0 ? (
                 <div className="messages-empty">
                   <p>No messages yet. Start a conversation!</p>
                 </div>
               ) : (
-                activeChat.messages.map((message) => (
-                  <div key={message.id} className={`message message-${message.role}`}>
-                    <div className="message-header">
-                      <span className="message-role">
-                        {message.role === 'user'
-                          ? 'You'
-                          : message.role === 'assistant'
-                            ? 'Assistant'
-                            : 'System'}
-                      </span>
-                      <span className="message-time">{formatDate(message.created_at)}</span>
+                displayedChat.messages.map((message) => {
+                  const images = imageAttachments(message.metadata);
+                  return (
+                    <div key={message.id} className={`message message-${message.role}`}>
+                      <div className="message-header">
+                        <span className="message-role">
+                          {message.role === 'user'
+                            ? 'You'
+                            : message.role === 'assistant'
+                              ? 'Assistant'
+                              : 'System'}
+                        </span>
+                        <span className="message-time">{formatDate(message.created_at)}</span>
+                      </div>
+                      {images.length > 0 && (
+                        <div className="message-images">
+                          {images.map((a) => (
+                            <img
+                              key={a.url}
+                              src={a.url}
+                              alt={a.name}
+                              title={a.name}
+                              data-testid="message-image"
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {message.content.trim() ? (
+                        <div className="message-content">
+                          <MessageContent content={message.content} />
+                        </div>
+                      ) : null}
                     </div>
-                    <div className="message-content">{message.content}</div>
-                  </div>
-                ))
+                  );
+                })
               )}
               <div ref={messagesEndRef} />
             </div>
 
-            <form className="message-form" onSubmit={handleSendMessage}>
-              <textarea
-                placeholder="Type a message..."
-                value={messageInput}
-                onChange={(e) => setMessageInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSendMessage(e);
-                  }
-                }}
-                disabled={sending}
-                rows={1}
-              />
-              <Button
-                type="submit"
-                variant="primary"
-                loading={sending}
-                disabled={!messageInput.trim()}
-              >
-                Send
-              </Button>
+            <form
+              className={`message-form${isDragging ? ' is-dragging' : ''}`}
+              onSubmit={handleSendMessage}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                setIsDragging(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                addFiles(e.dataTransfer.files);
+              }}
+            >
+              {attachments.length > 0 && (
+                <div className="message-attachments">
+                  {attachments.map((attachment) => (
+                    <span
+                      key={attachment.id}
+                      className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}${attachment.url ? ' has-thumb' : ''}`}
+                    >
+                      {attachment.url ? (
+                        <img className="attachment-chip-thumb" src={attachment.url} alt="" />
+                      ) : null}
+                      <span className="attachment-chip-name">{attachment.name}</span>
+                      <span className="attachment-chip-size">
+                        {attachment.rejected ? (
+                          <span className="attachment-chip-note">{attachment.rejected}</span>
+                        ) : (
+                          formatBytes(attachment.size)
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="attachment-chip-remove"
+                        onClick={() => removeAttachment(attachment.id)}
+                        aria-label={`Remove ${attachment.name}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="message-form-row">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    addFiles(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn-icon"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="Attach files"
+                  title="Attach files"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    width="18"
+                    height="18"
+                    aria-hidden="true"
+                  >
+                    <rect x="4.5" y="4.5" width="15" height="15" rx="3.5" />
+                    <path d="M12 8.75v6.5M8.75 12h6.5" strokeLinecap="square" />
+                  </svg>
+                </button>
+                <textarea
+                  placeholder="Type a message, or drop a file..."
+                  value={messageInput}
+                  onChange={(e) => setMessageInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage(e);
+                    }
+                  }}
+                  onPaste={(e) => {
+                    if (e.clipboardData.files.length > 0) {
+                      e.preventDefault();
+                      addFiles(e.clipboardData.files);
+                    }
+                  }}
+                  disabled={sending}
+                  rows={1}
+                />
+                <Button
+                  type="submit"
+                  variant="primary"
+                  loading={sending}
+                  disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                >
+                  Send
+                </Button>
+              </div>
             </form>
           </>
+        ) : selectedChatId && chatError ? (
+          <div className="chat-placeholder">
+            <div className="chats-error">{chatError}</div>
+          </div>
+        ) : selectedChatId ? (
+          <div className="chat-placeholder">
+            <div className="chats-loading">
+              <span className="spinner" /> Loading...
+            </div>
+          </div>
         ) : (
           <div className="chat-placeholder">
             <div className="placeholder-icon">

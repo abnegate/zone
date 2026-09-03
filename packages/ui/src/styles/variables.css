@@ -1,6 +1,6 @@
 /* =============================================================================
-   Zone UI - Shadcn Baseline Tokens
-   Legacy variable names mapped to shadcn defaults.
+   Zone UI - Workshop tokens
+   Warm paper / ink surfaces, a single copper accent, optical serif headings.
    ============================================================================= */
 
 :root {
@@ -8,12 +8,10 @@
      TYPOGRAPHY
      ═══════════════════════════════════════════════════════════════════════════ */
 
-  --ui-font-display: 'Space Grotesk', 'Inter', ui-sans-serif, system-ui, -apple-system,
-    BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --ui-font-body: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    'Segoe UI', sans-serif;
-  --ui-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
-    'Courier New', monospace;
+  --ui-font-display: 'Newsreader', 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --ui-font-body: 'Source Sans 3', 'Source Sans Pro', ui-sans-serif, system-ui, sans-serif;
+  --ui-font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', monospace;
 
   /* Type Scale */
   --ui-text-xs: 0.75rem;      /* 12px */
@@ -177,34 +175,34 @@
 
 :root,
 :root[data-theme='light'] {
-  /* Backgrounds */
-  --ui-bg-base: hsl(0 0% 100%);
-  --ui-bg-elevated: hsl(0 0% 100%);
-  --ui-bg-surface: hsl(210 40% 96.1%);
-  --ui-bg-muted: hsl(210 40% 96.1%);
-  --ui-bg-hover: hsl(210 40% 94%);
-  --ui-bg-active: hsl(210 40% 92%);
+  /* Backgrounds — warm paper, not sterile white */
+  --ui-bg-base: #f4f0e8;
+  --ui-bg-elevated: #faf7f1;
+  --ui-bg-surface: #ebe4d6;
+  --ui-bg-muted: #e6dfd0;
+  --ui-bg-hover: #ddd4c3;
+  --ui-bg-active: #d4c9b6;
 
-  --ui-bg-gradient: linear-gradient(180deg, hsl(0 0% 100%) 0%, hsl(210 40% 98%) 100%);
-  --ui-bg-radial: radial-gradient(ellipse at top, hsl(0 0% 100%) 0%, hsl(210 40% 96.1%) 70%);
+  --ui-bg-gradient: linear-gradient(180deg, #faf7f1 0%, #f4f0e8 100%);
+  --ui-bg-radial: radial-gradient(ellipse at top, #faf7f1 0%, #efe8da 70%);
 
-  /* Text */
-  --ui-text-primary: hsl(222.2 84% 4.9%);
-  --ui-text-secondary: hsl(215.4 16.3% 46.9%);
-  --ui-text-muted: hsl(215.4 16.3% 46.9%);
-  --ui-text-disabled: hsl(215.4 16.3% 65.1%);
-  --ui-text-inverse: hsl(210 40% 98%);
+  /* Text — ink on paper, 7:1+ on secondary */
+  --ui-text-primary: #1a1612;
+  --ui-text-secondary: #534b42;
+  --ui-text-muted: #6a6156;
+  --ui-text-disabled: #8a8074;
+  --ui-text-inverse: #faf7f1;
 
   /* Borders */
-  --ui-border: hsl(214.3 31.8% 91.4%);
-  --ui-border-subtle: hsl(210 40% 96.1%);
-  --ui-border-strong: hsl(214.3 31.8% 85%);
-  --ui-border-focus: hsl(222.2 84% 4.9%);
+  --ui-border: #d4cbb8;
+  --ui-border-subtle: #e4dccb;
+  --ui-border-strong: #b8ad98;
+  --ui-border-focus: #a3481d;
 
   /* Overlays */
-  --ui-overlay-light: rgb(0 0 0 / 0.04);
-  --ui-overlay-medium: rgb(0 0 0 / 0.3);
-  --ui-overlay-heavy: rgb(0 0 0 / 0.6);
+  --ui-overlay-light: rgb(26 22 18 / 0.04);
+  --ui-overlay-medium: rgb(26 22 18 / 0.32);
+  --ui-overlay-heavy: rgb(14 12 10 / 0.62);
 }
 
 /* =============================================================================
@@ -212,34 +210,34 @@
    ============================================================================= */
 
 :root[data-theme='dark'] {
-  /* Backgrounds */
-  --ui-bg-base: hsl(222.2 84% 4.9%);
-  --ui-bg-elevated: hsl(222.2 84% 4.9%);
-  --ui-bg-surface: hsl(217.2 32.6% 17.5%);
-  --ui-bg-muted: hsl(217.2 32.6% 17.5%);
-  --ui-bg-hover: hsl(217.2 32.6% 20%);
-  --ui-bg-active: hsl(217.2 32.6% 22%);
+  /* Backgrounds — warm near-black, not navy-slate */
+  --ui-bg-base: #0e0c0a;
+  --ui-bg-elevated: #141210;
+  --ui-bg-surface: #1c1916;
+  --ui-bg-muted: #1c1916;
+  --ui-bg-hover: #26221d;
+  --ui-bg-active: #2e2923;
 
-  --ui-bg-gradient: linear-gradient(180deg, hsl(222.2 84% 4.9%) 0%, hsl(222.2 84% 4.9%) 100%);
-  --ui-bg-radial: radial-gradient(ellipse at top, hsl(217.2 32.6% 17.5%) 0%, hsl(222.2 84% 4.9%) 70%);
+  --ui-bg-gradient: linear-gradient(180deg, #141210 0%, #0e0c0a 100%);
+  --ui-bg-radial: radial-gradient(ellipse at top, #1c1916 0%, #0e0c0a 70%);
 
   /* Text */
-  --ui-text-primary: hsl(210 40% 98%);
-  --ui-text-secondary: hsl(215 20.2% 65.1%);
-  --ui-text-muted: hsl(215 20.2% 65.1%);
-  --ui-text-disabled: hsl(215 20.2% 45%);
-  --ui-text-inverse: hsl(222.2 47.4% 11.2%);
+  --ui-text-primary: #f3eee6;
+  --ui-text-secondary: #c4b8a8;
+  --ui-text-muted: #a89f91;
+  --ui-text-disabled: #6f675c;
+  --ui-text-inverse: #1a1612;
 
   /* Borders */
-  --ui-border: hsl(217.2 32.6% 17.5%);
-  --ui-border-subtle: hsl(217.2 32.6% 12%);
-  --ui-border-strong: hsl(217.2 32.6% 25%);
-  --ui-border-focus: hsl(212.7 26.8% 83.9%);
+  --ui-border: #2e2923;
+  --ui-border-subtle: #221e1a;
+  --ui-border-strong: #3f3830;
+  --ui-border-focus: #e5a574;
 
   /* Overlays */
-  --ui-overlay-light: rgb(0 0 0 / 0.2);
+  --ui-overlay-light: rgb(0 0 0 / 0.22);
   --ui-overlay-medium: rgb(0 0 0 / 0.55);
-  --ui-overlay-heavy: rgb(0 0 0 / 0.8);
+  --ui-overlay-heavy: rgb(0 0 0 / 0.78);
 }
 
 /* =============================================================================
@@ -248,9 +246,54 @@
 
 :root:not([data-accent]),
 :root[data-theme='light']:not([data-accent]),
+:root[data-accent='copper'],
+:root[data-theme='light'][data-accent='copper'] {
+  --ui-accent-50: #fdf6f0;
+  --ui-accent-100: #f8e6d6;
+  --ui-accent-200: #f0c9a8;
+  --ui-accent-300: #e5a574;
+  --ui-accent-400: #d47d3f;
+  --ui-accent-500: #c45c26;
+  --ui-accent-600: #a3481d;
+  --ui-accent-700: #863b1b;
+  --ui-accent-800: #6d321c;
+  --ui-accent-900: #3d1c10;
+
+  --ui-accent: var(--ui-accent-600);
+  --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 14%, transparent);
+  --ui-accent-hover: var(--ui-accent-700);
+  --ui-accent-glow: rgb(164 72 29 / 0.22);
+
+  --ui-secondary-400: var(--ui-accent-400);
+  --ui-secondary-500: var(--ui-accent-500);
+  --ui-secondary-600: var(--ui-accent-600);
+}
+
+:root[data-theme='dark']:not([data-accent]),
+:root[data-theme='dark'][data-accent='copper'] {
+  --ui-accent-50: #3d1c10;
+  --ui-accent-100: #6d321c;
+  --ui-accent-200: #863b1b;
+  --ui-accent-300: #a3481d;
+  --ui-accent-400: #c45c26;
+  --ui-accent-500: #d47d3f;
+  --ui-accent-600: #e5a574;
+  --ui-accent-700: #f0c9a8;
+  --ui-accent-800: #f8e6d6;
+  --ui-accent-900: #fdf6f0;
+
+  --ui-accent: var(--ui-accent-600);
+  --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 18%, transparent);
+  --ui-accent-hover: var(--ui-accent-500);
+  --ui-accent-glow: rgb(212 125 63 / 0.24);
+
+  --ui-secondary-400: var(--ui-accent-400);
+  --ui-secondary-500: var(--ui-accent-500);
+  --ui-secondary-600: var(--ui-accent-600);
+}
+
 :root[data-accent='blue'],
 :root[data-theme='light'][data-accent='blue'] {
-  /* Blue preset (shadcn-inspired) */
   --ui-accent-50: hsl(213.8 100% 96.9%);
   --ui-accent-100: hsl(214.3 94.6% 92.7%);
   --ui-accent-200: hsl(213.3 96.9% 87.3%);
@@ -263,19 +306,16 @@
   --ui-accent-900: hsl(224.4 64.3% 32.9%);
 
   --ui-accent: var(--ui-accent-600);
-  --ui-accent-muted: var(--ui-accent-100);
+  --ui-accent-muted: color-mix(in srgb, var(--ui-accent-500) 14%, transparent);
   --ui-accent-hover: var(--ui-accent-700);
   --ui-accent-glow: hsl(221.2 83.2% 53.3% / 0.2);
 
-  /* Secondary accent (legacy) */
   --ui-secondary-400: var(--ui-accent-400);
   --ui-secondary-500: var(--ui-accent-500);
   --ui-secondary-600: var(--ui-accent-600);
 }
 
-:root[data-theme='dark']:not([data-accent]),
 :root[data-theme='dark'][data-accent='blue'] {
-  /* Blue preset (dark) */
   --ui-accent-50: hsl(224.4 64.3% 32.9%);
   --ui-accent-100: hsl(225.9 70.7% 40.2%);
   --ui-accent-200: hsl(224.3 76.3% 48%);
@@ -288,11 +328,10 @@
   --ui-accent-900: hsl(213.8 100% 96.9%);
 
   --ui-accent: var(--ui-accent-400);
-  --ui-accent-muted: var(--ui-accent-100);
+  --ui-accent-muted: color-mix(in srgb, var(--ui-accent-400) 16%, transparent);
   --ui-accent-hover: var(--ui-accent-300);
   --ui-accent-glow: hsl(217.2 91.2% 59.8% / 0.2);
 
-  /* Secondary accent (legacy) */
   --ui-secondary-400: var(--ui-accent-400);
   --ui-secondary-500: var(--ui-accent-500);
   --ui-secondary-600: var(--ui-accent-600);

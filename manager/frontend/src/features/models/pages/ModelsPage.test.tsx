@@ -45,6 +45,7 @@ mock.module('../components/VirtualBrowseList', () => ({
       author?: string;
       url?: string;
       install_name?: string;
+      sizes?: Array<{ name: string; label: string; size?: number | null }>;
     }>;
     onItemClick: (model: unknown) => void;
     onInstall: (model: unknown) => void;
@@ -722,6 +723,44 @@ describe('ModelsPage', () => {
         expect(pullMock).toHaveBeenCalledWith('test-model-name');
       });
     });
+
+    it('opens details instead of installing when a model has multiple sizes', async () => {
+      const pullMock = mock(() => Promise.resolve(true));
+      mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        source: 'ollama',
+        models: [
+          {
+            id: 'llama3.2',
+            name: 'llama3.2',
+            sizes: [
+              { name: 'llama3.2:1b', label: '1B', size: 1300000000 },
+              { name: 'llama3.2:3b', label: '3B', size: 2000000000 },
+            ],
+          },
+        ],
+      });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('browse-model-llama3.2')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Install'));
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Size')).toBeInTheDocument();
+      });
+      expect(pullMock).not.toHaveBeenCalled();
+      expect(screen.getByText('llama3.2:1b')).toBeInTheDocument();
+    });
   });
 
   describe('browse model details', () => {
@@ -762,6 +801,84 @@ describe('ModelsPage', () => {
       });
     });
 
+    it('shows a size picker and installs the selected size', async () => {
+      const pullMock = mock(() => Promise.resolve(true));
+      mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        source: 'ollama',
+        models: [
+          {
+            id: 'llama3.2',
+            name: 'llama3.2',
+            sizes: [
+              { name: 'llama3.2:1b', label: '1B', size: 1300000000 },
+              { name: 'llama3.2:3b', label: '3B', size: 2000000000 },
+            ],
+          },
+        ],
+      });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('browse-model-llama3.2')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Details'));
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Size')).toBeInTheDocument();
+      });
+      expect(
+        screen.getByText('This model is published in more than one size.')
+      ).toBeInTheDocument();
+      expect(screen.getByText('llama3.2:1b')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Install Model' }));
+
+      await waitFor(() => {
+        expect(pullMock).toHaveBeenCalledWith('llama3.2:1b');
+      });
+    });
+
+    it('hides the size picker when a model has only one download', async () => {
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        source: 'ollama',
+        models: [
+          {
+            id: 'nomic',
+            name: 'nomic-embed-text',
+            sizes: [{ name: 'nomic-embed-text:latest', label: '137M' }],
+          },
+        ],
+      });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('browse-model-nomic')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Details'));
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Install Model' })).toBeInTheDocument();
+      });
+      expect(screen.queryByLabelText('Size')).not.toBeInTheDocument();
+    });
+
     it('shows install button in browse model details', async () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
@@ -790,6 +907,49 @@ describe('ModelsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Install Model' })).toBeInTheDocument();
+      });
+    });
+
+    it('shows description and use cases for browse models', async () => {
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        source: 'ollama',
+        models: [
+          {
+            id: 'llama3',
+            name: 'llama3:7b',
+            size: 3800000000,
+            description: 'A general-purpose local chat model.',
+            use_cases: ['Chat', 'Coding'],
+            details: {
+              family: 'llama',
+              parameter_size: '7B',
+              context_length: 131072,
+            },
+          },
+        ],
+      });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('browse-model-llama3')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Details'));
+
+      await waitFor(() => {
+        expect(screen.getByText('A general-purpose local chat model.')).toBeInTheDocument();
+        expect(screen.getByText('Use cases')).toBeInTheDocument();
+        expect(screen.getByText('Chat')).toBeInTheDocument();
+        expect(screen.getByText('Coding')).toBeInTheDocument();
+        expect(screen.getByText('Parameters')).toBeInTheDocument();
+        expect(screen.getByText('128K')).toBeInTheDocument();
       });
     });
 
