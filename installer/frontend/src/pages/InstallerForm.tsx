@@ -1,37 +1,37 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useForm, FormProvider } from 'react-hook-form';
+import { FormProvider, useForm } from 'react-hook-form';
 import {
   AlertDescription,
   AlertTitle,
   Button,
   Card,
+  CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
-  CardContent,
-  CardFooter,
   InfoBox,
-  Separator,
   Modal,
   ProgressBar,
+  Separator,
   StatusLog,
   StepPills,
   ZoneLogo,
 } from '../components';
+import { InstallSummary } from '../components/InstallSummary';
 import { useInstallation } from '../hooks/useInstallation';
 import { useKeyboardNavigation } from '../hooks/useKeyboardNavigation';
-import { DomainStep } from '../steps/DomainStep';
-import { SecurityStep } from '../steps/SecurityStep';
-import { ModelsStep } from '../steps/ModelsStep';
-import { InterfaceStep } from '../steps/InterfaceStep';
-import { SearchStep } from '../steps/SearchStep';
-import { VPNStep } from '../steps/VPNStep';
 import { AdvancedStep } from '../steps/AdvancedStep';
-import { InstallSummary } from '../components/InstallSummary';
+import { DomainStep } from '../steps/DomainStep';
+import { InterfaceStep } from '../steps/InterfaceStep';
+import { ModelsStep } from '../steps/ModelsStep';
+import { SearchStep } from '../steps/SearchStep';
+import { SecurityStep } from '../steps/SecurityStep';
+import { VPNStep } from '../steps/VPNStep';
 import type { InstallerConfig } from '../types';
 import { STEPS } from '../types';
-import type { StepSchemaKey } from '../validation/schemas';
 import { loadConfig, saveConfig } from '../utils/crypto';
+import type { StepSchemaKey } from '../validation/schemas';
 
 const loadStepSchema = async (stepId: StepSchemaKey) => {
   const module = await import('../validation/schemas');

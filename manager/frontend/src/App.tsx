@@ -10,8 +10,7 @@ import {
   SessionsPage,
 } from './features/auth';
 import { ChatsPage } from './features/chats';
-import { ContextSearchPage } from './features/knowledge';
-import { WikiPage } from './features/knowledge';
+import { ContextSearchPage, WikiPage } from './features/knowledge';
 import { ModelsPage } from './features/models';
 import { ProjectsPage } from './features/projects';
 import { OrgSettingsPage, WorkspaceSettingsPage } from './features/settings';

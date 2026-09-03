@@ -39,6 +39,7 @@ jobs:
           uploadArtifacts: true
           temporaryPublicStorage: true
           configPath: ./manager/frontend/lighthouserc.json
+          staticDistDir: ./manager/frontend/build
 
   lighthouse-installer:
     name: Lighthouse - Installer Frontend
@@ -65,3 +66,4 @@ jobs:
           uploadArtifacts: true
           temporaryPublicStorage: true
           configPath: ./installer/frontend/lighthouserc.json
+          staticDistDir: ./installer/frontend/build

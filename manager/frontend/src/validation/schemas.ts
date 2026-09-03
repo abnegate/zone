@@ -17,9 +17,9 @@ import type {
 import type {
   SourceResponseSchema,
   SourceSchema,
+  SourcesResponseSchema,
   SourceTypesResponseSchema,
   SourceVerifyResponseSchema,
-  SourcesResponseSchema,
 } from '../features/sources/schemas';
 import type {
   TaskResponseSchema,
@@ -36,20 +36,20 @@ import type {
 // =============================================================================
 
 export {
-  UserSchema,
   AuthResponseSchema,
-  LoginRequestSchema,
-  RegisterRequestSchema,
-  ForgotPasswordSchema,
-  ResetPasswordSchema,
-  VerifyEmailRequestSchema,
-  ResendVerificationRequestSchema,
-  VerifyEmailResponseSchema,
-  ResendVerificationResponseSchema,
   ForgotPasswordResponseSchema,
-  ResetPasswordResponseSchema,
+  ForgotPasswordSchema,
   JwtPayloadSchema,
+  LoginRequestSchema,
   OrgRoleSchema,
+  RegisterRequestSchema,
+  ResendVerificationRequestSchema,
+  ResendVerificationResponseSchema,
+  ResetPasswordResponseSchema,
+  ResetPasswordSchema,
+  UserSchema,
+  VerifyEmailRequestSchema,
+  VerifyEmailResponseSchema,
   WorkspaceRoleSchema,
 } from '../features/auth/schemas';
 
@@ -113,11 +113,11 @@ export const UpdateWorkspaceRequestSchema = z.object({
 // =============================================================================
 
 export {
-  InstalledModelSchema,
   BrowseModelSchema,
+  BrowseResponseSchema,
+  InstalledModelSchema,
   ModelSourceSchema,
   ModelsResponseSchema,
-  BrowseResponseSchema,
   PullProgressSchema,
 } from '../features/models/schemas';
 
@@ -126,18 +126,18 @@ export {
 // =============================================================================
 
 export {
-  MessageRoleSchema,
-  MessageSchema,
+  ChatResponseSchema,
   ChatSchema,
+  ChatSearchResponseSchema,
+  ChatSearchResultSchema,
+  ChatsResponseSchema,
   ChatWithMessagesSchema,
   CreateChatRequestSchema,
-  SendMessageRequestSchema,
-  ChatsResponseSchema,
-  ChatResponseSchema,
-  MessagesResponseSchema,
   MessageResponseSchema,
-  ChatSearchResultSchema,
-  ChatSearchResponseSchema,
+  MessageRoleSchema,
+  MessageSchema,
+  MessagesResponseSchema,
+  SendMessageRequestSchema,
 } from '../features/chats/schemas';
 
 // =============================================================================
@@ -145,35 +145,35 @@ export {
 // =============================================================================
 
 export {
-  SourceCategorySchema,
-  SourceTypeSchema,
+  CalendarMetadataSchema,
+  ChatMetadataSchema,
+  ContentItemSchema,
+  ContentMetadataSchema,
+  ContentResponseSchema,
+  CreateSourceRequestSchema,
+  DiscordConfigSchema,
+  FileMetadataSchema,
+  FilesystemConfigSchema,
   GitHubConfigSchema,
   GitLabConfigSchema,
-  FilesystemConfigSchema,
   ICalConfigSchema,
   IMAPConfigSchema,
-  DiscordConfigSchema,
-  SlackConfigSchema,
-  WebConfigSchema,
-  TextConfigSchema,
-  SourceConfigSchema,
-  SourceSchema,
-  CreateSourceRequestSchema,
-  UpdateSourceRequestSchema,
-  SourcesResponseSchema,
-  SourceResponseSchema,
-  SourceVerifyResponseSchema,
-  SourceTypeInfoSchema,
-  SourceTypesResponseSchema,
-  FileMetadataSchema,
-  CalendarMetadataSchema,
   MailMetadataSchema,
-  ChatMetadataSchema,
-  WebMetadataSchema,
+  SlackConfigSchema,
+  SourceCategorySchema,
+  SourceConfigSchema,
+  SourceResponseSchema,
+  SourceSchema,
+  SourcesResponseSchema,
+  SourceTypeInfoSchema,
+  SourceTypeSchema,
+  SourceTypesResponseSchema,
+  SourceVerifyResponseSchema,
+  TextConfigSchema,
   TextMetadataSchema,
-  ContentMetadataSchema,
-  ContentItemSchema,
-  ContentResponseSchema,
+  UpdateSourceRequestSchema,
+  WebConfigSchema,
+  WebMetadataSchema,
 } from '../features/sources/schemas';
 
 // =============================================================================
@@ -181,18 +181,18 @@ export {
 // =============================================================================
 
 export {
-  ProjectStatusSchema,
-  ProjectSchema,
   CreateProjectRequestSchema,
-  UpdateProjectRequestSchema,
-  ProjectsResponseSchema,
-  ProjectResponseSchema,
-  SyncProviderSchema,
-  SyncDirectionSchema,
-  SyncConfigSchema,
   CreateSyncConfigRequestSchema,
-  SyncConfigsResponseSchema,
+  ProjectResponseSchema,
+  ProjectSchema,
+  ProjectStatusSchema,
+  ProjectsResponseSchema,
   SyncConfigResponseSchema,
+  SyncConfigSchema,
+  SyncConfigsResponseSchema,
+  SyncDirectionSchema,
+  SyncProviderSchema,
+  UpdateProjectRequestSchema,
 } from '../features/projects/schemas';
 
 // =============================================================================
@@ -200,21 +200,21 @@ export {
 // =============================================================================
 
 export {
-  TaskStatusSchema,
-  RunStatusSchema,
+  CreateTaskRequestSchema,
   LogLevelSchema,
   PrStatusSchema,
-  TaskSchema,
-  TaskRunSchema,
-  TaskRunLogSchema,
-  CreateTaskRequestSchema,
-  UpdateTaskRequestSchema,
-  TasksResponseSchema,
-  TaskResponseSchema,
-  TaskRunsResponseSchema,
-  TaskRunResponseSchema,
-  TaskRunLogsResponseSchema,
+  RunStatusSchema,
   TaskProgressMessageSchema,
+  TaskResponseSchema,
+  TaskRunLogSchema,
+  TaskRunLogsResponseSchema,
+  TaskRunResponseSchema,
+  TaskRunSchema,
+  TaskRunsResponseSchema,
+  TaskSchema,
+  TaskStatusSchema,
+  TasksResponseSchema,
+  UpdateTaskRequestSchema,
 } from '../features/tasks/schemas';
 
 // =============================================================================
@@ -401,55 +401,53 @@ export type AiSettingsResponse = z.infer<typeof AiSettingsResponseSchema>;
 // Session Schemas
 // =============================================================================
 
+export type { SessionsResponse, SessionZ } from '../features/auth/schemas';
 export { SessionSchema, SessionsResponseSchema } from '../features/auth/schemas';
-export type { SessionZ, SessionsResponse } from '../features/auth/schemas';
 
 // =============================================================================
 // Organization Member Schemas
 
 export type { OrgRoleZ } from '../features/auth/schemas';
-
-export {
-  OrganizationMemberSchema,
-  AddOrgMemberRequestSchema,
-  UpdateOrgMemberRequestSchema,
-  OrgMembersResponseSchema,
-} from '../features/settings/organization/schemas';
 export type {
   OrganizationMemberZ,
   OrgMembersResponse,
+} from '../features/settings/organization/schemas';
+export {
+  AddOrgMemberRequestSchema,
+  OrganizationMemberSchema,
+  OrgMembersResponseSchema,
+  UpdateOrgMemberRequestSchema,
 } from '../features/settings/organization/schemas';
 
 // =============================================================================
 // Workspace Member Schemas
 
 export type { WorkspaceRoleZ } from '../features/auth/schemas';
-
+export type {
+  WorkspaceMembersResponse,
+  WorkspaceMemberZ,
+} from '../features/settings/workspace/schemas';
 export {
-  WorkspaceMemberSchema,
   AddWorkspaceMemberRequestSchema,
   UpdateWorkspaceMemberRequestSchema,
+  WorkspaceMemberSchema,
   WorkspaceMembersResponseSchema,
-} from '../features/settings/workspace/schemas';
-export type {
-  WorkspaceMemberZ,
-  WorkspaceMembersResponse,
 } from '../features/settings/workspace/schemas';
 
 // =============================================================================
 // Invitation Schemas - now re-exported from features/settings
 
+export type { InvitationDetailsZ } from '../features/auth/schemas';
+export { InvitationDetailsSchema } from '../features/auth/schemas';
+export type {
+  InvitationsResponse,
+  InvitationZ,
+} from '../features/settings/organization/schemas';
 export {
-  InvitationSchema,
   CreateInvitationRequestSchema,
+  InvitationSchema,
   InvitationsResponseSchema,
 } from '../features/settings/organization/schemas';
-export type {
-  InvitationZ,
-  InvitationsResponse,
-} from '../features/settings/organization/schemas';
-export { InvitationDetailsSchema } from '../features/auth/schemas';
-export type { InvitationDetailsZ } from '../features/auth/schemas';
 
 // =============================================================================
 // Billing & Usage Schemas
@@ -594,29 +592,28 @@ export type AuditLogsResponse = z.infer<typeof AuditLogsResponseSchema>;
 // Knowledge Base & Context Search Schemas - re-exported from features/knowledge
 // =============================================================================
 
-export {
-  KnowledgeTypeSchema,
-  KnowledgeEntrySchema,
-  CreateKnowledgeRequestSchema,
-  KnowledgeResponseSchema,
-  SearchModeSchema,
-  SearchResultSchema,
-  SearchOptionsSchema,
-  SearchResponseSchema,
-  GatherContextRequestSchema,
-  GatheringStatusSchema,
-  GatheringProgressSchema,
-} from '../features/knowledge/schemas';
-
 export type {
-  KnowledgeTypeZ,
-  KnowledgeEntryZ,
   CreateKnowledgeRequestZ,
-  KnowledgeResponse,
-  SearchModeZ,
-  SearchResultZ,
-  SearchOptionsZ,
-  SearchResponse,
   GatherContextRequestZ,
   GatheringProgressZ,
+  KnowledgeEntryZ,
+  KnowledgeResponse,
+  KnowledgeTypeZ,
+  SearchModeZ,
+  SearchOptionsZ,
+  SearchResponse,
+  SearchResultZ,
+} from '../features/knowledge/schemas';
+export {
+  CreateKnowledgeRequestSchema,
+  GatherContextRequestSchema,
+  GatheringProgressSchema,
+  GatheringStatusSchema,
+  KnowledgeEntrySchema,
+  KnowledgeResponseSchema,
+  KnowledgeTypeSchema,
+  SearchModeSchema,
+  SearchOptionsSchema,
+  SearchResponseSchema,
+  SearchResultSchema,
 } from '../features/knowledge/schemas';

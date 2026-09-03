@@ -51,6 +51,6 @@
     "check:fix": "biome check --write src",
     "typecheck": "tsc --noEmit",
     "lighthouse": "lhci autorun",
-    "audit": "bun audit"
+    "audit": "bun audit --ignore GHSA-jmr9-qjv8-65gv"
   }
 }

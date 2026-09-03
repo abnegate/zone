@@ -1,10 +1,10 @@
 export {
-  formatNumber,
+  defaultDownloadName,
   formatBytes,
   formatContextLength,
   formatDate,
-  modelDownloadSizes,
   formatDownloadSizeLabel,
-  defaultDownloadName,
+  formatNumber,
+  modelDownloadSizes,
 } from './formatters';
 export { sortBrowseModels } from './sortModels';

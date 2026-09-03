@@ -1,62 +1,60 @@
 // Context & Hooks
-export { AuthProvider, useAuth } from './context';
 
 // Components
-export { VerificationPendingBanner, ResendVerificationButton } from './components';
+export { ResendVerificationButton, VerificationPendingBanner } from './components';
+export { AuthProvider, useAuth } from './context';
 
 // Pages
 export {
-  LoginPage,
-  RegisterPage,
   EmailVerificationPage,
   ForgotPasswordPage,
-  ResetPasswordPage,
   InvitationAcceptPage,
+  LoginPage,
+  RegisterPage,
+  ResetPasswordPage,
   SessionsPage,
 } from './pages';
-
-// Types
-export type {
-  User,
-  AuthResponse,
-  LoginRequest,
-  RegisterRequest,
-  VerifyEmailRequest,
-  VerifyEmailResponse,
-  ResendVerificationRequest,
-  ResendVerificationResponse,
-  ForgotPasswordRequest,
-  ForgotPasswordResponse,
-  ResetPasswordRequest,
-  ResetPasswordResponse,
-  JwtPayload,
-  Session,
-  SessionsResponse,
-  Invitation,
-  InvitationDetails,
-  OrgRole,
-  WorkspaceRole,
-} from './types';
-
 // Schemas
 export {
-  UserSchema,
   AuthResponseSchema,
-  LoginRequestSchema,
-  RegisterRequestSchema,
-  ForgotPasswordSchema,
-  ResetPasswordSchema,
-  VerifyEmailRequestSchema,
-  ResendVerificationRequestSchema,
-  VerifyEmailResponseSchema,
-  ResendVerificationResponseSchema,
   ForgotPasswordResponseSchema,
-  ResetPasswordResponseSchema,
+  ForgotPasswordSchema,
+  InvitationDetailsSchema,
+  InvitationSchema,
   JwtPayloadSchema,
+  LoginRequestSchema,
+  OrgRoleSchema,
+  RegisterRequestSchema,
+  ResendVerificationRequestSchema,
+  ResendVerificationResponseSchema,
+  ResetPasswordResponseSchema,
+  ResetPasswordSchema,
   SessionSchema,
   SessionsResponseSchema,
-  OrgRoleSchema,
+  UserSchema,
+  VerifyEmailRequestSchema,
+  VerifyEmailResponseSchema,
   WorkspaceRoleSchema,
-  InvitationSchema,
-  InvitationDetailsSchema,
 } from './schemas';
+// Types
+export type {
+  AuthResponse,
+  ForgotPasswordRequest,
+  ForgotPasswordResponse,
+  Invitation,
+  InvitationDetails,
+  JwtPayload,
+  LoginRequest,
+  OrgRole,
+  RegisterRequest,
+  ResendVerificationRequest,
+  ResendVerificationResponse,
+  ResetPasswordRequest,
+  ResetPasswordResponse,
+  Session,
+  SessionsResponse,
+  User,
+  VerifyEmailRequest,
+  VerifyEmailResponse,
+  WorkspaceRole,
+} from './types';

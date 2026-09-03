@@ -1,7 +1,7 @@
 import {
-  type StockFeatures,
   createColumnHelper,
   flexRender,
+  type StockFeatures,
   stockFeatures,
   useTable,
 } from '@tanstack/react-table';

@@ -2,7 +2,7 @@ import { Button, Input, Modal, Select } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
-import type { AddOrgMemberRequest, OrgRole, OrganizationMember } from '../types';
+import type { AddOrgMemberRequest, OrganizationMember, OrgRole } from '../types';
 import './OrgMembersSection.css';
 
 interface OrgMembersSectionProps {

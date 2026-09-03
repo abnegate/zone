@@ -14,6 +14,12 @@ on:
       - 'installer/frontend/**'
       - 'packages/ui/**'
 
+permissions:
+  actions: read
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
   visual-regression:
     name: Visual Regression
@@ -60,7 +66,7 @@ jobs:
       - name: Take PR screenshots
         run: |
           mkdir -p screenshots-pr
-          PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.spec.ts --project=chromium
+          PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.e2e.ts --project=chromium
           cp screenshots/*.png screenshots-pr/
 
       - name: Download baseline screenshots
@@ -461,7 +467,7 @@ jobs:
           curl -f http://localhost:4173 || exit 1
 
       - name: Take baseline screenshots
-        run: PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.spec.ts --project=chromium
+        run: PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.e2e.ts --project=chromium
 
       - name: Upload baseline screenshots
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

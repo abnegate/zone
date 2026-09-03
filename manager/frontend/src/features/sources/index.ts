@@ -3,23 +3,19 @@
  * Public API for the sources feature.
  */
 
-// Types
-export * from './types';
-
-// Schemas
-export * from './schemas';
-
-// Hooks
-export * from './hooks';
-
+// Components
+export * from './components';
 // Config/Registry
 export * from './config';
 
+// Hooks
+export * from './hooks';
 // Pages
 export * from './pages';
-
-// Components
-export * from './components';
+// Schemas
+export * from './schemas';
+// Types
+export * from './types';
 
 // Utils
 export * from './utils';

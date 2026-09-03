@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const mockGenerateSecret = mock(() => 'generated-secret');
 const mockInstall = mock();

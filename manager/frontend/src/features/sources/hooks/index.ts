@@ -3,8 +3,7 @@
  * Re-exports all source-related hooks.
  */
 
-export { useSources } from './useSources';
-export type { UseSourcesOptions, UseSourcesResult } from './useSources';
-
-export { useSource } from './useSource';
 export type { UseSourceResult } from './useSource';
+export { useSource } from './useSource';
+export type { UseSourcesOptions, UseSourcesResult } from './useSources';
+export { useSources } from './useSources';

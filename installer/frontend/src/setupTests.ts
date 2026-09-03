@@ -1,4 +1,4 @@
-import { mock, expect, afterEach, jest } from 'bun:test';
+import { afterEach, expect, jest, mock } from 'bun:test';
 import '@testing-library/dom';
 import { cleanup } from '@testing-library/react';
 

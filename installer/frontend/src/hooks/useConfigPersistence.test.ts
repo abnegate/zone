@@ -1,6 +1,6 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { InstallerConfig } from '../types';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 const mockLoadConfig = mock();
 const mockSaveConfig = mock();
