@@ -327,6 +327,38 @@
   font-family: var(--ui-font-mono);
 }
 
+/* Agent mode changes how every reply is produced, so it stays visible in the
+   header rather than hiding behind a settings menu. */
+.agent-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+  margin-left: auto;
+  padding: var(--ui-space-1) var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-full, 9999px);
+  background: transparent;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.agent-toggle:hover {
+  border-color: var(--ui-border-strong, var(--ui-accent));
+  color: var(--ui-text-primary);
+}
+
+.agent-toggle[aria-pressed='true'] {
+  border-color: color-mix(in srgb, var(--ui-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--ui-accent) 12%, transparent);
+  color: var(--ui-accent);
+}
+
 /* Messages ----------------------------------------------------------------- */
 
 .messages-container {
@@ -410,6 +442,109 @@
 
 .message-content {
   word-wrap: break-word;
+}
+
+/* Tool trace ---------------------------------------------------------------
+   The work behind a reply, shown above it. Deliberately quiet: it is context
+   for a reader who wants to check the answer, not part of the answer. */
+
+.tool-trace {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 0 var(--ui-space-3);
+  padding: 0;
+  list-style: none;
+  border-left: 2px solid var(--ui-border);
+}
+
+.tool-call-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  width: 100%;
+  padding: var(--ui-space-1) var(--ui-space-3);
+  border: 0;
+  background: transparent;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tool-call-summary:disabled {
+  cursor: default;
+}
+
+.tool-call-summary:not(:disabled):hover {
+  background: var(--ui-bg-surface);
+}
+
+.tool-call-status {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-text-tertiary, var(--ui-text-secondary));
+}
+
+.tool-call--ok .tool-call-status {
+  background: var(--ui-success, #16a34a);
+}
+
+.tool-call--failed .tool-call-status {
+  background: var(--ui-danger, #dc2626);
+}
+
+.tool-call--pending .tool-call-status {
+  background: var(--ui-accent);
+  animation: tool-call-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes tool-call-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-call--pending .tool-call-status {
+    animation: none;
+  }
+}
+
+.tool-call-name {
+  flex: none;
+  color: var(--ui-text-primary);
+  font-weight: 500;
+}
+
+.tool-call-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-call-duration {
+  flex: none;
+  font-family: var(--ui-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-call-args {
+  margin: 0;
+  padding: var(--ui-space-2) var(--ui-space-3);
+  overflow-x: auto;
+  background: var(--ui-bg-surface);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
 }
 
 .message-images {

@@ -15,6 +15,9 @@ pub struct ChatRow {
     pub title: String,
     pub model_name: String,
     pub archived: Option<bool>,
+    /// Whether this chat runs the tool-calling agent loop instead of a plain
+    /// completion.
+    pub agent_enabled: bool,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
 }
@@ -39,6 +42,7 @@ macro_rules! map_chat_row {
             title: $r.title,
             model_name: $r.model_name,
             archived: $r.archived,
+            agent_enabled: $r.agent_enabled,
             created_at: $r.created_at,
             updated_at: $r.updated_at,
         }
@@ -55,7 +59,7 @@ pub async fn list_chats(
         (Some(wid), Some(a)) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, workspace_id, title, model_name, archived, created_at, updated_at
+                SELECT id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
                 FROM chats
                 WHERE workspace_id = $1 AND archived = $2
                 ORDER BY updated_at DESC
@@ -70,7 +74,7 @@ pub async fn list_chats(
         (Some(wid), None) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, workspace_id, title, model_name, archived, created_at, updated_at
+                SELECT id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
                 FROM chats
                 WHERE workspace_id = $1
                 ORDER BY updated_at DESC
@@ -84,7 +88,7 @@ pub async fn list_chats(
         (None, Some(a)) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, workspace_id, title, model_name, archived, created_at, updated_at
+                SELECT id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
                 FROM chats
                 WHERE archived = $1
                 ORDER BY updated_at DESC
@@ -98,7 +102,7 @@ pub async fn list_chats(
         (None, None) => {
             let rows = sqlx::query!(
                 r#"
-                SELECT id, workspace_id, title, model_name, archived, created_at, updated_at
+                SELECT id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
                 FROM chats
                 ORDER BY updated_at DESC
                 "#
@@ -114,7 +118,7 @@ pub async fn list_chats(
 pub async fn get_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> {
     let row = sqlx::query!(
         r#"
-        SELECT id, workspace_id, title, model_name, archived, created_at, updated_at
+        SELECT id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
         FROM chats
         WHERE id = $1
         "#,
@@ -129,6 +133,7 @@ pub async fn get_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> {
         title: r.title,
         model_name: r.model_name,
         archived: r.archived,
+        agent_enabled: r.agent_enabled,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))
@@ -140,16 +145,18 @@ pub async fn create_chat(
     workspace_id: Option<Uuid>,
     title: &str,
     model_name: &str,
+    agent_enabled: bool,
 ) -> DbResult<ChatRow> {
     let row = sqlx::query!(
         r#"
-        INSERT INTO chats (workspace_id, title, model_name)
-        VALUES ($1, $2, $3)
-        RETURNING id, workspace_id, title, model_name, archived, created_at, updated_at
+        INSERT INTO chats (workspace_id, title, model_name, agent_enabled)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
         "#,
         workspace_id,
         title,
-        model_name
+        model_name,
+        agent_enabled
     )
     .fetch_one(pool)
     .await?;
@@ -160,27 +167,31 @@ pub async fn create_chat(
         title: row.title,
         model_name: row.model_name,
         archived: row.archived,
+        agent_enabled: row.agent_enabled,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
 }
 
-/// Update chat title
+/// Update a chat's title and/or agent mode. `None` leaves a field untouched.
 pub async fn update_chat(
     pool: &PgPool,
     id: Uuid,
     title: Option<&str>,
+    agent_enabled: Option<bool>,
 ) -> DbResult<Option<ChatRow>> {
     let row = sqlx::query!(
         r#"
         UPDATE chats
         SET title = COALESCE($2, title),
+            agent_enabled = COALESCE($3, agent_enabled),
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, workspace_id, title, model_name, archived, created_at, updated_at
+        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
         "#,
         id,
-        title
+        title,
+        agent_enabled
     )
     .fetch_optional(pool)
     .await?;
@@ -191,6 +202,7 @@ pub async fn update_chat(
         title: r.title,
         model_name: r.model_name,
         archived: r.archived,
+        agent_enabled: r.agent_enabled,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))
@@ -213,7 +225,7 @@ pub async fn archive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> 
         SET archived = true,
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, workspace_id, title, model_name, archived, created_at, updated_at
+        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
         "#,
         id
     )
@@ -226,6 +238,7 @@ pub async fn archive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> 
         title: r.title,
         model_name: r.model_name,
         archived: r.archived,
+        agent_enabled: r.agent_enabled,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))
@@ -239,7 +252,7 @@ pub async fn unarchive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>
         SET archived = false,
             updated_at = NOW()
         WHERE id = $1
-        RETURNING id, workspace_id, title, model_name, archived, created_at, updated_at
+        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at
         "#,
         id
     )
@@ -252,6 +265,7 @@ pub async fn unarchive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>
         title: r.title,
         model_name: r.model_name,
         archived: r.archived,
+        agent_enabled: r.agent_enabled,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))

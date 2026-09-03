@@ -12,8 +12,20 @@ export const MessageAttachmentSchema = z.object({
   url: z.string(),
 });
 
+export const ToolCallRecordSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  arguments: z.string(),
+  success: z.boolean(),
+  detail: z.string(),
+  duration_ms: z.number(),
+});
+
 export const MessageMetadataSchema = z
-  .object({ attachments: z.array(MessageAttachmentSchema).optional() })
+  .object({
+    attachments: z.array(MessageAttachmentSchema).optional(),
+    tool_calls: z.array(ToolCallRecordSchema).optional(),
+  })
   .passthrough();
 
 export const MessageSchema = z.object({
@@ -32,6 +44,8 @@ export const ChatSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   archived: z.boolean(),
+  // Servers predating agentic chat omit this; treat those chats as plain.
+  agent_enabled: z.boolean().default(false),
 });
 
 export const ChatWithMessagesSchema = ChatSchema.extend({
@@ -43,6 +57,7 @@ export const CreateChatRequestSchema = z.object({
   title: z.string().min(1, 'Title is required'),
   model_name: z.string().min(1, 'Model is required'),
   first_message: z.string().optional(),
+  agent_enabled: z.boolean().optional(),
 });
 
 export const SendMessageRequestSchema = z.object({

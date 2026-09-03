@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE chats\n        SET archived = false,\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, title, model_name, archived, created_at, updated_at\n        ",
+  "query": "\n        UPDATE chats\n        SET archived = false,\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at\n        ",
   "describe": {
     "columns": [
       {
@@ -30,11 +30,16 @@
       },
       {
         "ordinal": 5,
+        "name": "agent_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamp"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "updated_at",
         "type_info": "Timestamp"
       }
@@ -50,9 +55,10 @@
       false,
       false,
       true,
+      false,
       true,
       true
     ]
   },
-  "hash": "da5ae9494428a940067d4f11ffeb51ab576961fa1a7e6882b08a77db98a34713"
+  "hash": "7c6059500bf00f0010f028cbabae3934e0207a9ca579dc083510e5c1e4609262"
 }

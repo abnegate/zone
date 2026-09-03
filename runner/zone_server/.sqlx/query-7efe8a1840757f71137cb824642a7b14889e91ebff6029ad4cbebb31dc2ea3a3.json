@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE chats\n        SET title = COALESCE($2, title),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, title, model_name, archived, created_at, updated_at\n        ",
+  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at\n                FROM chats\n                ORDER BY updated_at DESC\n                ",
   "describe": {
     "columns": [
       {
@@ -30,20 +30,22 @@
       },
       {
         "ordinal": 5,
+        "name": "agent_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamp"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "updated_at",
         "type_info": "Timestamp"
       }
     ],
     "parameters": {
-      "Left": [
-        "Uuid",
-        "Text"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -51,9 +53,10 @@
       false,
       false,
       true,
+      false,
       true,
       true
     ]
   },
-  "hash": "30e08366908e78144724e78718269e66aa07bf9ef3ec1ecb3530a661774c236e"
+  "hash": "7efe8a1840757f71137cb824642a7b14889e91ebff6029ad4cbebb31dc2ea3a3"
 }

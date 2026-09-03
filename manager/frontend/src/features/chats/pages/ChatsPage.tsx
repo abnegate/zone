@@ -1,9 +1,9 @@
-import { Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
+import { Button, Checkbox, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
-import { MessageContent } from '../components';
+import { MessageContent, ToolTrace } from '../components';
 import { useChat, useChatSearch, useChats } from '../hooks';
 import type { ChatSearchResult } from '../types';
 import {
@@ -27,6 +27,7 @@ export default function ChatsPage() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatModel, setNewChatModel] = useState('');
+  const [newChatAgent, setNewChatAgent] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchResults, setShowSearchResults] = useState(false);
@@ -66,6 +67,7 @@ export default function ChatsPage() {
     chat: activeChat,
     error: chatError,
     sendMessage: sendMessageFn,
+    setAgentEnabled: setAgentEnabledFn,
   } = useChat(selectedChatId);
 
   const {
@@ -116,12 +118,24 @@ export default function ChatsPage() {
         workspace_id: currentWorkspace.id,
         title: `Chat with ${newChatModel}`,
         model_name: newChatModel,
+        agent_enabled: newChatAgent,
       });
       setShowNewChatModal(false);
       setNewChatModel('');
+      setNewChatAgent(false);
       selectChat(chat.id);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
+    }
+  };
+
+  const handleToggleAgent = async () => {
+    if (!isAuthenticated || !displayedChat) return;
+    setOperationError(null);
+    try {
+      await setAgentEnabledFn(!displayedChat.agent_enabled);
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to change agent mode');
     }
   };
 
@@ -459,6 +473,32 @@ export default function ChatsPage() {
                 <h3>{displayedChat.title}</h3>
                 <span className="chat-model">{displayedChat.model_name}</span>
               </div>
+              <button
+                type="button"
+                className="agent-toggle"
+                onClick={handleToggleAgent}
+                aria-pressed={displayedChat.agent_enabled}
+                title={
+                  displayedChat.agent_enabled
+                    ? 'Agent mode on: replies can search this workspace before answering'
+                    : 'Agent mode off: replies come straight from the model'
+                }
+                data-testid="agent-toggle"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  width="14"
+                  height="14"
+                  aria-hidden="true"
+                >
+                  <path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4L7 17M17 7l1.4-1.4" />
+                  <circle cx="12" cy="12" r="3.5" />
+                </svg>
+                Agent
+              </button>
             </div>
 
             <div className="messages-container">
@@ -469,6 +509,7 @@ export default function ChatsPage() {
               ) : (
                 displayedChat.messages.map((message) => {
                   const images = imageAttachments(message.metadata);
+                  const toolCalls = message.metadata?.tool_calls ?? [];
                   return (
                     <div key={message.id} className={`message message-${message.role}`}>
                       <div className="message-header">
@@ -494,6 +535,7 @@ export default function ChatsPage() {
                           ))}
                         </div>
                       )}
+                      {toolCalls.length > 0 && <ToolTrace calls={toolCalls} />}
                       {message.content.trim() ? (
                         <div className="message-content">
                           <MessageContent content={message.content} />
@@ -664,6 +706,12 @@ export default function ChatsPage() {
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setNewChatModel(e.target.value)}
             placeholder="Choose a model..."
             options={models.map((model) => ({ value: model.name, label: model.name }))}
+          />
+          <Checkbox
+            label="Agent mode"
+            helpText="Let replies search this workspace's knowledge, sources, projects and tasks before answering. Requires a model that supports tool calling."
+            checked={newChatAgent}
+            onCheckedChange={setNewChatAgent}
           />
           <div className="modal-actions">
             <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>

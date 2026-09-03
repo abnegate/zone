@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO chats (workspace_id, title, model_name)\n        VALUES ($1, $2, $3)\n        RETURNING id, workspace_id, title, model_name, archived, created_at, updated_at\n        ",
+  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at\n                FROM chats\n                WHERE archived = $1\n                ORDER BY updated_at DESC\n                ",
   "describe": {
     "columns": [
       {
@@ -30,20 +30,23 @@
       },
       {
         "ordinal": 5,
+        "name": "agent_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamp"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "updated_at",
         "type_info": "Timestamp"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text",
-        "Text"
+        "Bool"
       ]
     },
     "nullable": [
@@ -52,9 +55,10 @@
       false,
       false,
       true,
+      false,
       true,
       true
     ]
   },
-  "hash": "01934704f8b320c7e1676fc890cbf486ce1f674074433696203a6028d27e1732"
+  "hash": "8db6b13d6f0eabe7f21c51b1a88e3dcaa42cd3324ca84e813ac7e756ff50795e"
 }

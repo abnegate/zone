@@ -19,15 +19,19 @@ use axum::{
     response::IntoResponse,
 };
 use dashmap::DashMap;
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Semaphore, broadcast};
 use uuid::Uuid;
-use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage, Role as LlmRole};
+use zone_core::llm::{
+    ChatStreamChunk, LlmClient, LlmConfig, LlmError, Message as LlmMessage, Role as LlmRole,
+};
 
+use crate::agent::{self, AgentEvent, AgentRun, ChatToolRegistry, ToolCallRecord};
 use crate::auth::validate_token;
 use crate::db::{chats, workspace_members};
 use crate::state::AppState;
@@ -137,6 +141,23 @@ pub enum ServerMessage {
     MessageStart { message_id: Uuid, role: String },
     /// Content chunk streamed
     Chunk { content: String, index: u32 },
+    /// The agent started running a tool
+    ToolCall {
+        message_id: Uuid,
+        tool_call_id: String,
+        name: String,
+        arguments: String,
+    },
+    /// A tool finished. `detail` is a short outcome for display, not the full
+    /// output the model receives.
+    ToolResult {
+        message_id: Uuid,
+        tool_call_id: String,
+        name: String,
+        success: bool,
+        detail: String,
+        duration_ms: u64,
+    },
     /// Assistant message completed
     MessageEnd { message_id: Uuid, content: String },
     /// Generation cancelled
@@ -428,7 +449,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     &state,
                                     &mut sender,
                                     chat_id,
-                                    &chat.model_name,
                                     workspace_id,
                                     &content,
                                     metadata,
@@ -554,6 +574,44 @@ fn is_valid_model(model_name: &str) -> bool {
         .any(|prefix| model_lower.starts_with(prefix))
 }
 
+/// Adapt a plain completion stream to the events the agent emits, so one loop
+/// can consume either shape.
+fn plain_events(
+    stream: impl Stream<Item = Result<ChatStreamChunk, LlmError>>,
+) -> impl Stream<Item = AgentEvent> {
+    async_stream::stream! {
+        futures::pin_mut!(stream);
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    // Keep whatever was generated: returning here discarded a
+                    // complete reply whenever the provider sent one chunk the
+                    // envelope could not parse.
+                    tracing::error!("LLM stream error, keeping partial reply: {}", e);
+                    yield AgentEvent::Failed("Stream error".to_string());
+                    return;
+                }
+            };
+
+            let Some(choice) = chunk.choices.first() else {
+                continue;
+            };
+
+            if let Some(content) = &choice.delta.content
+                && !content.is_empty()
+            {
+                yield AgentEvent::Chunk(content.clone());
+            }
+
+            if choice.finish_reason.is_some() {
+                return;
+            }
+        }
+    }
+}
+
 /// Handle a send message request
 ///
 /// Chat requires write access (Member role or higher) since it creates messages.
@@ -562,12 +620,26 @@ async fn handle_send_message(
     state: &AppState,
     sender: &mut futures::stream::SplitSink<WebSocket, Message>,
     chat_id: Uuid,
-    model_name: &str,
     workspace_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
     consecutive_errors: &mut u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Read the chat fresh rather than trusting the row captured at connect
+    // time, so switching model or toggling agent mode takes effect on the next
+    // message instead of the next reconnect.
+    let chat = match chats::get_chat(state.db(), chat_id).await? {
+        Some(chat) => chat,
+        None => {
+            let error_msg = ServerMessage::Error {
+                message: "Chat not found".to_string(),
+            };
+            sender.send(error_msg.to_ws_message()).await?;
+            return Ok(());
+        }
+    };
+    let model_name = chat.model_name.as_str();
+
     // MAJOR-2: Validate model name to prevent routing to unexpected/expensive models
     if !is_valid_model(model_name) {
         tracing::warn!("Invalid model name rejected: {}", model_name);
@@ -633,8 +705,16 @@ async fn handle_send_message(
         }
     }
 
-    // MAJOR-6: Inject knowledge base context scoped to workspace if context service available
-    if let Some(context_service) = state.context_service() {
+    // Agent mode replaces blind context injection with a `search_knowledge`
+    // tool. Doing both would spend the context window on passages the model
+    // never asked for and then offer to fetch them again.
+    let registry = ChatToolRegistry::for_state(state);
+    let agentic = chat.agent_enabled && !registry.is_empty();
+
+    if agentic {
+        context_messages.insert(0, LlmMessage::system(agent::system_prompt(&registry)));
+    } else if let Some(context_service) = state.context_service() {
+        // MAJOR-6: Inject knowledge base context scoped to workspace if context service available
         // Create workspace-scoped search filters
         let filters = zone_context::embeddings::SearchFilters {
             workspace_id: Some(workspace_id),
@@ -692,26 +772,37 @@ async fn handle_send_message(
     };
     sender.send(start_msg.to_ws_message()).await?;
 
-    // Stream LLM response
-    let stream_result = llm_client
-        .chat_stream_with_model(model_name, context_messages, None)
-        .await;
-
-    let stream = match stream_result {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Failed to create LLM stream: {}", e);
-            let error_msg = ServerMessage::Error {
-                message: "Failed to generate response".to_string(),
-            };
-            sender.send(error_msg.to_ws_message()).await?;
-            CHAT_CANCELLATIONS.remove(&cancel_key);
-            return Err(Box::new(e));
+    // Both modes produce the same event stream, so the loop below - and its
+    // cancellation, timeout and truncation handling - is shared.
+    let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send>> = if agentic {
+        Box::pin(agent::run(AgentRun {
+            llm: llm_client,
+            model: model_name.to_string(),
+            registry,
+            context: agent::ToolContext {
+                state: state.clone(),
+                workspace_id,
+                chat_id,
+            },
+            messages: context_messages,
+        }))
+    } else {
+        match llm_client
+            .chat_stream_with_model(model_name, context_messages, None)
+            .await
+        {
+            Ok(stream) => Box::pin(plain_events(stream)),
+            Err(e) => {
+                tracing::error!("Failed to create LLM stream: {}", e);
+                let error_msg = ServerMessage::Error {
+                    message: "Failed to generate response".to_string(),
+                };
+                sender.send(error_msg.to_ws_message()).await?;
+                CHAT_CANCELLATIONS.remove(&cancel_key);
+                return Err(Box::new(e));
+            }
         }
     };
-
-    // Pin the stream for use in select!
-    let mut stream = Box::pin(stream);
 
     let mut full_content = String::new();
     let mut chunk_index = 0;
@@ -719,6 +810,7 @@ async fn handle_send_message(
     let mut client_gone = false;
     let mut stream_failed = false;
     let mut response_truncated = false;
+    let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
 
     // MAJOR-4: Add overall stream timeout
     let stream_deadline =
@@ -743,55 +835,80 @@ async fn handle_send_message(
                 break;
             }
 
-            // Process stream chunks
-            chunk = stream.next() => {
-                match chunk {
-                    Some(Ok(stream_chunk)) => {
-                        if let Some(choice) = stream_chunk.choices.first() {
-                            if let Some(content) = &choice.delta.content {
-                                // MAJOR-3: Check response length limit
-                                if full_content.len() + content.len() > MAX_RESPONSE_LENGTH {
-                                    tracing::warn!(
-                                        "LLM response exceeded maximum length for message {}",
-                                        assistant_message_id
-                                    );
-                                    response_truncated = true;
-                                    break;
-                                }
+            // Process agent events
+            event = events.next() => {
+                match event {
+                    Some(AgentEvent::Chunk(content)) => {
+                        // MAJOR-3: Check response length limit
+                        if full_content.len() + content.len() > MAX_RESPONSE_LENGTH {
+                            tracing::warn!(
+                                "LLM response exceeded maximum length for message {}",
+                                assistant_message_id
+                            );
+                            response_truncated = true;
+                            break;
+                        }
 
-                                full_content.push_str(content);
+                        full_content.push_str(&content);
 
-                                // Send chunk to client
-                                let chunk_msg = ServerMessage::Chunk {
-                                    content: content.clone(),
-                                    index: chunk_index,
-                                };
-                                if !client_gone
-                                    && sender.send(chunk_msg.to_ws_message()).await.is_err()
-                                {
-                                    // The reader navigated away. Keep generating:
-                                    // the reply still has to be saved, because the
-                                    // console reloads history from the database.
-                                    client_gone = true;
-                                }
-                                chunk_index += 1;
-                            }
+                        let chunk_msg = ServerMessage::Chunk {
+                            content,
+                            index: chunk_index,
+                        };
+                        if !client_gone
+                            && sender.send(chunk_msg.to_ws_message()).await.is_err()
+                        {
+                            // The reader navigated away. Keep generating:
+                            // the reply still has to be saved, because the
+                            // console reloads history from the database.
+                            client_gone = true;
+                        }
+                        chunk_index += 1;
+                    }
+                    Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
+                        // Recorded before the tool runs so a turn cancelled
+                        // mid-call still shows what it was doing.
+                        tool_calls.push(ToolCallRecord {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                            success: false,
+                            detail: "Did not finish".to_string(),
+                            duration_ms: 0,
+                        });
 
-                            // Check for finish reason
-                            if choice.finish_reason.is_some() {
-                                break;
-                            }
+                        let tool_msg = ServerMessage::ToolCall {
+                            message_id: assistant_message_id,
+                            tool_call_id: id,
+                            name,
+                            arguments,
+                        };
+                        if !client_gone && sender.send(tool_msg.to_ws_message()).await.is_err() {
+                            client_gone = true;
                         }
                     }
-                    Some(Err(e)) => {
-                        // Keep whatever was generated: returning here discarded a
-                        // complete reply whenever the provider sent one chunk the
-                        // envelope could not parse.
-                        tracing::error!("LLM stream error, keeping partial reply: {}", e);
+                    Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms }) => {
+                        if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
+                            record.success = success;
+                            record.detail = detail.clone();
+                            record.duration_ms = duration_ms;
+                        }
+
+                        let tool_msg = ServerMessage::ToolResult {
+                            message_id: assistant_message_id,
+                            tool_call_id: id,
+                            name,
+                            success,
+                            detail,
+                            duration_ms,
+                        };
+                        if !client_gone && sender.send(tool_msg.to_ws_message()).await.is_err() {
+                            client_gone = true;
+                        }
+                    }
+                    Some(AgentEvent::Failed(message)) => {
                         if !client_gone {
-                            let error_msg = ServerMessage::Error {
-                                message: "Stream error".to_string(),
-                            };
+                            let error_msg = ServerMessage::Error { message };
                             let _ = sender.send(error_msg.to_ws_message()).await;
                         }
                         stream_failed = true;
@@ -809,8 +926,10 @@ async fn handle_send_message(
     // Clean up cancellation channel
     CHAT_CANCELLATIONS.remove(&cancel_key);
 
-    // Nothing generated yet: there is no reply worth keeping.
-    if (cancelled || stream_failed) && full_content.is_empty() {
+    // Nothing generated yet: there is no reply worth keeping. A turn that ran
+    // tools before it broke is worth keeping even with no prose, because the
+    // trace shows the reader what was attempted.
+    if (cancelled || stream_failed) && full_content.is_empty() && tool_calls.is_empty() {
         if !client_gone {
             let cancel_msg = ServerMessage::Cancelled {
                 message_id: Some(assistant_message_id),
@@ -828,7 +947,27 @@ async fn handle_send_message(
         full_content.push_str("\n\n[Response interrupted]");
     }
 
-    match chats::create_message(state.db(), chat_id, "assistant", &full_content, None).await {
+    // Tools can run without the model ever producing prose. The turn is still
+    // worth keeping for its trace, but an assistant message with no content
+    // reads as a bug, and providers reject one when it comes back as history.
+    if full_content.trim().is_empty() {
+        full_content = "[Stopped before answering]".to_string();
+    }
+
+    // The trace is stored alongside the reply so reopening the chat shows the
+    // same tool calls the reader watched stream past.
+    let assistant_metadata =
+        (!tool_calls.is_empty()).then(|| serde_json::json!({ "tool_calls": tool_calls }));
+
+    match chats::create_message(
+        state.db(),
+        chat_id,
+        "assistant",
+        &full_content,
+        assistant_metadata,
+    )
+    .await
+    {
         Ok(msg) => {
             // Spawn background task to generate assistant message embedding
             spawn_message_embedding_task(state.clone(), msg.id, chat_id, full_content.clone());
@@ -1015,6 +1154,57 @@ mod tests {
         assert!(json.contains("\"type\":\"chunk\""));
         assert!(json.contains("\"content\":\"Hello\""));
         assert!(json.contains("\"index\":5"));
+    }
+
+    #[test]
+    fn test_server_message_tool_call_serialize() {
+        let msg = ServerMessage::ToolCall {
+            message_id: Uuid::new_v4(),
+            tool_call_id: "call_abc".to_string(),
+            name: "search_knowledge".to_string(),
+            arguments: r#"{"query":"deploys"}"#.to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"tool_call\""));
+        assert!(json.contains("\"tool_call_id\":\"call_abc\""));
+        assert!(json.contains("\"name\":\"search_knowledge\""));
+        assert!(json.contains("deploys"));
+    }
+
+    #[test]
+    fn test_server_message_tool_result_serialize() {
+        let msg = ServerMessage::ToolResult {
+            message_id: Uuid::new_v4(),
+            tool_call_id: "call_abc".to_string(),
+            name: "search_knowledge".to_string(),
+            success: true,
+            detail: "3 passages".to_string(),
+            duration_ms: 128,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"tool_result\""));
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("\"detail\":\"3 passages\""));
+        assert!(json.contains("\"duration_ms\":128"));
+    }
+
+    #[test]
+    fn test_tool_call_records_serialize_as_message_metadata() {
+        // The console reads this shape back out of `messages.metadata` when a
+        // conversation is reopened, so the key and field names are load bearing.
+        let records = vec![ToolCallRecord {
+            id: "call_abc".to_string(),
+            name: "list_tasks".to_string(),
+            arguments: "{}".to_string(),
+            success: true,
+            detail: "2 tasks".to_string(),
+            duration_ms: 7,
+        }];
+        let metadata = serde_json::json!({ "tool_calls": records });
+
+        assert_eq!(metadata["tool_calls"][0]["name"], "list_tasks");
+        assert_eq!(metadata["tool_calls"][0]["success"], true);
+        assert_eq!(metadata["tool_calls"][0]["duration_ms"], 7);
     }
 
     #[test]

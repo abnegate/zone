@@ -8,6 +8,7 @@ import type { ChatWithMessages, Message } from '../types';
 const mockGetChat = mock();
 const mockSendMessage = mock();
 const mockDeleteMessage = mock();
+const mockUpdateChat = mock();
 
 // Minimal stand-in for the chat socket: records what the hook sends and lets a
 // test push server frames back through onmessage.
@@ -37,6 +38,7 @@ mock.module('../../../api/chats', () => ({
     getChat: mockGetChat,
     sendMessage: mockSendMessage,
     deleteMessage: mockDeleteMessage,
+    updateChat: mockUpdateChat,
     createChatWebSocket: () => {
       lastSocket = new FakeSocket();
       return lastSocket;
@@ -91,6 +93,7 @@ describe('useChat', () => {
     created_at: '2024-01-01T00:00:00Z',
     updated_at: '2024-01-01T00:01:00Z',
     archived: false,
+    agent_enabled: false,
     messages: mockMessages,
   };
 
@@ -98,6 +101,7 @@ describe('useChat', () => {
     mockGetChat.mockReset();
     mockSendMessage.mockReset();
     mockDeleteMessage.mockReset();
+    mockUpdateChat.mockReset();
   });
 
   it('should fetch chat on mount', async () => {
@@ -181,6 +185,93 @@ describe('useChat', () => {
       expect(result.current.streaming).toBe(false);
     });
     expect(result.current.chat?.messages).toHaveLength(4);
+  });
+
+  it('builds the tool trace from the agent frames', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'search_knowledge',
+      arguments: '{"query":"deploys"}',
+    });
+
+    // While the tool runs the reader should see it as in flight, with the
+    // arguments already available.
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls).toHaveLength(1);
+    });
+    const running = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(running?.pending).toBe(true);
+    expect(running?.name).toBe('search_knowledge');
+    expect(running?.arguments).toBe('{"query":"deploys"}');
+
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'search_knowledge',
+      success: true,
+      detail: '3 passages',
+      duration_ms: 128,
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.pending).toBe(false);
+    });
+
+    // The result frame carries no arguments, so completing a call must not
+    // wipe what the start frame recorded.
+    const finished = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(finished?.arguments).toBe('{"query":"deploys"}');
+    expect(finished?.success).toBe(true);
+    expect(finished?.detail).toBe('3 passages');
+    expect(finished?.duration_ms).toBe(128);
+
+    // The reply text arrives after the tool work and must not disturb it.
+    lastSocket?.emit({ type: 'chunk', content: 'We deploy on Fridays.', index: 0 });
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm4',
+      content: 'We deploy on Fridays.',
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('We deploy on Fridays.');
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls).toHaveLength(1);
+  });
+
+  it('persists the agent toggle on the chat', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    mockUpdateChat.mockResolvedValue({ ...mockChat, agent_enabled: true });
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await result.current.setAgentEnabled(true);
+
+    expect(mockUpdateChat).toHaveBeenCalledWith('1', { agent_enabled: true });
+    await waitFor(() => {
+      expect(result.current.chat?.agent_enabled).toBe(true);
+    });
+    // Toggling must not disturb the loaded conversation.
+    expect(result.current.chat?.messages).toHaveLength(2);
   });
 
   it('should delete a message', async () => {
