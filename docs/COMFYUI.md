@@ -68,6 +68,13 @@ built-in authentication. Do not port-forward port 8188, and allow access only
 from the local machine and Docker Desktop. The manager reaches it through
 `http://host.docker.internal:8188`.
 
+After the runtime and checkpoint are ready, enable routing in `.env`:
+
+```dotenv
+COMFYUI_ENABLED=true
+COMFYUI_BASE_URL=http://host.docker.internal:8188
+```
+
 Override installation paths when necessary:
 
 ```bash
@@ -91,6 +98,7 @@ Use the same overrides for later verification and startup.
 Set the manager's internal endpoint in `.env`:
 
 ```dotenv
+COMFYUI_ENABLED=true
 COMFYUI_BASE_URL=http://comfyui:8188
 ```
 
@@ -135,12 +143,13 @@ docker compose --profile bundled-comfyui logs comfyui
 only built-in ComfyUI nodes. Integration code may replace only these inputs:
 
 - node `6`: positive prompt text
+- node `4`: checkpoint filename from trusted server configuration
 - node `5`: width, height, and batch size
 - node `3`: seed, steps, CFG, sampler, scheduler, and denoise
 - node `9`: output filename prefix
 
 The packaged defaults are Schnell-appropriate: four Euler/simple steps and CFG
-1. Node `4` is pinned to the manifest filename and should not be changed from
+1. Node `4` defaults to the manifest filename and is never changed from
 untrusted request data.
 
 ## Troubleshooting

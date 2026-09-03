@@ -125,6 +125,12 @@ For production, regenerate secrets for security.
 See [COMFYUI.md](COMFYUI.md) for model setup, hardware requirements, checksum
 details, and native macOS / bundled NVIDIA instructions.
 
+### `COMFYUI_ENABLED`
+- **Default**: `false`
+- **Description**: Enables automatic image-intent routing and direct ComfyUI
+  generation
+- **Set to `true`** only after the runtime and verified checkpoint are ready
+
 ### `COMFYUI_BASE_URL`
 - **Default**: `http://host.docker.internal:8188`
 - **Description**: ComfyUI endpoint used by the manager
@@ -139,6 +145,11 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: In-container path to the versioned FLUX.1 Schnell API
   workflow
 - **Usage**: The Compose file mounts the repository workflow at this path
+
+### `COMFYUI_CHECKPOINT`
+- **Default**: `flux1-schnell-fp8.safetensors`
+- **Description**: Checkpoint filename under ComfyUI's `models/checkpoints`
+  directory; path separators and traversal are rejected
 
 ### `COMFYUI_COMMIT`
 - **Default**: `30bdda1ef13a3a34fce2cd2fec633f15d832122a`
@@ -436,7 +447,8 @@ Need to find a specific config? Quick lookup:
 - **Domains**: DOMAIN_HOST_WEBUI
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
-- **Image generation**: COMFYUI_BASE_URL, COMFYUI_WORKFLOW_PATH, COMFYUI_COMMIT
+- **Image generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
+  COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY

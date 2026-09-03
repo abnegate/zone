@@ -97,7 +97,17 @@ VENV_PYTHON="$INSTALL_DIR/.venv/bin/python"
 "$VENV_PYTHON" -m pip install --disable-pip-version-check \
     -r "$INSTALL_DIR/requirements.txt"
 
-mkdir -p "$MODELS_DIR/checkpoints" "$INSTALL_DIR/output"
+mkdir -p "$MODELS_DIR/checkpoints" "$INSTALL_DIR/models" "$INSTALL_DIR/output"
+if [ "$MODELS_DIR" != "$INSTALL_DIR/models" ]; then
+    CHECKPOINT_LINK="$INSTALL_DIR/models/checkpoints"
+    if [ -d "$CHECKPOINT_LINK" ] && [ ! -L "$CHECKPOINT_LINK" ] \
+        && [ -n "$(ls -A "$CHECKPOINT_LINK" 2>/dev/null)" ]; then
+        echo "Default checkpoint directory is not empty: $CHECKPOINT_LINK" >&2
+        exit 1
+    fi
+    rm -rf "$CHECKPOINT_LINK"
+    ln -s "$MODELS_DIR/checkpoints" "$CHECKPOINT_LINK"
+fi
 
 echo "Installed ComfyUI $COMFYUI_COMMIT at: $INSTALL_DIR"
 echo "Model directory: $MODELS_DIR"

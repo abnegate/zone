@@ -44,6 +44,7 @@ pub struct Config {
 pub struct ComfyUiConfig {
     pub enabled: bool,
     pub base_url: String,
+    pub workflow_path: std::path::PathBuf,
     pub checkpoint: String,
     pub artifact_root: std::path::PathBuf,
     pub classifier_model: String,
@@ -57,6 +58,8 @@ impl Default for ComfyUiConfig {
         Self {
             enabled: false,
             base_url: "http://comfyui:8188".to_string(),
+            workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../comfyui/workflows/flux1-schnell-fp8-api.json"),
             checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
             artifact_root: "/app/artifacts".into(),
             classifier_model: "llama3.2:3b".to_string(),
@@ -71,10 +74,15 @@ impl ComfyUiConfig {
     pub fn from_env() -> Self {
         Self {
             enabled: env_truthy("COMFYUI_ENABLED", false),
-            base_url: env::var("COMFYUI_URL")
+            base_url: env::var("COMFYUI_BASE_URL")
                 .unwrap_or_else(|_| "http://comfyui:8188".to_string())
                 .trim_end_matches('/')
                 .to_string(),
+            workflow_path: env::var("COMFYUI_WORKFLOW_PATH")
+                .unwrap_or_else(|_| {
+                    "/app/comfyui/workflows/flux1-schnell-fp8-api.json".to_string()
+                })
+                .into(),
             checkpoint: env::var("COMFYUI_CHECKPOINT")
                 .unwrap_or_else(|_| "flux1-schnell-fp8.safetensors".to_string()),
             artifact_root: env::var("ARTIFACT_ROOT")

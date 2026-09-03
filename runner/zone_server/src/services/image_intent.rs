@@ -32,14 +32,14 @@ impl ImageIntentClassifier {
     /// Classify a message. Any unavailable, timed-out, or malformed model result
     /// safely falls back to normal chat.
     pub async fn is_image_request(&self, content: &str, metadata: Option<&Value>) -> bool {
+        if !self.config.enabled {
+            return false;
+        }
         if let Some(force) = metadata
             .and_then(|m| m.get("image_generation"))
             .and_then(Value::as_bool)
         {
             return force;
-        }
-        if !self.config.enabled {
-            return false;
         }
 
         match deterministic_decision(content) {
@@ -217,7 +217,7 @@ mod tests {
         config.enabled = false;
         let disabled = ImageIntentClassifier::new(config, String::new(), String::new());
         assert!(
-            disabled
+            !disabled
                 .is_image_request(
                     "generate an image",
                     Some(&serde_json::json!({"image_generation": true}))

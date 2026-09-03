@@ -36,6 +36,7 @@ pub struct GeneratedImage {
 pub struct ComfyUiClient {
     config: ComfyUiConfig,
     client: Client,
+    workflow: Value,
 }
 
 #[derive(Deserialize)]
@@ -59,7 +60,7 @@ fn default_output_type() -> String {
 impl ComfyUiClient {
     pub fn new(config: ComfyUiConfig) -> Result<Self, ComfyUiError> {
         if config.base_url.trim().is_empty() {
-            return Err(ComfyUiError::Configuration("COMFYUI_URL is empty"));
+            return Err(ComfyUiError::Configuration("COMFYUI_BASE_URL is empty"));
         }
         if config.checkpoint.is_empty()
             || config.checkpoint.contains('/')
@@ -73,7 +74,19 @@ impl ComfyUiClient {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        Ok(Self { config, client })
+        let workflow = std::fs::read_to_string(&config.workflow_path)
+            .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not readable"))
+            .and_then(|contents| {
+                serde_json::from_str(&contents).map_err(|_| {
+                    ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not valid JSON")
+                })
+            })?;
+        validate_workflow(&workflow)?;
+        Ok(Self {
+            config,
+            client,
+            workflow,
+        })
     }
 
     pub async fn generate(
@@ -86,7 +99,8 @@ impl ComfyUiClient {
             return Err(ComfyUiError::Disabled);
         }
 
-        let workflow = build_flux_schnell_workflow(
+        let workflow = configure_flux_schnell_workflow(
+            self.workflow.clone(),
             prompt,
             &self.config.checkpoint,
             rand::random::<u64>() & i64::MAX as u64,
@@ -244,6 +258,37 @@ pub fn build_flux_schnell_workflow(
     checkpoint: &str,
     seed: u64,
 ) -> Result<Value, ComfyUiError> {
+    let workflow = serde_json::from_str(include_str!(
+        "../../../../comfyui/workflows/flux1-schnell-fp8-api.json"
+    ))
+    .map_err(|_| ComfyUiError::Configuration("packaged workflow is not valid JSON"))?;
+    configure_flux_schnell_workflow(workflow, prompt, checkpoint, seed)
+}
+
+fn validate_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
+    for pointer in [
+        "/3/inputs/seed",
+        "/4/inputs/ckpt_name",
+        "/5/inputs/width",
+        "/5/inputs/height",
+        "/6/inputs/text",
+        "/9/inputs/filename_prefix",
+    ] {
+        if workflow.pointer(pointer).is_none() {
+            return Err(ComfyUiError::Configuration(
+                "workflow does not match the FLUX Schnell contract",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn configure_flux_schnell_workflow(
+    mut workflow: Value,
+    prompt: &str,
+    checkpoint: &str,
+    seed: u64,
+) -> Result<Value, ComfyUiError> {
     if prompt.trim().is_empty() || prompt.len() > 100_000 {
         return Err(ComfyUiError::Configuration("prompt is empty or too long"));
     }
@@ -254,19 +299,12 @@ pub fn build_flux_schnell_workflow(
     {
         return Err(ComfyUiError::Configuration("invalid checkpoint filename"));
     }
-    Ok(json!({
-        "1": { "class_type": "CheckpointLoaderSimple", "inputs": { "ckpt_name": checkpoint } },
-        "2": { "class_type": "CLIPTextEncode", "inputs": { "text": prompt, "clip": ["1", 1] } },
-        "3": { "class_type": "CLIPTextEncode", "inputs": { "text": "", "clip": ["1", 1] } },
-        "4": { "class_type": "EmptyLatentImage", "inputs": { "width": 1024, "height": 1024, "batch_size": 1 } },
-        "5": { "class_type": "KSampler", "inputs": {
-            "seed": seed, "steps": 4, "cfg": 1.0, "sampler_name": "euler",
-            "scheduler": "simple", "denoise": 1.0, "model": ["1", 0],
-            "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0]
-        }},
-        "6": { "class_type": "VAEDecode", "inputs": { "samples": ["5", 0], "vae": ["1", 2] } },
-        "7": { "class_type": "SaveImage", "inputs": { "filename_prefix": "zone_flux", "images": ["6", 0] } }
-    }))
+    validate_workflow(&workflow)?;
+    workflow["3"]["inputs"]["seed"] = json!(seed);
+    workflow["4"]["inputs"]["ckpt_name"] = json!(checkpoint);
+    workflow["6"]["inputs"]["text"] = json!(prompt);
+    workflow["9"]["inputs"]["filename_prefix"] = json!("Zone/flux1-schnell");
+    Ok(workflow)
 }
 
 #[cfg(test)]
@@ -280,11 +318,11 @@ mod tests {
     #[test]
     fn workflow_mutates_only_approved_inputs() {
         let workflow = build_flux_schnell_workflow("a blue fox", "flux.safetensors", 42).unwrap();
-        assert_eq!(workflow["1"]["inputs"]["ckpt_name"], "flux.safetensors");
-        assert_eq!(workflow["2"]["inputs"]["text"], "a blue fox");
-        assert_eq!(workflow["5"]["inputs"]["seed"], 42);
-        assert_eq!(workflow["5"]["inputs"]["steps"], 4);
-        assert_eq!(workflow["4"]["inputs"]["width"], 1024);
+        assert_eq!(workflow["4"]["inputs"]["ckpt_name"], "flux.safetensors");
+        assert_eq!(workflow["6"]["inputs"]["text"], "a blue fox");
+        assert_eq!(workflow["3"]["inputs"]["seed"], 42);
+        assert_eq!(workflow["3"]["inputs"]["steps"], 4);
+        assert_eq!(workflow["5"]["inputs"]["width"], 1024);
     }
 
     #[test]

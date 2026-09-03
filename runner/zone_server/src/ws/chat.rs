@@ -782,8 +782,15 @@ async fn handle_image_generation(
 
     let content = "Generated image.";
     let metadata = image_metadata(&attachments);
-    if let Err(error) =
-        chats::create_message(state.db(), chat_id, "assistant", content, metadata.clone()).await
+    if let Err(error) = chats::create_message_with_id(
+        state.db(),
+        assistant_message_id,
+        chat_id,
+        "assistant",
+        content,
+        metadata.clone(),
+    )
+    .await
     {
         store
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
