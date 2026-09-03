@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["local-embeddings"]
+# In-process embeddings (EMBEDDING_ENGINE=local). Links ONNX Runtime, which
+# publishes no musl prebuilts, so any image building this must be glibc-based.
+local-embeddings = ["zone_context/local-embeddings"]
+
 [lib]
 name = "zone_server"
 path = "src/lib.rs"

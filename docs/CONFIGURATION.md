@@ -108,6 +108,16 @@ For production, regenerate secrets for security.
 - **Description**: Where LiteLLM, the manager, and metrics reach Ollama
 - **Usage**: Host daemon is the default so Docker Desktop / Apple Silicon can use Metal. For a bundled container, set `http://ollama:11434` and start with `--profile bundled-ollama`.
 
+### `EMBEDDING_ENGINE`
+- **Default**: `ollama`
+- **Description**: How the manager computes embeddings for search and RAG. The model is always `OLLAMA_MODEL_EMBED`; this only chooses where it runs.
+- **Options**:
+  - `ollama` — call Ollama over HTTP. Uses the GPU when Ollama has one.
+  - `local` — run the model in-process via ONNX Runtime on CPU. No network hop and no contention with the chat model for Ollama's loaded-model slots.
+- **When `local` wins**: short texts (chat messages, search queries) and any host where Ollama has no GPU. On a GPU-backed Ollama, long document chunks are still faster over HTTP.
+- **First boot**: downloads ~520MB of weights into the `zone_manager_embed_cache` volume before the server binds. `ZONE_EMBED_CACHE_DIR` overrides the location.
+- **Build requirement**: needs a `zone-server` built with the `local-embeddings` Cargo feature, which is on by default. ONNX Runtime publishes no musl builds, so the manager image is Debian-based rather than Alpine.
+
 ---
 
 ## 💬 Open WebUI Configuration

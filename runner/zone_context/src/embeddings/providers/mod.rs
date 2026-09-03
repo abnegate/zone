@@ -2,6 +2,7 @@
 //!
 //! Supports multiple embedding providers:
 //! - Ollama (self-hosted via LiteLLM)
+//! - In-process ONNX (self-hosted, feature `local-embeddings`)
 //! - OpenAI
 //! - AWS Bedrock
 
@@ -9,12 +10,26 @@ mod ollama;
 // mod openai;
 // mod bedrock;
 
+#[cfg(feature = "local-embeddings")]
+mod local;
+
 pub use ollama::OllamaProvider;
+
+#[cfg(feature = "local-embeddings")]
+pub use local::LocalEmbeddingProvider;
 
 /// Provider identifier constants
 pub const PROVIDER_SELF_HOSTED: &str = "self_hosted";
 pub const PROVIDER_OPENAI: &str = "openai";
 pub const PROVIDER_BEDROCK: &str = "bedrock";
+
+/// Embedding engine identifiers for the `self_hosted` provider.
+///
+/// The provider says *where the LLM lives*; the engine says *how embeddings
+/// are computed*. `ollama` calls the configured host over HTTP; `local` runs
+/// the model in-process.
+pub const EMBEDDING_ENGINE_OLLAMA: &str = "ollama";
+pub const EMBEDDING_ENGINE_LOCAL: &str = "local";
 
 // Mock provider for testing - available both as cfg(test) and cfg(feature = "test-utils")
 #[cfg(any(test, feature = "test-utils"))]
@@ -84,6 +99,9 @@ pub struct AiSettings {
     pub bedrock_region: Option<String>,
     /// Embedding model name
     pub model_embedding: Option<String>,
+    /// Embedding engine for `self_hosted`: [`EMBEDDING_ENGINE_OLLAMA`]
+    /// (default) or [`EMBEDDING_ENGINE_LOCAL`].
+    pub embedding_engine: Option<String>,
 }
 
 /// Factory for creating embedding providers
@@ -93,12 +111,32 @@ impl EmbeddingProviderFactory {
     /// Create an embedding provider based on AI settings
     pub fn create(settings: &AiSettings) -> Result<Arc<dyn EmbeddingService>> {
         match settings.provider.as_str() {
-            PROVIDER_SELF_HOSTED => {
-                let provider = OllamaProvider::from_settings(settings)?;
-                Ok(Arc::new(provider))
-            }
+            PROVIDER_SELF_HOSTED => match settings.embedding_engine.as_deref() {
+                None | Some(EMBEDDING_ENGINE_OLLAMA) => {
+                    let provider = OllamaProvider::from_settings(settings)?;
+                    Ok(Arc::new(provider))
+                }
+                Some(EMBEDDING_ENGINE_LOCAL) => Self::create_local(settings),
+                Some(other) => Err(ContextError::InvalidSourceConfig(format!(
+                    "Unknown embedding engine '{}' (expected '{}' or '{}')",
+                    other, EMBEDDING_ENGINE_OLLAMA, EMBEDDING_ENGINE_LOCAL
+                ))),
+            },
             _ => Err(ContextError::EmbeddingProviderNotConfigured),
         }
+    }
+
+    #[cfg(feature = "local-embeddings")]
+    fn create_local(settings: &AiSettings) -> Result<Arc<dyn EmbeddingService>> {
+        let provider = LocalEmbeddingProvider::from_settings(settings)?;
+        Ok(Arc::new(provider))
+    }
+
+    #[cfg(not(feature = "local-embeddings"))]
+    fn create_local(_settings: &AiSettings) -> Result<Arc<dyn EmbeddingService>> {
+        Err(ContextError::InvalidSourceConfig(
+            "Embedding engine 'local' requires the `local-embeddings` feature".to_string(),
+        ))
     }
 
     /// Create a provider with explicit configuration
@@ -159,5 +197,37 @@ mod tests {
         assert!(result.is_ok());
         let provider = result.unwrap();
         assert_eq!(provider.model(), "nomic-embed-text");
+    }
+
+    #[test]
+    fn test_provider_factory_rejects_unknown_engine() {
+        let settings = AiSettings {
+            provider: PROVIDER_SELF_HOSTED.to_string(),
+            litellm_host: Some("http://localhost:11434".to_string()),
+            embedding_engine: Some("gpu-magic".to_string()),
+            ..Default::default()
+        };
+        match EmbeddingProviderFactory::create(&settings) {
+            Err(ContextError::InvalidSourceConfig(_)) => {}
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("unknown engine should be rejected"),
+        }
+    }
+
+    // With the feature on this would load a real model (network + seconds),
+    // which belongs in the ignored integration test, not a unit test.
+    #[cfg(not(feature = "local-embeddings"))]
+    #[test]
+    fn test_provider_factory_local_engine_requires_feature() {
+        let settings = AiSettings {
+            provider: PROVIDER_SELF_HOSTED.to_string(),
+            embedding_engine: Some(EMBEDDING_ENGINE_LOCAL.to_string()),
+            ..Default::default()
+        };
+        match EmbeddingProviderFactory::create(&settings) {
+            Err(ContextError::InvalidSourceConfig(_)) => {}
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("local engine should need the feature"),
+        }
     }
 }
