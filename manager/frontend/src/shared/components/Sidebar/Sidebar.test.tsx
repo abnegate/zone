@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 
 mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useLocation: () => ({ pathname: '/' }),
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
     <a href={to}>{children}</a>
   ),
@@ -182,7 +183,7 @@ describe('Sidebar', () => {
       expect(screen.getByText('Tasks').closest('a')).toHaveAttribute('href', '/tasks');
       expect(screen.getByText('Sources').closest('a')).toHaveAttribute('href', '/sources');
       expect(screen.getByText('Search').closest('a')).toHaveAttribute('href', '/search');
-      expect(screen.getByText('Models').closest('a')).toHaveAttribute('href', '/');
+      expect(screen.getByText('Models').closest('a')).toHaveAttribute('href', '/models');
       expect(screen.getByText('Wiki').closest('a')).toHaveAttribute('href', '/wiki');
       expect(screen.getByText('Organization').closest('a')).toHaveAttribute(
         'href',

@@ -63,7 +63,6 @@ export default function ChatsPage() {
 
   const {
     chat: activeChat,
-    loading: chatLoading,
     error: chatError,
     sendMessage: sendMessageFn,
   } = useChat(selectedChatId);
@@ -78,8 +77,9 @@ export default function ChatsPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Combine errors from all hooks and operations
-  const error = chatsError || chatError || searchError || operationError;
+  // Only render a conversation that matches the current selection so a
+  // previous chat never flashes in the main pane while the next one loads.
+  const displayedChat = activeChat?.id === selectedChatId ? activeChat : null;
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -206,10 +206,8 @@ export default function ChatsPage() {
     setShowSearchResults(false);
   };
 
-  const loading = chatsLoading || chatLoading;
-
   return (
-    <div className="page chats-page">
+    <div className="page page--workspace chats-page">
       <div className="chats-sidebar">
         <div className="chats-sidebar-header">
           <h1>Chats</h1>
@@ -219,6 +217,19 @@ export default function ChatsPage() {
         </div>
 
         <form className="chat-search" onSubmit={handleSearch}>
+          <svg
+            className="chat-search-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            width="16"
+            height="16"
+            aria-hidden="true"
+          >
+            <circle cx="11" cy="11" r="7" />
+            <path d="M21 21l-4.3-4.3" />
+          </svg>
           <input
             type="text"
             placeholder="Search messages..."
@@ -262,13 +273,19 @@ export default function ChatsPage() {
           </Tabs>
         )}
 
+        {operationError && !showNewChatModal && (
+          <div className="chats-error" role="alert">
+            {operationError}
+          </div>
+        )}
+
         {showSearchResults ? (
           searching ? (
             <div className="chats-loading">
               <span className="spinner" /> Searching...
             </div>
-          ) : error ? (
-            <div className="chats-error">{error}</div>
+          ) : searchError ? (
+            <div className="chats-error">{searchError}</div>
           ) : searchResults.length === 0 ? (
             <div className="chats-empty">No messages found</div>
           ) : (
@@ -295,12 +312,12 @@ export default function ChatsPage() {
               ))}
             </div>
           )
-        ) : loading ? (
+        ) : chatsLoading ? (
           <div className="chats-loading">
             <span className="spinner" /> Loading...
           </div>
-        ) : error ? (
-          <div className="chats-error">{error}</div>
+        ) : chatsError ? (
+          <div className="chats-error">{chatsError}</div>
         ) : chats.length === 0 ? (
           <EmptyState
             icon={
@@ -408,22 +425,22 @@ export default function ChatsPage() {
       </div>
 
       <div className="chats-main">
-        {activeChat ? (
+        {displayedChat ? (
           <>
             <div className="chat-header">
               <div className="chat-header-info">
-                <h3>{activeChat.title}</h3>
-                <span className="chat-model">{activeChat.model_name}</span>
+                <h3>{displayedChat.title}</h3>
+                <span className="chat-model">{displayedChat.model_name}</span>
               </div>
             </div>
 
             <div className="messages-container">
-              {activeChat.messages.length === 0 ? (
+              {displayedChat.messages.length === 0 ? (
                 <div className="messages-empty">
                   <p>No messages yet. Start a conversation!</p>
                 </div>
               ) : (
-                activeChat.messages.map((message) => (
+                displayedChat.messages.map((message) => (
                   <div key={message.id} className={`message message-${message.role}`}>
                     <div className="message-header">
                       <span className="message-role">
@@ -559,6 +576,16 @@ export default function ChatsPage() {
               </div>
             </form>
           </>
+        ) : selectedChatId && chatError ? (
+          <div className="chat-placeholder">
+            <div className="chats-error">{chatError}</div>
+          </div>
+        ) : selectedChatId ? (
+          <div className="chat-placeholder">
+            <div className="chats-loading">
+              <span className="spinner" /> Loading...
+            </div>
+          </div>
         ) : (
           <div className="chat-placeholder">
             <div className="placeholder-icon">

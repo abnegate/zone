@@ -1,5 +1,64 @@
 .sources-page {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background:
+    radial-gradient(ellipse 80% 45% at 50% 0%, color-mix(in srgb, var(--ui-accent) 7%, transparent), transparent 55%),
+    var(--ui-bg-base);
+  color: var(--ui-text-primary);
+}
+
+.sources-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-space-4);
+  min-height: 3.5rem;
+  padding: 0 var(--ui-space-6);
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-base);
+}
+
+.sources-header-copy {
+  min-width: 0;
+}
+
+.sources-header-copy h1 {
+  margin: 0;
+  font-size: var(--ui-text-xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.sources-header-copy p {
+  margin: 0.1rem 0 0;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
+}
+
+.sources-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--ui-space-6);
+}
+
+.sources-empty {
+  flex: 1;
+}
+
+.sources-banner {
+  margin: var(--ui-space-4) var(--ui-space-6) 0;
+  padding: var(--ui-space-3) var(--ui-space-4);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-text-sm);
+}
+
+.sources-banner--error {
+  background: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
+  color: var(--ui-error);
 }
 
 .sources-page .page-header {
@@ -111,10 +170,10 @@
 }
 
 .source-card {
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: var(--spacing-md);
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  padding: var(--ui-space-4);
   transition: all 0.15s ease;
 }
 
@@ -766,7 +825,7 @@ details summary::-webkit-details-marker {
 
 /* Wizard Step Content */
 .wizard-step-content {
-  min-height: 200px;
+  min-height: 0;
 }
 
 .wizard-step-intro {
@@ -778,7 +837,7 @@ details summary::-webkit-details-marker {
 
 .source-type-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(9.25rem, 1fr));
   gap: var(--ui-space-3);
 }
 

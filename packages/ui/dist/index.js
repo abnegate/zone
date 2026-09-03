@@ -820,7 +820,7 @@ var stepDescriptionVariants = (0, import_class_variance_authority3.cva)([
 ]);
 var contentVariants = (0, import_class_variance_authority3.cva)(
   [
-    "flex-1 overflow-auto",
+    "overflow-auto",
     "p-[var(--ui-space-6)]",
     "transition-all duration-150 ease-out"
   ],
@@ -940,27 +940,27 @@ var Wizard = (0, import_react12.forwardRef)(
       if (index === currentStep) return "current";
       return "upcoming";
     };
-    return /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: cn(overlayVariants()), onClick: onClose, children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
+    return /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: cn("ui-wizard-overlay", overlayVariants()), onClick: onClose, children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
       "div",
       {
         ref,
-        className: cn(wizardVariants({ size, className })),
+        className: cn("ui-wizard", `ui-wizard--${size ?? "md"}`, wizardVariants({ size, className })),
         onClick: (e) => e.stopPropagation(),
         role: "dialog",
         "aria-modal": "true",
         "aria-labelledby": "wizard-title",
         ...props,
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("header", { className: cn(headerVariants()), children: [
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("header", { className: cn("ui-wizard-header", headerVariants()), children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { children: [
               /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("h2", { id: "wizard-title", className: cn(titleVariants()), children: title }),
-              subtitle && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: cn(subtitleVariants()), children: subtitle })
+              subtitle && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("p", { className: cn("ui-wizard-subtitle", subtitleVariants()), children: subtitle })
             ] }),
             onClose && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
               "button",
               {
                 type: "button",
-                className: cn(closeButtonVariants()),
+                className: cn("ui-wizard-close", closeButtonVariants()),
                 onClick: onClose,
                 "aria-label": "Close wizard",
                 disabled: loading,
@@ -980,8 +980,8 @@ var Wizard = (0, import_react12.forwardRef)(
               }
             )
           ] }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("nav", { className: cn(stepsNavVariants()), "aria-label": "Wizard steps", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: cn(progressTrackVariants()), children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("nav", { className: cn("ui-wizard-steps", stepsNavVariants()), "aria-label": "Wizard steps", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: cn("ui-wizard-progress", progressTrackVariants()), children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
               "div",
               {
                 className: cn(progressFillVariants()),
@@ -1017,9 +1017,9 @@ var Wizard = (0, import_react12.forwardRef)(
                             children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("polyline", { points: "20 6 9 17 4 12" })
                           }
                         ) : step.icon ? step.icon : showStepNumbers ? index + 1 : /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "w-2 h-2 rounded-full bg-current" }) }),
-                        /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "flex flex-col items-start", children: [
-                          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: cn(stepTitleVariants({ state })), children: step.title }),
-                          step.description && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: cn(stepDescriptionVariants()), children: step.description })
+                        /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: "ui-wizard-step-copy flex flex-col items-start", children: [
+                          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: cn("ui-wizard-step-title", stepTitleVariants({ state })), children: step.title }),
+                          step.description && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: cn("ui-wizard-step-description", stepDescriptionVariants()), children: step.description })
                         ] })
                       ]
                     }
@@ -1032,11 +1032,11 @@ var Wizard = (0, import_react12.forwardRef)(
           /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
             "div",
             {
-              className: cn(contentVariants({ animating: animatingStep || "none" })),
+              className: cn("ui-wizard-content", contentVariants({ animating: animatingStep || "none" })),
               children
             }
           ),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("footer", { className: cn(footerVariants()), children: [
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("footer", { className: cn("ui-wizard-footer", footerVariants()), children: [
             /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
               Button,
               {

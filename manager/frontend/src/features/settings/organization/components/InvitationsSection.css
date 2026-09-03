@@ -11,15 +11,17 @@
 
 .section-header h2 {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: var(--ui-text-lg);
   font-weight: 600;
 }
 
 .empty-state {
   text-align: center;
-  padding: 3rem;
-  background: var(--bg-secondary);
-  border-radius: 8px;
+  padding: var(--ui-space-8) var(--ui-space-4);
+  background: var(--ui-bg-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  color: var(--ui-text-secondary);
 }
 
 .empty-state p {

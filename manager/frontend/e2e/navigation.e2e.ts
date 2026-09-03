@@ -161,8 +161,16 @@ test.describe('Navigation', () => {
     await expect(navItems.nth(8)).toContainText('Workspace');
   });
 
-  test('Models page is default route', async ({ page }) => {
-    await expect(page.locator('.nav-item:has-text("Models")')).toHaveClass(/active/);
+  test('Chats page is default route', async ({ page }) => {
+    await expect(page.locator('.nav-item:has-text("Chats")')).toHaveClass(/active/);
+    await expect(
+      page.getByRole('heading', { name: 'Chats', exact: true })
+    ).toBeVisible();
+  });
+
+  test('navigates to Models page', async ({ page }) => {
+    await page.click('a[href="/models"]');
+    await expect(page).toHaveURL('/models');
     await expect(
       page.getByRole('heading', { name: 'Models', exact: true })
     ).toBeVisible();
@@ -227,11 +235,11 @@ test.describe('Navigation', () => {
   });
 
   test('active nav item updates on navigation', async ({ page }) => {
-    await expect(page.locator('.nav-item:has-text("Models")')).toHaveClass(/active/);
-
-    await page.click('a[href="/chats"]');
     await expect(page.locator('.nav-item:has-text("Chats")')).toHaveClass(/active/);
-    await expect(page.locator('.nav-item:has-text("Models")')).not.toHaveClass(/active/);
+
+    await page.click('a[href="/models"]');
+    await expect(page.locator('.nav-item:has-text("Models")')).toHaveClass(/active/);
+    await expect(page.locator('.nav-item:has-text("Chats")')).not.toHaveClass(/active/);
   });
 
   test('direct URL navigation works', async ({ page }) => {

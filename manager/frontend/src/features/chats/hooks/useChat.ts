@@ -16,30 +16,43 @@ type ServerMessage =
 
 export function useChat(chatId: string | null) {
   const [chat, setChat] = useState<ChatWithMessages | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(chatId));
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
+  const requestIdRef = useRef(0);
 
-  const fetchChat = useCallback(async () => {
+  const fetchChat = useCallback(async (opts?: { silent?: boolean }) => {
+    const requestId = ++requestIdRef.current;
     if (!chatId) {
+      setChat(null);
       setLoading(false);
+      setError(null);
       return;
     }
 
-    setLoading(true);
+    if (!opts?.silent) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const data = await chatsApi.getChat(chatId);
+      if (requestId !== requestIdRef.current) return;
       setChat(data);
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : 'Failed to fetch chat');
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [chatId]);
 
   useEffect(() => {
+    // Drop the previous conversation as soon as the selection changes so the
+    // UI never keeps rendering chat A under chat B's selection.
+    setChat(null);
     fetchChat();
   }, [fetchChat]);
 
@@ -174,7 +187,7 @@ export function useChat(chatId: string | null) {
   };
 
   const refresh = async (): Promise<void> => {
-    await fetchChat();
+    await fetchChat({ silent: true });
   };
 
   return {

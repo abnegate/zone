@@ -6,18 +6,41 @@ import { z } from 'zod';
 
 export const KnowledgeTypeSchema = z.enum(['text', 'url']);
 
-export const KnowledgeEntrySchema = z.object({
-  id: z.string().min(1),
-  workspace_id: z.string().min(1),
-  title: z.string(),
-  type: KnowledgeTypeSchema,
-  content: z.string(),
-  fetched_content: z.string().nullable(),
-  tags: z.array(z.string()),
-  last_refreshed_at: z.string().nullable(),
-  created_at: z.string().datetime(),
-  updated_at: z.string().datetime(),
-});
+export const KnowledgeEntrySchema = z
+  .object({
+    id: z.string().min(1),
+    workspace_id: z.string().min(1),
+    title: z.string(),
+    type: KnowledgeTypeSchema.optional(),
+    content: z.string().nullable().optional(),
+    fetched_content: z.string().nullable().optional(),
+    category: z.string().nullable().optional(),
+    tags: z.array(z.string()).optional().default([]),
+    token_count: z.number().optional(),
+    is_active: z.boolean().optional(),
+    source_url: z.string().nullable().optional(),
+    last_fetched_at: z.string().nullable().optional(),
+    last_refreshed_at: z.string().nullable().optional(),
+    refresh_interval_minutes: z.number().nullable().optional(),
+    last_fetch_error: z.string().nullable().optional(),
+    created_at: z.string().optional(),
+    updated_at: z.string().optional(),
+  })
+  .transform((entry) => {
+    const sourceUrl = entry.source_url ?? null;
+    return {
+      id: entry.id,
+      workspace_id: entry.workspace_id,
+      title: entry.title,
+      type: entry.type ?? (sourceUrl ? 'url' : 'text'),
+      content: entry.content ?? sourceUrl ?? '',
+      fetched_content: entry.fetched_content ?? null,
+      tags: entry.tags ?? [],
+      last_refreshed_at: entry.last_refreshed_at ?? entry.last_fetched_at ?? null,
+      created_at: entry.created_at ?? '',
+      updated_at: entry.updated_at ?? '',
+    };
+  });
 
 export const CreateKnowledgeRequestSchema = z.object({
   title: z.string().min(1, 'Title is required'),
@@ -26,9 +49,12 @@ export const CreateKnowledgeRequestSchema = z.object({
   tags: z.array(z.string()).optional(),
 });
 
-export const KnowledgeResponseSchema = z.object({
-  entries: z.array(KnowledgeEntrySchema),
-});
+export const KnowledgeResponseSchema = z.preprocess(
+  (data) => (Array.isArray(data) ? { entries: data } : data),
+  z.object({
+    entries: z.array(KnowledgeEntrySchema),
+  })
+);
 
 export type KnowledgeTypeZ = z.infer<typeof KnowledgeTypeSchema>;
 export type KnowledgeEntryZ = z.infer<typeof KnowledgeEntrySchema>;
