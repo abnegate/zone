@@ -7,7 +7,7 @@
     "@hookform/resolvers": "^3.10.0",
     "@tailwindcss/vite": "4.1.18",
     "@tanstack/react-query": "^5.62.7",
-    "@tanstack/react-table": "^8.20.6",
+    "@tanstack/react-table": "9.2.4",
     "@zone/ui": "*",
     "date-fns": "^4.1.0",
     "react": "^19.2.3",
