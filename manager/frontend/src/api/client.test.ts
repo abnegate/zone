@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Limits, Plan, Subscription, Usage } from '../types';
 import { client } from './client';
 
@@ -23,7 +23,17 @@ class MockWebSocket {
   close = mock();
 }
 
-(global as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket;
+// Every test file shares one process, so a global left swapped out here reaches
+// suites that expect a real WebSocket.
+const realWebSocket = global.WebSocket;
+
+beforeAll(() => {
+  (global as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket;
+});
+
+afterAll(() => {
+  global.WebSocket = realWebSocket;
+});
 
 describe('Client', () => {
   beforeEach(() => {
