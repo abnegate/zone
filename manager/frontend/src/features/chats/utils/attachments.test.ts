@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { attachmentMetadata, imageAttachments, isSendable, sendMetadata } from './attachments';
+import { attachmentMetadata, imageAttachments, isSendable } from './attachments';
 
 describe('imageAttachments', () => {
   it('returns only image attachments with a url', () => {
@@ -34,33 +34,6 @@ describe('attachmentMetadata', () => {
       ])
     ).toEqual({
       attachments: [{ name: 'shot.png', mime: 'image/png', url: 'data:image/png;base64,xx' }],
-    });
-  });
-});
-
-describe('sendMetadata', () => {
-  it('includes the web search flag even without attachments', () => {
-    expect(sendMetadata([], true)).toEqual({ web_search: true });
-    expect(sendMetadata([], false)).toEqual({ web_search: false });
-  });
-
-  it('keeps image attachments alongside web search', () => {
-    expect(
-      sendMetadata(
-        [
-          {
-            id: '1',
-            name: 'shot.png',
-            size: 12,
-            type: 'image/png',
-            url: 'data:image/png;base64,xx',
-          },
-        ],
-        true
-      )
-    ).toEqual({
-      attachments: [{ name: 'shot.png', mime: 'image/png', url: 'data:image/png;base64,xx' }],
-      web_search: true,
     });
   });
 });

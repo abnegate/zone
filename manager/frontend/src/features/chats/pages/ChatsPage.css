@@ -698,11 +698,6 @@
   font-size: var(--ui-text-xs);
 }
 
-.message-form-row .btn-icon.is-active {
-  background-color: color-mix(in srgb, var(--ui-accent) 12%, transparent);
-  color: var(--ui-accent);
-}
-
 .message-form textarea {
   flex: 1;
   min-height: 2.25rem;

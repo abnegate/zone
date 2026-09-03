@@ -92,15 +92,16 @@ impl WebSearchConfig {
 
     /// Whether this chat message should trigger a SearXNG lookup.
     ///
-    /// Enabled by default when the server switch is on. A boolean
-    /// `metadata.web_search` value opts a single message in or out.
-    pub fn requested_for(&self, metadata: Option<&serde_json::Value>) -> bool {
+    /// When the server switch is on, search runs only when the message looks
+    /// like it needs current web information. A boolean `metadata.web_search`
+    /// value can force a lookup on or off for a single message.
+    pub fn requested_for(&self, content: &str, metadata: Option<&serde_json::Value>) -> bool {
         if !self.enabled || self.query_url.trim().is_empty() {
             return false;
         }
         match metadata.and_then(|m| m.get("web_search")) {
             Some(v) if v.is_boolean() => v.as_bool() == Some(true),
-            _ => true,
+            _ => crate::services::searxng::needs_web_search(content),
         }
     }
 }
@@ -410,20 +411,22 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.query_url, DEFAULT_SEARXNG_QUERY_URL);
         assert_eq!(config.result_count, 5);
-        assert!(!config.requested_for(None));
+        assert!(!config.requested_for("hello", None));
     }
 
     #[test]
-    fn test_web_search_requested_for_respects_metadata() {
+    fn test_web_search_requested_for_respects_metadata_and_intent() {
         let config = WebSearchConfig {
             enabled: true,
             ..WebSearchConfig::default()
         };
-        assert!(config.requested_for(None));
-        assert!(config.requested_for(Some(&serde_json::json!({}))));
-        assert!(config.requested_for(Some(&serde_json::json!({ "web_search": true }))));
-        assert!(!config.requested_for(Some(&serde_json::json!({ "web_search": false }))));
-        assert!(config.requested_for(Some(&serde_json::json!({ "web_search": "yes" }))));
+        assert!(!config.requested_for("Explain this function", None));
+        assert!(config.requested_for("What is the latest news on Rust?", None));
+        assert!(config.requested_for("anything", Some(&serde_json::json!({ "web_search": true }))));
+        assert!(!config.requested_for(
+            "latest news",
+            Some(&serde_json::json!({ "web_search": false }))
+        ));
     }
 
     #[test]
@@ -432,13 +435,16 @@ mod tests {
             enabled: false,
             ..WebSearchConfig::default()
         };
-        assert!(!disabled.requested_for(Some(&serde_json::json!({ "web_search": true }))));
+        assert!(!disabled.requested_for(
+            "latest news",
+            Some(&serde_json::json!({ "web_search": true }))
+        ));
 
         let empty_url = WebSearchConfig {
             enabled: true,
             query_url: "  ".to_string(),
             ..WebSearchConfig::default()
         };
-        assert!(!empty_url.requested_for(None));
+        assert!(!empty_url.requested_for("latest news", None));
     }
 }
