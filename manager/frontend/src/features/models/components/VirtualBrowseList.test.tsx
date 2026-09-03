@@ -7,6 +7,9 @@ const mockModels: BrowseModel[] = [
   {
     name: 'llama2:7b',
     size: 3800000000,
+    description: 'A compact Llama 2 chat model.',
+    downloads: 28700,
+    use_cases: ['Chat', 'Tool use'],
     details: {
       family: 'llama',
       parameter_size: '7B',
@@ -79,7 +82,7 @@ describe('VirtualBrowseList', () => {
     expect(screen.getByText('3.8 GB')).toBeInTheDocument();
   });
 
-  it('renders model details as tags', () => {
+  it('renders parameter size, description, and use cases', () => {
     render(
       <VirtualBrowseList
         models={mockModels}
@@ -91,10 +94,34 @@ describe('VirtualBrowseList', () => {
       />
     );
 
-    expect(screen.getByText('llama')).toBeInTheDocument();
-    expect(screen.getByText('mistral')).toBeInTheDocument();
     expect(screen.getAllByText('7B').length).toBeGreaterThan(0);
     expect(screen.getByText('Q4_0')).toBeInTheDocument();
+    expect(screen.getByText('llama')).toBeInTheDocument();
+    expect(screen.getByText('A compact Llama 2 chat model.')).toBeInTheDocument();
+    expect(screen.getByText('Chat')).toBeInTheDocument();
+    expect(screen.getByText('Tool use')).toBeInTheDocument();
+    expect(screen.getByText('28.7K downloads')).toBeInTheDocument();
+  });
+
+  it('prefers display name when present', () => {
+    render(
+      <VirtualBrowseList
+        models={[
+          {
+            name: 'anthropic/claude-sonnet-4',
+            display_name: 'Anthropic: Claude Sonnet 4',
+            description: 'A balanced coding model.',
+          },
+        ]}
+        onItemClick={onItemClick}
+        onInstall={onInstall}
+        hasMore={false}
+        loadingMore={false}
+        onLoadMore={onLoadMore}
+      />
+    );
+
+    expect(screen.getByText('Anthropic: Claude Sonnet 4')).toBeInTheDocument();
   });
 
   it('calls onItemClick when model clicked', () => {
