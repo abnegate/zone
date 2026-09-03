@@ -9,11 +9,39 @@ const mockGetChat = mock();
 const mockSendMessage = mock();
 const mockDeleteMessage = mock();
 
+// Minimal stand-in for the chat socket: records what the hook sends and lets a
+// test push server frames back through onmessage.
+class FakeSocket {
+  static OPEN = 1;
+  readyState = 1;
+  sent: string[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  send(data: string) {
+    this.sent.push(data);
+  }
+  close() {
+    this.readyState = 3;
+  }
+  emit(payload: unknown) {
+    this.onmessage?.({ data: JSON.stringify(payload) });
+  }
+}
+
+let lastSocket: FakeSocket | null = null;
+
 mock.module('../../../api/chats', () => ({
   chatsApi: {
     getChat: mockGetChat,
     sendMessage: mockSendMessage,
     deleteMessage: mockDeleteMessage,
+    createChatWebSocket: () => {
+      lastSocket = new FakeSocket();
+      return lastSocket;
+    },
+    chatAccessToken: () => 'test-token',
   },
 }));
 
@@ -111,22 +139,48 @@ describe('useChat', () => {
       created_at: '2024-01-01T00:02:00Z',
     };
     mockGetChat.mockResolvedValue(mockChat);
-    mockSendMessage.mockResolvedValue(newMessage);
 
     const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
     });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
 
-    const message = await result.current.sendMessage({ content: 'New message' });
+    await result.current.sendMessage({ content: 'New message' });
 
-    expect(message).toEqual(newMessage);
-    expect(mockSendMessage).toHaveBeenCalledWith('1', { content: 'New message' });
+    // The user message goes over the socket, not to POST /messages: the socket
+    // is what makes the server generate a reply.
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(JSON.parse(lastSocket?.sent.at(-1) ?? '{}')).toEqual({
+      type: 'send',
+      content: 'New message',
+    });
+
+    lastSocket?.emit({
+      type: 'message_saved',
+      message_id: 'm3',
+      role: 'user',
+      content: 'New message',
+    });
     await waitFor(() => {
       expect(result.current.chat?.messages).toHaveLength(3);
     });
-    expect(result.current.chat?.messages).toContainEqual(newMessage);
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({ type: 'chunk', content: 'Hel', index: 0 });
+    lastSocket?.emit({ type: 'chunk', content: 'lo', index: 1 });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('Hello');
+    });
+
+    lastSocket?.emit({ type: 'message_end', message_id: 'm4', content: 'Hello' });
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+    });
+    expect(result.current.chat?.messages).toHaveLength(4);
   });
 
   it('should delete a message', async () => {
@@ -180,18 +234,21 @@ describe('useChat', () => {
   });
 
   it('should handle sending message with error', async () => {
-    const error = new Error('Failed to send message');
     mockGetChat.mockResolvedValue(mockChat);
-    mockSendMessage.mockRejectedValue(error);
 
     const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
     });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.close();
 
     await expect(result.current.sendMessage({ content: 'Test' })).rejects.toThrow(
-      'Failed to send message'
+      'Chat connection is not open'
     );
     expect(result.current.chat?.messages).toHaveLength(2); // No new message added
   });
