@@ -124,7 +124,9 @@ export default function WorkspaceSettingsPage() {
         client.getWorkspaceAiSettings(orgId, workspaceId),
         client.getEffectiveAiSettings(orgId, workspaceId),
       ]);
-      applyThemeToForm(theme);
+      if (theme) {
+        applyThemeToForm(theme);
+      }
       setWorkspaceTheme(theme);
       applyAiSettingsToForm(wsAiSettings);
       setEffectiveSettings(effectiveAi);
