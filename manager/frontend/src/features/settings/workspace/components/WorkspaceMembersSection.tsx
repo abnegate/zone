@@ -22,6 +22,14 @@ const roleOptions: Array<{ value: WorkspaceRole; label: string }> = [
   { value: 'owner', label: 'Owner' },
 ];
 
+const memberLabel = (member: { display_name: string | null; email: string }) =>
+  member.display_name || member.email || 'Member';
+
+const toUserMessage = (err: unknown, fallback: string) => {
+  const message = err instanceof Error ? err.message : fallback;
+  return message.startsWith('Validation failed') ? fallback : message;
+};
+
 export default function WorkspaceMembersSection({
   workspaceId,
   orgId,
@@ -75,7 +83,7 @@ export default function WorkspaceMembersSection({
         setCurrentUserRole(currentMember.role);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load members');
+      setError(toUserMessage(err, 'Couldn’t load members'));
     } finally {
       setLoading(false);
     }
@@ -204,8 +212,9 @@ export default function WorkspaceMembersSection({
   };
 
   const formatDate = (dateString: string): string => {
+    if (!dateString) return '—';
     const date = new Date(dateString);
-    // Use user's locale instead of hardcoded 'en-US'
+    if (Number.isNaN(date.getTime())) return '—';
     return date.toLocaleDateString(undefined, {
       year: 'numeric',
       month: 'short',
@@ -300,12 +309,12 @@ export default function WorkspaceMembersSection({
                     <td>
                       <div className="member-info">
                         <div className="member-avatar">
-                          {(member.display_name || member.email)[0].toUpperCase()}
+                          {memberLabel(member)[0].toUpperCase()}
                         </div>
-                        <div className="member-name">{member.display_name || member.email}</div>
+                        <div className="member-name">{memberLabel(member)}</div>
                       </div>
                     </td>
-                    <td>{member.email}</td>
+                    <td>{member.email || '—'}</td>
                     <td>
                       <span className={getRoleBadgeClass(member.role)}>
                         {member.role.charAt(0).toUpperCase() + member.role.slice(1)}
@@ -321,7 +330,7 @@ export default function WorkspaceMembersSection({
                           }
                           disabled={!canModify || isUpdating}
                           className="role-select"
-                          aria-label={`Change role for ${member.display_name || member.email}`}
+                          aria-label={`Change role for ${memberLabel(member)}`}
                         >
                           {availableRoles.map((option) => (
                             <option key={option.value} value={option.value}>
@@ -376,7 +385,7 @@ export default function WorkspaceMembersSection({
               { value: '', label: 'Select a user...' },
               ...availableOrgMembers.map((orgMember) => ({
                 value: orgMember.user_id,
-                label: `${orgMember.display_name || orgMember.email} (${orgMember.email})`,
+                label: `${memberLabel(orgMember)}${orgMember.email ? ` (${orgMember.email})` : ''}`,
               })),
             ]}
             error={addUserIdError}
@@ -418,7 +427,7 @@ export default function WorkspaceMembersSection({
         <div className="remove-member-modal">
           <p>
             Are you sure you want to remove{' '}
-            <strong>{memberToRemove?.display_name || memberToRemove?.email}</strong> from this
+            <strong>{memberToRemove ? memberLabel(memberToRemove) : ''}</strong> from this
             workspace?
           </p>
           <div className="modal-actions">
@@ -445,7 +454,7 @@ export default function WorkspaceMembersSection({
           <p>
             Are you sure you want to promote{' '}
             <strong>
-              {pendingRoleChange?.member.display_name || pendingRoleChange?.member.email}
+              {pendingRoleChange ? memberLabel(pendingRoleChange.member) : ''}
             </strong>{' '}
             to <strong>{pendingRoleChange?.newRole}</strong>?
           </p>

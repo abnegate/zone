@@ -45,7 +45,7 @@ async fn create_organization(client: &TestClient, token: &str, name: &str, slug:
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    Uuid::parse_str(body["id"].as_str().unwrap()).unwrap()
+    Uuid::parse_str(body["organization"]["id"].as_str().unwrap()).unwrap()
 }
 
 // =============================================================================
@@ -121,7 +121,7 @@ async fn test_create_invitation_with_workspaces() {
 
     ws_response.assert_status(StatusCode::CREATED);
     let ws_body = ws_response.json_value();
-    let workspace_id = ws_body["id"].as_str().unwrap();
+    let workspace_id = ws_body["workspace"]["id"].as_str().unwrap();
 
     let invite_email = test_email();
 
@@ -537,7 +537,9 @@ async fn test_accept_invitation_success() {
 
     members_response.assert_status(StatusCode::OK);
     let json = members_response.json_value();
-    let members = json.as_array().unwrap();
+    let members = json["members"]
+        .as_array()
+        .expect("member list must be wrapped in a `members` key, not a bare array");
 
     // Should have owner + new member
     assert!(members.len() >= 2);
@@ -575,7 +577,7 @@ async fn test_accept_invitation_adds_to_workspaces() {
 
     ws_response.assert_status(StatusCode::CREATED);
     let json = ws_response.json_value();
-    let workspace_id = json["id"].as_str().unwrap();
+    let workspace_id = json["workspace"]["id"].as_str().unwrap();
 
     // Create invitation with workspace
     let invite_email = test_email();
@@ -619,7 +621,9 @@ async fn test_accept_invitation_adds_to_workspaces() {
 
     ws_members_response.assert_status(StatusCode::OK);
     let json = ws_members_response.json_value();
-    let ws_members = json.as_array().unwrap();
+    let ws_members = json["members"]
+        .as_array()
+        .expect("member list must be wrapped in a `members` key, not a bare array");
 
     let invited_id_str = invited_id.to_string();
     let invited_ws_member = ws_members.iter().find(|m| m["user_id"] == invited_id_str);

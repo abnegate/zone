@@ -39,15 +39,30 @@ export const WorkspaceResponseSchema = z.object({
 });
 
 // Workspace Member Schemas
-export const WorkspaceMemberSchema = z.object({
-  id: z.string().min(1),
-  user_id: z.string().min(1),
-  workspace_id: z.string().min(1),
-  role: WorkspaceRoleSchema,
-  email: z.string().email(),
-  display_name: z.string().nullable(),
-  joined_at: z.string().datetime(),
-});
+export const WorkspaceMemberSchema = z
+  .object({
+    id: z.string().min(1),
+    user_id: z.string().min(1),
+    workspace_id: z.string().min(1),
+    role: WorkspaceRoleSchema,
+    is_active: z.boolean().optional(),
+    invited_by: z.string().nullable().optional(),
+    email: z.string().nullable().optional(),
+    display_name: z.string().nullable().optional(),
+    joined_at: z.string().optional(),
+    created_at: z.string().optional(),
+    updated_at: z.string().optional(),
+    deleted_at: z.string().nullable().optional(),
+  })
+  .transform((member) => ({
+    id: member.id,
+    user_id: member.user_id,
+    workspace_id: member.workspace_id,
+    role: member.role,
+    email: member.email || '',
+    display_name: member.display_name ?? null,
+    joined_at: member.joined_at || member.created_at || '',
+  }));
 
 export const AddWorkspaceMemberRequestSchema = z.object({
   user_id: z.string().min(1, 'User is required'),

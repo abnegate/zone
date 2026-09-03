@@ -17,6 +17,10 @@ const HTTP_TIMEOUT_SECS: u64 = 30;
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
 const POOL_MAX_IDLE_PER_HOST: usize = 10;
 const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+/// Ollama publishes exact blob sizes in its registry manifests; the library
+/// listing page carries no size at all, so each browsed model needs one lookup.
+const OLLAMA_REGISTRY_URL: &str = "https://registry.ollama.ai/v2/library";
+const OLLAMA_SIZE_LOOKUP_CONCURRENCY: usize = 8;
 
 // =============================================================================
 // Shared HTTP Client
@@ -152,6 +156,7 @@ impl ModelProvider for OllamaLibraryProvider {
         let all_models = parse_ollama_library_html(&html);
         let total = all_models.len();
         let models: Vec<_> = all_models.into_iter().skip(offset).take(limit).collect();
+        let models = attach_ollama_download_sizes(models).await;
 
         // For offset-based pagination, encode next offset as cursor
         let next_offset = offset + models.len();
@@ -166,6 +171,49 @@ impl ModelProvider for OllamaLibraryProvider {
             next_cursor,
         })
     }
+}
+
+/// Look up the download size of each model from the Ollama registry.
+///
+/// A model whose manifest cannot be fetched keeps `size: None` rather than
+/// failing the whole listing.
+async fn attach_ollama_download_sizes(models: Vec<ModelResponse>) -> Vec<ModelResponse> {
+    use futures::stream::{self, StreamExt};
+
+    stream::iter(models)
+        .map(|mut model| async move {
+            model.size = fetch_ollama_manifest_size(&model.name).await;
+            model
+        })
+        .buffered(OLLAMA_SIZE_LOOKUP_CONCURRENCY)
+        .collect()
+        .await
+}
+
+/// Sum the layer sizes in a model's `latest` manifest to get its download size.
+async fn fetch_ollama_manifest_size(name: &str) -> Option<u64> {
+    let url = format!("{}/{}/manifests/latest", OLLAMA_REGISTRY_URL, name);
+
+    let response = HTTP_CLIENT
+        .get(&url)
+        .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+        .send()
+        .await
+        .ok()?;
+
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let manifest: serde_json::Value = response.json().await.ok()?;
+    let total: u64 = manifest
+        .get("layers")?
+        .as_array()?
+        .iter()
+        .filter_map(|layer| layer.get("size")?.as_u64())
+        .sum();
+
+    (total > 0).then_some(total)
 }
 
 /// Parse Ollama library HTML to extract model information

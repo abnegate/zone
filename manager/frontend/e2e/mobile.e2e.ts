@@ -111,16 +111,18 @@ test.describe('Mobile Responsiveness', () => {
     });
 
     test('page header is visible on mobile', async ({ page }) => {
-      await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Chats', exact: true })).toBeVisible();
     });
   });
 
   test.describe('Models Page Mobile', () => {
     test('models page renders correctly on mobile', async ({ page }) => {
+      await page.goto('/models');
       await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible();
     });
 
     test('model form is visible on mobile', async ({ page }) => {
+      await page.goto('/models');
       await expect(page.locator('.model-form')).toBeVisible();
     });
   });
@@ -147,13 +149,13 @@ test.describe('Tablet Responsiveness', () => {
     await page.reload();
 
     // Wait for page to load
-    await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible({
+    await expect(page.getByRole('heading', { name: 'Chats', exact: true })).toBeVisible({
       timeout: 10000,
     });
   });
 
   test('page loads correctly on tablet', async ({ page }) => {
-    await expect(page.getByRole('heading', { name: 'Models', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Chats', exact: true })).toBeVisible();
   });
 
   test('content adjusts to tablet width', async ({ page }) => {

@@ -52,7 +52,7 @@ async fn create_test_organization(client: &TestClient, token: &str) -> Uuid {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    Uuid::parse_str(body["id"].as_str().unwrap()).unwrap()
+    Uuid::parse_str(body["organization"]["id"].as_str().unwrap()).unwrap()
 }
 
 /// Create a test workspace and return its ID
@@ -81,7 +81,7 @@ async fn create_test_workspace(
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    Uuid::parse_str(body["id"].as_str().unwrap()).unwrap()
+    Uuid::parse_str(body["workspace"]["id"].as_str().unwrap()).unwrap()
 }
 
 // =============================================================================

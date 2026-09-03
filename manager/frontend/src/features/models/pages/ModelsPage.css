@@ -1,85 +1,227 @@
+/* =============================================================================
+   Models — same language as Chats
+   Flat surfaces, one accent, a full-height workspace. The install row is the
+   composer; the catalogue is the reading column.
+   ============================================================================= */
+
 .models-page {
-}
-
-/* Main Tabs */
-.main-tabs {
   display: flex;
-  gap: var(--spacing-xs);
-  margin-bottom: var(--spacing-lg);
-  border-bottom: 1px solid var(--color-border);
+  flex-direction: column;
+  min-height: 0;
+  background:
+    radial-gradient(ellipse 80% 45% at 50% 0%, color-mix(in srgb, var(--ui-accent) 7%, transparent), transparent 55%),
+    var(--ui-bg-base);
+  color: var(--ui-text-primary);
 }
 
-.main-tab {
-  display: inline-flex;
+.models-header {
+  display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-sm) var(--spacing-lg);
-  font-size: 1rem;
-  font-weight: 500;
-  color: var(--color-text-muted);
+  justify-content: space-between;
+  gap: var(--ui-space-4);
+  min-height: 3.5rem;
+  padding: 0 var(--ui-space-6);
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-base);
+}
+
+.models-header-copy h1 {
+  margin: 0;
+  font-size: var(--ui-text-xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.models-header-copy p {
+  margin: 0.1rem 0 0;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
+}
+
+.models-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+  padding: var(--ui-space-6);
+  overflow: auto;
+}
+
+.models-install-panel {
+  padding: var(--ui-space-4) var(--ui-space-5);
+}
+
+.models-page .card {
+  margin-bottom: 0;
+  padding: var(--ui-space-5);
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-xl);
+  box-shadow: none;
+}
+
+.models-page .card.models-list-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: transparent;
   border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  cursor: pointer;
-  transition: all var(--transition-fast);
+  padding: 0;
 }
 
-.main-tab:hover {
-  color: var(--color-text);
+.models-page .card::before {
+  display: none;
 }
 
-.main-tab.active {
-  color: var(--color-primary);
-  border-bottom-color: var(--color-primary);
-}
-
-.tab-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 var(--spacing-xs);
-  font-size: 0.75rem;
+.models-page .card h2 {
+  font-family: var(--ui-font-body);
+  font-size: var(--ui-text-sm);
   font-weight: 600;
-  color: var(--color-text);
-  background: var(--color-bg-input);
-  border-radius: 10px;
+  letter-spacing: -0.01em;
 }
 
-.main-tab.active .tab-badge {
-  background: rgba(59, 130, 246, 0.15);
-  color: var(--color-primary);
+.models-page .help-text {
+  color: var(--ui-text-secondary);
 }
 
+.models-page .model-form {
+  margin-top: var(--ui-space-3);
+}
 
-/* Progress bar */
-.progress-bar-container {
+.models-page .input-group {
+  align-items: center;
+}
+
+.models-page input[type='text'] {
+  height: 2.25rem;
+  padding: 0 var(--ui-space-3);
+  font-size: var(--ui-text-sm);
+  background: var(--ui-bg-base);
+  border-radius: var(--ui-radius-md);
+}
+
+.models-page input[type='text']:focus {
+  background: var(--ui-bg-elevated);
+  border-color: var(--ui-accent);
+  box-shadow: 0 0 0 1px var(--ui-accent);
+}
+
+.models-list-panel .models-list {
+  flex: 1;
+}
+
+.models-list-panel .card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--ui-space-2);
+  padding-bottom: var(--ui-space-3);
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.models-page .models-list {
+  gap: 2px;
+}
+
+.models-page .model-item {
+  padding: var(--ui-space-3);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--ui-border-subtle);
+  border-radius: 0;
+}
+
+.models-page .model-item:last-child {
+  border-bottom: none;
+}
+
+.models-page .model-item:hover {
+  background: var(--ui-bg-surface);
+}
+
+.models-page .model-name {
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+}
+
+.models-page .model-meta {
+  color: var(--ui-text-secondary);
+}
+
+.models-browse-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.models-browse-panel .search-container {
+  margin-bottom: var(--ui-space-3);
+}
+
+.models-browse-panel .virtual-browse-container,
+.models-browse-panel .loading-placeholder,
+.models-browse-panel .error-placeholder {
+  flex: 1;
+  min-height: 16rem;
+}
+
+.models-page .progress-section {
+  margin-top: var(--ui-space-4);
+  padding-top: var(--ui-space-4);
+}
+
+.models-page .progress-header {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--ui-text-secondary);
+}
+
+.models-page .progress-bar-container {
   position: relative;
-  height: 24px;
-  background: var(--color-bg-input);
-  border-radius: var(--radius-sm);
-  margin-bottom: var(--spacing-md);
+  height: 0.5rem;
+  background: var(--ui-bg-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-full);
+  margin-bottom: var(--ui-space-3);
   overflow: hidden;
 }
 
-.progress-bar {
+.models-page .progress-bar {
   position: absolute;
   left: 0;
   top: 0;
   height: 100%;
-  background: var(--color-primary);
-  transition: width 0.3s ease;
+  background: var(--ui-accent);
+  transition: width 0.3s var(--ui-ease-out);
 }
 
-.progress-text {
+.models-page .progress-text {
   position: absolute;
-  left: 50%;
+  right: var(--ui-space-2);
   top: 50%;
-  transform: translate(-50%, -50%);
-  font-size: 0.75rem;
+  transform: translateY(-50%);
+  font-size: var(--ui-text-xs);
   font-weight: 600;
-  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-primary);
   z-index: 1;
+}
+
+@media (max-width: 768px) {
+  .models-header {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-3) var(--ui-space-4);
+    min-height: unset;
+  }
+
+  .models-body {
+    padding: var(--ui-space-4);
+  }
 }

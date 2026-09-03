@@ -4,6 +4,7 @@ import type { WizardStep } from '@zone/ui';
 import type { CreateKnowledgeRequest, KnowledgeEntry, KnowledgeType } from '../types';
 import { getErrors } from '../../../validation';
 import { CreateKnowledgeRequestSchema } from '../schemas';
+import { useWorkspace } from '../../../shared/context';
 
 interface CreateKnowledgeWizardProps {
   isOpen: boolean;
@@ -36,6 +37,7 @@ export function CreateKnowledgeWizard({
   onCreated,
   createEntry,
 }: CreateKnowledgeWizardProps) {
+  const { currentWorkspace } = useWorkspace();
   const [currentStep, setCurrentStep] = useState(0);
   const [type, setType] = useState<KnowledgeType>('text');
   const [title, setTitle] = useState('');
@@ -65,8 +67,13 @@ export function CreateKnowledgeWizard({
   }, [currentStep, type, content, title]);
 
   const handleComplete = useCallback(async () => {
+    if (!currentWorkspace) {
+      setError('No workspace selected. Please select or create a workspace first.');
+      return;
+    }
+
     const request: CreateKnowledgeRequest = {
-      workspace_id: '00000000-0000-0000-0000-000000000001',
+      workspace_id: currentWorkspace.id,
       title: title.trim(),
       type,
       content: content.trim(),
@@ -92,7 +99,7 @@ export function CreateKnowledgeWizard({
     } finally {
       setLoading(false);
     }
-  }, [title, type, content, tags, createEntry, onCreated]);
+  }, [currentWorkspace, title, type, content, tags, createEntry, onCreated]);
 
   const handleClose = useCallback(() => {
     setCurrentStep(0);

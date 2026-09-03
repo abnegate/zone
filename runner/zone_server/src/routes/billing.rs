@@ -73,12 +73,22 @@ pub struct UsageStats {
     pub chat_messages: i64,
 }
 
+#[derive(Debug, Serialize)]
+struct PlansListResponse {
+    plans: Vec<Plan>,
+}
+
+#[derive(Debug, Serialize)]
+struct SinglePlanResponse {
+    plan: Plan,
+}
+
 /// List all public plans
 ///
 /// GET /api/plans
 pub async fn list_plans(State(state): State<AppState>) -> impl IntoResponse {
     match list_public_plans(state.db()).await {
-        Ok(plans) => Json(plans).into_response(),
+        Ok(plans) => Json(PlansListResponse { plans }).into_response(),
         Err(e) => {
             tracing::error!("Failed to list plans: {}", e);
             (
@@ -98,7 +108,7 @@ pub async fn get_plan(
     Path(plan_id): Path<Uuid>,
 ) -> impl IntoResponse {
     match get_plan_by_id(state.db(), plan_id).await {
-        Ok(Some(plan)) => Json(plan).into_response(),
+        Ok(Some(plan)) => Json(SinglePlanResponse { plan }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Plan not found")),

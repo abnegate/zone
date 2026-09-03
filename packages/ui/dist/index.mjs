@@ -729,7 +729,7 @@ var stepDescriptionVariants = cva3([
 ]);
 var contentVariants = cva3(
   [
-    "flex-1 overflow-auto",
+    "overflow-auto",
     "p-[var(--ui-space-6)]",
     "transition-all duration-150 ease-out"
   ],
@@ -849,27 +849,27 @@ var Wizard = forwardRef5(
       if (index === currentStep) return "current";
       return "upcoming";
     };
-    return /* @__PURE__ */ jsx12("div", { className: cn(overlayVariants()), onClick: onClose, children: /* @__PURE__ */ jsxs8(
+    return /* @__PURE__ */ jsx12("div", { className: cn("ui-wizard-overlay", overlayVariants()), onClick: onClose, children: /* @__PURE__ */ jsxs8(
       "div",
       {
         ref,
-        className: cn(wizardVariants({ size, className })),
+        className: cn("ui-wizard", `ui-wizard--${size ?? "md"}`, wizardVariants({ size, className })),
         onClick: (e) => e.stopPropagation(),
         role: "dialog",
         "aria-modal": "true",
         "aria-labelledby": "wizard-title",
         ...props,
         children: [
-          /* @__PURE__ */ jsxs8("header", { className: cn(headerVariants()), children: [
+          /* @__PURE__ */ jsxs8("header", { className: cn("ui-wizard-header", headerVariants()), children: [
             /* @__PURE__ */ jsxs8("div", { children: [
               /* @__PURE__ */ jsx12("h2", { id: "wizard-title", className: cn(titleVariants()), children: title }),
-              subtitle && /* @__PURE__ */ jsx12("p", { className: cn(subtitleVariants()), children: subtitle })
+              subtitle && /* @__PURE__ */ jsx12("p", { className: cn("ui-wizard-subtitle", subtitleVariants()), children: subtitle })
             ] }),
             onClose && /* @__PURE__ */ jsx12(
               "button",
               {
                 type: "button",
-                className: cn(closeButtonVariants()),
+                className: cn("ui-wizard-close", closeButtonVariants()),
                 onClick: onClose,
                 "aria-label": "Close wizard",
                 disabled: loading,
@@ -889,8 +889,8 @@ var Wizard = forwardRef5(
               }
             )
           ] }),
-          /* @__PURE__ */ jsxs8("nav", { className: cn(stepsNavVariants()), "aria-label": "Wizard steps", children: [
-            /* @__PURE__ */ jsx12("div", { className: cn(progressTrackVariants()), children: /* @__PURE__ */ jsx12(
+          /* @__PURE__ */ jsxs8("nav", { className: cn("ui-wizard-steps", stepsNavVariants()), "aria-label": "Wizard steps", children: [
+            /* @__PURE__ */ jsx12("div", { className: cn("ui-wizard-progress", progressTrackVariants()), children: /* @__PURE__ */ jsx12(
               "div",
               {
                 className: cn(progressFillVariants()),
@@ -926,9 +926,9 @@ var Wizard = forwardRef5(
                             children: /* @__PURE__ */ jsx12("polyline", { points: "20 6 9 17 4 12" })
                           }
                         ) : step.icon ? step.icon : showStepNumbers ? index + 1 : /* @__PURE__ */ jsx12("span", { className: "w-2 h-2 rounded-full bg-current" }) }),
-                        /* @__PURE__ */ jsxs8("span", { className: "flex flex-col items-start", children: [
-                          /* @__PURE__ */ jsx12("span", { className: cn(stepTitleVariants({ state })), children: step.title }),
-                          step.description && /* @__PURE__ */ jsx12("span", { className: cn(stepDescriptionVariants()), children: step.description })
+                        /* @__PURE__ */ jsxs8("span", { className: "ui-wizard-step-copy flex flex-col items-start", children: [
+                          /* @__PURE__ */ jsx12("span", { className: cn("ui-wizard-step-title", stepTitleVariants({ state })), children: step.title }),
+                          step.description && /* @__PURE__ */ jsx12("span", { className: cn("ui-wizard-step-description", stepDescriptionVariants()), children: step.description })
                         ] })
                       ]
                     }
@@ -941,11 +941,11 @@ var Wizard = forwardRef5(
           /* @__PURE__ */ jsx12(
             "div",
             {
-              className: cn(contentVariants({ animating: animatingStep || "none" })),
+              className: cn("ui-wizard-content", contentVariants({ animating: animatingStep || "none" })),
               children
             }
           ),
-          /* @__PURE__ */ jsxs8("footer", { className: cn(footerVariants()), children: [
+          /* @__PURE__ */ jsxs8("footer", { className: cn("ui-wizard-footer", footerVariants()), children: [
             /* @__PURE__ */ jsx12("div", { children: /* @__PURE__ */ jsx12(
               Button,
               {

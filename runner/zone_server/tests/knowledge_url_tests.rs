@@ -38,7 +38,7 @@ async fn setup_user_and_workspace(client: &TestClient) -> (String, Uuid) {
         )
         .await;
 
-    let org_id = org_response.json_value()["id"]
+    let org_id = org_response.json_value()["organization"]["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -55,7 +55,7 @@ async fn setup_user_and_workspace(client: &TestClient) -> (String, Uuid) {
         )
         .await;
 
-    let workspace_id = Uuid::parse_str(ws_response.json_value()["id"].as_str().unwrap()).unwrap();
+    let workspace_id = Uuid::parse_str(ws_response.json_value()["workspace"]["id"].as_str().unwrap()).unwrap();
 
     (token, workspace_id)
 }
@@ -267,7 +267,7 @@ async fn test_url_exists_in_workspace() {
         )
         .await;
     let org_body = org_response.json_value();
-    let org_id = org_body["id"].as_str().unwrap();
+    let org_id = org_body["organization"]["id"].as_str().unwrap();
 
     let ws_response = client
         .post_json_auth(
@@ -280,7 +280,7 @@ async fn test_url_exists_in_workspace() {
         )
         .await;
     let ws_body = ws_response.json_value();
-    let workspace_id = Uuid::parse_str(ws_body["id"].as_str().unwrap()).unwrap();
+    let workspace_id = Uuid::parse_str(ws_body["workspace"]["id"].as_str().unwrap()).unwrap();
 
     // Use DB function directly
     use zone_server::db::knowledge;

@@ -115,28 +115,30 @@ export default function ModelsPage() {
   };
 
   return (
-    <div className="page models-page">
-      <header className="mb-6">
-        <h1 className="text-2xl font-semibold text-foreground">Models</h1>
-        <p className="text-muted-foreground mt-1">Manage your Ollama models</p>
+    <div className="page page--workspace models-page">
+      <header className="models-header">
+        <div className="models-header-copy">
+          <h1>Models</h1>
+          <p>Manage your Ollama models</p>
+        </div>
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Tab)} className="models-tabs">
+          <TabsList>
+            <TabsTrigger value="installed" className="gap-2">
+              Installed
+              {models.length > 0 && <Badge variant="secondary">{models.length}</Badge>}
+            </TabsTrigger>
+            <TabsTrigger value="browse">Browse</TabsTrigger>
+          </TabsList>
+        </Tabs>
       </header>
 
-      {/* Main Tabs */}
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Tab)} className="mb-6">
-        <TabsList>
-          <TabsTrigger value="installed" className="gap-2">
-            Installed
-            {models.length > 0 && <Badge variant="secondary">{models.length}</Badge>}
-          </TabsTrigger>
-          <TabsTrigger value="browse">Browse</TabsTrigger>
-        </TabsList>
-      </Tabs>
+      <div className="models-body">
 
       {/* Installed Tab Content */}
       {activeTab === 'installed' && (
         <>
           {/* Add Model Section */}
-          <section className="card">
+          <section className="card models-install-panel">
             <h2>Add Model</h2>
             <p className="help-text">
               Enter an Ollama model name (e.g., llama3.2) or HuggingFace GGUF model
@@ -208,7 +210,7 @@ export default function ModelsPage() {
           </section>
 
           {/* Installed Models Section */}
-          <section className="card">
+          <section className="card models-list-panel">
             <div className="card-header">
               <h2>Installed Models</h2>
               <Button variant="ghost" size="icon" onClick={refresh} title="Refresh">
@@ -317,7 +319,7 @@ export default function ModelsPage() {
 
       {/* Browse Tab Content */}
       {activeTab === 'browse' && (
-        <section className="card">
+        <section className="card models-browse-panel">
           <Tabs
             value={browse.source}
             onValueChange={(v) => browse.changeSource(v as typeof browse.source)}
@@ -362,6 +364,7 @@ export default function ModelsPage() {
           )}
         </section>
       )}
+      </div>
 
       {/* Delete Confirmation Modal */}
       <Modal

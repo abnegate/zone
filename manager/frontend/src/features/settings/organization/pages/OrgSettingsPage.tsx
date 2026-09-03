@@ -212,31 +212,36 @@ export default function OrgSettingsPage() {
 
   if (!currentOrganization) {
     return (
-      <div className="page-container">
-        <div className="page-header">
+      <div className="page page--workspace settings-page">
+        <header className="settings-page-header">
           <h1 className="page-title">Organization Settings</h1>
+        </header>
+        <div className="settings-page-body">
+          <div className="loading-state">Please select an organization</div>
         </div>
-        <div className="loading-state">Please select an organization</div>
       </div>
     );
   }
 
   if (loading && activeTab === 'ai') {
     return (
-      <div className="page-container">
-        <div className="page-header">
+      <div className="page page--workspace settings-page">
+        <header className="settings-page-header">
           <h1 className="page-title">Organization Settings</h1>
+        </header>
+        <div className="settings-page-body">
+          <div className="loading-state">Loading settings...</div>
         </div>
-        <div className="loading-state">Loading settings...</div>
       </div>
     );
   }
 
   return (
-    <div className="page-container">
-      <div className="page-header">
+    <div className="page page--workspace settings-page">
+      <header className="settings-page-header">
         <h1 className="page-title">Organization Settings</h1>
-      </div>
+      </header>
+      <div className="settings-page-body">
 
       {/* Tabs */}
       <div className="settings-tabs" role="tablist">
@@ -575,6 +580,7 @@ export default function OrgSettingsPage() {
           </form>
         </div>
       )}
+      </div>
     </div>
   );
 }

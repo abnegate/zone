@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import { useTheme } from '../../context/ThemeContext';
 import ContextSwitcher from '../ContextSwitcher/ContextSwitcher';
@@ -35,7 +35,7 @@ const navItems = [
     icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z',
   },
   {
-    path: '/',
+    path: '/models',
     label: 'Models',
     icon: 'M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4',
   },
@@ -59,8 +59,16 @@ const navItems = [
 export default function Sidebar() {
   const { logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const { pathname } = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === 'true');
+
+  const isNavActive = (path: string, isActive: boolean) => {
+    if (path === '/chats') {
+      return pathname === '/' || pathname === '/chats';
+    }
+    return isActive;
+  };
 
   const toggleCollapsed = () => {
     setCollapsed((prev) => {
@@ -133,7 +141,7 @@ export default function Sidebar() {
             <NavLink
               key={item.path}
               to={item.path}
-              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+              className={({ isActive }) => `nav-item ${isNavActive(item.path, isActive) ? 'active' : ''}`}
               onClick={() => setMobileOpen(false)}
               title={collapsed ? item.label : undefined}
             >

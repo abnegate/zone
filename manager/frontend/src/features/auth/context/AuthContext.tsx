@@ -10,6 +10,7 @@ import {
   useState,
 } from 'react';
 import * as authApi from '../../../api/auth';
+import { RefreshError } from '../../../api/auth';
 import { client } from '../../../api/client';
 import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
 
@@ -38,6 +39,10 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 type AuthApi = Pick<typeof authApi, 'login' | 'register' | 'refreshToken' | 'logout'>;
 type ClientApi = Pick<typeof client, 'setAccessToken'>;
 type StorageApi = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+
+// Retry window after a refresh that failed for a reason other than the server
+// rejecting the credential. scheduleRefresh subtracts 60s, so this lands ~15s out.
+const RETRY_REFRESH_SECONDS = 75;
 
 const ACCESS_TOKEN_KEY = 'manager_access_token';
 const REFRESH_TOKEN_KEY = 'manager_refresh_token';
@@ -111,6 +116,8 @@ export function AuthProvider({
       clearTimeout(refreshTimeoutRef.current);
     }
 
+    apiClient.setAccessToken(null);
+
     storage.removeItem(ACCESS_TOKEN_KEY);
     storage.removeItem(REFRESH_TOKEN_KEY);
     storage.removeItem(USER_KEY);
@@ -124,9 +131,13 @@ export function AuthProvider({
       isAuthenticated: false,
       isLoading: false,
     });
-  }, [storage]);
+  }, [apiClient, storage]);
 
   const handleAuthResponse = useCallback((response: AuthResponse) => {
+    // Set client token synchronously: WorkspaceProvider is a child of this
+    // provider, so its effects run before the effect below syncs the client.
+    apiClient.setAccessToken(response.access_token);
+
     storage.setItem(ACCESS_TOKEN_KEY, response.access_token);
     storage.setItem(REFRESH_TOKEN_KEY, response.refresh_token);
     storage.setItem(USER_KEY, JSON.stringify(response.user));
@@ -142,7 +153,7 @@ export function AuthProvider({
     });
 
     scheduleRefreshRef.current?.(response.expires_in);
-  }, [storage]);
+  }, [apiClient, storage]);
 
   const scheduleRefresh = useCallback(
     (expiresIn: number) => {
@@ -159,7 +170,13 @@ export function AuthProvider({
             try {
               const response = await auth.refreshToken(currentRefreshToken);
               handleAuthResponse(response);
-            } catch {
+            } catch (err) {
+              // Only a rejected credential ends the session. A proxy reload or a
+              // restarting backend must not sign the user out; try again shortly.
+              if (err instanceof RefreshError && !err.credentialRejected) {
+                scheduleRefreshRef.current?.(RETRY_REFRESH_SECONDS);
+                return;
+              }
               handleLogout();
             }
           }
@@ -199,7 +216,13 @@ export function AuthProvider({
       try {
         const response = await auth.refreshToken(refreshToken);
         handleAuthResponse(response);
-      } catch {
+      } catch (err) {
+        if (err instanceof RefreshError && !err.credentialRejected) {
+          // Keep the stored session and retry: the server never said no.
+          setState((s) => ({ ...s, isLoading: false }));
+          scheduleRefreshRef.current?.(RETRY_REFRESH_SECONDS);
+          return;
+        }
         handleLogout();
       }
     };
