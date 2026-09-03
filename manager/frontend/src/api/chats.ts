@@ -145,6 +145,22 @@ class ChatsApi {
     return data.message;
   }
 
+  createChatWebSocket(chatId: string): WebSocket {
+    let wsUrl: string;
+    if (API_BASE) {
+      const wsBase = API_BASE.replace(/^http/, 'ws');
+      wsUrl = `${wsBase}/ws/chats/${encodeURIComponent(chatId)}`;
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsUrl = `${protocol}//${window.location.host}/ws/chats/${encodeURIComponent(chatId)}`;
+    }
+    return new WebSocket(wsUrl);
+  }
+
+  chatAccessToken(): string | null {
+    return this.getAccessToken();
+  }
+
   async deleteMessage(chatId: string, messageId: string): Promise<void> {
     const response = await fetch(`${API_BASE}/api/chats/${chatId}/messages/${messageId}`, {
       method: 'DELETE',
