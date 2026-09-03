@@ -13,6 +13,7 @@ import type {
   CreateChatRequest,
   Message,
   SendMessageRequest,
+  UpdateChatRequest,
 } from '../features/chats/types';
 import { parse } from '../validation';
 import { API_BASE } from './client';
@@ -74,11 +75,11 @@ class ChatsApi {
     return data.chat;
   }
 
-  async updateChatTitle(id: string, title: string): Promise<Chat> {
+  async updateChat(id: string, request: UpdateChatRequest): Promise<Chat> {
     const response = await fetch(`${API_BASE}/api/chats/${id}`, {
-      method: 'PATCH',
+      method: 'PUT',
       headers: this.getHeaders(),
-      body: JSON.stringify({ title }),
+      body: JSON.stringify(request),
     });
     if (!response.ok) {
       throw new Error(`Failed to update chat: ${response.status}`);

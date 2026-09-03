@@ -161,11 +161,11 @@ async fn test_user_cannot_see_other_workspace_chats() {
     .expect("Failed to create workspace b");
 
     // Create chats in both workspaces
-    let chat1 = chats::create_chat(&pool, Some(ws1.id), "Chat 1", "gpt-4")
+    let chat1 = chats::create_chat(&pool, Some(ws1.id), "Chat 1", "gpt-4", false)
         .await
         .expect("Failed to create chat 1");
 
-    let chat2 = chats::create_chat(&pool, Some(ws2.id), "Chat 2", "gpt-4")
+    let chat2 = chats::create_chat(&pool, Some(ws2.id), "Chat 2", "gpt-4", false)
         .await
         .expect("Failed to create chat 2");
 
@@ -283,7 +283,7 @@ async fn test_workspace_deletion_cascades() {
         .await
         .expect("Failed to create project");
 
-    let chat = chats::create_chat(&pool, Some(ws.id), "Chat", "gpt-4")
+    let chat = chats::create_chat(&pool, Some(ws.id), "Chat", "gpt-4", false)
         .await
         .expect("Failed to create chat");
 

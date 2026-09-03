@@ -6,6 +6,7 @@ import type {
   MessageMetadata,
   MessageRole,
   SendMessageRequest,
+  ToolCallRecord,
 } from '../types';
 
 // The server saves the user message and streams the assistant reply over
@@ -22,6 +23,22 @@ type ServerMessage =
     }
   | { type: 'message_start'; message_id: string; role: MessageRole }
   | { type: 'chunk'; content: string; index: number }
+  | {
+      type: 'tool_call';
+      message_id: string;
+      tool_call_id: string;
+      name: string;
+      arguments: string;
+    }
+  | {
+      type: 'tool_result';
+      message_id: string;
+      tool_call_id: string;
+      name: string;
+      success: boolean;
+      detail: string;
+      duration_ms: number;
+    }
   | { type: 'message_end'; message_id: string; content: string }
   | { type: 'cancelled'; message_id: string | null }
   | { type: 'error'; message: string };
@@ -105,6 +122,40 @@ export function useChat(chatId: string | null) {
     []
   );
 
+  // Tool calls arrive in two frames: one when the agent starts a tool and one
+  // when it finishes, so this merges a partial update into the message's trace
+  // rather than replacing the record.
+  const patchToolCall = useCallback(
+    (messageId: string, toolCallId: string, patch: Partial<ToolCallRecord>) => {
+      setChat((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          messages: prev.messages.map((message) => {
+            if (message.id !== messageId) return message;
+            const existing = message.metadata?.tool_calls ?? [];
+            const toolCalls = existing.some((call) => call.id === toolCallId)
+              ? existing.map((call) => (call.id === toolCallId ? { ...call, ...patch } : call))
+              : [
+                  ...existing,
+                  {
+                    id: toolCallId,
+                    name: '',
+                    arguments: '',
+                    success: false,
+                    detail: '',
+                    duration_ms: 0,
+                    ...patch,
+                  },
+                ];
+            return { ...message, metadata: { ...message.metadata, tool_calls: toolCalls } };
+          }),
+        };
+      });
+    },
+    []
+  );
+
   const applySavedUserMessage = useCallback(
     (id: string, content: string, metadata?: MessageMetadata | null) => {
       setChat((prev) => {
@@ -175,6 +226,23 @@ export function useChat(chatId: string | null) {
             upsertMessage(assistantId, 'assistant', assistantContent);
           }
           break;
+        case 'tool_call':
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            name: payload.name,
+            arguments: payload.arguments,
+            detail: 'Running…',
+            pending: true,
+          });
+          break;
+        case 'tool_result':
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            name: payload.name,
+            success: payload.success,
+            detail: payload.detail,
+            duration_ms: payload.duration_ms,
+            pending: false,
+          });
+          break;
         case 'message_end':
           upsertMessage(payload.message_id, 'assistant', payload.content);
           assistantId = null;
@@ -206,7 +274,7 @@ export function useChat(chatId: string | null) {
       socket.close();
       socketRef.current = null;
     };
-  }, [chatId, upsertMessage, applySavedUserMessage]);
+  }, [chatId, upsertMessage, applySavedUserMessage, patchToolCall]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     if (socket.readyState === WebSocket.OPEN) {
@@ -269,6 +337,18 @@ export function useChat(chatId: string | null) {
     }
   };
 
+  // Persisted on the chat rather than sent per message, so the next reply uses
+  // the new mode whichever window or device it comes from.
+  const setAgentEnabled = async (enabled: boolean): Promise<void> => {
+    if (!chatId) {
+      throw new Error('No chat selected');
+    }
+    const updated = await chatsApi.updateChat(chatId, { agent_enabled: enabled });
+    setChat((prev) =>
+      prev && prev.id === updated.id ? { ...prev, agent_enabled: updated.agent_enabled } : prev
+    );
+  };
+
   const deleteMessage = async (messageId: string): Promise<void> => {
     if (!chatId) {
       throw new Error('No chat selected');
@@ -290,6 +370,7 @@ export function useChat(chatId: string | null) {
     streaming,
     sendMessage,
     cancelGeneration,
+    setAgentEnabled,
     deleteMessage,
     refresh,
   };

@@ -10,8 +10,22 @@ export interface MessageAttachment {
   url: string;
 }
 
+/// One tool the agent ran while producing a reply. Streamed over the socket as
+/// it happens and stored on the message, so the trace survives a reload.
+export interface ToolCallRecord {
+  id: string;
+  name: string;
+  arguments: string;
+  success: boolean;
+  detail: string;
+  duration_ms: number;
+  /** Client-only: set while the tool is still running. Never sent by the server. */
+  pending?: boolean;
+}
+
 export interface MessageMetadata {
   attachments?: MessageAttachment[];
+  tool_calls?: ToolCallRecord[];
 }
 
 export interface Message {
@@ -30,6 +44,8 @@ export interface Chat {
   created_at: string;
   updated_at: string;
   archived: boolean;
+  /** Whether replies run the tool-calling agent loop. */
+  agent_enabled: boolean;
 }
 
 export interface ChatWithMessages extends Chat {
@@ -41,6 +57,12 @@ export interface CreateChatRequest {
   title: string;
   model_name: string;
   first_message?: string;
+  agent_enabled?: boolean;
+}
+
+export interface UpdateChatRequest {
+  title?: string;
+  agent_enabled?: boolean;
 }
 
 export interface SendMessageRequest {

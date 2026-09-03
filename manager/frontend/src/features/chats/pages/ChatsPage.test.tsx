@@ -31,7 +31,7 @@ mock.module('../../../api/chats', () => ({
     searchChatMessages: mockSearchChatMessages,
     setGetAccessToken: mock(),
     getMessages: mock(),
-    updateChatTitle: mock(),
+    updateChat: mock(),
     deleteMessage: mock(),
     chatAccessToken: () => 'test-token',
     createChatWebSocket: () => ({
@@ -148,6 +148,7 @@ const mockChats: Chat[] = [
     model_name: 'llama2',
     updated_at: getDateString(0),
     archived: false,
+    agent_enabled: false,
     created_at: '2024-01-01T00:00:00Z',
   },
   {
@@ -156,6 +157,7 @@ const mockChats: Chat[] = [
     model_name: 'mistral',
     updated_at: getDateString(1),
     archived: false,
+    agent_enabled: false,
     created_at: '2024-01-02T00:00:00Z',
   },
   {
@@ -164,6 +166,7 @@ const mockChats: Chat[] = [
     model_name: 'llama2',
     updated_at: getDateString(3),
     archived: false,
+    agent_enabled: false,
     created_at: '2024-01-03T00:00:00Z',
   },
   {
@@ -172,6 +175,7 @@ const mockChats: Chat[] = [
     model_name: 'mistral',
     updated_at: getDateString(10),
     archived: false,
+    agent_enabled: false,
     created_at: '2024-01-04T00:00:00Z',
   },
 ];
@@ -182,6 +186,7 @@ const mockChatWithMessages: ChatWithMessages = {
   model_name: 'llama2',
   updated_at: '2024-01-01T00:00:00Z',
   archived: false,
+  agent_enabled: false,
   created_at: '2024-01-01T00:00:00Z',
   messages: [
     {
@@ -207,6 +212,7 @@ const mockChatEmpty: ChatWithMessages = {
   model_name: 'mistral',
   updated_at: '2024-01-02T00:00:00Z',
   archived: false,
+  agent_enabled: false,
   created_at: '2024-01-02T00:00:00Z',
   messages: [],
 };
@@ -217,6 +223,7 @@ const mockChatWithSystemMessage: ChatWithMessages = {
   model_name: 'llama2',
   updated_at: '2024-01-03T00:00:00Z',
   archived: false,
+  agent_enabled: false,
   created_at: '2024-01-03T00:00:00Z',
   messages: [
     {
@@ -540,6 +547,7 @@ describe('ChatsPage', () => {
         model_name: 'llama2',
         updated_at: '2024-01-05T00:00:00Z',
         archived: false,
+        agent_enabled: false,
         created_at: '2024-01-05T00:00:00Z',
       };
       mockClient.createChat.mockResolvedValueOnce(newChat);
@@ -582,6 +590,7 @@ describe('ChatsPage', () => {
           workspace_id: 'ws-1',
           title: 'Chat with llama2',
           model_name: 'llama2',
+          agent_enabled: false,
         });
       });
     });
@@ -794,6 +803,7 @@ describe('ChatsPage', () => {
         model_name: 'llama2',
         updated_at: '2024-01-01T00:00:00Z',
         archived: true,
+        agent_enabled: false,
         created_at: '2024-01-01T00:00:00Z',
       };
       mockClient.archiveChat.mockResolvedValueOnce(archivedChat);
@@ -838,6 +848,7 @@ describe('ChatsPage', () => {
           model_name: 'llama2',
           updated_at: '2024-01-01T00:00:00Z',
           archived: true,
+          agent_enabled: false,
           created_at: '2024-01-01T00:00:00Z',
         },
       ];
@@ -848,6 +859,7 @@ describe('ChatsPage', () => {
         model_name: 'llama2',
         updated_at: '2024-01-01T00:00:00Z',
         archived: false,
+        agent_enabled: false,
         created_at: '2024-01-01T00:00:00Z',
       };
       mockClient.unarchiveChat.mockResolvedValueOnce(unarchivedChat);
@@ -883,6 +895,7 @@ describe('ChatsPage', () => {
           model_name: 'llama2',
           updated_at: '2024-01-01T00:00:00Z',
           archived: true,
+          agent_enabled: false,
           created_at: '2024-01-01T00:00:00Z',
         },
       ];
@@ -937,6 +950,7 @@ describe('ChatsPage', () => {
         model_name: 'llama2',
         updated_at: '2024-01-01T00:00:00Z',
         archived: true,
+        agent_enabled: false,
         created_at: '2024-01-01T00:00:00Z',
       };
       mockClient.archiveChat.mockResolvedValueOnce(archivedChat);

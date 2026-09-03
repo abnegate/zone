@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, workspace_id, title, model_name, archived, created_at, updated_at\n        FROM chats\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT id, workspace_id, title, model_name, archived, agent_enabled, created_at, updated_at\n        FROM chats\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -30,11 +30,16 @@
       },
       {
         "ordinal": 5,
+        "name": "agent_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
         "name": "created_at",
         "type_info": "Timestamp"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "updated_at",
         "type_info": "Timestamp"
       }
@@ -50,9 +55,10 @@
       false,
       false,
       true,
+      false,
       true,
       true
     ]
   },
-  "hash": "fa3e2651772779e3249457511a9011ba9c8e8e505cfff5b318dbd255a07f54a7"
+  "hash": "875c8ab340a929d90cf4274201a837a284548dde0ec69762c78a345d77483de9"
 }
