@@ -34,6 +34,27 @@
 .virtual-browse-item-wrapper .browse-item {
   height: calc(100% - 2px);
   box-sizing: border-box;
+  align-items: center;
+}
+
+.browse-specs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-1) var(--ui-space-2);
+  margin-bottom: var(--ui-space-1);
+  font-size: var(--ui-text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-secondary);
+}
+
+.browse-spec:not(:last-child)::after {
+  content: '·';
+  margin-left: var(--ui-space-2);
+  color: var(--ui-text-muted);
+}
+
+.browse-item .browse-description {
+  margin: 0 0 var(--ui-space-1);
 }
 
 .virtual-browse-loading {

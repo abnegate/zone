@@ -150,6 +150,13 @@
   color: var(--ui-text-secondary);
 }
 
+.models-page .details-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-6);
+  margin-bottom: var(--ui-space-4);
+}
+
 .models-browse-panel {
   flex: 1;
   min-height: 0;
