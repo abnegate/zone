@@ -20,7 +20,7 @@ interface VirtualBrowseListProps {
   onLoadMore: () => void;
 }
 
-const ITEM_HEIGHT = 120;
+const ITEM_HEIGHT = 88;
 
 export default function VirtualBrowseList({
   models,
@@ -99,30 +99,23 @@ export default function VirtualBrowseList({
     [models, onItemClick, onInstall]
   );
 
-  // Determine container height
   const [containerHeight, setContainerHeight] = React.useState(400);
 
   useEffect(() => {
-    let timeoutId: ReturnType<typeof setTimeout>;
+    const el = containerRef.current;
+    if (!el) return;
 
     const updateHeight = () => {
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(() => {
-        if (containerRef.current?.parentElement) {
-          const parentHeight = containerRef.current.parentElement.clientHeight;
-          const calculatedHeight = models.length > 3 ? Math.min(parentHeight, 400) : 400;
-          setContainerHeight(calculatedHeight);
-        }
-      }, 100);
+      const next = el.clientHeight || el.parentElement?.clientHeight || 400;
+      setContainerHeight(Math.max(next, 200));
     };
 
     updateHeight();
-    window.addEventListener('resize', updateHeight);
-    return () => {
-      window.removeEventListener('resize', updateHeight);
-      clearTimeout(timeoutId);
-    };
-  }, [models.length]);
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(el);
+    if (el.parentElement) observer.observe(el.parentElement);
+    return () => observer.disconnect();
+  }, []);
 
   if (models.length === 0 && !loadingMore) {
     return <div className="empty-placeholder">No models found</div>;

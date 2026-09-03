@@ -4,7 +4,7 @@ import { WorkspaceMembersSection } from '../components';
 import { Button, Tabs, TabsList, TabsTrigger, TabsContent } from '@zone/ui';
 import { useAuth } from '../../../auth';
 import { useTheme } from '../../../../shared/context/ThemeContext';
-import { useWorkspace } from '../../../../shared/context';
+import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import type {
   AiProvider,
   AiSettings,
@@ -319,33 +319,38 @@ export default function WorkspaceSettingsPage() {
 
   if (loading) {
     return (
-      <div className="page-container">
-        <div className="page-header">
+      <div className="page page--workspace settings-page">
+        <header className="settings-page-header">
           <h1 className="page-title">Workspace Settings</h1>
+        </header>
+        <div className="settings-page-body">
+          <div className="loading-state">Loading theme settings...</div>
         </div>
-        <div className="loading-state">Loading theme settings...</div>
       </div>
     );
   }
 
   if (!orgId || !workspaceId) {
     return (
-      <div className="page-container">
-        <div className="page-header">
+      <div className="page page--workspace settings-page">
+        <header className="settings-page-header">
           <h1 className="page-title">Workspace Settings</h1>
-        </div>
-        <div className="alert alert-error">
-          No workspace selected. Please select or create a workspace first.
+        </header>
+        <div className="settings-page-body">
+          <div className="alert alert-error">
+            No workspace selected. Please select or create a workspace first.
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="page-container">
-      <div className="page-header">
+    <div className="page page--workspace settings-page">
+      <header className="settings-page-header">
         <h1 className="page-title">Workspace Settings</h1>
-      </div>
+      </header>
+      <div className="settings-page-body">
 
       {error && <div className="alert alert-error">{error}</div>}
       {success && <div className="alert alert-success">{success}</div>}
@@ -873,6 +878,7 @@ export default function WorkspaceSettingsPage() {
           </form>
         </TabsContent>
       </Tabs>
+      </div>
     </div>
   );
 }

@@ -526,7 +526,7 @@ describeScreenshots('Screenshots - Empty States', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/');
+    await page.goto('/models');
     await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
@@ -658,7 +658,7 @@ describeScreenshots('Screenshots - Populated States', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/');
+    await page.goto('/models');
     await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
@@ -825,7 +825,7 @@ describeScreenshots('Screenshots - Dark Mode', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/');
+    await page.goto('/models');
     await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);

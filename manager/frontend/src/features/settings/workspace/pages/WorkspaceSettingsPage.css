@@ -2,6 +2,73 @@
    Workspace Settings Page
    ============================================================================= */
 
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background:
+    radial-gradient(ellipse 80% 45% at 50% 0%, color-mix(in srgb, var(--ui-accent) 7%, transparent), transparent 55%),
+    var(--ui-bg-base);
+  color: var(--ui-text-primary);
+}
+
+.settings-page-header {
+  display: flex;
+  align-items: center;
+  min-height: 3.5rem;
+  padding: 0 var(--ui-space-6);
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-base);
+}
+
+.settings-page-header .page-title,
+.settings-page-header h1 {
+  margin: 0;
+  font-size: var(--ui-text-xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.settings-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--ui-space-5) var(--ui-space-6) var(--ui-space-8);
+  max-width: 56rem;
+  width: 100%;
+}
+
+.settings-page .settings-tabs,
+.settings-page .tabs-container {
+  margin-bottom: var(--ui-space-5);
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.settings-page .tab-button,
+.settings-page .tab {
+  padding: var(--ui-space-3) var(--ui-space-4);
+  color: var(--ui-text-secondary);
+}
+
+.settings-page .tab-button.active,
+.settings-page .tab-active {
+  color: var(--ui-accent);
+  border-bottom-color: var(--ui-accent);
+}
+
+.settings-page .alert {
+  padding: var(--ui-space-3) var(--ui-space-4);
+  border-radius: var(--ui-radius-md);
+  margin-bottom: var(--ui-space-4);
+  font-size: var(--ui-text-sm);
+}
+
+.settings-page .alert-error {
+  background: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
+  color: var(--ui-error);
+}
+
 /* Tabs */
 .tabs-container {
   display: flex;

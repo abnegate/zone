@@ -411,62 +411,32 @@ export type { SessionZ, SessionsResponse } from '../features/auth/schemas';
 
 export type { OrgRoleZ } from '../features/auth/schemas';
 
-export const OrganizationMemberSchema = z.object({
-  id: z.string().min(1),
-  user_id: z.string().min(1),
-  organization_id: z.string().min(1),
-  role: OrgRoleSchema,
-  email: z.string().email(),
-  display_name: z.string().nullable(),
-  joined_at: z.string().datetime(),
-});
-
-export const AddOrgMemberRequestSchema = z.object({
-  email: z.string().email('Invalid email address'),
-  role: OrgRoleSchema,
-});
-
-export const UpdateOrgMemberRequestSchema = z.object({
-  role: OrgRoleSchema,
-});
-
-export const OrgMembersResponseSchema = z.object({
-  members: z.array(OrganizationMemberSchema),
-});
-
-export type OrganizationMemberZ = z.infer<typeof OrganizationMemberSchema>;
-export type OrgMembersResponse = z.infer<typeof OrgMembersResponseSchema>;
+export {
+  OrganizationMemberSchema,
+  AddOrgMemberRequestSchema,
+  UpdateOrgMemberRequestSchema,
+  OrgMembersResponseSchema,
+} from '../features/settings/organization/schemas';
+export type {
+  OrganizationMemberZ,
+  OrgMembersResponse,
+} from '../features/settings/organization/schemas';
 
 // =============================================================================
 // Workspace Member Schemas
 
 export type { WorkspaceRoleZ } from '../features/auth/schemas';
 
-export const WorkspaceMemberSchema = z.object({
-  id: z.string().min(1),
-  user_id: z.string().min(1),
-  workspace_id: z.string().min(1),
-  role: WorkspaceRoleSchema,
-  email: z.string().email(),
-  display_name: z.string().nullable(),
-  joined_at: z.string().datetime(),
-});
-
-export const AddWorkspaceMemberRequestSchema = z.object({
-  user_id: z.string().min(1, 'User is required'),
-  role: WorkspaceRoleSchema,
-});
-
-export const UpdateWorkspaceMemberRequestSchema = z.object({
-  role: WorkspaceRoleSchema,
-});
-
-export const WorkspaceMembersResponseSchema = z.object({
-  members: z.array(WorkspaceMemberSchema),
-});
-
-export type WorkspaceMemberZ = z.infer<typeof WorkspaceMemberSchema>;
-export type WorkspaceMembersResponse = z.infer<typeof WorkspaceMembersResponseSchema>;
+export {
+  WorkspaceMemberSchema,
+  AddWorkspaceMemberRequestSchema,
+  UpdateWorkspaceMemberRequestSchema,
+  WorkspaceMembersResponseSchema,
+} from '../features/settings/workspace/schemas';
+export type {
+  WorkspaceMemberZ,
+  WorkspaceMembersResponse,
+} from '../features/settings/workspace/schemas';
 
 // =============================================================================
 // Invitation Schemas - now re-exported from features/settings
