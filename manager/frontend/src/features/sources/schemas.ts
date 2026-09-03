@@ -90,24 +90,79 @@ export const SourceConfigSchema = z.union([
   TextConfigSchema,
 ]);
 
+const SOURCE_TYPE_CATEGORY: Record<
+  z.infer<typeof SourceTypeSchema>,
+  z.infer<typeof SourceCategorySchema>
+> = {
+  github: 'file',
+  gitlab: 'file',
+  filesystem: 'file',
+  ical: 'calendar',
+  imap: 'mail',
+  discord: 'chat',
+  slack: 'chat',
+  web: 'web',
+  text: 'text',
+};
+
+function deriveSourceUrl(
+  sourceType: z.infer<typeof SourceTypeSchema>,
+  config: unknown,
+  url: string | null | undefined
+): string {
+  if (url) return url;
+  if (!config || typeof config !== 'object') return '';
+  const fields = config as Record<string, unknown>;
+  if (
+    sourceType === 'github' &&
+    typeof fields.owner === 'string' &&
+    typeof fields.repo === 'string'
+  ) {
+    return `https://github.com/${fields.owner}/${fields.repo}`;
+  }
+  if (sourceType === 'gitlab' && typeof fields.project_id === 'string') {
+    const host =
+      typeof fields.host === 'string' && fields.host
+        ? fields.host.replace(/\/$/, '')
+        : 'https://gitlab.com';
+    return `${host}/${fields.project_id}`;
+  }
+  if ((sourceType === 'web' || sourceType === 'ical') && typeof fields.url === 'string') {
+    return fields.url;
+  }
+  return '';
+}
+
 // =============================================================================
 // Main Source Schema
 // =============================================================================
 
-export const SourceSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  source_type: SourceTypeSchema,
-  category: SourceCategorySchema,
-  config: SourceConfigSchema,
-  description: z.string().nullable(),
-  url: z.string(),
-  is_active: z.boolean(),
-  last_verified_at: z.string().nullable(),
-  last_error: z.string().nullable(),
-  created_at: z.string(),
-  updated_at: z.string(),
-});
+// Backend create/get responses omit `category` and may send `url: null`.
+// Normalize those so the UI always has a category and a display URL.
+export const SourceSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    source_type: SourceTypeSchema,
+    category: SourceCategorySchema.optional(),
+    config: SourceConfigSchema,
+    description: z.string().nullable().optional(),
+    url: z.string().nullable().optional(),
+    is_active: z.boolean(),
+    last_verified_at: z.string().nullable().optional(),
+    last_error: z.string().nullable().optional(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  })
+  .passthrough()
+  .transform((source) => ({
+    ...source,
+    category: source.category ?? SOURCE_TYPE_CATEGORY[source.source_type],
+    description: source.description ?? null,
+    url: deriveSourceUrl(source.source_type, source.config, source.url),
+    last_verified_at: source.last_verified_at ?? null,
+    last_error: source.last_error ?? null,
+  }));
 
 // =============================================================================
 // Request/Response Schemas
@@ -119,6 +174,7 @@ export const CreateSourceRequestSchema = z.object({
   config: SourceConfigSchema,
   credentials: z.string().optional(),
   description: z.string().optional(),
+  url: z.string().optional(),
 });
 
 export const UpdateSourceRequestSchema = z.object({
@@ -135,11 +191,17 @@ export const SourcesResponseSchema = z.object({
   sources: z.array(SourceSchema),
 });
 
-export const SourceResponseSchema = z.object({
+const WrappedSourceResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
   source: SourceSchema,
 });
+
+// Create/get/update may return `{ source }` or the source object at the top level.
+export const SourceResponseSchema = z.union([
+  WrappedSourceResponseSchema,
+  SourceSchema.transform((source) => ({ source })),
+]);
 
 export const SourceVerifyResponseSchema = z.object({
   success: z.boolean(),

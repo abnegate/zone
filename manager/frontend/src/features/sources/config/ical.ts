@@ -36,5 +36,10 @@ export const icalSource: SourceDefinition = {
     }
   },
 
+  getUrl: (state) => {
+    const url = state.icalUrl as string;
+    return url || undefined;
+  },
+
   getFieldIds: () => ['icalUrl'],
 };

@@ -94,12 +94,70 @@ async fn check_workspace_write_access(
     }
 }
 
+/// Category for a persisted source_type string
+fn category_for_source_type(source_type: &str) -> &'static str {
+    match source_type {
+        "github" | "gitlab" | "filesystem" => "file",
+        "ical" => "calendar",
+        "imap" => "mail",
+        "discord" | "slack" => "chat",
+        "web" => "web",
+        "text" => "text",
+        _ => "file",
+    }
+}
+
+/// Prefer an explicit URL, otherwise derive one from source config
+fn derive_source_url(
+    source_type: &str,
+    config: &serde_json::Value,
+    explicit: Option<&str>,
+) -> Option<String> {
+    if let Some(url) = explicit.filter(|value| !value.is_empty()) {
+        return Some(url.to_string());
+    }
+
+    match source_type {
+        "github" => {
+            let owner = config
+                .get("owner")?
+                .as_str()
+                .filter(|value| !value.is_empty())?;
+            let repo = config
+                .get("repo")?
+                .as_str()
+                .filter(|value| !value.is_empty())?;
+            Some(format!("https://github.com/{}/{}", owner, repo))
+        }
+        "gitlab" => {
+            let project_id = config
+                .get("project_id")?
+                .as_str()
+                .filter(|value| !value.is_empty())?;
+            let host = config
+                .get("host")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("https://gitlab.com")
+                .trim_end_matches('/');
+            Some(format!("{}/{}", host, project_id))
+        }
+        "web" | "ical" => config
+            .get("url")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        _ => None,
+    }
+}
+
 /// Source response
 #[derive(Debug, Serialize)]
 pub struct SourceResponse {
     id: Uuid,
     name: String,
     source_type: String,
+    category: String,
     config: serde_json::Value,
     description: Option<String>,
     url: Option<String>,
@@ -159,13 +217,17 @@ impl SourceResponse {
                 }
             });
 
+        let url = derive_source_url(&row.source_type, &row.config, row.url.as_deref());
+        let category = category_for_source_type(&row.source_type).to_string();
+
         Self {
             id: row.id,
             name: row.name,
             source_type: row.source_type,
+            category,
             config: row.config,
             description: row.description,
-            url: row.url,
+            url,
             is_active: row.is_active.unwrap_or(true),
             last_error: row.last_error,
             last_verified_at: row.last_verified_at,
@@ -357,6 +419,8 @@ pub async fn create(
         None => None,
     };
 
+    let url = derive_source_url(&req.source_type, &req.config, req.url.as_deref());
+
     let source_row = match sources::create_source(
         state.db(),
         workspace_id,
@@ -364,7 +428,7 @@ pub async fn create(
         &req.source_type,
         req.config,
         req.description.as_deref(),
-        req.url.as_deref(),
+        url.as_deref(),
         credentials_encrypted.as_deref(),
     )
     .await
