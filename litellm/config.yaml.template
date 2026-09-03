@@ -29,6 +29,15 @@ model_list:
       api_base: http://ollama:11434
       timeout: 30
 
+  # ===========================================================================
+  # Vision Model - For messages carrying images
+  # ===========================================================================
+  - model_name: "{{OLLAMA_MODEL_VISION}}"
+    litellm_params:
+      model: ollama/{{OLLAMA_MODEL_VISION}}
+      api_base: http://ollama:11434
+      timeout: 180
+
 # =============================================================================
 # Router Configuration
 # =============================================================================

@@ -151,7 +151,11 @@ services:
       - internal
 
   litellm:
-    image: ghcr.io/berriai/litellm:${DOCKER_VERSION_LITELLM:-main-v1.59.13}
+    build:
+      context: ./litellm
+      args:
+        LITELLM_VERSION: ${DOCKER_VERSION_LITELLM:-v1.99.1}
+    image: zone-litellm:${DOCKER_VERSION_LITELLM:-v1.99.1}
     container_name: litellm
     restart: unless-stopped
     depends_on:
@@ -195,11 +199,11 @@ services:
       - traefik.http.routers.litellm.rule=Host(`litellm.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.litellm.entrypoints=web
       - traefik.http.routers.litellm.service=litellm
-      - traefik.http.routers.litellm.middlewares=security-headers
+      - traefik.http.routers.litellm.middlewares=auth,security-headers
       - traefik.http.routers.litellm-secure.rule=Host(`litellm.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.litellm-secure.entrypoints=websecure
       - traefik.http.routers.litellm-secure.service=litellm
-      - traefik.http.routers.litellm-secure.middlewares=security-headers
+      - traefik.http.routers.litellm-secure.middlewares=auth,security-headers
       - traefik.http.routers.litellm-secure.tls=true
       - traefik.http.routers.litellm-secure.tls.certresolver=letsencrypt
     healthcheck:
