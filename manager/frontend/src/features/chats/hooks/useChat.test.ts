@@ -274,6 +274,44 @@ describe('useChat', () => {
     });
   });
 
+  it('adds streamed assistant images and keeps final metadata', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const attachment = {
+      name: 'generated-image-1.webp',
+      mime: 'image/webp',
+      url: 'data:image/webp;base64,generated',
+    };
+    lastSocket?.emit({ type: 'message_start', message_id: 'm-image', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'image',
+      message_id: 'm-image',
+      attachment,
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    });
+
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm-image',
+      content: '',
+      metadata: { attachments: [attachment] },
+    });
+
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    });
+  });
+
   it('should handle sending message with error', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

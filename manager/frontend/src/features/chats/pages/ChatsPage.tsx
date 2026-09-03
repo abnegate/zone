@@ -483,15 +483,28 @@ export default function ChatsPage() {
                         <span className="message-time">{formatDate(message.created_at)}</span>
                       </div>
                       {images.length > 0 && (
-                        <div className="message-images">
-                          {images.map((a) => (
-                            <img
+                        <div
+                          className="message-images"
+                          data-image-count={Math.min(images.length, 3)}
+                        >
+                          {images.map((a, index) => (
+                            <a
+                              className="message-image-link"
                               key={a.url}
-                              src={a.url}
-                              alt={a.name}
-                              title={a.name}
-                              data-testid="message-image"
-                            />
+                              href={a.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              aria-label={`Open ${a.name || `image ${index + 1}`} full size`}
+                            >
+                              <img
+                                src={a.url}
+                                alt={a.name || `Generated image ${index + 1}`}
+                                title="Open full size"
+                                loading="lazy"
+                                decoding="async"
+                                data-testid="message-image"
+                              />
+                            </a>
                           ))}
                         </div>
                       )}

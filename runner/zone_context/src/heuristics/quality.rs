@@ -143,11 +143,12 @@ impl QualityAnalyzer {
         // Calculate Hamming distance (number of differing bits)
         let hamming_distance = (new_hash ^ existing_fingerprint).count_ones();
 
-        // Convert to similarity score (0.0 = very different, 1.0 = identical)
-        // Threshold: < 3 bits different = likely duplicate (similarity > 0.95)
-        let similarity = 1.0 - (hamming_distance as f32 / 64.0);
+        // Unrelated texts differ in ~32 of 64 bits, so raw bit agreement bottoms
+        // out near 0.5 rather than 0.0. Rescale the meaningful [0.5, 1.0] band
+        // onto [0.0, 1.0] so that 0.0 means unique, as the score is documented.
+        let bit_agreement = 1.0 - (hamming_distance as f32 / 64.0);
 
-        similarity.clamp(0.0, 1.0)
+        ((bit_agreement - 0.5) * 2.0).clamp(0.0, 1.0)
     }
 
     /// Compute SimHash fingerprint for text
