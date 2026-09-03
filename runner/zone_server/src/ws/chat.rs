@@ -535,6 +535,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     metadata,
                                 ).await {
                                     tracing::error!("Error handling send message: {}", e);
+                                    let _ = send_server(
+                                        &task_sender,
+                                        ServerMessage::Error {
+                                            message: "Failed to process message".to_string(),
+                                        },
+                                    )
+                                    .await;
                                 }
                                 });
                             }
@@ -752,10 +759,18 @@ async fn handle_image_generation(
         {
             Ok(url) => url,
             Err(error) => {
+                tracing::error!("Failed to persist generated image: {error}");
                 store
                     .cleanup_owner(workspace_id, chat_id, assistant_message_id)
                     .await;
-                return Err(Box::new(error));
+                let _ = send_server(
+                    sender,
+                    ServerMessage::Error {
+                        message: "Image generation failed: could not store the image".to_string(),
+                    },
+                )
+                .await;
+                return Ok(());
             }
         };
         if let Some(attachment) = generated_image_attachment(&url, attachments.len()) {
@@ -785,10 +800,18 @@ async fn handle_image_generation(
     )
     .await
     {
+        tracing::error!("Failed to persist generated image message: {error}");
         store
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
             .await;
-        return Err(Box::new(error));
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Image generation failed: could not save the message".to_string(),
+            },
+        )
+        .await;
+        return Ok(());
     }
     let _ = send_server(
         sender,
