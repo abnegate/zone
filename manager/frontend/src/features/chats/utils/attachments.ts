@@ -111,3 +111,10 @@ export function attachmentMetadata(attachments: Attachment[]) {
 export function isSendable(attachment: Attachment): boolean {
   return attachment.text !== undefined || attachment.url !== undefined;
 }
+
+/** Images stored on a message so the thread can render them after send. */
+export function imageAttachments(
+  metadata?: { attachments?: { name: string; mime: string; url: string }[] } | null
+) {
+  return metadata?.attachments?.filter((a) => a.mime.startsWith('image/') && Boolean(a.url)) ?? [];
+}

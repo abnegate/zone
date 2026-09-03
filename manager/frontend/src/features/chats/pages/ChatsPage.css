@@ -419,12 +419,23 @@
   margin-bottom: var(--ui-space-2);
 }
 
-.message-images img {
-  max-width: 16rem;
-  max-height: 16rem;
+.message-images img,
+.message-md-image {
+  display: block;
+  max-width: min(18rem, 100%);
+  max-height: 18rem;
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-md);
   object-fit: cover;
+}
+
+.message-user .message-images img,
+.message-user .message-md-image {
+  border-color: color-mix(in srgb, var(--ui-text-inverse) 22%, transparent);
+}
+
+.message-markdown .message-md-image {
+  margin: var(--ui-space-3) 0;
 }
 
 /* Markdown ---------------------------------------------------------------- */
@@ -565,19 +576,17 @@
 .message-form {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1-5);
   width: calc(100% - var(--ui-space-8));
   max-width: var(--chat-column);
   margin: 0 auto var(--ui-space-6);
-  padding: var(--ui-space-3);
+  padding: var(--ui-space-1);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-xl);
   background: var(--ui-bg-elevated);
-  box-shadow: var(--ui-shadow-sm);
   transition:
     border-color var(--ui-transition-fast),
-    background-color var(--ui-transition-fast),
-    box-shadow var(--ui-transition-fast);
+    background-color var(--ui-transition-fast);
 }
 
 .message-form:focus-within {
@@ -594,13 +603,20 @@
 .message-form-row {
   display: flex;
   align-items: flex-end;
-  gap: var(--ui-space-2);
+  gap: var(--ui-space-1);
+  border: none;
+}
+
+.message-form-row > *:not(.ui-btn) {
+  border: none;
+  box-shadow: none;
 }
 
 .message-attachments {
   display: flex;
   flex-wrap: wrap;
   gap: var(--ui-space-2);
+  padding: var(--ui-space-1) var(--ui-space-1) 0;
 }
 
 .attachment-chip {
@@ -613,6 +629,18 @@
   border-radius: var(--ui-radius-md);
   background: var(--ui-bg-surface);
   font-size: var(--ui-text-xs);
+}
+
+.attachment-chip.has-thumb {
+  padding-left: var(--ui-space-1);
+}
+
+.attachment-chip-thumb {
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--ui-radius-sm);
+  object-fit: cover;
+  background: var(--ui-bg-muted);
 }
 
 .attachment-chip-name {
@@ -665,8 +693,9 @@
   flex: 1;
   min-height: 2.25rem;
   max-height: 12rem;
-  padding: var(--ui-space-2) var(--ui-space-3);
+  padding: var(--ui-space-1-5) var(--ui-space-2);
   border: none;
+  box-shadow: none;
   background: transparent;
   color: var(--ui-text-primary);
   font-family: inherit;

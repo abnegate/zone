@@ -10,7 +10,16 @@ interface MessageContentProps {
 export function MessageContent({ content }: MessageContentProps) {
   return (
     <div className="message-markdown">
-      <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          img: ({ src, alt, title }) => (
+            <img src={src} alt={alt ?? ''} title={title} className="message-md-image" />
+          ),
+        }}
+      >
+        {content}
+      </Markdown>
     </div>
   );
 }

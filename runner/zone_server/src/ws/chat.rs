@@ -130,6 +130,8 @@ pub enum ServerMessage {
         message_id: Uuid,
         role: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
     },
     /// Assistant message started
     MessageStart { message_id: Uuid, role: String },
@@ -588,6 +590,7 @@ async fn handle_send_message(
         message_id: user_message.id,
         role: "user".to_string(),
         content: content.to_string(),
+        metadata: user_message.metadata.clone(),
     };
     sender.send(saved_msg.to_ws_message()).await?;
 
@@ -938,11 +941,57 @@ mod tests {
             message_id: Uuid::new_v4(),
             role: "user".to_string(),
             content: "Test message".to_string(),
+            metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"message_saved\""));
         assert!(json.contains("\"role\":\"user\""));
         assert!(json.contains("\"content\":\"Test message\""));
+        assert!(!json.contains("\"metadata\""));
+    }
+
+    #[test]
+    fn test_server_message_message_saved_includes_image_metadata() {
+        let metadata = serde_json::json!({
+            "attachments": [{
+                "name": "shot.png",
+                "mime": "image/png",
+                "url": "data:image/png;base64,xx"
+            }]
+        });
+        let msg = ServerMessage::MessageSaved {
+            message_id: Uuid::new_v4(),
+            role: "user".to_string(),
+            content: "see this".to_string(),
+            metadata: Some(metadata.clone()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"metadata\""));
+        assert!(json.contains("shot.png"));
+        assert!(json.contains("image/png"));
+    }
+
+    #[test]
+    fn test_image_urls_from_metadata() {
+        let metadata = serde_json::json!({
+            "attachments": [
+                {
+                    "name": "shot.png",
+                    "mime": "image/png",
+                    "url": "data:image/png;base64,xx"
+                },
+                {
+                    "name": "notes.md",
+                    "mime": "text/markdown",
+                    "url": "https://example.test/notes.md"
+                }
+            ]
+        });
+        assert_eq!(
+            image_urls_from_metadata(Some(&metadata)),
+            vec!["data:image/png;base64,xx".to_string()]
+        );
+        assert!(image_urls_from_metadata(None).is_empty());
     }
 
     #[test]
