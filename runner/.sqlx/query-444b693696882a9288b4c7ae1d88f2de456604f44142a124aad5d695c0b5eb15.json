@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, organization_id, plan_id, status, current_period_start, current_period_end,\n               cancel_at_period_end, canceled_at, trial_start, trial_end,\n               stripe_subscription_id, stripe_customer_id, created_at, updated_at\n        FROM subscriptions\n        WHERE organization_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "organization_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "plan_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "current_period_start",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "current_period_end",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "cancel_at_period_end",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "canceled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "trial_start",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "trial_end",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "stripe_subscription_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "stripe_customer_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "444b693696882a9288b4c7ae1d88f2de456604f44142a124aad5d695c0b5eb15"
+}

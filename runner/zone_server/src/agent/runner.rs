@@ -13,7 +13,7 @@ use zone_core::llm::{
     LlmClient, Message as LlmMessage, Role as LlmRole, StreamToolCall, ToolCall as LlmToolCall,
 };
 
-use super::tools::{ChatToolRegistry, ToolContext};
+use super::tools::ChatTools;
 
 /// Maximum reason/act rounds before we stop and answer with what we have.
 pub const MAX_ITERATIONS: usize = 6;
@@ -50,8 +50,7 @@ pub enum AgentEvent {
 pub struct AgentRun {
     pub llm: LlmClient,
     pub model: String,
-    pub registry: ChatToolRegistry,
-    pub context: ToolContext,
+    pub tools: ChatTools,
     /// Conversation so far, including the system prompt and the new user turn.
     pub messages: Vec<LlmMessage>,
 }
@@ -59,8 +58,8 @@ pub struct AgentRun {
 /// Run one agent turn, yielding events until the model produces a final answer.
 pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
     async_stream::stream! {
-        let AgentRun { llm, model, registry, context, mut messages } = run;
-        let definitions = registry.definitions();
+        let AgentRun { llm, model, tools, mut messages } = run;
+        let definitions = tools.definitions();
         let mut tool_calls_used = 0usize;
 
         for iteration in 0..MAX_ITERATIONS {
@@ -155,8 +154,8 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 };
 
                 let started = Instant::now();
-                let result = registry
-                    .execute(&call.function.name, &call.function.arguments, &context)
+                let result = tools
+                    .execute(&call.function.name, &call.function.arguments)
                     .await;
                 let duration_ms = started.elapsed().as_millis() as u64;
 

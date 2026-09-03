@@ -1,23 +1,26 @@
-//! Tools the chat agent can call.
+//! The tools a chat agent can call.
 //!
-//! These are deliberately not `zone_core::tools`: those read and write the
-//! filesystem and run shell commands, which is right for a task runner working
-//! in a checkout and catastrophic for a multi-tenant API server. Everything
-//! here is read-only and scoped to the workspace the chat belongs to, so a tool
-//! call can never reach another tenant's data or the manager host.
+//! These implement [`zone_core::tools::Tool`], the same trait the task runner
+//! and the CLI use, so there is one tool abstraction in the codebase rather
+//! than one per caller. What differs here is scope: each tool carries the
+//! workspace and chat it was built for, so a call can never reach another
+//! tenant's data no matter what the model puts in the arguments.
+//!
+//! A chat gets one of two tool sets, chosen by its `agent_sandboxed` setting.
+//! Sandboxed, the default, is these workspace tools alone: all read-only, all
+//! backed by Postgres. Unsandboxed adds `zone_core`'s file and shell tools
+//! with containment switched off, which is a real shell on the real host.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::time::Duration;
 use uuid::Uuid;
-use zone_core::llm::ToolDefinition;
-use zone_core::tools::ToolResult;
+use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use crate::db::{message_embeddings, projects, sources, tasks};
 use crate::state::AppState;
 
-/// Hard cap on how much text one tool may feed back into the prompt.
+/// Hard cap on how much text one workspace tool may feed back into the prompt.
 const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 /// Cap on rows any listing tool returns.
@@ -26,92 +29,155 @@ const MAX_TOOL_RESULTS: usize = 25;
 /// Default rows when the model does not ask for a specific count.
 const DEFAULT_TOOL_RESULTS: usize = 5;
 
-/// Per-call timeout. Tools hit Postgres and the embedding service, so a stall
-/// here would otherwise hold the whole agent loop open.
-const TOOL_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Minimum similarity for a chat-history hit to be worth showing.
 const CHAT_HISTORY_THRESHOLD: f32 = 0.5;
 
 /// Longest snippet of a single search hit.
 const SNIPPET_CHARS: usize = 500;
 
-/// What a tool is allowed to touch during a chat turn.
+/// What the workspace tools are allowed to touch.
 ///
-/// The workspace is fixed by the chat being answered, not by anything the model
-/// says, which is what keeps tool calls inside the caller's tenant.
+/// Fixed by the chat being answered, not by anything the model says, which is
+/// what keeps tool calls inside the caller's tenant. Every workspace tool
+/// holds one of these, because `zone_core`'s `ToolContext` describes a working
+/// directory and knows nothing about tenants.
 #[derive(Clone)]
-pub struct ToolContext {
+pub struct WorkspaceScope {
     pub state: AppState,
     pub workspace_id: Uuid,
     pub chat_id: Uuid,
 }
 
-/// A tool the chat agent can call.
-#[async_trait]
-pub trait ChatTool: Send + Sync {
-    fn name(&self) -> &'static str;
+/// Whether this deployment permits leaving the sandbox at all.
+///
+/// Defaults to allowed, so the per-chat toggle is the only thing most people
+/// need. A shared deployment can take the option away outright.
+pub fn host_tools_allowed() -> bool {
+    allow_host(std::env::var("ZONE_CHAT_AGENT_ALLOW_HOST").ok().as_deref())
+}
 
-    fn description(&self) -> &'static str;
-
-    fn parameters_schema(&self) -> Value;
-
-    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult;
-
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition::function(self.name(), self.description(), self.parameters_schema())
+/// Split out from the environment lookup so it can be tested without writing
+/// to a global that every other test in the process shares.
+fn allow_host(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        None => true,
     }
 }
 
-/// The tools offered for one chat turn.
-pub struct ChatToolRegistry {
-    tools: Vec<Arc<dyn ChatTool>>,
+/// Where unsandboxed tools start when the model gives a relative path.
+fn host_root() -> std::path::PathBuf {
+    std::env::var_os("ZONE_CHAT_AGENT_CWD")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
 }
 
-impl ChatToolRegistry {
-    /// Build the tool set available given the services this server booted with.
+/// The tools offered for one chat turn, and the context they run in.
+pub struct ChatTools {
+    registry: ToolRegistry,
+    context: ToolContext,
+    sandboxed: bool,
+}
+
+impl ChatTools {
+    /// Build the tool set for a chat.
     ///
     /// Search tools are omitted when their backing service is absent rather
     /// than advertised and failed at call time, so the model never burns an
     /// iteration on a tool that cannot work.
-    pub fn for_state(state: &AppState) -> Self {
-        let mut tools: Vec<Arc<dyn ChatTool>> = Vec::new();
+    /// `sandboxed` is the effective decision, not the chat's preference: the
+    /// caller is expected to have already folded in [`host_tools_allowed`], so
+    /// that whether a deployment permits host tools is decided in one place.
+    pub fn build(scope: WorkspaceScope, sandboxed: bool) -> Self {
+        let mut registry = ToolRegistry::new();
 
-        if state.context_service().is_some() {
-            tools.push(Arc::new(SearchKnowledgeTool));
+        if scope.state.context_service().is_some() {
+            registry.register(Arc::new(SearchKnowledgeTool(scope.clone())));
         }
-        if state.embedding_service().is_some() {
-            tools.push(Arc::new(SearchChatHistoryTool));
+        if scope.state.embedding_service().is_some() {
+            registry.register(Arc::new(SearchChatHistoryTool(scope.clone())));
         }
-        tools.push(Arc::new(ListSourcesTool));
-        tools.push(Arc::new(ListProjectsTool));
-        tools.push(Arc::new(ListTasksTool));
+        registry.register(Arc::new(ListSourcesTool(scope.clone())));
+        registry.register(Arc::new(ListProjectsTool(scope.clone())));
+        registry.register(Arc::new(ListTasksTool(scope)));
 
-        Self { tools }
+        // The workspace tools stay available outside the sandbox: knowing what
+        // the workspace holds is still the fastest way to answer many
+        // questions, and dropping them would push the model towards the shell
+        // for things that do not need it.
+        if !sandboxed {
+            for tool in ToolRegistry::with_host_tools().into_tools() {
+                registry.register(tool);
+            }
+        }
+
+        let context = if sandboxed {
+            // Nothing in the sandboxed set reads the filesystem, so this only
+            // has to be somewhere harmless.
+            ToolContext {
+                cwd: std::env::temp_dir(),
+                env: Default::default(),
+                max_file_size: 0,
+                command_timeout: 0,
+                unrestricted: false,
+            }
+        } else {
+            ToolContext {
+                cwd: host_root(),
+                env: std::env::vars().collect(),
+                unrestricted: true,
+                ..Default::default()
+            }
+        };
+
+        Self {
+            registry,
+            context,
+            sandboxed,
+        }
+    }
+
+    /// Whether this turn is confined to the read-only workspace tools.
+    pub fn is_sandboxed(&self) -> bool {
+        self.sandboxed
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.registry.names().is_empty()
     }
 
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|t| t.definition()).collect()
+    pub fn definitions(&self) -> Vec<zone_core::llm::ToolDefinition> {
+        self.registry.definitions()
     }
 
-    pub fn names(&self) -> Vec<&'static str> {
-        self.tools.iter().map(|t| t.name()).collect()
+    /// Tool names, sorted so the system prompt is stable between turns.
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .registry
+            .names()
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        names.sort();
+        names
     }
 
-    /// Run a tool by name, converting every failure mode into a `ToolResult`.
+    /// Run a tool by name, turning every failure mode into a `ToolResult`.
     ///
     /// A failed tool is an observation the model can recover from, so nothing
-    /// here returns `Err` and aborts the turn.
-    pub async fn execute(&self, name: &str, arguments: &str, ctx: &ToolContext) -> ToolResult {
-        let Some(tool) = self.tools.iter().find(|t| t.name() == name) else {
+    /// here aborts the turn.
+    pub async fn execute(&self, name: &str, arguments: &str) -> ToolResult {
+        let Some(tool) = self.registry.get(name) else {
+            let mut available = self.names();
+            available.sort();
             return ToolResult::error(format!(
                 "Unknown tool '{}'. Available tools: {}.",
                 name,
-                self.names().join(", ")
+                available.join(", ")
             ));
         };
 
@@ -129,12 +195,14 @@ impl ChatToolRegistry {
             }
         };
 
-        match tokio::time::timeout(TOOL_TIMEOUT, tool.execute(params, ctx)).await {
-            Ok(result) => result,
+        let limit = tool.timeout(&self.context);
+        match tokio::time::timeout(limit, tool.execute(params, &self.context)).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => ToolResult::error(e.to_string()),
             Err(_) => ToolResult::error(format!(
                 "Tool '{}' timed out after {}s",
                 name,
-                TOOL_TIMEOUT.as_secs()
+                limit.as_secs()
             )),
         }
     }
@@ -150,7 +218,7 @@ fn limit_arg(params: &Value) -> usize {
 }
 
 /// Read a required non-empty string argument.
-fn string_arg<'a>(params: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
+pub(super) fn string_arg<'a>(params: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
     match params.get(key).and_then(Value::as_str) {
         Some(s) if !s.trim().is_empty() => Ok(s.trim()),
         _ => Err(ToolResult::error(format!(
@@ -160,7 +228,7 @@ fn string_arg<'a>(params: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
     }
 }
 
-fn optional_string_arg<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
+pub(super) fn optional_string_arg<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
     params
         .get(key)
         .and_then(Value::as_str)
@@ -169,7 +237,7 @@ fn optional_string_arg<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// Truncate on a character boundary, marking that we cut.
-fn truncate(text: &str, max_chars: usize) -> String {
+pub(super) fn truncate(text: &str, max_chars: usize) -> String {
     match text.char_indices().nth(max_chars) {
         Some((byte_idx, _)) => format!("{}…", &text[..byte_idx]),
         None => text.to_string(),
@@ -194,15 +262,15 @@ fn render(lines: Vec<String>, empty_message: &str) -> ToolResult {
 // Knowledge base search
 // =============================================================================
 
-struct SearchKnowledgeTool;
+struct SearchKnowledgeTool(WorkspaceScope);
 
 #[async_trait]
-impl ChatTool for SearchKnowledgeTool {
-    fn name(&self) -> &'static str {
+impl Tool for SearchKnowledgeTool {
+    fn name(&self) -> &str {
         "search_knowledge"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Search the workspace knowledge base (indexed documents, repositories and other connected \
          sources) for passages relevant to a query. Use this whenever the answer may depend on \
          the user's own content rather than general knowledge."
@@ -227,7 +295,20 @@ impl ChatTool for SearchKnowledgeTool {
         })
     }
 
-    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
+    async fn execute(
+        &self,
+        params: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(self.run(params).await)
+    }
+}
+
+impl SearchKnowledgeTool {
+    /// The body is written to return a `ToolResult` rather than an error,
+    /// because a tool that fails is an observation the model can act on.
+    async fn run(&self, params: Value) -> ToolResult {
+        let ctx = &self.0;
         let query = match string_arg(&params, "query") {
             Ok(q) => q,
             Err(e) => return e,
@@ -285,15 +366,15 @@ impl ChatTool for SearchKnowledgeTool {
 // Chat history search
 // =============================================================================
 
-struct SearchChatHistoryTool;
+struct SearchChatHistoryTool(WorkspaceScope);
 
 #[async_trait]
-impl ChatTool for SearchChatHistoryTool {
-    fn name(&self) -> &'static str {
+impl Tool for SearchChatHistoryTool {
+    fn name(&self) -> &str {
         "search_chat_history"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Search earlier messages across this workspace's conversations. Use this to recall what \
          was decided or discussed before, especially when the user refers to a past conversation."
     }
@@ -321,7 +402,20 @@ impl ChatTool for SearchChatHistoryTool {
         })
     }
 
-    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
+    async fn execute(
+        &self,
+        params: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(self.run(params).await)
+    }
+}
+
+impl SearchChatHistoryTool {
+    /// The body is written to return a `ToolResult` rather than an error,
+    /// because a tool that fails is an observation the model can act on.
+    async fn run(&self, params: Value) -> ToolResult {
+        let ctx = &self.0;
         let query = match string_arg(&params, "query") {
             Ok(q) => q,
             Err(e) => return e,
@@ -383,15 +477,15 @@ impl ChatTool for SearchChatHistoryTool {
 // Workspace inventory
 // =============================================================================
 
-struct ListSourcesTool;
+struct ListSourcesTool(WorkspaceScope);
 
 #[async_trait]
-impl ChatTool for ListSourcesTool {
-    fn name(&self) -> &'static str {
+impl Tool for ListSourcesTool {
+    fn name(&self) -> &str {
         "list_sources"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List the content sources connected to this workspace (repositories, folders, documents \
          and so on). Use this to find out what material the knowledge base actually covers."
     }
@@ -410,7 +504,20 @@ impl ChatTool for ListSourcesTool {
         })
     }
 
-    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
+    async fn execute(
+        &self,
+        params: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(self.run(params).await)
+    }
+}
+
+impl ListSourcesTool {
+    /// The body is written to return a `ToolResult` rather than an error,
+    /// because a tool that fails is an observation the model can act on.
+    async fn run(&self, params: Value) -> ToolResult {
+        let ctx = &self.0;
         let limit = limit_arg(&params);
 
         let rows = match sources::list_sources(
@@ -453,15 +560,15 @@ impl ChatTool for ListSourcesTool {
     }
 }
 
-struct ListProjectsTool;
+struct ListProjectsTool(WorkspaceScope);
 
 #[async_trait]
-impl ChatTool for ListProjectsTool {
-    fn name(&self) -> &'static str {
+impl Tool for ListProjectsTool {
+    fn name(&self) -> &str {
         "list_projects"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List the projects in this workspace, optionally filtered by status."
     }
 
@@ -483,7 +590,20 @@ impl ChatTool for ListProjectsTool {
         })
     }
 
-    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
+    async fn execute(
+        &self,
+        params: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(self.run(params).await)
+    }
+}
+
+impl ListProjectsTool {
+    /// The body is written to return a `ToolResult` rather than an error,
+    /// because a tool that fails is an observation the model can act on.
+    async fn run(&self, params: Value) -> ToolResult {
+        let ctx = &self.0;
         let limit = limit_arg(&params);
         let status = optional_string_arg(&params, "status");
 
@@ -514,15 +634,15 @@ impl ChatTool for ListProjectsTool {
     }
 }
 
-struct ListTasksTool;
+struct ListTasksTool(WorkspaceScope);
 
 #[async_trait]
-impl ChatTool for ListTasksTool {
-    fn name(&self) -> &'static str {
+impl Tool for ListTasksTool {
+    fn name(&self) -> &str {
         "list_tasks"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List the tasks in this workspace, optionally filtered by status. Use this to report on \
          what work is queued, running or finished."
     }
@@ -545,7 +665,20 @@ impl ChatTool for ListTasksTool {
         })
     }
 
-    async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
+    async fn execute(
+        &self,
+        params: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(self.run(params).await)
+    }
+}
+
+impl ListTasksTool {
+    /// The body is written to return a `ToolResult` rather than an error,
+    /// because a tool that fails is an observation the model can act on.
+    async fn run(&self, params: Value) -> ToolResult {
+        let ctx = &self.0;
         let limit = limit_arg(&params);
         let status = optional_string_arg(&params, "status");
 
@@ -642,23 +775,106 @@ mod tests {
         assert!(result.output.unwrap().chars().count() <= MAX_TOOL_OUTPUT_CHARS + 1);
     }
 
-    #[test]
-    fn tool_definitions_are_well_formed() {
-        let tools: Vec<Arc<dyn ChatTool>> = vec![
-            Arc::new(SearchKnowledgeTool),
-            Arc::new(SearchChatHistoryTool),
-            Arc::new(ListSourcesTool),
-            Arc::new(ListProjectsTool),
-            Arc::new(ListTasksTool),
+    fn scope() -> WorkspaceScope {
+        WorkspaceScope {
+            state: AppState::for_tests(),
+            workspace_id: Uuid::new_v4(),
+            chat_id: Uuid::new_v4(),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_are_well_formed() {
+        let scope = scope();
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(SearchKnowledgeTool(scope.clone())),
+            Arc::new(SearchChatHistoryTool(scope.clone())),
+            Arc::new(ListSourcesTool(scope.clone())),
+            Arc::new(ListProjectsTool(scope.clone())),
+            Arc::new(ListTasksTool(scope)),
         ];
 
         for tool in tools {
-            let definition = tool.definition();
+            let definition = tool.to_definition();
             assert_eq!(definition.tool_type, "function");
             assert_eq!(definition.function.name, tool.name());
             assert!(!definition.function.description.is_empty());
             assert_eq!(definition.function.parameters["type"], "object");
             assert!(definition.function.parameters.get("properties").is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn sandboxed_chats_get_no_host_tools() {
+        let tools = ChatTools::build(scope(), true);
+
+        assert!(tools.is_sandboxed());
+        assert!(tools.names().contains(&"list_projects".to_string()));
+        for host in ["run_shell", "run_command", "write_file", "read_file"] {
+            assert!(
+                !tools.names().contains(&host.to_string()),
+                "{host} must not be offered to a sandboxed chat"
+            );
+        }
+        assert!(!tools.context.unrestricted);
+    }
+
+    #[tokio::test]
+    async fn unsandboxed_chats_get_the_host_tools_as_well() {
+        let tools = ChatTools::build(scope(), false);
+
+        assert!(!tools.is_sandboxed());
+        // The workspace tools stay: leaving the sandbox adds reach, it does
+        // not trade one set for the other.
+        assert!(tools.names().contains(&"list_projects".to_string()));
+        for host in ["run_shell", "run_command", "write_file", "read_file"] {
+            assert!(
+                tools.names().contains(&host.to_string()),
+                "{host} should be offered once the sandbox is off"
+            );
+        }
+        assert!(tools.context.unrestricted);
+    }
+
+    #[test]
+    fn an_operator_can_refuse_the_host_tools_outright() {
+        for value in ["0", "false", "no", "off", "OFF", " False "] {
+            assert!(!allow_host(Some(value)), "{value} should refuse host tools");
+        }
+        for value in ["1", "true", "yes", "anything"] {
+            assert!(allow_host(Some(value)), "{value} should permit host tools");
+        }
+        assert!(allow_host(None), "the default is to permit");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tool_lists_what_is_available() {
+        let tools = ChatTools::build(scope(), true);
+        let result = tools.execute("definitely_not_a_tool", "{}").await;
+
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert!(error.contains("Unknown tool"), "{error}");
+        assert!(error.contains("list_projects"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn malformed_arguments_come_back_as_a_readable_failure() {
+        let tools = ChatTools::build(scope(), true);
+        let result = tools.execute("list_projects", "{not json").await;
+
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("not valid JSON"));
+    }
+
+    #[tokio::test]
+    async fn host_tools_run_for_an_unsandboxed_chat() {
+        let tools = ChatTools::build(scope(), false);
+        let result = tools
+            .execute("run_shell", r#"{"command":"echo agentic"}"#)
+            .await;
+
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output.unwrap().contains("agentic"));
     }
 }

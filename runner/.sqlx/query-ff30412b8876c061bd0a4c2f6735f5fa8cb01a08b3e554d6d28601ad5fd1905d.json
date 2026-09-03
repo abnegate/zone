@@ -1,0 +1,72 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE task_runs\n        SET current_phase = COALESCE($2, current_phase),\n            progress_percent = COALESCE($3, progress_percent)\n        WHERE id = $1\n        RETURNING id, task_id, status, current_phase, progress_percent, started_at,\n                  completed_at, error_message, artifacts\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "task_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "current_phase",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "progress_percent",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 6,
+        "name": "completed_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 7,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "artifacts",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "ff30412b8876c061bd0a4c2f6735f5fa8cb01a08b3e554d6d28601ad5fd1905d"
+}

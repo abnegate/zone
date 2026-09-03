@@ -372,6 +372,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         env: get_safe_env(),
         max_file_size: MAX_FILE_SIZE,
         command_timeout: COMMAND_TIMEOUT_SECS,
+        unrestricted: false,
     };
 
     // Create tool registry with defaults

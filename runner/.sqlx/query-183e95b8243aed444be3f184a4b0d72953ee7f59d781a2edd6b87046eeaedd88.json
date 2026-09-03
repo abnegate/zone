@@ -1,0 +1,156 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,\n                       t.model_name, t.dependencies, t.is_agentic, t.github_repo_url, t.source_id, t.source_ids,\n                       t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,\n                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at\n                FROM tasks t\n                INNER JOIN task_projects tp ON t.id = tp.task_id\n                WHERE t.workspace_id = $1 AND tp.project_id = $2 AND t.status = $3\n                ORDER BY t.created_at DESC\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "acceptance_criteria",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "model_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "dependencies",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "is_agentic",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "github_repo_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "source_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 11,
+        "name": "source_ids",
+        "type_info": "UuidArray"
+      },
+      {
+        "ordinal": 12,
+        "name": "workspace_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 13,
+        "name": "worker_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "queued_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 15,
+        "name": "started_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 16,
+        "name": "completed_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 17,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 18,
+        "name": "updated_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 19,
+        "name": "pr_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 20,
+        "name": "branch_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "pr_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 22,
+        "name": "pr_created_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "183e95b8243aed444be3f184a4b0d72953ee7f59d781a2edd6b87046eeaedd88"
+}

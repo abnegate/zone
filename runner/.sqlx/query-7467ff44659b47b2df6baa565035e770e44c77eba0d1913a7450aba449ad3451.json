@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE sync_configs\n        SET enabled = COALESCE($2, enabled),\n            config = COALESCE($3, config),\n            webhook_secret_encrypted = COALESCE($4, webhook_secret_encrypted)\n        WHERE id = $1\n        RETURNING id, project_id, provider, enabled, config, webhook_secret_encrypted,\n                  created_at, updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "provider",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "config",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "webhook_secret_encrypted",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "7467ff44659b47b2df6baa565035e770e44c77eba0d1913a7450aba449ad3451"
+}

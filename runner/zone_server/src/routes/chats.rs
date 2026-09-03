@@ -113,6 +113,7 @@ pub struct ChatResponse {
     model_name: String,
     archived: bool,
     agent_enabled: bool,
+    agent_sandboxed: bool,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -126,6 +127,7 @@ impl From<chats::ChatRow> for ChatResponse {
             model_name: row.model_name,
             archived: row.archived.unwrap_or(false),
             agent_enabled: row.agent_enabled,
+            agent_sandboxed: row.agent_sandboxed,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
@@ -218,6 +220,13 @@ pub struct CreateChatRequest {
     model_name: String,
     #[serde(default)]
     agent_enabled: bool,
+    /// Defaults to sandboxed when the client does not say.
+    #[serde(default = "default_sandboxed")]
+    agent_sandboxed: bool,
+}
+
+fn default_sandboxed() -> bool {
+    true
 }
 
 /// Update chat request
@@ -225,6 +234,7 @@ pub struct CreateChatRequest {
 pub struct UpdateChatRequest {
     title: Option<String>,
     agent_enabled: Option<bool>,
+    agent_sandboxed: Option<bool>,
 }
 
 /// Create message request
@@ -279,6 +289,7 @@ pub async fn create(
         &req.title,
         &req.model_name,
         req.agent_enabled,
+        req.agent_sandboxed,
     )
     .await
     {
@@ -336,7 +347,15 @@ pub async fn update(
         return e.into_response();
     }
 
-    match chats::update_chat(state.db(), id, req.title.as_deref(), req.agent_enabled).await {
+    match chats::update_chat(
+        state.db(),
+        id,
+        req.title.as_deref(),
+        req.agent_enabled,
+        req.agent_sandboxed,
+    )
+    .await
+    {
         Ok(Some(chat)) => Json(SingleChatResponse {
             chat: chat_with_messages(&state, chat).await,
         })

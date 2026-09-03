@@ -46,6 +46,11 @@ export interface Chat {
   archived: boolean;
   /** Whether replies run the tool-calling agent loop. */
   agent_enabled: boolean;
+  /**
+   * Whether the agent is limited to read-only workspace tools. When false it
+   * also gets a shell and file access on the machine running the server.
+   */
+  agent_sandboxed: boolean;
 }
 
 export interface ChatWithMessages extends Chat {
@@ -58,11 +63,13 @@ export interface CreateChatRequest {
   model_name: string;
   first_message?: string;
   agent_enabled?: boolean;
+  agent_sandboxed?: boolean;
 }
 
 export interface UpdateChatRequest {
   title?: string;
   agent_enabled?: boolean;
+  agent_sandboxed?: boolean;
 }
 
 export interface SendMessageRequest {

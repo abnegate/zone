@@ -31,7 +31,7 @@ use zone_core::llm::{
     ChatStreamChunk, LlmClient, LlmConfig, LlmError, Message as LlmMessage, Role as LlmRole,
 };
 
-use crate::agent::{self, AgentEvent, AgentRun, ChatToolRegistry, ToolCallRecord};
+use crate::agent::{self, AgentEvent, AgentRun, ToolCallRecord};
 use crate::auth::validate_token;
 use crate::db::{chats, workspace_members};
 use crate::state::AppState;
@@ -708,11 +708,29 @@ async fn handle_send_message(
     // Agent mode replaces blind context injection with a `search_knowledge`
     // tool. Doing both would spend the context window on passages the model
     // never asked for and then offer to fetch them again.
-    let registry = ChatToolRegistry::for_state(state);
-    let agentic = chat.agent_enabled && !registry.is_empty();
+    let tools = agent::ChatTools::build(
+        agent::WorkspaceScope {
+            state: state.clone(),
+            workspace_id,
+            chat_id,
+        },
+        // A deployment can refuse host tools outright, in which case the
+        // chat's preference does not get a say.
+        chat.agent_sandboxed || !agent::host_tools_allowed(),
+    );
+    let agentic = chat.agent_enabled && !tools.is_empty();
+
+    if agentic && !tools.is_sandboxed() {
+        // Worth a line in the log: this turn can write to the host, and the
+        // trace on the message is the only other record of what it did.
+        tracing::warn!(
+            "Chat {} is running an unsandboxed agent turn with host tools",
+            chat_id
+        );
+    }
 
     if agentic {
-        context_messages.insert(0, LlmMessage::system(agent::system_prompt(&registry)));
+        context_messages.insert(0, LlmMessage::system(agent::system_prompt(&tools)));
     } else if let Some(context_service) = state.context_service() {
         // MAJOR-6: Inject knowledge base context scoped to workspace if context service available
         // Create workspace-scoped search filters
@@ -778,12 +796,7 @@ async fn handle_send_message(
         Box::pin(agent::run(AgentRun {
             llm: llm_client,
             model: model_name.to_string(),
-            registry,
-            context: agent::ToolContext {
-                state: state.clone(),
-                workspace_id,
-                chat_id,
-            },
+            tools,
             messages: context_messages,
         }))
     } else {
