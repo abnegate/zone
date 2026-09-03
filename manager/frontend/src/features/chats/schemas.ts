@@ -25,6 +25,7 @@ export const MessageMetadataSchema = z
   .object({
     attachments: z.array(MessageAttachmentSchema).optional(),
     tool_calls: z.array(ToolCallRecordSchema).optional(),
+    web_search: z.boolean().optional(),
   })
   .passthrough();
 

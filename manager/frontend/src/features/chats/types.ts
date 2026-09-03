@@ -26,6 +26,8 @@ export interface ToolCallRecord {
 export interface MessageMetadata {
   attachments?: MessageAttachment[];
   tool_calls?: ToolCallRecord[];
+  /** Optional API override: force web search on/off for one message. */
+  web_search?: boolean;
 }
 
 export interface Message {

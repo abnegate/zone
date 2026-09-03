@@ -1,11 +1,12 @@
-import { useMemo } from 'react';
-import { formatDistanceToNow } from 'date-fns';
 import {
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
   type ColumnDef,
+  type StockFeatures,
+  flexRender,
+  stockFeatures,
+  useTable,
 } from '@tanstack/react-table';
+import { formatDistanceToNow } from 'date-fns';
+import { useMemo } from 'react';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './index';
 
 export type InstallSummaryRow = {
@@ -19,7 +20,7 @@ type InstallSummaryProps = {
 };
 
 export function InstallSummary({ rows, completedAt }: InstallSummaryProps) {
-  const columns = useMemo<ColumnDef<InstallSummaryRow>[]>(
+  const columns = useMemo<ColumnDef<StockFeatures, InstallSummaryRow>[]>(
     () => [
       {
         header: 'Setting',
@@ -33,10 +34,10 @@ export function InstallSummary({ rows, completedAt }: InstallSummaryProps) {
     []
   );
 
-  const table = useReactTable({
+  const table = useTable({
+    features: stockFeatures,
     data: rows,
     columns,
-    getCoreRowModel: getCoreRowModel(),
   });
 
   return (

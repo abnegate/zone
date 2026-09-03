@@ -1236,6 +1236,45 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('renders generated assistant images as full-size links', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-generated',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'Here is the image.',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              attachments: [
+                {
+                  name: 'generated-image-1.webp',
+                  mime: 'image/webp',
+                  url: 'data:image/webp;base64,generated',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      renderChatsPage();
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        const image = screen.getByRole('img', { name: 'generated-image-1.webp' });
+        expect(image).toHaveAttribute('src', 'data:image/webp;base64,generated');
+        expect(image).toHaveAttribute('loading', 'lazy');
+        expect(
+          screen.getByRole('link', { name: 'Open generated-image-1.webp full size' })
+        ).toHaveAttribute('target', '_blank');
+      });
+    });
+
     it('displays chat model name', async () => {
       renderChatsPage();
 

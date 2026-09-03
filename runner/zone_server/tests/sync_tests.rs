@@ -47,6 +47,7 @@ async fn setup_test_state() -> AppState {
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,
         app_base_url: "http://localhost:3000".to_string(),
+        web_search: Default::default(),
     };
 
     AppState::new(config, pool.inner().clone(), None)

@@ -249,6 +249,10 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - VALKEY_HOST=valkey
       - VALKEY_PORT=6379
+      # Chat web search through SearXNG on the Gluetun network namespace
+      - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
+      - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
+      - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
     volumes:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts

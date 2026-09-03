@@ -256,6 +256,7 @@ pub(crate) fn test_config() -> Config {
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,
         app_base_url: "http://localhost:3000".to_string(),
+        web_search: crate::config::WebSearchConfig::default(),
     }
 }
 
@@ -280,6 +281,7 @@ mod tests {
             cors_origins: vec!["*".to_string()],
             cors_allow_credentials: false,
             app_base_url: "http://localhost:3000".to_string(),
+            web_search: Default::default(),
         }
     }
 

@@ -42,6 +42,9 @@ pub enum AgentEvent {
         detail: String,
         duration_ms: u64,
     },
+    /// The model produced an image. Carries the raw URL from the provider;
+    /// the consumer decides how to store it and whether it is a duplicate.
+    Image(String),
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
 }
@@ -111,6 +114,10 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                     yield AgentEvent::Chunk(content.clone());
                 }
 
+                for image in &choice.delta.generated_images {
+                    yield AgentEvent::Image(image.image_url.url.clone());
+                }
+
                 if let Some(deltas) = &choice.delta.tool_calls {
                     pending.merge(deltas);
                 }
@@ -135,6 +142,7 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 tool_calls: Some(requested.clone()),
                 tool_call_id: None,
                 images: Vec::new(),
+                generated_images: Vec::new(),
             });
 
             for call in requested {
