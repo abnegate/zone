@@ -1,5 +1,5 @@
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { Button, Modal, Select } from '@zone/ui';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useAuth } from '../../../auth';
 import type {
@@ -308,9 +308,7 @@ export default function WorkspaceMembersSection({
                   <tr key={member.id}>
                     <td>
                       <div className="member-info">
-                        <div className="member-avatar">
-                          {memberLabel(member)[0].toUpperCase()}
-                        </div>
+                        <div className="member-avatar">{memberLabel(member)[0].toUpperCase()}</div>
                         <div className="member-name">{memberLabel(member)}</div>
                       </div>
                     </td>
@@ -453,10 +451,8 @@ export default function WorkspaceMembersSection({
         <div className="role-confirm-modal">
           <p>
             Are you sure you want to promote{' '}
-            <strong>
-              {pendingRoleChange ? memberLabel(pendingRoleChange.member) : ''}
-            </strong>{' '}
-            to <strong>{pendingRoleChange?.newRole}</strong>?
+            <strong>{pendingRoleChange ? memberLabel(pendingRoleChange.member) : ''}</strong> to{' '}
+            <strong>{pendingRoleChange?.newRole}</strong>?
           </p>
           {pendingRoleChange?.newRole === 'owner' && (
             <div className="alert alert-warning">

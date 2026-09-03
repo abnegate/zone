@@ -1,4 +1,4 @@
-import { mock, expect, afterEach, vi } from 'bun:test';
+import { afterEach, expect, mock, vi } from 'bun:test';
 import '@testing-library/dom';
 import { cleanup } from '@testing-library/react';
 
@@ -56,7 +56,10 @@ expect.extend({
           : `expected element to have attribute "${attr}"${value !== undefined ? ` with value "${value}"` : ''}`,
     };
   },
-  toHaveValue(received: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null, value: string | number) {
+  toHaveValue(
+    received: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null,
+    value: string | number
+  ) {
     if (received === null) {
       return { pass: false, message: () => 'element is null' };
     }
@@ -77,9 +80,7 @@ expect.extend({
     return {
       pass,
       message: () =>
-        pass
-          ? 'expected element not to be disabled'
-          : 'expected element to be disabled',
+        pass ? 'expected element not to be disabled' : 'expected element to be disabled',
     };
   },
   toBeEnabled(received: HTMLElement | null) {
@@ -90,9 +91,7 @@ expect.extend({
     return {
       pass,
       message: () =>
-        pass
-          ? 'expected element not to be enabled'
-          : 'expected element to be enabled',
+        pass ? 'expected element not to be enabled' : 'expected element to be enabled',
     };
   },
   toBeChecked(received: HTMLInputElement | null) {
@@ -103,9 +102,7 @@ expect.extend({
     return {
       pass,
       message: () =>
-        pass
-          ? 'expected element not to be checked'
-          : 'expected element to be checked',
+        pass ? 'expected element not to be checked' : 'expected element to be checked',
     };
   },
   toContainHTML(received: Element | null, html: string) {
@@ -136,7 +133,6 @@ expect.extend({
     };
   },
 });
-
 
 // Mock window.matchMedia globally for all tests
 Object.defineProperty(window, 'matchMedia', {

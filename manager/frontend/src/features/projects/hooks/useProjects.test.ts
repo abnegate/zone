@@ -1,9 +1,9 @@
-import { renderHook, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import type { Project, CreateProjectRequest, UpdateProjectRequest } from '../types';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { renderHook, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
+import type { CreateProjectRequest, Project, UpdateProjectRequest } from '../types';
 
 const mockGetProjects = mock();
 const mockCreateProject = mock();
@@ -207,9 +207,7 @@ describe('useProjects', () => {
 
   it('should delete project', async () => {
     // First call returns initial projects, second call (after refetch) returns list without deleted project
-    mockGetProjects
-      .mockResolvedValueOnce(mockProjects)
-      .mockResolvedValueOnce([mockProjects[1]]);
+    mockGetProjects.mockResolvedValueOnce(mockProjects).mockResolvedValueOnce([mockProjects[1]]);
     mockDeleteProject.mockResolvedValue(undefined);
 
     const { result } = renderHook(() => useProjects(), { wrapper: createWrapper() });

@@ -1,5 +1,3 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   afterAll,
   afterEach,
@@ -12,6 +10,8 @@ import {
   setSystemTime,
   vi,
 } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { client } from '../../../api/client';
 import type { SessionsResponse } from '../types';
 import type SessionsPageType from './SessionsPage';
@@ -882,5 +882,4 @@ describe('SessionsPage', () => {
       });
     });
   });
-
 });

@@ -1,8 +1,8 @@
-import { fireEvent, render, screen, waitFor, cleanup } from '@testing-library/react';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterEach, afterAll, mock, beforeAll, beforeEach, describe, it, expect } from 'bun:test';
 import type { KnowledgeEntry } from '../types';
 
 // Create mock functions for useKnowledge hook
@@ -94,8 +94,7 @@ const renderWikiPage = () => {
   );
 };
 
-const getAddKnowledgeButton = () =>
-  screen.getByRole('button', { name: /add knowledge/i });
+const getAddKnowledgeButton = () => screen.getByRole('button', { name: /add knowledge/i });
 
 describe('WikiPage', () => {
   const defaultEntries: KnowledgeEntry[] = [

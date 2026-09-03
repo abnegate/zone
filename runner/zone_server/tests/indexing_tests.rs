@@ -55,7 +55,10 @@ async fn setup_user_and_workspace(client: &TestClient) -> (String, String, Strin
         )
         .await;
 
-    let workspace_id = ws_response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let workspace_id = ws_response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     (token, org_id, workspace_id)
 }
@@ -228,7 +231,8 @@ async fn test_update_name_no_reindex() {
         )
         .await;
 
-    let source_id = Uuid::parse_str(response.json_value()["source"]["id"].as_str().unwrap()).unwrap();
+    let source_id =
+        Uuid::parse_str(response.json_value()["source"]["id"].as_str().unwrap()).unwrap();
 
     // Wait for initial index
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;

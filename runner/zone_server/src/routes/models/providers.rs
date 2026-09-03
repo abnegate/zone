@@ -1367,11 +1367,9 @@ fn parse_param_billions(raw: &str) -> Option<f64> {
 fn sort_models(models: &mut [ModelResponse], sort: ModelSort) {
     match sort {
         ModelSort::Relevance => {}
-        ModelSort::NameAsc => {
-            models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        }
+        ModelSort::NameAsc => models.sort_by_key(|model| model.name.to_lowercase()),
         ModelSort::NameDesc => {
-            models.sort_by(|a, b| b.name.to_lowercase().cmp(&a.name.to_lowercase()))
+            models.sort_by_key(|model| std::cmp::Reverse(model.name.to_lowercase()))
         }
         ModelSort::SizeAsc => models.sort_by(|a, b| cmp_optional(a.size, b.size)),
         ModelSort::SizeDesc => models.sort_by(|a, b| cmp_optional(b.size, a.size)),
@@ -1603,7 +1601,7 @@ fn format_context_tokens(tokens: u64) -> String {
         }
         return format!("{}K", tokens / 1024);
     }
-    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+    if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
         return format!("{}M", tokens / 1_000_000);
     }
     if tokens >= 1_000_000 {

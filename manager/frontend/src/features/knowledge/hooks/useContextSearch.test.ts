@@ -1,9 +1,9 @@
-import { act, renderHook, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import type { SearchResult, SearchOptions } from '../types';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
+import type { SearchOptions, SearchResult } from '../types';
 
 const mockSearchContext = mock();
 
@@ -106,7 +106,10 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockSearchContext).toHaveBeenCalledWith({ ...options, workspace_id: 'test-workspace-id' });
+      expect(mockSearchContext).toHaveBeenCalledWith({
+        ...options,
+        workspace_id: 'test-workspace-id',
+      });
       expect(result.current.results).toEqual(mockResults);
       expect(result.current.total).toBe(2);
       expect(result.current.loading).toBe(false);
@@ -176,9 +179,7 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockSearchContext).toHaveBeenCalledWith(
-        expect.objectContaining({ mode: 'semantic' })
-      );
+      expect(mockSearchContext).toHaveBeenCalledWith(expect.objectContaining({ mode: 'semantic' }));
     });
 
     it('should search with keyword mode', async () => {
@@ -198,9 +199,7 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockSearchContext).toHaveBeenCalledWith(
-        expect.objectContaining({ mode: 'keyword' })
-      );
+      expect(mockSearchContext).toHaveBeenCalledWith(expect.objectContaining({ mode: 'keyword' }));
     });
 
     it('should search with source filters', async () => {
@@ -242,9 +241,7 @@ describe('useContextSearch', () => {
         await result.current.search(options);
       });
 
-      expect(mockSearchContext).toHaveBeenCalledWith(
-        expect.objectContaining({ limit: 10 })
-      );
+      expect(mockSearchContext).toHaveBeenCalledWith(expect.objectContaining({ limit: 10 }));
     });
 
     it('should clear previous results on new search', async () => {

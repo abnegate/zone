@@ -101,7 +101,12 @@ async fn setup_user_and_workspace(client: &TestClient) -> (String, Uuid, Uuid) {
         )
         .await;
     org_response.assert_status(StatusCode::CREATED);
-    let org_id = Uuid::parse_str(org_response.json_value()["organization"]["id"].as_str().unwrap()).unwrap();
+    let org_id = Uuid::parse_str(
+        org_response.json_value()["organization"]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
 
     // Create workspace
     let ws_response = client
@@ -115,7 +120,12 @@ async fn setup_user_and_workspace(client: &TestClient) -> (String, Uuid, Uuid) {
         )
         .await;
     ws_response.assert_status(StatusCode::CREATED);
-    let workspace_id = Uuid::parse_str(ws_response.json_value()["workspace"]["id"].as_str().unwrap()).unwrap();
+    let workspace_id = Uuid::parse_str(
+        ws_response.json_value()["workspace"]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
 
     (token, user_id, workspace_id)
 }

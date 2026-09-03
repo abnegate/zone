@@ -541,7 +541,9 @@ describe('useBrowse', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    let resolveSlow: ((value: { models: Array<{ name: string }>; next_cursor: null }) => void) | undefined;
+    let resolveSlow:
+      | ((value: { models: Array<{ name: string }>; next_cursor: null }) => void)
+      | undefined;
     const slow = new Promise<{ models: Array<{ name: string }>; next_cursor: null }>((resolve) => {
       resolveSlow = resolve;
     });

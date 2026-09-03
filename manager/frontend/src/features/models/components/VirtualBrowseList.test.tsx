@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { BrowseModel } from '../types';
 import VirtualBrowseList from './VirtualBrowseList';
 

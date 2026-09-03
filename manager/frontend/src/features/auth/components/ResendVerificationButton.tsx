@@ -1,6 +1,6 @@
-import { useState } from 'react';
 import { Button } from '@zone/ui';
 import type { ButtonProps } from '@zone/ui';
+import { useState } from 'react';
 import { client } from '../../../api/client';
 import './ResendVerificationButton.css';
 

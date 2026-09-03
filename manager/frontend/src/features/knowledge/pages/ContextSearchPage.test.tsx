@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const mockSearch = mock();
 const mockClear = mock();
@@ -201,9 +201,7 @@ describe('ContextSearchPage', () => {
     fireEvent.submit(input.closest('form')!);
 
     await waitFor(() => {
-      expect(mockSearch).toHaveBeenCalledWith(
-        expect.objectContaining({ mode: 'semantic' })
-      );
+      expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ mode: 'semantic' }));
     });
   });
 
@@ -226,9 +224,7 @@ describe('ContextSearchPage', () => {
     fireEvent.submit(input.closest('form')!);
 
     await waitFor(() => {
-      expect(mockSearch).toHaveBeenCalledWith(
-        expect.objectContaining({ source_ids: ['s1'] })
-      );
+      expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ source_ids: ['s1'] }));
     });
   });
 
@@ -317,9 +313,7 @@ describe('ContextSearchPage', () => {
     fireEvent.submit(input.closest('form')!);
 
     await waitFor(() => {
-      expect(mockSearch).toHaveBeenCalledWith(
-        expect.objectContaining({ query: 'test query' })
-      );
+      expect(mockSearch).toHaveBeenCalledWith(expect.objectContaining({ query: 'test query' }));
     });
   });
 

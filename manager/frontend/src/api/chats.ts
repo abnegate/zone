@@ -1,4 +1,10 @@
-import { parse } from '../validation';
+import {
+  ChatResponseSchema,
+  ChatSearchResponseSchema,
+  ChatsResponseSchema,
+  MessageResponseSchema,
+  MessagesResponseSchema,
+} from '../features/chats/schemas';
 import type {
   Chat,
   ChatSearchOptions,
@@ -8,13 +14,7 @@ import type {
   Message,
   SendMessageRequest,
 } from '../features/chats/types';
-import {
-  ChatResponseSchema,
-  ChatsResponseSchema,
-  ChatSearchResponseSchema,
-  MessageResponseSchema,
-  MessagesResponseSchema,
-} from '../features/chats/schemas';
+import { parse } from '../validation';
 import { API_BASE } from './client';
 
 class ChatsApi {

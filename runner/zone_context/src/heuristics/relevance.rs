@@ -156,13 +156,12 @@ impl RelevanceScorer {
                     0.4
                 }
             }
-            Topic::Question | Topic::Answer => {
-                if lower.contains('?') || lower.contains("how") || lower.contains("what") {
-                    0.8
-                } else {
-                    0.5
-                }
+            Topic::Question | Topic::Answer
+                if lower.contains('?') || lower.contains("how") || lower.contains("what") =>
+            {
+                0.8
             }
+            Topic::Question | Topic::Answer => 0.5,
             _ => 0.5, // Default medium relevance
         }
     }

@@ -1,25 +1,25 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
-import { Layout, ProtectedRoute } from './shared/components';
 import {
   AuthProvider,
-  LoginPage,
-  RegisterPage,
   EmailVerificationPage,
   ForgotPasswordPage,
-  ResetPasswordPage,
   InvitationAcceptPage,
+  LoginPage,
+  RegisterPage,
+  ResetPasswordPage,
   SessionsPage,
 } from './features/auth';
-import { ThemeProvider, WorkspaceProvider } from './shared/context';
 import { ChatsPage } from './features/chats';
-import { ProjectsPage } from './features/projects';
-import { TasksPage } from './features/tasks';
 import { ContextSearchPage } from './features/knowledge';
+import { WikiPage } from './features/knowledge';
 import { ModelsPage } from './features/models';
+import { ProjectsPage } from './features/projects';
 import { OrgSettingsPage, WorkspaceSettingsPage } from './features/settings';
 import { SourcesPage } from './features/sources';
+import { TasksPage } from './features/tasks';
 import UnauthorizedPage from './pages/UnauthorizedPage';
-import { WikiPage } from './features/knowledge';
+import { Layout, ProtectedRoute } from './shared/components';
+import { ThemeProvider, WorkspaceProvider } from './shared/context';
 import { PERMISSIONS } from './shared/types/permissions';
 import './App.css';
 

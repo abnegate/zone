@@ -1,7 +1,7 @@
+import { Badge, Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
-import { Button, Modal, Select, Tabs, TabsList, TabsTrigger, Badge, EmptyState } from '@zone/ui';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
@@ -416,7 +416,11 @@ export default function ModelsPage() {
               </div>
 
               {browse.hasActiveFilters && (
-                <button type="button" className="browse-clear-filters" onClick={browse.clearFilters}>
+                <button
+                  type="button"
+                  className="browse-clear-filters"
+                  onClick={browse.clearFilters}
+                >
                   Clear filters
                 </button>
               )}

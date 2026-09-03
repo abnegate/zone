@@ -18,28 +18,31 @@ export function useContextSearch() {
   const { currentWorkspace } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
 
-  const search = useCallback(async (options: ContextSearchOptions) => {
-    if (!workspaceId) {
-      setError('No workspace selected');
-      return;
-    }
-    try {
-      setLoading(true);
-      setError(null);
-      const response = await knowledgeApi.searchContext({
-        ...options,
-        workspace_id: workspaceId,
-      });
-      setResults(response.results);
-      setTotal(response.total);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to search');
-      setResults([]);
-      setTotal(0);
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceId]);
+  const search = useCallback(
+    async (options: ContextSearchOptions) => {
+      if (!workspaceId) {
+        setError('No workspace selected');
+        return;
+      }
+      try {
+        setLoading(true);
+        setError(null);
+        const response = await knowledgeApi.searchContext({
+          ...options,
+          workspace_id: workspaceId,
+        });
+        setResults(response.results);
+        setTotal(response.total);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to search');
+        setResults([]);
+        setTotal(0);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [workspaceId]
+  );
 
   const clear = useCallback(() => {
     setResults([]);

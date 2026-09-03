@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
-import { isValidTokenFormat } from '../utils';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
+import { isValidTokenFormat } from '../utils';
 import './AuthPage.css';
 
 export default function EmailVerificationPage() {

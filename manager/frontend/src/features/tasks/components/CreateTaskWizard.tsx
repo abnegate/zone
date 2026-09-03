@@ -1,11 +1,11 @@
-import { useState, useCallback, useMemo } from 'react';
-import { Wizard } from '../../../components';
 import type { WizardStep } from '@zone/ui';
-import type { CreateTaskRequest, Task } from '../types';
-import type { Project } from '../../projects/types';
+import { useCallback, useMemo, useState } from 'react';
+import { Wizard } from '../../../components';
 import type { Source } from '../../../types';
 import { getErrors } from '../../../validation';
+import type { Project } from '../../projects/types';
 import { CreateTaskRequestSchema } from '../schemas';
+import type { CreateTaskRequest, Task } from '../types';
 
 interface CreateTaskWizardProps {
   isOpen: boolean;
@@ -113,7 +113,17 @@ export function CreateTaskWizard({
     } finally {
       setLoading(false);
     }
-  }, [projectId, title, description, criteria, priority, isAgentic, sourceId, createTask, onCreated]);
+  }, [
+    projectId,
+    title,
+    description,
+    criteria,
+    priority,
+    isAgentic,
+    sourceId,
+    createTask,
+    onCreated,
+  ]);
 
   const handleClose = useCallback(() => {
     setCurrentStep(0);
@@ -142,9 +152,7 @@ export function CreateTaskWizard({
             {projects.length === 0 ? (
               <div className="wizard-empty-state">
                 <p>No projects available.</p>
-                <p className="wizard-empty-hint">
-                  Create a project first from the Projects page.
-                </p>
+                <p className="wizard-empty-hint">Create a project first from the Projects page.</p>
               </div>
             ) : (
               <div className="project-selection-grid">
@@ -185,8 +193,7 @@ export function CreateTaskWizard({
                   setTitle(e.target.value);
                   if (fieldErrors.title) {
                     setFieldErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.title;
+                      const { title: _title, ...next } = prev;
                       return next;
                     });
                   }
@@ -205,8 +212,7 @@ export function CreateTaskWizard({
                   setDescription(e.target.value);
                   if (fieldErrors.description) {
                     setFieldErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.description;
+                      const { description: _description, ...next } = prev;
                       return next;
                     });
                   }
@@ -242,7 +248,9 @@ export function CreateTaskWizard({
               Configure task priority and enable agentic mode for autonomous execution.
             </p>
             <div className="form-group">
-              <span id="priority-label" className="form-label">Priority</span>
+              <span id="priority-label" className="form-label">
+                Priority
+              </span>
               <div className="priority-selector" role="group" aria-labelledby="priority-label">
                 {[1, 2, 3, 4, 5].map((p) => (
                   <button
@@ -253,7 +261,15 @@ export function CreateTaskWizard({
                   >
                     <span className="priority-number">{p}</span>
                     <span className="priority-label">
-                      {p === 1 ? 'Lowest' : p === 2 ? 'Low' : p === 3 ? 'Medium' : p === 4 ? 'High' : 'Highest'}
+                      {p === 1
+                        ? 'Lowest'
+                        : p === 2
+                          ? 'Low'
+                          : p === 3
+                            ? 'Medium'
+                            : p === 4
+                              ? 'High'
+                              : 'Highest'}
                     </span>
                   </button>
                 ))}

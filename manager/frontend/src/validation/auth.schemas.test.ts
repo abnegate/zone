@@ -1,9 +1,9 @@
 import { getErrors, isValid } from './index';
 import {
   ForgotPasswordSchema,
+  ResendVerificationRequestSchema,
   ResetPasswordSchema,
   VerifyEmailRequestSchema,
-  ResendVerificationRequestSchema,
 } from './schemas';
 
 describe('Auth Validation Schemas', () => {

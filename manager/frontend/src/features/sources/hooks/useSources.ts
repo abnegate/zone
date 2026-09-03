@@ -3,11 +3,11 @@
  * Hook for managing a list of sources with CRUD operations.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { sourcesApi } from '../../../api/sources';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import type { Source, SourceType, CreateSourceRequest, UpdateSourceRequest } from '../types';
 import type { SourceVerifyResponse } from '../schemas';
+import type { CreateSourceRequest, Source, SourceType, UpdateSourceRequest } from '../types';
 
 export interface UseSourcesOptions {
   type?: SourceType;
@@ -57,12 +57,15 @@ export function useSources(options: UseSourcesOptions = {}): UseSourcesResult {
     loadSources();
   }, [loadSources]);
 
-  const createSource = useCallback(async (request: CreateSourceRequest): Promise<Source> => {
-    if (!workspaceId) throw new Error('No workspace selected');
-    const newSource = await sourcesApi.createSource(workspaceId, request);
-    setSources((prev) => [newSource, ...prev]);
-    return newSource;
-  }, [workspaceId]);
+  const createSource = useCallback(
+    async (request: CreateSourceRequest): Promise<Source> => {
+      if (!workspaceId) throw new Error('No workspace selected');
+      const newSource = await sourcesApi.createSource(workspaceId, request);
+      setSources((prev) => [newSource, ...prev]);
+      return newSource;
+    },
+    [workspaceId]
+  );
 
   const updateSource = useCallback(
     async (id: string, request: UpdateSourceRequest): Promise<Source> => {
@@ -74,20 +77,26 @@ export function useSources(options: UseSourcesOptions = {}): UseSourcesResult {
     [workspaceId]
   );
 
-  const deleteSource = useCallback(async (id: string): Promise<void> => {
-    if (!workspaceId) throw new Error('No workspace selected');
-    await sourcesApi.deleteSource(workspaceId, id);
-    setSources((prev) => prev.filter((s) => s.id !== id));
-  }, [workspaceId]);
+  const deleteSource = useCallback(
+    async (id: string): Promise<void> => {
+      if (!workspaceId) throw new Error('No workspace selected');
+      await sourcesApi.deleteSource(workspaceId, id);
+      setSources((prev) => prev.filter((s) => s.id !== id));
+    },
+    [workspaceId]
+  );
 
-  const verifySource = useCallback(async (id: string): Promise<SourceVerifyResponse> => {
-    if (!workspaceId) throw new Error('No workspace selected');
-    const result = await sourcesApi.verifySource(workspaceId, id);
-    // Refresh the source to get updated verification status
-    const updatedSource = await sourcesApi.getSource(workspaceId, id);
-    setSources((prev) => prev.map((s) => (s.id === id ? updatedSource : s)));
-    return result;
-  }, [workspaceId]);
+  const verifySource = useCallback(
+    async (id: string): Promise<SourceVerifyResponse> => {
+      if (!workspaceId) throw new Error('No workspace selected');
+      const result = await sourcesApi.verifySource(workspaceId, id);
+      // Refresh the source to get updated verification status
+      const updatedSource = await sourcesApi.getSource(workspaceId, id);
+      setSources((prev) => prev.map((s) => (s.id === id ? updatedSource : s)));
+      return result;
+    },
+    [workspaceId]
+  );
 
   const refresh = useCallback(async () => {
     await loadSources();
