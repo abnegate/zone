@@ -673,22 +673,24 @@
 }
 
 .ui-dialog-overlay[data-state="open"] {
-  animation: ui-fade-in 150ms ease-out;
+  animation: ui-fade-in 150ms ease-out both;
 }
 
 .ui-dialog-overlay[data-state="closed"] {
-  animation: ui-fade-out 150ms ease-in;
+  animation: ui-fade-out 150ms ease-in both;
 }
 
 .ui-dialog-content {
   position: fixed;
-  left: 50%;
-  top: 50%;
+  inset: 0;
   z-index: 50;
   display: grid;
-  width: 100%;
+  width: min(32rem, calc(100vw - 2rem));
   max-width: 32rem;
-  transform: translate(-50%, -50%);
+  height: fit-content;
+  max-height: calc(100vh - 2rem);
+  margin: auto;
+  overflow-y: auto;
   gap: 1rem;
   border: 1px solid var(--ui-border);
   background-color: var(--ui-bg-base);
@@ -697,13 +699,15 @@
   border-radius: var(--ui-radius-lg);
 }
 
+/* One animation owns transform+opacity. Fill-mode both applies the
+   from-keyframe before the first paint so the panel never flashes
+   fully visible, then jumps. */
 .ui-dialog-content[data-state="open"] {
-  animation: ui-fade-in 150ms ease-out, ui-zoom-in 150ms ease-out,
-    ui-slide-in-from-center 150ms ease-out;
+  animation: ui-dialog-in 150ms ease-out both;
 }
 
 .ui-dialog-content[data-state="closed"] {
-  animation: ui-fade-out 150ms ease-in, ui-zoom-out 150ms ease-in;
+  animation: ui-dialog-out 150ms ease-in both;
 }
 
 .ui-dialog-close {
@@ -812,14 +816,39 @@
   }
 }
 
-@keyframes ui-slide-in-from-center {
+@keyframes ui-dialog-in {
   from {
-    transform: translate(-50%, -48%);
+    opacity: 0;
+    transform: scale(0.95);
   }
   to {
-    transform: translate(-50%, -50%);
+    opacity: 1;
+    transform: scale(1);
   }
 }
+
+@keyframes ui-dialog-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-dialog-overlay[data-state="open"],
+  .ui-dialog-overlay[data-state="closed"],
+  .ui-dialog-content[data-state="open"],
+  .ui-dialog-content[data-state="closed"],
+  .ui-wizard-overlay,
+  .ui-wizard {
+    animation: none;
+  }
+}
+
 
 /* Wizard overlay is CSS, not Tailwind — the package source is not scanned. */
 .ui-wizard-overlay {
@@ -832,6 +861,7 @@
   padding: var(--ui-space-6);
   background: var(--ui-overlay-heavy);
   backdrop-filter: blur(8px);
+  animation: ui-fade-in 150ms ease-out both;
 }
 
 .ui-wizard {
@@ -846,6 +876,7 @@
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-xl);
   box-shadow: var(--ui-shadow-xl);
+  animation: ui-scale-in 150ms ease-out both;
 }
 
 .ui-wizard--sm {

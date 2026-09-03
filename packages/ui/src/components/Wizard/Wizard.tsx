@@ -1,4 +1,5 @@
 import React, { forwardRef, useEffect, useCallback, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 import { Button } from '../Button';
@@ -8,7 +9,6 @@ const overlayVariants = cva([
   'flex items-center justify-center',
   'bg-[var(--ui-overlay-medium)]',
   'backdrop-blur-sm',
-  'animate-in fade-in duration-200',
 ]);
 
 const wizardVariants = cva(
@@ -19,7 +19,6 @@ const wizardVariants = cva(
     'rounded-[var(--ui-radius-xl)]',
     'shadow-[var(--ui-shadow-xl)]',
     'max-h-[90vh] overflow-hidden',
-    'animate-in zoom-in-95 fade-in duration-200',
   ],
   {
     variants: {
@@ -266,20 +265,28 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
     const [animatingStep, setAnimatingStep] = useState<'next' | 'prev' | null>(null);
 
     useEffect(() => {
+      if (!isOpen) return undefined;
+
       const handleEscape = (e: KeyboardEvent) => {
         if (e.key === 'Escape' && onClose) {
           onClose();
         }
       };
 
-      if (isOpen) {
-        document.addEventListener('keydown', handleEscape);
-        document.body.style.overflow = 'hidden';
+      const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+      const previousOverflow = document.body.style.overflow;
+      const previousPaddingRight = document.body.style.paddingRight;
+
+      document.addEventListener('keydown', handleEscape);
+      document.body.style.overflow = 'hidden';
+      if (scrollbarWidth > 0) {
+        document.body.style.paddingRight = `${scrollbarWidth}px`;
       }
 
       return () => {
         document.removeEventListener('keydown', handleEscape);
-        document.body.style.overflow = '';
+        document.body.style.overflow = previousOverflow;
+        document.body.style.paddingRight = previousPaddingRight;
       };
     }, [isOpen, onClose]);
 
@@ -348,7 +355,7 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
       return 'upcoming';
     };
 
-    return (
+    const dialog = (
       <div className={cn('ui-wizard-overlay', overlayVariants())} onClick={onClose}>
         <div
           ref={ref}
@@ -500,6 +507,12 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
         </div>
       </div>
     );
+
+    if (typeof document === 'undefined') {
+      return dialog;
+    }
+
+    return createPortal(dialog, document.body);
   }
 );
 

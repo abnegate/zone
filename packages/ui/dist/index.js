@@ -654,14 +654,14 @@ ProgressBar.displayName = "ProgressBar";
 
 // src/components/Wizard/Wizard.tsx
 var import_react12 = require("react");
+var import_react_dom = require("react-dom");
 var import_class_variance_authority3 = require("class-variance-authority");
 var import_jsx_runtime12 = require("react/jsx-runtime");
 var overlayVariants = (0, import_class_variance_authority3.cva)([
   "fixed inset-0 z-50",
   "flex items-center justify-center",
   "bg-[var(--ui-overlay-medium)]",
-  "backdrop-blur-sm",
-  "animate-in fade-in duration-200"
+  "backdrop-blur-sm"
 ]);
 var wizardVariants = (0, import_class_variance_authority3.cva)(
   [
@@ -670,8 +670,7 @@ var wizardVariants = (0, import_class_variance_authority3.cva)(
     "border border-[var(--ui-border)]",
     "rounded-[var(--ui-radius-xl)]",
     "shadow-[var(--ui-shadow-xl)]",
-    "max-h-[90vh] overflow-hidden",
-    "animate-in zoom-in-95 fade-in duration-200"
+    "max-h-[90vh] overflow-hidden"
   ],
   {
     variants: {
@@ -869,18 +868,24 @@ var Wizard = (0, import_react12.forwardRef)(
   }, ref) => {
     const [animatingStep, setAnimatingStep] = (0, import_react12.useState)(null);
     (0, import_react12.useEffect)(() => {
+      if (!isOpen) return void 0;
       const handleEscape = (e) => {
         if (e.key === "Escape" && onClose) {
           onClose();
         }
       };
-      if (isOpen) {
-        document.addEventListener("keydown", handleEscape);
-        document.body.style.overflow = "hidden";
+      const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+      const previousOverflow = document.body.style.overflow;
+      const previousPaddingRight = document.body.style.paddingRight;
+      document.addEventListener("keydown", handleEscape);
+      document.body.style.overflow = "hidden";
+      if (scrollbarWidth > 0) {
+        document.body.style.paddingRight = `${scrollbarWidth}px`;
       }
       return () => {
         document.removeEventListener("keydown", handleEscape);
-        document.body.style.overflow = "";
+        document.body.style.overflow = previousOverflow;
+        document.body.style.paddingRight = previousPaddingRight;
       };
     }, [isOpen, onClose]);
     const handleNext = (0, import_react12.useCallback)(() => {
@@ -940,7 +945,7 @@ var Wizard = (0, import_react12.forwardRef)(
       if (index === currentStep) return "current";
       return "upcoming";
     };
-    return /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: cn("ui-wizard-overlay", overlayVariants()), onClick: onClose, children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
+    const dialog = /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: cn("ui-wizard-overlay", overlayVariants()), onClick: onClose, children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
       "div",
       {
         ref,
@@ -1079,6 +1084,10 @@ var Wizard = (0, import_react12.forwardRef)(
         ]
       }
     ) });
+    if (typeof document === "undefined") {
+      return dialog;
+    }
+    return (0, import_react_dom.createPortal)(dialog, document.body);
   }
 );
 Wizard.displayName = "Wizard";
