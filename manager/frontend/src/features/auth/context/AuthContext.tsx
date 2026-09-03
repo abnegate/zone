@@ -111,6 +111,8 @@ export function AuthProvider({
       clearTimeout(refreshTimeoutRef.current);
     }
 
+    apiClient.setAccessToken(null);
+
     storage.removeItem(ACCESS_TOKEN_KEY);
     storage.removeItem(REFRESH_TOKEN_KEY);
     storage.removeItem(USER_KEY);
@@ -124,9 +126,13 @@ export function AuthProvider({
       isAuthenticated: false,
       isLoading: false,
     });
-  }, [storage]);
+  }, [apiClient, storage]);
 
   const handleAuthResponse = useCallback((response: AuthResponse) => {
+    // Set client token synchronously: WorkspaceProvider is a child of this
+    // provider, so its effects run before the effect below syncs the client.
+    apiClient.setAccessToken(response.access_token);
+
     storage.setItem(ACCESS_TOKEN_KEY, response.access_token);
     storage.setItem(REFRESH_TOKEN_KEY, response.refresh_token);
     storage.setItem(USER_KEY, JSON.stringify(response.user));
@@ -142,7 +148,7 @@ export function AuthProvider({
     });
 
     scheduleRefreshRef.current?.(response.expires_in);
-  }, [storage]);
+  }, [apiClient, storage]);
 
   const scheduleRefresh = useCallback(
     (expiresIn: number) => {
