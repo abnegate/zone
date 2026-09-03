@@ -71,7 +71,7 @@ validate_model_name "${OLLAMA_MODEL_REASON}" "OLLAMA_MODEL_REASON"
 validate_model_name "${OLLAMA_MODEL_EMBED}" "OLLAMA_MODEL_EMBED"
 
 # Vision is optional: an install without it still runs, just without images.
-OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://ollama:11434}"
+OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
 OLLAMA_MODEL_VISION="${OLLAMA_MODEL_VISION:-llava:7b}"
 validate_model_name "${OLLAMA_MODEL_VISION}" "OLLAMA_MODEL_VISION"
 

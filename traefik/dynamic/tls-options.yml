@@ -1,0 +1,9 @@
+# Force HTTP/1.1 on TLS so Axum can complete WebSocket upgrades.
+# HTTP/2 has no Connection: Upgrade; browsers then fail with
+# "Chat connection is not open".
+tls:
+  options:
+    default:
+      alpnProtocols:
+        - http/1.1
+        - acme-tls/1
