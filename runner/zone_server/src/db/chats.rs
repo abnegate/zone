@@ -325,28 +325,38 @@ pub async fn create_message_with_id(
         .execute(pool)
         .await?;
 
-    let row = sqlx::query!(
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            String,
+            Option<serde_json::Value>,
+            Option<NaiveDateTime>,
+        ),
+    >(
         r#"
         INSERT INTO messages (id, chat_id, role, content, metadata)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING id, chat_id, role, content, metadata, created_at
         "#,
-        message_id,
-        chat_id,
-        role,
-        content,
-        metadata
     )
+    .bind(message_id)
+    .bind(chat_id)
+    .bind(role)
+    .bind(content)
+    .bind(metadata)
     .fetch_one(pool)
     .await?;
 
     Ok(MessageRow {
-        id: row.id,
-        chat_id: row.chat_id,
-        role: row.role,
-        content: row.content,
-        metadata: row.metadata,
-        created_at: row.created_at,
+        id: row.0,
+        chat_id: row.1,
+        role: row.2,
+        content: row.3,
+        metadata: row.4,
+        created_at: row.5,
     })
 }
 
