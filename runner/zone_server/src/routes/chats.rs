@@ -105,22 +105,6 @@ async fn get_chat_with_access(
     Ok(chat)
 }
 
-fn artifact_owner_ids(metadata: Option<&serde_json::Value>) -> Vec<Uuid> {
-    metadata
-        .and_then(|value| value.get("attachments"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|attachment| attachment.get("url").and_then(serde_json::Value::as_str))
-        .filter_map(|url| {
-            let parts: Vec<_> = url.trim_start_matches('/').split('/').collect();
-            (parts.len() == 6 && parts[0] == "api" && parts[1] == "artifacts")
-                .then(|| Uuid::parse_str(parts[4]).ok())
-                .flatten()
-        })
-        .collect()
-}
-
 /// Chat response
 #[derive(Debug, Serialize)]
 pub struct ChatResponse {
@@ -583,14 +567,6 @@ pub async fn delete_message(
         return e.into_response();
     }
 
-    let artifact_owners = chats::list_messages(state.db(), chat_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .find(|message| message.id == message_id)
-        .map(|message| artifact_owner_ids(message.metadata.as_ref()))
-        .unwrap_or_default();
-
     match chats::delete_message(state.db(), chat_id, message_id).await {
         Ok(true) => {
             // Clean up embedding
@@ -604,10 +580,12 @@ pub async fn delete_message(
                 );
             }
             if let Some(workspace_id) = chat.workspace_id {
-                let store = ArtifactStore::new(state.config().comfyui.artifact_root.clone());
-                for owner_id in artifact_owners {
-                    store.cleanup_owner(workspace_id, chat_id, owner_id).await;
-                }
+                // Generated artifacts are stored under their trusted database
+                // message ID. Never derive an owner from user-controlled
+                // attachment metadata.
+                ArtifactStore::new(state.config().comfyui.artifact_root.clone())
+                    .cleanup_owner(workspace_id, chat_id, message_id)
+                    .await;
             }
             StatusCode::NO_CONTENT.into_response()
         }

@@ -46,6 +46,7 @@ export function useChat(chatId: string | null) {
   const socketRef = useRef<WebSocket | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
+  const activeGenerationRef = useRef(false);
 
   const fetchChat = useCallback(
     async (opts?: { silent?: boolean }) => {
@@ -217,15 +218,18 @@ export function useChat(chatId: string | null) {
           assistantId = null;
           assistantContent = '';
           assistantMetadata = undefined;
+          activeGenerationRef.current = false;
           setStreaming(false);
           break;
         case 'cancelled':
           setStatus(null);
+          activeGenerationRef.current = false;
           setStreaming(false);
           break;
         case 'error':
           setStatus(null);
           setError(payload.message);
+          activeGenerationRef.current = false;
           setStreaming(false);
           break;
         default:
@@ -236,11 +240,13 @@ export function useChat(chatId: string | null) {
     socket.onerror = () => {
       setError('Chat connection failed');
       setStatus(null);
+      activeGenerationRef.current = false;
       setStreaming(false);
     };
 
     socket.onclose = () => {
       setStatus(null);
+      activeGenerationRef.current = false;
       setStreaming(false);
     };
 
@@ -251,10 +257,12 @@ export function useChat(chatId: string | null) {
   }, [chatId, upsertMessage, applySavedUserMessage]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
-    if (socket.readyState === WebSocket.OPEN) {
+    // Numeric readyState values stay valid for test doubles that do not
+    // implement the WebSocket.OPEN/CLOSING/CLOSED constants.
+    if (socket.readyState === 1) {
       return Promise.resolve();
     }
-    if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+    if (socket.readyState === 2 || socket.readyState === 3) {
       return Promise.reject(new Error('Chat connection is not open'));
     }
     return new Promise((resolve, reject) => {
@@ -281,9 +289,13 @@ export function useChat(chatId: string | null) {
       throw new Error('Chat connection is not open');
     }
     await waitForOpen(socket);
+    if (activeGenerationRef.current) {
+      throw new Error('Wait for the current response to finish');
+    }
     setError(null);
     const pendingId = `pending-${crypto.randomUUID()}`;
     pendingUserIdRef.current = pendingId;
+    activeGenerationRef.current = true;
     upsertMessage(pendingId, 'user', request.content, request.metadata);
     setStreaming(true);
     try {
@@ -296,6 +308,7 @@ export function useChat(chatId: string | null) {
       );
     } catch (err) {
       pendingUserIdRef.current = null;
+      activeGenerationRef.current = false;
       setChat((prev) =>
         prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== pendingId) } : prev
       );

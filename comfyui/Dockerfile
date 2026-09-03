@@ -1,12 +1,8 @@
-ARG CUDA_IMAGE=nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04
+ARG CUDA_IMAGE=nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04@sha256:14d94b039cb94bbd5da559f303b46bc4b0d5d6c24ab1a9d7b186e566ed3400dc
 
 FROM ${CUDA_IMAGE} AS builder
 
 ARG COMFYUI_COMMIT=30bdda1ef13a3a34fce2cd2fec633f15d832122a
-ARG TORCH_VERSION=2.9.1
-ARG TORCHVISION_VERSION=0.24.1
-ARG TORCHAUDIO_VERSION=2.9.1
-
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
@@ -25,14 +21,14 @@ RUN git init /opt/ComfyUI \
     && test "$(git -C /opt/ComfyUI rev-parse HEAD)" = "${COMFYUI_COMMIT}" \
     && rm -rf /opt/ComfyUI/.git
 
+COPY requirements.lock /opt/zone/requirements.lock
+
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/venv/bin/pip install --no-cache-dir \
+    && /opt/venv/bin/pip install --no-cache-dir --require-hashes \
         --index-url https://download.pytorch.org/whl/cu130 \
-        "torch==${TORCH_VERSION}" \
-        "torchvision==${TORCHVISION_VERSION}" \
-        "torchaudio==${TORCHAUDIO_VERSION}" \
-    && /opt/venv/bin/pip install --no-cache-dir -r /opt/ComfyUI/requirements.txt
+        --extra-index-url https://pypi.org/simple \
+        -r /opt/zone/requirements.lock
 
 FROM ${CUDA_IMAGE}
 

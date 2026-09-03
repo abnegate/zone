@@ -3,6 +3,7 @@
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::future::Future;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -73,6 +74,7 @@ impl ComfyUiClient {
         }
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(config.request_timeout_secs))
             .build()?;
         let workflow = std::fs::read_to_string(&config.workflow_path)
             .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not readable"))
@@ -99,29 +101,33 @@ impl ComfyUiClient {
             return Err(ComfyUiError::Disabled);
         }
 
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.config.generation_timeout_secs);
         let workflow = configure_flux_schnell_workflow(
             self.workflow.clone(),
             prompt,
             &self.config.checkpoint,
             rand::random::<u64>() & i64::MAX as u64,
         )?;
-        let response = self
-            .client
-            .post(format!("{}/prompt", self.config.base_url))
+        let request = self
+            .authorize(self.client.post(format!("{}/prompt", self.config.base_url)))
             .json(&json!({
                 "prompt": workflow,
                 "client_id": Uuid::new_v4().to_string()
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<PromptResponse>()
+            }));
+        let response = self
+            .bounded(&mut cancel, deadline, async move {
+                request
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<PromptResponse>()
+                    .await
+            })
             .await?;
         let prompt_id = response.prompt_id;
         let _ = progress.send("Image queued...".to_string());
 
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(self.config.generation_timeout_secs);
         let mut announced_generation = false;
         loop {
             tokio::select! {
@@ -138,26 +144,71 @@ impl ComfyUiClient {
                         let _ = progress.send("Generating image...".to_string());
                         announced_generation = true;
                     }
-                    if let Some(outputs) = self.history_outputs(&prompt_id).await? {
-                        let _ = progress.send("Saving generated image...".to_string());
-                        return self.fetch_outputs(outputs).await;
+                    match self.history_outputs(&prompt_id, &mut cancel, deadline).await {
+                        Ok(Some(outputs)) => {
+                            let _ = progress.send("Saving generated image...".to_string());
+                            let result = self.fetch_outputs(outputs, &mut cancel, deadline).await;
+                            self.clear_history(&prompt_id).await;
+                            if matches!(result, Err(ComfyUiError::Cancelled | ComfyUiError::Timeout)) {
+                                self.cancel(&prompt_id).await;
+                            }
+                            return result;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            if matches!(error, ComfyUiError::Cancelled | ComfyUiError::Timeout) {
+                                self.cancel(&prompt_id).await;
+                            }
+                            return Err(error);
+                        }
                     }
                 }
             }
         }
     }
 
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.config.api_token {
+            Some(token) => request.header("X-Zone-ComfyUI-Token", token),
+            None => request,
+        }
+    }
+
+    async fn bounded<T, F>(
+        &self,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+        request: F,
+    ) -> Result<T, ComfyUiError>
+    where
+        F: Future<Output = Result<T, reqwest::Error>>,
+    {
+        tokio::select! {
+            _ = cancel.recv() => Err(ComfyUiError::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(ComfyUiError::Timeout),
+            result = request => result.map_err(ComfyUiError::Http),
+        }
+    }
+
     async fn history_outputs(
         &self,
         prompt_id: &str,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
     ) -> Result<Option<Vec<OutputImage>>, ComfyUiError> {
+        let request = self.authorize(
+            self.client
+                .get(format!("{}/history/{}", self.config.base_url, prompt_id)),
+        );
         let history = self
-            .client
-            .get(format!("{}/history/{}", self.config.base_url, prompt_id))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
+            .bounded(cancel, deadline, async move {
+                request
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<Value>()
+                    .await
+            })
             .await?;
         let Some(entry) = history.get(prompt_id) else {
             return Ok(None);
@@ -176,10 +227,14 @@ impl ComfyUiClient {
         for node in nodes.values() {
             if let Some(items) = node.get("images").and_then(Value::as_array) {
                 for item in items {
-                    images.push(
-                        serde_json::from_value(item.clone())
-                            .map_err(|_| ComfyUiError::InvalidResponse("invalid image output"))?,
-                    );
+                    let image: OutputImage = serde_json::from_value(item.clone())
+                        .map_err(|_| ComfyUiError::InvalidResponse("invalid image output"))?;
+                    if image.r#type != "temp" {
+                        return Err(ComfyUiError::InvalidResponse(
+                            "workflow returned a non-temporary image",
+                        ));
+                    }
+                    images.push(image);
                 }
             }
         }
@@ -192,30 +247,34 @@ impl ComfyUiClient {
     async fn fetch_outputs(
         &self,
         outputs: Vec<OutputImage>,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
     ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
         let mut generated = Vec::with_capacity(outputs.len());
         for output in outputs {
-            let response = self
-                .client
-                .get(format!("{}/view", self.config.base_url))
+            let request = self
+                .authorize(self.client.get(format!("{}/view", self.config.base_url)))
                 .query(&[
                     ("filename", output.filename.as_str()),
                     ("subfolder", output.subfolder.as_str()),
                     ("type", output.r#type.as_str()),
-                ])
-                .send()
-                .await?
-                .error_for_status()?;
-            let mime = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(';').next())
-                .filter(|value| value.starts_with("image/"))
-                .unwrap_or("image/png")
-                .to_string();
+                ]);
+            let (bytes, mime) = self
+                .bounded(cancel, deadline, async move {
+                    let response = request.send().await?.error_for_status()?;
+                    let mime = response
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.split(';').next())
+                        .filter(|value| value.starts_with("image/"))
+                        .unwrap_or("image/png")
+                        .to_string();
+                    Ok((response.bytes().await?, mime))
+                })
+                .await?;
             generated.push(GeneratedImage {
-                bytes: response.bytes().await?,
+                bytes,
                 mime,
                 filename: output.filename,
             });
@@ -225,29 +284,29 @@ impl ComfyUiClient {
 
     async fn cancel(&self, prompt_id: &str) {
         if let Err(error) = self
-            .client
-            .post(format!("{}/queue", self.config.base_url))
+            .authorize(self.client.post(format!("{}/queue", self.config.base_url)))
             .json(&json!({ "delete": [prompt_id] }))
             .send()
             .await
         {
             tracing::warn!("Failed to cancel ComfyUI prompt {}: {}", prompt_id, error);
         }
-        // ComfyUI only removes queued work above; a running workflow requires
-        // the process-wide interrupt endpoint. Zone serializes its image jobs
-        // before invoking this method so it cannot interrupt another Zone user.
+        // `/interrupt` is process-wide in ComfyUI and cannot safely identify a
+        // prompt. Never call it: removing queued work is safe, while an already
+        // running cancelled job finishes into ComfyUI's temporary directory.
+    }
+
+    async fn clear_history(&self, prompt_id: &str) {
         if let Err(error) = self
-            .client
-            .post(format!("{}/interrupt", self.config.base_url))
-            .json(&json!({ "prompt_id": prompt_id }))
+            .authorize(
+                self.client
+                    .post(format!("{}/history", self.config.base_url)),
+            )
+            .json(&json!({ "delete": [prompt_id] }))
             .send()
             .await
         {
-            tracing::warn!(
-                "Failed to interrupt ComfyUI prompt {}: {}",
-                prompt_id,
-                error
-            );
+            tracing::warn!("Failed to clear ComfyUI history {}: {}", prompt_id, error);
         }
     }
 }
@@ -272,13 +331,18 @@ fn validate_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
         "/5/inputs/width",
         "/5/inputs/height",
         "/6/inputs/text",
-        "/9/inputs/filename_prefix",
+        "/9/inputs/images",
     ] {
         if workflow.pointer(pointer).is_none() {
             return Err(ComfyUiError::Configuration(
                 "workflow does not match the FLUX Schnell contract",
             ));
         }
+    }
+    if workflow.pointer("/9/class_type").and_then(Value::as_str) != Some("PreviewImage") {
+        return Err(ComfyUiError::Configuration(
+            "workflow output must use temporary PreviewImage storage",
+        ));
     }
     Ok(())
 }
@@ -303,7 +367,6 @@ fn configure_flux_schnell_workflow(
     workflow["3"]["inputs"]["seed"] = json!(seed);
     workflow["4"]["inputs"]["ckpt_name"] = json!(checkpoint);
     workflow["6"]["inputs"]["text"] = json!(prompt);
-    workflow["9"]["inputs"]["filename_prefix"] = json!("Zone/flux1-schnell");
     Ok(workflow)
 }
 
@@ -331,6 +394,21 @@ mod tests {
         assert!(build_flux_schnell_workflow("fox", "models/secret", 1).is_err());
     }
 
+    #[test]
+    fn workflow_rejects_persistent_output_nodes() {
+        let mut workflow: Value = serde_json::from_str(include_str!(
+            "../../../../comfyui/workflows/flux1-schnell-fp8-api.json"
+        ))
+        .unwrap();
+        workflow["9"]["class_type"] = json!("SaveImage");
+        assert!(matches!(
+            validate_workflow(&workflow),
+            Err(ComfyUiError::Configuration(
+                "workflow output must use temporary PreviewImage storage"
+            ))
+        ));
+    }
+
     #[tokio::test]
     async fn submits_recovers_history_and_fetches_output() {
         let server = MockServer::start().await;
@@ -343,7 +421,7 @@ mod tests {
             .and(path("/history/p1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "p1": {"status": {"status_str": "success"}, "outputs": {
-                    "7": {"images": [{"filename": "zone.png", "subfolder": "", "type": "output"}]}
+                    "7": {"images": [{"filename": "zone.png", "subfolder": "", "type": "temp"}]}
                 }}
             })))
             .mount(&server)
@@ -377,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_deletes_specific_prompt() {
+    async fn cancellation_deletes_specific_prompt_without_global_interrupt() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/prompt"))
@@ -390,16 +468,46 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        let client = ComfyUiClient::new(ComfyUiConfig {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 5000,
+            ..Default::default()
+        })
+        .unwrap();
+        let (cancel_tx, cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let task =
+            tokio::spawn(async move { client.generate("a fox", cancel_rx, progress_tx).await });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        cancel_tx.send(()).unwrap();
+        assert!(matches!(task.await.unwrap(), Err(ComfyUiError::Cancelled)));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.url.path() != "/interrupt")
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_prompt_request_is_cancellable() {
+        let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/interrupt"))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(1)
+            .and(path("/prompt"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(30))
+                    .set_body_json(json!({"prompt_id": "never"})),
+            )
             .mount(&server)
             .await;
         let client = ComfyUiClient::new(ComfyUiConfig {
             enabled: true,
             base_url: server.uri(),
-            poll_interval_ms: 5000,
+            request_timeout_secs: 60,
             ..Default::default()
         })
         .unwrap();

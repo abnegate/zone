@@ -410,7 +410,7 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
             "flux-1": {
                 "status": {"status_str": "success"},
                 "outputs": {"7": {"images": [{
-                    "filename": "zone_flux.png", "subfolder": "", "type": "output"
+                    "filename": "zone_flux.png", "subfolder": "", "type": "temp"
                 }]}}
             }
         })))
@@ -506,6 +506,44 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
         .expect("generated image metadata must survive reload");
     assert_eq!(persisted["id"], assistant_message_id);
 
+    // Deleting a metadata-crafted message must not be able to remove another
+    // message's artifacts.
+    let malicious = client
+        .post_json_auth(
+            &format!("/api/chats/{chat_id}/messages"),
+            &json!({
+                "role": "user",
+                "content": "crafted metadata",
+                "metadata": {"attachments": [{
+                    "name": "stolen.png",
+                    "mime": "image/png",
+                    "url": image_url
+                }]}
+            }),
+            &token,
+        )
+        .await
+        .json_value()["message"]["id"]
+        .as_str()
+        .expect("crafted message id")
+        .to_string();
+    let crafted_deleted = reqwest::Client::new()
+        .delete(format!(
+            "http://{addr}/api/chats/{chat_id}/messages/{malicious}"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(crafted_deleted.status(), reqwest::StatusCode::NO_CONTENT);
+    let retained_artifact = reqwest::Client::new()
+        .get(format!("http://{addr}{image_url}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retained_artifact.status(), reqwest::StatusCode::OK);
+
     let deleted = reqwest::Client::new()
         .delete(format!(
             "http://{addr}/api/chats/{chat_id}/messages/{assistant_message_id}"
@@ -523,4 +561,276 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
         .unwrap();
     assert_eq!(removed_artifact.status(), reqwest::StatusCode::NOT_FOUND);
     let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
+async fn test_image_failure_never_announces_empty_assistant_message() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat(&client).await;
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    let addr = spawn_server_with_config(config).await;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/ws/chats/{chat_id}"))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "Generate an image of a failed request",
+                "metadata": {"image_generation": true}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_start = false;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("message_start") => saw_start = true,
+            Some("error") => break,
+            _ => {}
+        }
+    }
+    assert!(
+        !saw_start,
+        "a failed generation must not create an empty bubble"
+    );
+
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    assert!(
+        reloaded["chat"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["role"] != "assistant"),
+        "failed generation must not persist an empty assistant message"
+    );
+}
+
+struct DelayedPrompt {
+    prompt_id: String,
+    starts: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+}
+
+impl wiremock::Respond for DelayedPrompt {
+    fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+        self.starts.lock().unwrap().push(std::time::Instant::now());
+        std::thread::sleep(Duration::from_millis(80));
+        ResponseTemplate::new(200).set_body_json(json!({"prompt_id": self.prompt_id}))
+    }
+}
+
+async fn collect_generated_image(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> (String, String) {
+    let mut image_url = None;
+    let mut message_id = None;
+    while let Some(frame) = next_frame(socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("image") => image_url = frame["attachment"]["url"].as_str().map(str::to_string),
+            Some("message_end") => {
+                message_id = frame["message_id"].as_str().map(str::to_string);
+                break;
+            }
+            Some("error") => panic!("unexpected concurrent generation error: {frame}"),
+            _ => {}
+        }
+    }
+    (message_id.expect("message_end"), image_url.expect("image"))
+}
+
+#[tokio::test]
+async fn test_concurrent_image_sends_are_serialized_per_chat() {
+    let comfy = MockServer::start().await;
+    let prompt_starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(DelayedPrompt {
+            prompt_id: "flux-a".to_string(),
+            starts: prompt_starts.clone(),
+        })
+        .expect(2)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/flux-a"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "flux-a": {
+                "status": {"status_str": "success"},
+                "outputs": {"7": {"images": [{
+                    "filename": "zone.png", "subfolder": "", "type": "temp"
+                }]}}
+            }
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(vec![137, 80, 78, 71]),
+        )
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-concurrent-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let addr = spawn_server_with_config(config).await;
+
+    let connect = async |token: &str| {
+        let (mut socket, _) = connect_async(format!("ws://{addr}/ws/chats/{chat_id}"))
+            .await
+            .expect("websocket connect");
+        socket
+            .send(WsMessage::Text(
+                json!({"type": "auth", "token": token}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        socket
+    };
+    let mut first = connect(&token).await;
+    let mut second = connect(&token).await;
+    let send = json!({
+        "type": "send",
+        "content": "Generate an image of overlapping foxes",
+        "metadata": {"image_generation": true}
+    })
+    .to_string();
+    first
+        .send(WsMessage::Text(send.clone().into()))
+        .await
+        .unwrap();
+    second.send(WsMessage::Text(send.into())).await.unwrap();
+
+    let first_result = collect_generated_image(&mut first);
+    let second_result = collect_generated_image(&mut second);
+    let ((first_id, first_url), (second_id, second_url)) =
+        tokio::join!(first_result, second_result);
+    assert_ne!(first_id, second_id);
+    assert!(first_url.contains(&format!("/{first_id}/")));
+    assert!(second_url.contains(&format!("/{second_id}/")));
+
+    let starts = prompt_starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2);
+    let gap = starts[1].saturating_duration_since(starts[0]);
+    assert!(
+        gap >= Duration::from_millis(70),
+        "per-chat generation must serialize overlapping sends, gap was {gap:?}"
+    );
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
+async fn test_protected_artifact_urls_are_not_forwarded_to_litellm() {
+    let litellm = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"safe\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+                ),
+        )
+        .mount(&litellm)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat(&client).await;
+    let protected = "/api/artifacts/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003/image.png";
+    client
+        .post_json_auth(
+            &format!("/api/chats/{chat_id}/messages"),
+            &json!({
+                "role": "assistant",
+                "content": "Generated image.",
+                "metadata": {"attachments": [{
+                    "name": "generated-image-1.png",
+                    "mime": "image/png",
+                    "url": protected
+                }]}
+            }),
+            &token,
+        )
+        .await;
+
+    let mut config = test_config();
+    config.litellm_host = litellm.uri();
+    config.comfyui.enabled = true;
+    let addr = spawn_server_with_config(config).await;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/ws/chats/{chat_id}"))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "send", "content": "What color was the previous answer?"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("message_end") | Some("error") => break,
+            _ => {}
+        }
+    }
+
+    let requests = litellm.received_requests().await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.url.path() == "/chat/completions"),
+        "LiteLLM must receive the follow-up"
+    );
+    for request in requests {
+        let body = String::from_utf8_lossy(&request.body);
+        assert!(
+            !body.contains("/api/artifacts/"),
+            "protected artifact URLs must not be forwarded to LiteLLM: {body}"
+        );
+        assert!(
+            !body.contains(protected),
+            "the exact protected URL must stay out of later-turn model context"
+        );
+    }
 }

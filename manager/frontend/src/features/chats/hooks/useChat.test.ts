@@ -25,6 +25,7 @@ class FakeSocket {
   close() {
     this.readyState = 3;
   }
+  addEventListener() {}
   emit(payload: unknown) {
     this.onmessage?.({ data: JSON.stringify(payload) });
   }
@@ -95,6 +96,7 @@ describe('useChat', () => {
   };
 
   beforeEach(() => {
+    lastSocket = null;
     mockGetChat.mockReset();
     mockSendMessage.mockReset();
     mockDeleteMessage.mockReset();
@@ -272,6 +274,25 @@ describe('useChat', () => {
       expect(saved?.metadata).toEqual(metadata);
       expect(result.current.chat?.messages.filter((m) => m.content === 'see this')).toHaveLength(1);
     });
+  });
+
+  it('serializes sends until the current response completes', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    await result.current.sendMessage({ content: 'first' });
+    await expect(result.current.sendMessage({ content: 'second' })).rejects.toThrow(
+      'Wait for the current response to finish'
+    );
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'a-first', role: 'assistant' });
+    lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
+    await waitFor(() => expect(result.current.streaming).toBe(false));
+    await expect(result.current.sendMessage({ content: 'second' })).resolves.toBeUndefined();
   });
 
   it('adds streamed assistant images and keeps final metadata', async () => {

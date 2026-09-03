@@ -92,16 +92,15 @@
     }
   },
   "9": {
-    "class_type": "SaveImage",
+    "class_type": "PreviewImage",
     "inputs": {
-      "filename_prefix": "Zone/flux1-schnell",
       "images": [
         "8",
         0
       ]
     },
     "_meta": {
-      "title": "Save Image"
+      "title": "Temporary Image Output"
     }
   }
 }

@@ -17,9 +17,13 @@ SHA-256 before the file is accepted.
 - Size: `17,236,328,572` bytes (approximately 16.05 GiB / 17.24 GB)
 - SHA-256: `ead426278b49030e9da5df862994f25ce94ab2ee4df38b556ddddb3db093bf72`
 - Model license: Apache-2.0
+- CUDA base image manifest:
+  `sha256:14d94b039cb94bbd5da559f303b46bc4b0d5d6c24ab1a9d7b186e566ed3400dc`
 
 The machine-readable source of truth is `comfyui/model-manifest.json`.
 Third-party attribution is in `comfyui/NOTICE.md`.
+Python dependencies are fully resolved and hash-verified in the platform
+specific `comfyui/requirements*.lock` files.
 
 ## Apple Silicon macOS
 
@@ -56,7 +60,7 @@ Start the pinned runtime:
 ```bash
 cd "$HOME/Library/Application Support/Zone/ComfyUI"
 .venv/bin/python main.py \
-  --listen 0.0.0.0 \
+  --listen 127.0.0.1 \
   --port 8188 \
   --disable-auto-launch \
   --force-fp16
@@ -64,9 +68,31 @@ cd "$HOME/Library/Application Support/Zone/ComfyUI"
 
 `--force-fp16` keeps compute on the broadly supported MPS path while the FP8
 checkpoint retains its smaller storage and memory footprint. ComfyUI has no
-built-in authentication. Do not port-forward port 8188, and allow access only
-from the local machine and Docker Desktop. The manager reaches it through
-`http://host.docker.internal:8188`.
+built-in authentication, so it must stay bound to loopback.
+
+First test whether Docker Desktop can reach the loopback listener:
+
+```bash
+docker run --rm curlimages/curl:8.16.0 \
+  -fsS http://host.docker.internal:8188/system_stats
+```
+
+If that succeeds, use `http://host.docker.internal:8188` directly. If it does
+not, run Zone's authenticated bridge in a separate terminal:
+
+```bash
+export COMFYUI_BRIDGE_TOKEN="$(openssl rand -hex 32)"
+python3 scripts/comfyui-loopback-bridge.py
+```
+
+The bridge is the only process that listens beyond loopback, accepts only
+GET/POST, forwards solely to `127.0.0.1:8188`, limits request bodies, and
+requires a constant-time checked token. Put the same token in `.env`:
+
+```dotenv
+COMFYUI_BASE_URL=http://host.docker.internal:8189
+COMFYUI_API_TOKEN=<value of COMFYUI_BRIDGE_TOKEN>
+```
 
 After the runtime and checkpoint are ready, enable routing in `.env`:
 
@@ -146,11 +172,13 @@ only built-in ComfyUI nodes. Integration code may replace only these inputs:
 - node `4`: checkpoint filename from trusted server configuration
 - node `5`: width, height, and batch size
 - node `3`: seed, steps, CFG, sampler, scheduler, and denoise
-- node `9`: output filename prefix
+- node `9`: temporary `PreviewImage` output (persistent `SaveImage` is rejected)
 
 The packaged defaults are Schnell-appropriate: four Euler/simple steps and CFG
 1. Node `4` defaults to the manifest filename and is never changed from
-untrusted request data.
+untrusted request data. Zone copies successful temporary output into its
+protected artifact store and clears the ComfyUI history entry; cancelled
+running jobs remain only in ComfyUI's temporary lifecycle.
 
 ## Troubleshooting
 
@@ -159,7 +187,9 @@ untrusted request data.
 - **CUDA device unavailable:** confirm `nvidia-smi` works on the host and
   `docker run --rm --gpus all nvidia/cuda:13.0.2-base-ubuntu24.04 nvidia-smi`
   works before starting the profile.
-- **macOS manager cannot connect:** confirm ComfyUI listens on `0.0.0.0:8188`,
-  then test `curl http://127.0.0.1:8188/system_stats` on the host.
+- **macOS manager cannot connect:** confirm ComfyUI responds at
+  `http://127.0.0.1:8188/system_stats`, then use the direct Docker Desktop test
+  and authenticated bridge procedure above. Do not bind ComfyUI itself to
+  `0.0.0.0`.
 - **MPS out of memory:** close GPU-heavy applications and reduce workflow width
   and height. Do not add `--cpu` unless very slow CPU generation is acceptable.
