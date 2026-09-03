@@ -4577,3 +4577,72 @@ async fn test_audit_logs_cannot_access_other_org() {
     // Should be forbidden or not found
     assert!(response.status == StatusCode::FORBIDDEN || response.status == StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn test_chat_single_responses_carry_messages() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/chats",
+            &json!({
+                "workspace_id": workspace_id,
+                "title": "Envelope Test Chat",
+                "model_name": "llama3.1:8b"
+            }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let created = response.json_value();
+    assert!(
+        created["chat"]["messages"].is_array(),
+        "chat create must return chat.messages; the console rejects the response without it"
+    );
+
+    let chat_id = created["chat"]["id"].as_str().unwrap().to_string();
+
+    for (label, response) in [
+        (
+            "get",
+            client
+                .get_auth(
+                    &format!("/api/chats/{}?workspace_id={}", chat_id, workspace_id),
+                    &token,
+                )
+                .await,
+        ),
+        (
+            "archive",
+            client
+                .post_json_auth(
+                    &format!("/api/chats/{}/archive?workspace_id={}", chat_id, workspace_id),
+                    &json!({}),
+                    &token,
+                )
+                .await,
+        ),
+        (
+            "unarchive",
+            client
+                .post_json_auth(
+                    &format!(
+                        "/api/chats/{}/unarchive?workspace_id={}",
+                        chat_id, workspace_id
+                    ),
+                    &json!({}),
+                    &token,
+                )
+                .await,
+        ),
+    ] {
+        response.assert_status(StatusCode::OK);
+        assert!(
+            response.json_value()["chat"]["messages"].is_array(),
+            "chat {} must return chat.messages",
+            label
+        );
+    }
+}
