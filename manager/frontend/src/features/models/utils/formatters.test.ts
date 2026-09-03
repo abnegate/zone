@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'bun:test';
-import { formatBytes, formatContextLength, formatDate, formatNumber } from './formatters';
+import {
+  defaultDownloadName,
+  formatBytes,
+  formatContextLength,
+  formatDate,
+  formatDownloadSizeLabel,
+  formatNumber,
+  modelDownloadSizes,
+} from './formatters';
 
 describe('formatNumber', () => {
   it('formats thousands and millions', () => {
@@ -30,5 +38,48 @@ describe('formatContextLength', () => {
 describe('formatDate', () => {
   it('returns the original string for invalid dates', () => {
     expect(formatDate('5 days ago')).toBe('5 days ago');
+  });
+});
+
+describe('modelDownloadSizes', () => {
+  it('returns nothing when there is only one size', () => {
+    expect(
+      modelDownloadSizes({
+        name: 'mistral',
+        sizes: [{ name: 'mistral:7b', label: '7B' }],
+      })
+    ).toEqual([]);
+  });
+
+  it('returns every size when a model ships more than one', () => {
+    const sizes = [
+      { name: 'llama3.2:1b', label: '1B', size: 1_300_000_000 },
+      { name: 'llama3.2:3b', label: '3B', size: 2_000_000_000 },
+    ];
+    expect(modelDownloadSizes({ name: 'llama3.2', sizes })).toEqual(sizes);
+  });
+});
+
+describe('formatDownloadSizeLabel', () => {
+  it('includes the download size when known', () => {
+    expect(formatDownloadSizeLabel({ name: 'llama3.2:1b', label: '1B', size: 1_300_000_000 })).toBe(
+      `1B · ${formatBytes(1_300_000_000)}`
+    );
+    expect(formatDownloadSizeLabel({ name: 'llama3.2:3b', label: '3B' })).toBe('3B');
+  });
+});
+
+describe('defaultDownloadName', () => {
+  it('uses the smallest listed size, otherwise the model name', () => {
+    expect(
+      defaultDownloadName({
+        name: 'llama3.2',
+        sizes: [
+          { name: 'llama3.2:1b', label: '1B' },
+          { name: 'llama3.2:3b', label: '3B' },
+        ],
+      })
+    ).toBe('llama3.2:1b');
+    expect(defaultDownloadName({ name: 'mistral' })).toBe('mistral');
   });
 });
