@@ -473,11 +473,16 @@ class Client {
   // Workspace Theme API (nested under organizations/workspaces)
   // =============================================================================
 
-  async getWorkspaceTheme(_orgId: string, wsId: string): Promise<WorkspaceTheme> {
+  async getWorkspaceTheme(_orgId: string, wsId: string): Promise<WorkspaceTheme | null> {
     const response = await fetch(
       `${API_BASE}/api/workspaces/${wsId}/theme`,
       { headers: this.getHeaders() }
     );
+    // A workspace with no theme override has no stored row; that is the state a
+    // new workspace starts in and the state a theme reset returns it to.
+    if (response.status === 404) {
+      return null;
+    }
     if (!response.ok) {
       throw new Error(`Failed to fetch workspace theme: ${response.status}`);
     }
