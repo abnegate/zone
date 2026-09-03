@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef } from 'react';
-import { VariableSizeList as List, type ListChildComponentProps } from 'react-window';
+import { List, type RowComponentProps } from 'react-window';
 import type { BrowseModel } from '../types';
 import { formatBytes, formatContextLength, formatNumber } from '../utils';
 import './VirtualBrowseList.css';
@@ -12,6 +12,12 @@ interface VirtualBrowseListProps {
   loadingMore: boolean;
   onLoadMore: () => void;
 }
+
+type BrowseRowProps = {
+  models: BrowseModel[];
+  onItemClick: (model: BrowseModel) => void;
+  onInstall: (model: BrowseModel) => void;
+};
 
 const LOADING_ROW_HEIGHT = 56;
 
@@ -38,6 +44,83 @@ function specParts(model: BrowseModel): string[] {
   return parts;
 }
 
+function BrowseRow({
+  index,
+  style,
+  models,
+  onItemClick,
+  onInstall,
+}: RowComponentProps<BrowseRowProps>) {
+  if (index >= models.length) {
+    return (
+      <div style={style} className="virtual-browse-loading">
+        <span className="spinner" /> Loading more...
+      </div>
+    );
+  }
+
+  const model = models[index];
+  const specs = specParts(model);
+  const useCases = model.use_cases ?? [];
+  const title = model.display_name || model.name;
+
+  return (
+    <div style={style} className="virtual-browse-item-wrapper">
+      <div
+        className="browse-item"
+        onClick={() => onItemClick(model)}
+        onKeyDown={(e) => e.key === 'Enter' && onItemClick(model)}
+        role="button"
+        tabIndex={0}
+      >
+        <div className="browse-info">
+          <div className="browse-header">
+            <span className="browse-name">{title}</span>
+            {model.source && (
+              <span className={`browse-source browse-source-${model.source}`}>{model.source}</span>
+            )}
+          </div>
+          {specs.length > 0 && (
+            <div className="browse-specs">
+              {specs.map((part) => (
+                <span key={part} className="browse-spec">
+                  {part}
+                </span>
+              ))}
+            </div>
+          )}
+          {model.description && <p className="browse-description">{model.description}</p>}
+          {(useCases.length > 0 || model.downloads) && (
+            <div className="browse-tags">
+              {useCases.slice(0, 4).map((useCase) => (
+                <span key={useCase} className="tag">
+                  {useCase}
+                </span>
+              ))}
+              {model.downloads ? (
+                <span className="browse-downloads">
+                  {formatNumber(model.downloads)}
+                  {model.source === 'ollama' ? ' pulls' : ' downloads'}
+                </span>
+              ) : null}
+            </div>
+          )}
+        </div>
+        <button
+          className="btn btn-primary btn-small"
+          onClick={(e) => {
+            e.stopPropagation();
+            onInstall(model);
+          }}
+          type="button"
+        >
+          Install
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function VirtualBrowseList({
   models,
   onItemClick,
@@ -46,12 +129,11 @@ export default function VirtualBrowseList({
   loadingMore,
   onLoadMore,
 }: VirtualBrowseListProps) {
-  const listRef = useRef<List>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const handleItemsRendered = useCallback(
-    ({ visibleStopIndex }: { visibleStopIndex: number }) => {
-      if (hasMore && !loadingMore && visibleStopIndex >= models.length - 5) {
+  const handleRowsRendered = useCallback(
+    ({ stopIndex }: { stopIndex: number }) => {
+      if (hasMore && !loadingMore && stopIndex >= models.length - 5) {
         onLoadMore();
       }
     },
@@ -60,7 +142,7 @@ export default function VirtualBrowseList({
 
   const itemCount = models.length + (hasMore ? 1 : 0);
 
-  const getItemSize = useCallback(
+  const rowHeight = useCallback(
     (index: number) => {
       if (index >= models.length) return LOADING_ROW_HEIGHT;
       return browseItemHeight(models[index]);
@@ -68,85 +150,12 @@ export default function VirtualBrowseList({
     [models]
   );
 
-  // Reset cached row heights whenever the catalogue contents change.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: models identity is the catalogue snapshot
-  useEffect(() => {
-    listRef.current?.resetAfterIndex(0);
-  }, [models]);
-
-  const Row = useCallback(
-    ({ index, style }: ListChildComponentProps) => {
-      if (index >= models.length) {
-        return (
-          <div style={style} className="virtual-browse-loading">
-            <span className="spinner" /> Loading more...
-          </div>
-        );
-      }
-
-      const model = models[index];
-      const specs = specParts(model);
-      const useCases = model.use_cases ?? [];
-      const title = model.display_name || model.name;
-
-      return (
-        <div style={style} className="virtual-browse-item-wrapper">
-          <div
-            className="browse-item"
-            onClick={() => onItemClick(model)}
-            onKeyDown={(e) => e.key === 'Enter' && onItemClick(model)}
-            role="button"
-            tabIndex={0}
-          >
-            <div className="browse-info">
-              <div className="browse-header">
-                <span className="browse-name">{title}</span>
-                {model.source && (
-                  <span className={`browse-source browse-source-${model.source}`}>
-                    {model.source}
-                  </span>
-                )}
-              </div>
-              {specs.length > 0 && (
-                <div className="browse-specs">
-                  {specs.map((part) => (
-                    <span key={part} className="browse-spec">
-                      {part}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {model.description && <p className="browse-description">{model.description}</p>}
-              {(useCases.length > 0 || model.downloads) && (
-                <div className="browse-tags">
-                  {useCases.slice(0, 4).map((useCase) => (
-                    <span key={useCase} className="tag">
-                      {useCase}
-                    </span>
-                  ))}
-                  {model.downloads ? (
-                    <span className="browse-downloads">
-                      {formatNumber(model.downloads)}
-                      {model.source === 'ollama' ? ' pulls' : ' downloads'}
-                    </span>
-                  ) : null}
-                </div>
-              )}
-            </div>
-            <button
-              className="btn btn-primary btn-small"
-              onClick={(e) => {
-                e.stopPropagation();
-                onInstall(model);
-              }}
-              type="button"
-            >
-              Install
-            </button>
-          </div>
-        </div>
-      );
-    },
+  const rowProps = React.useMemo<BrowseRowProps>(
+    () => ({
+      models,
+      onItemClick,
+      onInstall,
+    }),
     [models, onItemClick, onInstall]
   );
 
@@ -175,17 +184,15 @@ export default function VirtualBrowseList({
   return (
     <div ref={containerRef} className="virtual-browse-container">
       <List
-        ref={listRef}
-        height={containerHeight}
-        itemCount={itemCount}
-        itemSize={getItemSize}
-        width="100%"
+        rowCount={itemCount}
+        rowHeight={rowHeight}
+        rowComponent={BrowseRow}
+        rowProps={rowProps}
         overscanCount={8}
-        onItemsRendered={handleItemsRendered}
+        onRowsRendered={handleRowsRendered}
         className="virtual-browse-list"
-      >
-        {Row}
-      </List>
+        style={{ height: containerHeight, width: '100%' }}
+      />
     </div>
   );
 }
