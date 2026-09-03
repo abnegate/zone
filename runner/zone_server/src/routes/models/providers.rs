@@ -536,6 +536,7 @@ impl ModelProvider for HuggingFaceProvider {
         // then paginate with an offset cursor.
         let offset = parse_cursor_offset(opts.cursor).unwrap_or(0);
         let needs_sorted_window = huggingface_uses_local_sort(opts.sort);
+        let max_pages = huggingface_window_pages(needs_sorted_window);
         let mut accumulated = Vec::new();
         let mut hf_cursor: Option<String> = None;
         let mut pages = 0;
@@ -547,7 +548,7 @@ impl ModelProvider for HuggingFaceProvider {
             accumulated.extend(page);
             hf_cursor = next;
 
-            let exhausted = hf_cursor.is_none() || pages >= HF_WINDOW_PAGES;
+            let exhausted = hf_cursor.is_none() || pages >= max_pages;
             if exhausted {
                 break;
             }
@@ -562,14 +563,49 @@ impl ModelProvider for HuggingFaceProvider {
         }
 
         let mut response = paginate_models(refine_models(accumulated, &opts), offset, opts.limit);
-        if response.next_cursor.is_none() && hf_cursor.is_some() {
-            response.next_cursor = Some(format!("offset:{}", offset + response.models.len()));
-        }
+        response.next_cursor = huggingface_window_next_cursor(
+            response.next_cursor,
+            hf_cursor.is_some(),
+            needs_sorted_window,
+            pages >= max_pages,
+            offset,
+            response.models.len(),
+        );
         Ok(response)
     }
 }
 
+/// Pages fetched when HuggingFace cannot apply the requested sort natively.
 const HF_WINDOW_PAGES: usize = 5;
+/// Extra scan budget for size filters, which can skip most downloads-ranked rows.
+const HF_FILTER_MAX_PAGES: usize = 15;
+
+fn huggingface_window_pages(needs_sorted_window: bool) -> usize {
+    if needs_sorted_window {
+        HF_WINDOW_PAGES
+    } else {
+        HF_FILTER_MAX_PAGES
+    }
+}
+
+/// Keep pagination inside the fetched window for local sorts. Size filters may
+/// continue only while we stopped early with more HuggingFace pages available.
+fn huggingface_window_next_cursor(
+    page_next: Option<String>,
+    hf_has_more: bool,
+    needs_sorted_window: bool,
+    hit_page_cap: bool,
+    offset: usize,
+    page_len: usize,
+) -> Option<String> {
+    if page_next.is_some() {
+        return page_next;
+    }
+    if hf_has_more && !needs_sorted_window && !hit_page_cap {
+        return Some(format!("offset:{}", offset + page_len));
+    }
+    None
+}
 
 fn huggingface_uses_local_sort(sort: ModelSort) -> bool {
     matches!(
@@ -1875,6 +1911,28 @@ mod tests {
         )));
         assert!(huggingface_uses_local_sort(ModelSort::ParamsDesc));
         assert!(!huggingface_uses_local_sort(ModelSort::UpdatedDesc));
+        assert_eq!(huggingface_window_pages(true), HF_WINDOW_PAGES);
+        assert_eq!(huggingface_window_pages(false), HF_FILTER_MAX_PAGES);
+    }
+
+    #[test]
+    fn test_huggingface_window_next_cursor() {
+        assert_eq!(
+            huggingface_window_next_cursor(Some("offset:20".into()), true, true, true, 0, 20),
+            Some("offset:20".into())
+        );
+        assert_eq!(
+            huggingface_window_next_cursor(None, true, true, true, 480, 20),
+            None
+        );
+        assert_eq!(
+            huggingface_window_next_cursor(None, true, false, false, 0, 20),
+            Some("offset:20".into())
+        );
+        assert_eq!(
+            huggingface_window_next_cursor(None, true, false, true, 0, 20),
+            None
+        );
     }
 
     #[test]
