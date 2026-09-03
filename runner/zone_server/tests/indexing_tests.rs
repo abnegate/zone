@@ -89,7 +89,8 @@ async fn test_create_source_includes_index_status() {
 
     response.assert_status(StatusCode::CREATED);
 
-    let source = response.json_value();
+    let body = response.json_value();
+    let source = &body["source"];
 
     // Verify index status fields are present
     assert!(
@@ -129,7 +130,7 @@ async fn test_create_source_triggers_auto_index() {
     response.assert_status(StatusCode::CREATED);
 
     let source = response.json_value();
-    let source_id = Uuid::parse_str(source["id"].as_str().unwrap()).unwrap();
+    let source_id = Uuid::parse_str(source["source"]["id"].as_str().unwrap()).unwrap();
 
     // Wait for background indexing to be queued
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -171,7 +172,7 @@ async fn test_update_config_triggers_reindex() {
         .await;
 
     let source = response.json_value();
-    let source_id = Uuid::parse_str(source["id"].as_str().unwrap()).unwrap();
+    let source_id = Uuid::parse_str(source["source"]["id"].as_str().unwrap()).unwrap();
 
     // Wait for initial index
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -294,7 +295,7 @@ async fn test_manual_reindex_endpoint() {
         .await;
 
     let source_value = response.json_value();
-    let source_id = source_value["id"].as_str().unwrap();
+    let source_id = source_value["source"]["id"].as_str().unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
@@ -378,7 +379,7 @@ async fn test_get_source_includes_index_status() {
         .await;
 
     let create_value = create_response.json_value();
-    let source_id = create_value["id"].as_str().unwrap();
+    let source_id = create_value["source"]["id"].as_str().unwrap();
 
     // Get source
     let get_response = client
@@ -390,7 +391,8 @@ async fn test_get_source_includes_index_status() {
 
     get_response.assert_status(StatusCode::OK);
 
-    let source = get_response.json_value();
+    let body = get_response.json_value();
+    let source = &body["source"];
     assert!(
         source["index_status"].is_string(),
         "index_status should be present"

@@ -22,6 +22,39 @@ jobs:
       run:
         working-directory: runner
 
+    # zone_server's integration tests talk to real backing services: Postgres
+    # via tests/common::create_test_pool, and Valkey via cache_tests. Without
+    # both, coverage fails before it can measure anything.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zone_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      valkey:
+        image: valkey/valkey:8.1-alpine
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
+      REDIS_URL: redis://localhost:6379
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -46,8 +79,17 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Run database migrations
+        run: psql -h localhost -U postgres -d zone_test -f zone_server/migrations/001_initial_schema.sql
+        env:
+          PGPASSWORD: postgres
+
+      # Deliberately not --all-features: that enables zone_server's default
+      # local-embeddings feature, which links ONNX Runtime statically into every
+      # coverage-instrumented test binary and exhausts the runner's disk (ld dies
+      # with SIGBUS). test-utils is the only other feature in the workspace.
       - name: Generate coverage report
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -61,7 +103,7 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Generate HTML coverage report
-        run: cargo llvm-cov --all-features --workspace --html
+        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --html
 
       - name: Upload HTML coverage report
         uses: actions/upload-artifact@v4
@@ -71,12 +113,12 @@ jobs:
           retention-days: 30
 
       - name: Coverage summary
-        run: cargo llvm-cov --all-features --workspace --text | tee coverage-summary.txt
+        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --text | tee coverage-summary.txt
 
       - name: Check coverage threshold
         run: |
           # Extract total coverage percentage
-          COVERAGE=$(cargo llvm-cov --all-features --workspace --json | jq '.data[0].totals.lines.percent')
+          COVERAGE=$(cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --json | jq '.data[0].totals.lines.percent')
           echo "Total line coverage: $COVERAGE%"
 
           # Fail if coverage is below threshold (adjust as needed)
