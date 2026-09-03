@@ -231,7 +231,6 @@ fn has_web_intent(lower: &str) -> bool {
         "latest",
         "recent",
         "currently",
-        "current",
         "today",
         "tonight",
         "yesterday",
@@ -345,6 +344,9 @@ mod tests {
         assert!(!needs_web_search("Explain this function"));
         assert!(!needs_web_search("Refactor this Rust module"));
         assert!(!needs_web_search("What is a binary search tree?"));
+        assert!(!needs_web_search(
+            "What is the current implementation of this parser?"
+        ));
         assert!(needs_web_search("What is the latest news on OpenAI?"));
         assert!(needs_web_search("What's the weather in Auckland today?"));
         assert!(needs_web_search("Who won the game last night?"));
