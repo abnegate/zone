@@ -19,7 +19,7 @@ use zone_context::context::ContextService;
 use zone_server::cache::Cache;
 use zone_server::config::Config;
 use zone_server::routes;
-use zone_server::services::embedding::create_embedding_service;
+use zone_server::services::embedding::{create_embedding_service, embedding_engine_from_env};
 use zone_server::state::AppState;
 
 #[tokio::main]
@@ -101,10 +101,12 @@ async fn main() {
             model_embedding: Some("nomic-embed-text".to_string()),
         };
 
-        match create_embedding_service(&default_settings) {
+        let engine = embedding_engine_from_env();
+        match create_embedding_service(&default_settings, engine.as_deref()) {
             Ok(service) => {
                 tracing::info!(
-                    "Initialized embedding service: model={}, dimension={}",
+                    "Initialized embedding service: engine={}, model={}, dimension={}",
+                    engine.as_deref().unwrap_or("ollama"),
                     service.model(),
                     service.dimension()
                 );

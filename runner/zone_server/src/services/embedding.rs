@@ -11,9 +11,18 @@ use zone_context::error::Result as ContextResult;
 
 use crate::db::ai_settings::EffectiveAiSettings;
 
-/// Create an embedding service from effective AI settings
+/// Environment variable selecting the self-hosted embedding engine
+/// (`ollama` or `local`).
+pub const EMBEDDING_ENGINE_ENV: &str = "EMBEDDING_ENGINE";
+
+/// Create an embedding service from effective AI settings.
+///
+/// `engine` selects how `self_hosted` embeddings are computed; `None` keeps
+/// the Ollama-over-HTTP default. Callers normally pass
+/// [`embedding_engine_from_env`].
 pub fn create_embedding_service(
     settings: &EffectiveAiSettings,
+    engine: Option<&str>,
 ) -> ContextResult<Arc<dyn EmbeddingService>> {
     // Convert EffectiveAiSettings to zone_context AiSettings
     let ai_settings = AiSettings {
@@ -24,9 +33,18 @@ pub fn create_embedding_service(
         openai_base_url: settings.openai_base_url.clone(),
         bedrock_region: settings.bedrock_region.clone(),
         model_embedding: settings.model_embedding.clone(),
+        embedding_engine: engine.map(str::to_string),
     };
 
     EmbeddingProviderFactory::create(&ai_settings)
+}
+
+/// Read `EMBEDDING_ENGINE` from the environment, treating blank as unset.
+pub fn embedding_engine_from_env() -> Option<String> {
+    std::env::var(EMBEDDING_ENGINE_ENV)
+        .ok()
+        .map(|v| v.trim().to_lowercase())
+        .filter(|v| !v.is_empty())
 }
 
 #[cfg(test)]
@@ -55,7 +73,7 @@ mod tests {
         };
 
         // When: Creating embedding service
-        let result = create_embedding_service(&settings);
+        let result = create_embedding_service(&settings, None);
 
         // Then: Should successfully create Ollama provider
         assert!(result.is_ok());
@@ -85,7 +103,7 @@ mod tests {
         };
 
         // When: Creating embedding service
-        let result = create_embedding_service(&settings);
+        let result = create_embedding_service(&settings, None);
 
         // Then: Should fail with error
         assert!(result.is_err());
@@ -112,7 +130,7 @@ mod tests {
         };
 
         // When: Creating embedding service
-        let result = create_embedding_service(&settings);
+        let result = create_embedding_service(&settings, None);
 
         // Then: Should fail (OpenAI not yet implemented)
         assert!(result.is_err());
@@ -139,7 +157,7 @@ mod tests {
         };
 
         // When: Creating embedding service
-        let result = create_embedding_service(&settings);
+        let result = create_embedding_service(&settings, None);
 
         // Then: Should use default model
         assert!(result.is_ok());
