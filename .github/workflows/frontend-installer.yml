@@ -42,7 +42,7 @@ jobs:
 
       - name: Check formatting
         working-directory: installer/frontend
-        run: biome format --check src
+        run: biome format src
 
   biome-imports:
     name: Import Organization

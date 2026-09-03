@@ -25,12 +25,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         rust: [stable, beta]
-        exclude:
-          # Only test beta on Linux to save CI time
-          - os: macos-latest
-            rust: beta
 
     services:
       postgres:
@@ -98,6 +94,50 @@ jobs:
         env:
           DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
           TEST_DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
+
+  # Service containers are Linux-only, so macOS must be a separate job.
+  test-macos:
+    name: Test Suite (macos-latest, stable)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: runner
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            runner/target
+          key: ${{ runner.os }}-stable-cargo-test-${{ hashFiles('runner/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-stable-cargo-test-
+            ${{ runner.os }}-stable-cargo-
+            ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Run unit tests
+        run: cargo test --lib --all-features
+
+      - name: Run integration tests
+        run: cargo test --test '*' --all-features
+        env:
+          RUST_BACKTRACE: 1
+
+      - name: Run doc tests
+        run: cargo test --doc
 
   # Ensure minimum supported Rust version compiles
   msrv:
