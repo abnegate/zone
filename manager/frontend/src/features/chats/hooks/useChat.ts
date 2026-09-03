@@ -34,13 +34,15 @@ type ServerMessage =
       metadata?: MessageMetadata | null;
     }
   | { type: 'cancelled'; message_id: string | null }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'status'; message: string };
 
 export function useChat(chatId: string | null) {
   const [chat, setChat] = useState<ChatWithMessages | null>(null);
   const [loading, setLoading] = useState(Boolean(chatId));
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
@@ -150,6 +152,7 @@ export function useChat(chatId: string | null) {
       return;
     }
 
+    setStatus(null);
     const socket = chatsApi.createChatWebSocket(chatId);
     socketRef.current = socket;
     let assistantId: string | null = null;
@@ -175,7 +178,11 @@ export function useChat(chatId: string | null) {
         case 'message_saved':
           applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
           break;
+        case 'status':
+          setStatus(payload.message);
+          break;
         case 'message_start':
+          setStatus(null);
           assistantId = payload.message_id;
           assistantContent = '';
           assistantMetadata = undefined;
@@ -200,6 +207,7 @@ export function useChat(chatId: string | null) {
           }
           break;
         case 'message_end':
+          setStatus(null);
           upsertMessage(
             payload.message_id,
             'assistant',
@@ -212,9 +220,11 @@ export function useChat(chatId: string | null) {
           setStreaming(false);
           break;
         case 'cancelled':
+          setStatus(null);
           setStreaming(false);
           break;
         case 'error':
+          setStatus(null);
           setError(payload.message);
           setStreaming(false);
           break;
@@ -225,10 +235,12 @@ export function useChat(chatId: string | null) {
 
     socket.onerror = () => {
       setError('Chat connection failed');
+      setStatus(null);
       setStreaming(false);
     };
 
     socket.onclose = () => {
+      setStatus(null);
       setStreaming(false);
     };
 
@@ -318,6 +330,7 @@ export function useChat(chatId: string | null) {
     loading,
     error,
     streaming,
+    status,
     sendMessage,
     cancelGeneration,
     deleteMessage,

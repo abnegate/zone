@@ -47,6 +47,9 @@ services:
       - SQLX_OFFLINE=true
       - RUST_LOG=zone_server=debug,zone_core=debug,zone_context=debug
       - RUST_BACKTRACE=1
+      - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
+      - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
+      - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

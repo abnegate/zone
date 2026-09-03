@@ -52,7 +52,10 @@ export function SearchStep() {
       </div>
 
       <InfoBox variant="info">
-        <AlertDescription>Web search requires VPN configuration in the next step.</AlertDescription>
+        <AlertDescription>
+          Web search requires VPN configuration in the next step. Open WebUI and Manager chat both
+          query SearXNG through Gluetun.
+        </AlertDescription>
       </InfoBox>
     </div>
   );

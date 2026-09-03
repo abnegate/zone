@@ -65,6 +65,7 @@ export default function ChatsPage() {
   const {
     chat: activeChat,
     error: chatError,
+    status: chatStatus,
     sendMessage: sendMessageFn,
   } = useChat(selectedChatId);
 
@@ -516,6 +517,11 @@ export default function ChatsPage() {
                   );
                 })
               )}
+              {chatStatus ? (
+                <div className="message-status" role="status">
+                  {chatStatus}
+                </div>
+              ) : null}
               <div ref={messagesEndRef} />
             </div>
 
