@@ -189,6 +189,24 @@ describe('Client', () => {
       const url = mockFetch.mock.calls[0][0];
       expect(url).not.toContain('cursor=');
     });
+
+    it('includes sort and filter parameters', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ models: [], next_cursor: null }),
+      });
+
+      await client.browseModels('ollama', 'llama', null, 20, {
+        sort: 'name_asc',
+        family: 'llama',
+        size: 'medium',
+      });
+
+      const url = mockFetch.mock.calls[0][0];
+      expect(url).toContain('sort=name_asc');
+      expect(url).toContain('family=llama');
+      expect(url).toContain('size=medium');
+    });
   });
 
   describe('getModelInfo', () => {

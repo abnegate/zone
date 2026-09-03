@@ -40,6 +40,34 @@ pub struct ModelDetails {
     pub quantization_level: Option<String>,
 }
 
+/// How to sort browse results
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSort {
+    #[default]
+    Relevance,
+    NameAsc,
+    NameDesc,
+    SizeAsc,
+    SizeDesc,
+    ParamsAsc,
+    ParamsDesc,
+    UpdatedDesc,
+    UpdatedAsc,
+}
+
+/// Parameter-size buckets for browse filtering
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSizeFilter {
+    #[default]
+    All,
+    Small,
+    Medium,
+    Large,
+    Xl,
+}
+
 /// Query parameters for listing models
 #[derive(Debug, Deserialize)]
 pub struct ListModelsQuery {
@@ -52,6 +80,42 @@ pub struct ListModelsQuery {
     pub cursor: Option<String>,
     /// Pagination limit (default 20, max 100)
     pub limit: Option<usize>,
+    /// Sort order for browse results
+    pub sort: Option<ModelSort>,
+    /// Filter by model family (llama, mistral, qwen, ...)
+    pub family: Option<String>,
+    /// Filter by parameter-size bucket
+    pub size: Option<ModelSizeFilter>,
+}
+
+/// Options passed to a model provider search
+#[derive(Debug, Clone, Copy)]
+pub struct BrowseQuery<'a> {
+    pub query: Option<&'a str>,
+    pub cursor: Option<&'a str>,
+    pub limit: usize,
+    pub sort: ModelSort,
+    pub family: Option<&'a str>,
+    pub size: ModelSizeFilter,
+}
+
+impl ListModelsQuery {
+    pub fn to_browse_query(&self, limit: usize) -> BrowseQuery<'_> {
+        let family = self
+            .family
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("all"));
+
+        BrowseQuery {
+            query: self.search.as_deref(),
+            cursor: self.cursor.as_deref(),
+            limit,
+            sort: self.sort.unwrap_or_default(),
+            family,
+            size: self.size.unwrap_or_default(),
+        }
+    }
 }
 
 /// Response for browsing models with pagination info
