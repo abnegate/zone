@@ -819,7 +819,7 @@ var stepDescriptionVariants = (0, import_class_variance_authority3.cva)([
 ]);
 var contentVariants = (0, import_class_variance_authority3.cva)(
   [
-    "flex-1 overflow-auto",
+    "overflow-auto",
     "p-[var(--ui-space-6)]",
     "transition-all duration-150 ease-out"
   ],

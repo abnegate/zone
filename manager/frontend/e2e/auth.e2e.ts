@@ -657,7 +657,7 @@ test.describe('Permission-Based UI', () => {
       localStorage.setItem('manager_user', JSON.stringify(user));
     }, { token: mockToken, user: mockUser });
 
-    await page.goto('/');
+    await page.goto('/models');
 
     // Wait for models page to load (use role-based selector for reliability)
     await expect(page.getByRole('heading', { name: 'Models', level: 1 })).toBeVisible();

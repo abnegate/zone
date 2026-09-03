@@ -124,7 +124,7 @@ test.describe('Models Page', () => {
     await setupAuth(page);
 
     // Navigate to models page
-    await page.goto('/');
+    await page.goto('/models');
     // Wait for navigation to complete
     await page.waitForLoadState('domcontentloaded');
     await expect(page.getByRole('navigation')).toBeVisible();

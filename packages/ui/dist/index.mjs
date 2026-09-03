@@ -728,7 +728,7 @@ var stepDescriptionVariants = cva3([
 ]);
 var contentVariants = cva3(
   [
-    "flex-1 overflow-auto",
+    "overflow-auto",
     "p-[var(--ui-space-6)]",
     "transition-all duration-150 ease-out"
   ],

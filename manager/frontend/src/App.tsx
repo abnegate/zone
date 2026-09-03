@@ -51,8 +51,8 @@ function App() {
                 <Route
                   index
                   element={
-                    <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
-                      <ModelsPage />
+                    <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
+                      <ChatsPage />
                     </ProtectedRoute>
                   }
                 />
@@ -61,6 +61,14 @@ function App() {
                   element={
                     <ProtectedRoute requiredPermission={PERMISSIONS.CHATS.READ}>
                       <ChatsPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="models"
+                  element={
+                    <ProtectedRoute requiredPermission={PERMISSIONS.MODELS.READ}>
+                      <ModelsPage />
                     </ProtectedRoute>
                   }
                 />

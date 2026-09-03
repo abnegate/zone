@@ -181,7 +181,7 @@ const stepDescriptionVariants = cva([
 
 const contentVariants = cva(
   [
-    'flex-1 overflow-auto',
+    'overflow-auto',
     'p-[var(--ui-space-6)]',
     'transition-all duration-150 ease-out',
   ],

@@ -6,7 +6,7 @@ test.describe('Model Installation', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
-    await page.goto('/');
+    await page.goto('/models');
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
@@ -56,7 +56,7 @@ test.describe('Add Model Section UI', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
-    await page.goto('/');
+    await page.goto('/models');
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
@@ -107,7 +107,7 @@ test.describe('Install from Browse', () => {
       });
     });
 
-    await page.goto('/');
+    await page.goto('/models');
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });

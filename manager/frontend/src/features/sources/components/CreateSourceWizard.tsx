@@ -380,6 +380,7 @@ export function CreateSourceWizard({
       onClose={handleClose}
       title="Add Source"
       subtitle="Connect a repository, calendar, email, or other data source"
+      size="lg"
       steps={WIZARD_STEPS}
       currentStep={currentStep}
       onStepChange={handleStepChange}

@@ -265,4 +265,57 @@ describe('useChat', () => {
     expect(result.current.chat).toBeNull();
     expect(mockGetChat).not.toHaveBeenCalled();
   });
+
+  it('should clear chat when chatId becomes null', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result, rerender } = renderHook(({ id }) => useChat(id), {
+      wrapper: createWrapper(),
+      initialProps: { id: '1' as string | null },
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat).toEqual(mockChat);
+    });
+
+    rerender({ id: null });
+
+    await waitFor(() => {
+      expect(result.current.chat).toBeNull();
+      expect(result.current.loading).toBe(false);
+    });
+  });
+
+  it('should not apply a stale response after chatId changes', async () => {
+    const otherChat: ChatWithMessages = {
+      ...mockChat,
+      id: '2',
+      title: 'Other Chat',
+    };
+    let resolveFirst: (value: ChatWithMessages) => void = () => {};
+    const first = new Promise<ChatWithMessages>((resolve) => {
+      resolveFirst = resolve;
+    });
+    mockGetChat.mockImplementation((id: string) =>
+      id === '1' ? first : Promise.resolve(otherChat)
+    );
+
+    const { result, rerender } = renderHook(({ id }) => useChat(id), {
+      wrapper: createWrapper(),
+      initialProps: { id: '1' as string | null },
+    });
+
+    rerender({ id: '2' });
+
+    await waitFor(() => {
+      expect(mockGetChat).toHaveBeenCalledWith('2');
+    });
+
+    resolveFirst(mockChat);
+
+    await waitFor(() => {
+      expect(result.current.chat?.id).toBe('2');
+    });
+    expect(result.current.chat?.id).not.toBe('1');
+  });
 });

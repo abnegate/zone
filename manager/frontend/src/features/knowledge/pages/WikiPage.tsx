@@ -62,7 +62,10 @@ export default function WikiPage() {
   });
 
   const formatDate = (date: string) => {
-    return new Date(date).toLocaleDateString(undefined, {
+    if (!date) return '—';
+    const parsed = new Date(date);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return parsed.toLocaleDateString(undefined, {
       year: 'numeric',
       month: 'short',
       day: 'numeric',
@@ -70,15 +73,24 @@ export default function WikiPage() {
   };
 
   return (
-    <div className="page wiki-page">
-      <header className="flex justify-between items-start mb-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Knowledge Base</h1>
-          <p className="text-muted-foreground mt-1">
-            Manage documentation, links, and content for your AI models
-          </p>
+    <div className="page page--workspace wiki-page">
+      <header className="wiki-header">
+        <div className="wiki-header-copy">
+          <h1>Knowledge Base</h1>
+          <p>Manage documentation, links, and content for your AI models</p>
         </div>
-        <div className="flex items-center gap-3">
+        <Tabs
+          value={filterType}
+          onValueChange={(v) => setFilterType(v as FilterType)}
+          className="wiki-tabs"
+        >
+          <TabsList>
+            <TabsTrigger value="all">All</TabsTrigger>
+            <TabsTrigger value="text">Text</TabsTrigger>
+            <TabsTrigger value="url">URL</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <div className="wiki-actions">
           <div className="wiki-search">
             <svg
               className="wiki-search-icon"
@@ -95,7 +107,7 @@ export default function WikiPage() {
               />
             </svg>
             <input
-              type="text"
+              type="search"
               placeholder="Search knowledge..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -108,20 +120,8 @@ export default function WikiPage() {
         </div>
       </header>
 
-      <Tabs value={filterType} onValueChange={(v) => setFilterType(v as FilterType)} className="mb-6">
-        <TabsList>
-          <TabsTrigger value="all">All</TabsTrigger>
-          <TabsTrigger value="text">Text</TabsTrigger>
-          <TabsTrigger value="url">URL</TabsTrigger>
-        </TabsList>
-      </Tabs>
-
       {(error || deleteError || refreshError) && (
-        <div
-          className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive mb-4"
-          role="alert"
-          aria-live="assertive"
-        >
+        <div className="wiki-banner wiki-banner--error" role="alert" aria-live="assertive">
           {error || deleteError || refreshError}
         </div>
       )}
@@ -132,6 +132,7 @@ export default function WikiPage() {
         </div>
       ) : filteredEntries.length === 0 ? (
         <EmptyState
+          className="wiki-empty-state"
           icon={
             <svg
               viewBox="0 0 24 24"
@@ -153,6 +154,7 @@ export default function WikiPage() {
           action={!searchQuery && filterType === 'all' ? <Button onClick={() => setShowCreateWizard(true)}>Add Entry</Button> : undefined}
         />
       ) : (
+        <div className="wiki-workspace">
         <div className="knowledge-grid">
           {filteredEntries.map((entry) => (
             <div
@@ -203,7 +205,7 @@ export default function WikiPage() {
 
               <div className="knowledge-card-footer">
                 <div className="knowledge-card-date">
-                  <span>Updated {formatDate(entry.updated_at)}</span>
+                  {entry.updated_at ? <span>Updated {formatDate(entry.updated_at)}</span> : null}
                   {entry.type === 'url' && entry.last_refreshed_at && (
                     <span> • Refreshed {formatDate(entry.last_refreshed_at)}</span>
                   )}
@@ -254,6 +256,7 @@ export default function WikiPage() {
               </div>
             </div>
           ))}
+        </div>
         </div>
       )}
 

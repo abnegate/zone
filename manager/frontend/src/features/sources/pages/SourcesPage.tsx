@@ -87,11 +87,11 @@ export default function SourcesPage() {
   const displayError = error || operationError;
 
   return (
-    <div className="page sources-page">
-      <header className="flex justify-between items-start mb-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Sources</h1>
-          <p className="text-muted-foreground mt-1">Connect repositories, calendars, email, and other data sources</p>
+    <div className="page page--workspace sources-page">
+      <header className="sources-header">
+        <div className="sources-header-copy">
+          <h1>Sources</h1>
+          <p>Connect repositories, calendars, email, and other data sources</p>
         </div>
         <Button onClick={() => setShowCreateModal(true)}>
           + Add Source
@@ -99,12 +99,13 @@ export default function SourcesPage() {
       </header>
 
       {displayError && (
-        <div className="rounded-md bg-destructive/10 border border-destructive/30 p-3 text-sm text-destructive mb-4">
+        <div className="sources-banner sources-banner--error" role="alert">
           {displayError}
         </div>
       )}
 
       {loading ? (
+        <div className="sources-workspace">
         <div className="sources-list">
           {[1, 2, 3].map((i) => (
             <div key={i} className="source-card skeleton-card">
@@ -121,8 +122,10 @@ export default function SourcesPage() {
             </div>
           ))}
         </div>
+        </div>
       ) : sources.length === 0 ? (
         <EmptyState
+          className="sources-empty"
           icon={
             <svg
               viewBox="0 0 24 24"
@@ -141,6 +144,7 @@ export default function SourcesPage() {
           action={<Button onClick={() => setShowCreateModal(true)}>Add Source</Button>}
         />
       ) : (
+        <div className="sources-workspace">
         <div className="sources-list">
           {sources.map((source) => (
             <div
@@ -193,6 +197,7 @@ export default function SourcesPage() {
               </div>
             </div>
           ))}
+        </div>
         </div>
       )}
 
