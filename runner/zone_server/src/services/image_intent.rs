@@ -87,66 +87,113 @@ impl ImageIntentClassifier {
 }
 
 fn deterministic_decision(content: &str) -> RuleDecision {
-    let text = content.trim().to_ascii_lowercase();
-    if text.is_empty() {
+    let tokens: Vec<String> = content
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect();
+    if tokens.is_empty() {
+        return RuleDecision::Chat;
+    }
+    let has = |word: &str| tokens.iter().any(|token| token == word);
+    let has_phrase = |phrase: &[&str]| {
+        tokens
+            .windows(phrase.len())
+            .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+    };
+
+    // High-confidence non-generation intents take precedence. Exact tokens
+    // avoid treating "a teacher explaining relativity" as a request to
+    // explain image generation.
+    let asks_how = has_phrase(&["how", "to"]) || has_phrase(&["how", "do", "i"]);
+    let programming_language = ["react", "typescript", "javascript", "rust", "python"]
+        .iter()
+        .any(|word| has(word));
+    let implementation_term = [
+        "component",
+        "function",
+        "class",
+        "api",
+        "workflow",
+        "code",
+        "implement",
+        "html",
+        "css",
+    ]
+    .iter()
+    .any(|word| has(word));
+    let discusses_code = (programming_language && implementation_term)
+        || ((has("image") || has("images"))
+            && ["component", "api", "workflow", "code", "implement"]
+                .iter()
+                .any(|word| has(word)));
+    let analysis_request = ["describe", "analyze", "analyse", "inspect"]
+        .iter()
+        .any(|word| has(word))
+        && (has("image") || has("picture") || has("photo"));
+    let prompt_request =
+        has("prompt") && (has("write") || has("improve") || has_phrase(&["prompt", "for"]));
+    let discussion_request = has_phrase(&["talk", "about"])
+        || has_phrase(&["discuss", "image"])
+        || (asks_how && (has("generate") || has("create") || has("make")));
+    if analysis_request || prompt_request || discussion_request || discusses_code {
         return RuleDecision::Chat;
     }
 
-    // Negative guards take precedence over positive keywords.
-    const NEGATIVE: &[&str] = &[
-        "describe this image",
-        "analyze this image",
-        "analyse this image",
-        "what is in this image",
-        "edit this image",
-        "modify this image",
-        "image prompt",
-        "prompt for an image",
-        "improve this prompt",
-        "how do i generate",
-        "how to generate",
-        "image generation code",
-        "implement image",
-        "comfyui workflow",
-        "image api",
-        "talk about",
-        "explain",
+    const ACTIONS: &[&str] = &[
+        "generate",
+        "create",
+        "make",
+        "draw",
+        "render",
+        "paint",
+        "illustrate",
+        "sketch",
     ];
-    if NEGATIVE.iter().any(|guard| text.contains(guard)) {
-        return RuleDecision::Chat;
-    }
-
-    const EXPLICIT: &[&str] = &[
-        "generate an image",
-        "generate a picture",
-        "create an image",
-        "create a picture",
-        "make an image",
-        "make a picture",
-        "draw an image",
-        "draw a picture",
-        "render an image",
-        "paint a picture",
-        "illustrate ",
+    const VISUAL_NOUNS: &[&str] = &[
+        "image",
+        "images",
+        "picture",
+        "pictures",
+        "photo",
+        "photos",
+        "artwork",
+        "illustration",
+        "illustrations",
+        "poster",
+        "posters",
+        "logo",
+        "logos",
+        "wallpaper",
+        "wallpapers",
+        "portrait",
+        "portraits",
     ];
-    if EXPLICIT.iter().any(|phrase| text.contains(phrase)) {
+    let explicit = tokens.iter().enumerate().any(|(index, token)| {
+        ACTIONS.contains(&token.as_str())
+            && tokens
+                .iter()
+                .skip(index + 1)
+                .take(7)
+                .any(|candidate| VISUAL_NOUNS.contains(&candidate.as_str()))
+    });
+    let visual_imperative = tokens
+        .iter()
+        .take(4)
+        .any(|token| ["draw", "paint", "illustrate", "sketch"].contains(&token.as_str()))
+        && !["conclusion", "conclusions", "attention", "parallel"]
+            .iter()
+            .any(|word| has(word));
+    if explicit || visual_imperative {
         return RuleDecision::Image;
     }
 
-    const AMBIGUOUS: &[&str] = &[
-        "draw ",
-        "paint ",
-        "render ",
-        "sketch ",
-        "visualize ",
-        "visualise ",
-        "poster",
-        "logo",
-        "wallpaper",
-        "portrait",
-        "illustration",
-    ];
-    if AMBIGUOUS.iter().any(|word| text.contains(word)) {
+    if tokens
+        .iter()
+        .any(|token| ACTIONS.contains(&token.as_str()) || VISUAL_NOUNS.contains(&token.as_str()))
+        || has("visualize")
+        || has("visualise")
+    {
         RuleDecision::Ambiguous
     } else {
         RuleDecision::Chat
@@ -168,6 +215,12 @@ mod tests {
             "please draw a picture of the moon",
             "Create a picture of our city",
             "Illustrate a quiet forest",
+            "Generate an image of a teacher explaining relativity",
+            "Make me three images of red pandas",
+            "Create pictures showing the four seasons",
+            "Generate an image of a Python snake",
+            "generate images",
+            "make me an image",
         ] {
             assert_eq!(
                 deterministic_decision(request),
@@ -180,6 +233,9 @@ mod tests {
             "Write an image prompt for a red panda",
             "Describe this image",
             "How do I generate an image with Rust?",
+            "How should I create a React image component?",
+            "Discuss image components in React",
+            "Render an image component in React",
             "What is the capital of France?",
         ] {
             assert_eq!(deterministic_decision(chat), RuleDecision::Chat, "{chat}");

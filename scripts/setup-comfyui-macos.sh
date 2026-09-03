@@ -2,9 +2,7 @@
 set -eu
 
 COMFYUI_COMMIT="30bdda1ef13a3a34fce2cd2fec633f15d832122a"
-TORCH_VERSION="2.9.1"
-TORCHVISION_VERSION="0.24.1"
-TORCHAUDIO_VERSION="2.9.1"
+PIP_VERSION="25.3"
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname "$SCRIPT_DIR")
@@ -89,13 +87,9 @@ if [ ! -x "$INSTALL_DIR/.venv/bin/python" ]; then
 fi
 
 VENV_PYTHON="$INSTALL_DIR/.venv/bin/python"
-"$VENV_PYTHON" -m pip install --disable-pip-version-check --upgrade pip
+"$VENV_PYTHON" -m pip install --disable-pip-version-check --upgrade "pip==$PIP_VERSION"
 "$VENV_PYTHON" -m pip install --disable-pip-version-check \
-    "torch==$TORCH_VERSION" \
-    "torchvision==$TORCHVISION_VERSION" \
-    "torchaudio==$TORCHAUDIO_VERSION"
-"$VENV_PYTHON" -m pip install --disable-pip-version-check \
-    -r "$INSTALL_DIR/requirements.txt"
+    --require-hashes -r "$PROJECT_DIR/comfyui/requirements-macos.lock"
 
 mkdir -p "$MODELS_DIR/checkpoints" "$INSTALL_DIR/models" "$INSTALL_DIR/output"
 if [ "$MODELS_DIR" != "$INSTALL_DIR/models" ]; then

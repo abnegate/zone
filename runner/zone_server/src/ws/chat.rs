@@ -107,7 +107,10 @@ static CHAT_CONNECTIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap
 /// Using composite key prevents race conditions when multiple streams run concurrently
 static CHAT_CANCELLATIONS: Lazy<DashMap<(Uuid, Uuid), broadcast::Sender<()>>> =
     Lazy::new(DashMap::new);
-/// ComfyUI's interrupt endpoint is process-wide, so serialize direct image jobs.
+/// Serialize full request lifecycles per chat. The protocol's chunk/status
+/// frames are intentionally compact and do not all carry correlation IDs.
+static CHAT_GENERATIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
+/// Keep direct image jobs globally bounded for the shared GPU runtime.
 static IMAGE_GENERATIONS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
 
 type SharedSender = Arc<Mutex<futures::stream::SplitSink<WebSocket, Message>>>;
@@ -228,10 +231,12 @@ impl Drop for ConnectionCleanupGuard {
     }
 }
 
-/// Pull image data URLs out of a message's stored metadata.
+/// Pull provider-safe image URLs out of a message's stored metadata.
 ///
 /// Images ride in `metadata.attachments[]` rather than in `content`, so the
-/// text of a message stays readable and the images survive a reload.
+/// text of a message stays readable and the images survive a reload. Protected
+/// relative artifact URLs require Zone authentication, which LiteLLM does not
+/// receive, so they must never be forwarded on later turns.
 fn image_urls_from_metadata(metadata: Option<&serde_json::Value>) -> Vec<String> {
     metadata
         .and_then(|m| m.get("attachments"))
@@ -245,6 +250,11 @@ fn image_urls_from_metadata(metadata: Option<&serde_json::Value>) -> Vec<String>
                         .is_some_and(|m| m.starts_with("image/"))
                 })
                 .filter_map(|a| a.get("url").and_then(|u| u.as_str()))
+                .filter(|url| {
+                    url.starts_with("data:")
+                        || url.starts_with("https://")
+                        || url.starts_with("http://")
+                })
                 .map(str::to_string)
                 .collect()
         })
@@ -655,15 +665,6 @@ async fn handle_image_generation(
     let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
     CHAT_CANCELLATIONS.insert(cancel_key, cancel_tx);
 
-    let _ = send_server(
-        sender,
-        ServerMessage::MessageStart {
-            message_id: assistant_message_id,
-            role: "assistant".to_string(),
-        },
-    )
-    .await;
-
     let client = match ComfyUiClient::new(state.config().comfyui.clone()) {
         Ok(client) => client,
         Err(error) => {
@@ -758,14 +759,6 @@ async fn handle_image_generation(
             }
         };
         if let Some(attachment) = generated_image_attachment(&url, attachments.len()) {
-            let _ = send_server(
-                sender,
-                ServerMessage::Image {
-                    message_id: assistant_message_id,
-                    attachment: attachment.clone(),
-                },
-            )
-            .await;
             attachments.push(attachment);
         }
     }
@@ -799,6 +792,24 @@ async fn handle_image_generation(
     }
     let _ = send_server(
         sender,
+        ServerMessage::MessageStart {
+            message_id: assistant_message_id,
+            role: "assistant".to_string(),
+        },
+    )
+    .await;
+    for attachment in &attachments {
+        let _ = send_server(
+            sender,
+            ServerMessage::Image {
+                message_id: assistant_message_id,
+                attachment: attachment.clone(),
+            },
+        )
+        .await;
+    }
+    let _ = send_server(
+        sender,
         ServerMessage::MessageEnd {
             message_id: assistant_message_id,
             content: content.to_string(),
@@ -822,6 +833,12 @@ async fn handle_send_message(
     content: &str,
     metadata: Option<serde_json::Value>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let generation = CHAT_GENERATIONS
+        .entry(chat_id)
+        .or_insert_with(|| Arc::new(Semaphore::new(1)))
+        .clone();
+    let _chat_generation_permit = generation.acquire().await?;
+
     let mut image_config = state.config().comfyui.clone();
     if let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
         && let Ok(settings) = ai_settings::get_effective_ai_settings(
@@ -1185,8 +1202,9 @@ async fn handle_send_message(
     }
 
     let generated_image_metadata = image_metadata(&generated_images);
-    match chats::create_message(
+    match chats::create_message_with_id(
         state.db(),
+        assistant_message_id,
         chat_id,
         "assistant",
         &full_content,
@@ -1352,12 +1370,28 @@ mod tests {
                     "name": "notes.md",
                     "mime": "text/markdown",
                     "url": "https://example.test/notes.md"
+                },
+                {
+                    "name": "protected.png",
+                    "mime": "image/png",
+                    "url": "/api/artifacts/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003/image.png"
                 }
             ]
         });
         assert_eq!(
             image_urls_from_metadata(Some(&metadata)),
             vec!["data:image/png;base64,xx".to_string()]
+        );
+        let public = serde_json::json!({
+            "attachments": [{
+                "name": "remote.png",
+                "mime": "image/png",
+                "url": "https://example.test/remote.png"
+            }]
+        });
+        assert_eq!(
+            image_urls_from_metadata(Some(&public)),
+            vec!["https://example.test/remote.png".to_string()]
         );
         assert!(image_urls_from_metadata(None).is_empty());
     }

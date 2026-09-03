@@ -44,11 +44,13 @@ pub struct Config {
 pub struct ComfyUiConfig {
     pub enabled: bool,
     pub base_url: String,
+    pub api_token: Option<String>,
     pub workflow_path: std::path::PathBuf,
     pub checkpoint: String,
     pub artifact_root: std::path::PathBuf,
     pub classifier_model: String,
     pub classifier_timeout_secs: u64,
+    pub request_timeout_secs: u64,
     pub generation_timeout_secs: u64,
     pub poll_interval_ms: u64,
 }
@@ -58,12 +60,14 @@ impl Default for ComfyUiConfig {
         Self {
             enabled: false,
             base_url: "http://comfyui:8188".to_string(),
+            api_token: None,
             workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../comfyui/workflows/flux1-schnell-fp8-api.json"),
             checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
             artifact_root: "/app/artifacts".into(),
             classifier_model: "llama3.2:3b".to_string(),
             classifier_timeout_secs: 3,
+            request_timeout_secs: 15,
             generation_timeout_secs: 300,
             poll_interval_ms: 500,
         }
@@ -78,6 +82,9 @@ impl ComfyUiConfig {
                 .unwrap_or_else(|_| "http://comfyui:8188".to_string())
                 .trim_end_matches('/')
                 .to_string(),
+            api_token: env::var("COMFYUI_API_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty()),
             workflow_path: env::var("COMFYUI_WORKFLOW_PATH")
                 .unwrap_or_else(|_| "/app/comfyui/workflows/flux1-schnell-fp8-api.json".to_string())
                 .into(),
@@ -89,6 +96,7 @@ impl ComfyUiConfig {
             classifier_model: env::var("COMFYUI_CLASSIFIER_MODEL")
                 .unwrap_or_else(|_| "llama3.2:3b".to_string()),
             classifier_timeout_secs: env_u64("COMFYUI_CLASSIFIER_TIMEOUT_SECS", 3, 1, 30),
+            request_timeout_secs: env_u64("COMFYUI_REQUEST_TIMEOUT_SECS", 15, 1, 120),
             generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),
             poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
         }
