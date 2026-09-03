@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::auth::AuthUser;
 use crate::db::{chats, message_embeddings};
 use crate::error::ServerError;
+use crate::services::artifacts::ArtifactStore;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 
@@ -102,6 +103,22 @@ async fn get_chat_with_access(
     check_workspace_read_access(state, auth, workspace_id).await?;
 
     Ok(chat)
+}
+
+fn artifact_owner_ids(metadata: Option<&serde_json::Value>) -> Vec<Uuid> {
+    metadata
+        .and_then(|value| value.get("attachments"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|attachment| attachment.get("url").and_then(serde_json::Value::as_str))
+        .filter_map(|url| {
+            let parts: Vec<_> = url.trim_start_matches('/').split('/').collect();
+            (parts.len() == 6 && parts[0] == "api" && parts[1] == "artifacts")
+                .then(|| Uuid::parse_str(parts[4]).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 /// Chat response
@@ -371,7 +388,14 @@ pub async fn delete(
     }
 
     match chats::delete_chat(state.db(), id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            if let Some(workspace_id) = chat.workspace_id {
+                ArtifactStore::new(state.config().comfyui.artifact_root.clone())
+                    .cleanup_chat(workspace_id, id)
+                    .await;
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Chat not found")),
@@ -559,6 +583,14 @@ pub async fn delete_message(
         return e.into_response();
     }
 
+    let artifact_owners = chats::list_messages(state.db(), chat_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|message| message.id == message_id)
+        .map(|message| artifact_owner_ids(message.metadata.as_ref()))
+        .unwrap_or_default();
+
     match chats::delete_message(state.db(), chat_id, message_id).await {
         Ok(true) => {
             // Clean up embedding
@@ -570,6 +602,12 @@ pub async fn delete_message(
                     message_id,
                     e
                 );
+            }
+            if let Some(workspace_id) = chat.workspace_id {
+                let store = ArtifactStore::new(state.config().comfyui.artifact_root.clone());
+                for owner_id in artifact_owners {
+                    store.cleanup_owner(workspace_id, chat_id, owner_id).await;
+                }
             }
             StatusCode::NO_CONTENT.into_response()
         }
