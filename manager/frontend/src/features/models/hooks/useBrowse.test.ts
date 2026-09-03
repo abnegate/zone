@@ -461,4 +461,112 @@ describe('useBrowse', () => {
       size: undefined,
     });
   });
+
+  it('sorts the combined All-source list instead of interleaving', async () => {
+    mockBrowseModels.mockImplementation(async (src: string) => {
+      if (src === 'ollama') {
+        return { models: [{ name: 'zeta', size: 30 }], next_cursor: null };
+      }
+      if (src === 'huggingface') {
+        return { models: [{ name: 'alpha', size: 10 }], next_cursor: null };
+      }
+      return { models: [], next_cursor: null };
+    });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      await result.current.search('', 'all', 'name_asc');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.models.map((m) => m.name)).toEqual(['alpha', 'zeta']);
+  });
+
+  it('re-sorts accumulated All-source pages when loading more', async () => {
+    mockBrowseModels.mockImplementation(async (src: string, _q: string, cursor: string | null) => {
+      if (!cursor) {
+        if (src === 'ollama') {
+          return { models: [{ name: 'zeta' }], next_cursor: 'ollama-2' };
+        }
+        if (src === 'huggingface') {
+          return { models: [{ name: 'mid' }], next_cursor: 'hf-2' };
+        }
+        return { models: [], next_cursor: null };
+      }
+      if (src === 'ollama') {
+        return { models: [{ name: 'beta' }], next_cursor: null };
+      }
+      if (src === 'huggingface') {
+        return { models: [{ name: 'alpha' }], next_cursor: null };
+      }
+      return { models: [], next_cursor: null };
+    });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      result.current.setSort('name_asc');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(result.current.models.map((m) => m.name)).toEqual(['mid', 'zeta']);
+    });
+
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    await waitFor(() => {
+      expect(result.current.loadingMore).toBe(false);
+    });
+
+    expect(result.current.models.map((m) => m.name)).toEqual(['alpha', 'beta', 'mid', 'zeta']);
+  });
+
+  it('ignores stale overlapping searches', async () => {
+    mockBrowseModels.mockResolvedValue({ models: [], next_cursor: null });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      result.current.changeSource('ollama');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    let resolveSlow: ((value: { models: Array<{ name: string }>; next_cursor: null }) => void) | undefined;
+    const slow = new Promise<{ models: Array<{ name: string }>; next_cursor: null }>((resolve) => {
+      resolveSlow = resolve;
+    });
+
+    mockBrowseModels.mockReset();
+    mockBrowseModels
+      .mockReturnValueOnce(slow)
+      .mockResolvedValueOnce({ models: [{ name: 'qwen' }], next_cursor: null });
+
+    await act(async () => {
+      result.current.setFamily('llama');
+      result.current.setFamily('qwen');
+    });
+
+    await waitFor(() => {
+      expect(result.current.family).toBe('qwen');
+      expect(result.current.models.map((m) => m.name)).toEqual(['qwen']);
+      expect(result.current.loading).toBe(false);
+    });
+
+    await act(async () => {
+      resolveSlow?.({ models: [{ name: 'llama-stale' }], next_cursor: null });
+    });
+
+    expect(result.current.models.map((m) => m.name)).toEqual(['qwen']);
+    expect(result.current.error).toBeNull();
+  });
 });
