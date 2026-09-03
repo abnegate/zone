@@ -363,7 +363,7 @@ setup-runner-coverage: ## Install dependencies for Rust code coverage
 	@echo "$(BLUE)Setting up Rust code coverage tools...$(NC)"
 	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
 		echo "$(YELLOW)Installing cargo-llvm-cov...$(NC)"; \
-		cargo install cargo-llvm-cov; \
+		cargo install cargo-llvm-cov --version 0.9.0 --locked; \
 	fi
 	@echo "$(YELLOW)Installing llvm-tools-preview component...$(NC)"
 	@rustup component add llvm-tools-preview 2>/dev/null || \

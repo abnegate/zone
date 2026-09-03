@@ -415,7 +415,7 @@ services:
       start_period: 30s
 
   searxng:
-    image: searxng/searxng:${DOCKER_VERSION_SEARXNG:-2025.12.30-a5c946a32}@${DOCKER_DIGEST_SEARXNG:-sha256:1ad4159e74903f8870e3464df701b800a75bd2854f5d11b44ce09ee297f3c158}
+    image: searxng/searxng:${DOCKER_VERSION_SEARXNG:-2026.9.3-a1144dda3}@${DOCKER_DIGEST_SEARXNG:-sha256:3602e6ddbeba037f5d800d1ed9d296a8b93c9f5b3cf9d05fa179d0e766dd59a1}
     container_name: searxng
     restart: unless-stopped
     profiles:
@@ -484,7 +484,7 @@ services:
       start_period: 10s
 
   grafana:
-    image: grafana/grafana:${DOCKER_VERSION_GRAFANA:-12.4.10}@${DOCKER_DIGEST_GRAFANA:-sha256:c132a683b2430fff9115a29b2a79c8ab97540cdcc90846e3c81878c778ca3596}
+    image: grafana/grafana:${DOCKER_VERSION_GRAFANA:-13.2.1}@${DOCKER_DIGEST_GRAFANA:-sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283}
     container_name: grafana
     restart: unless-stopped
     profiles:

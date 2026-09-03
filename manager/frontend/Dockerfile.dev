@@ -15,7 +15,7 @@ WORKDIR /app
 COPY --chown=bun:bun manager/frontend/package.json ./package.json.orig
 
 # Remove workspace reference to @zone/ui and install dependencies
-RUN sed 's/"@zone\/ui": "\*",//' package.json.orig > package.json && \
+RUN sed 's/"@zone\/ui": "workspace:0.1.0",//' package.json.orig > package.json && \
     bun install
 
 # Add the built UI package

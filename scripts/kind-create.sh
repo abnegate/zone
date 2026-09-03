@@ -39,7 +39,7 @@ kubectl wait --for=condition=Ready nodes --all --timeout=120s
 
 # Install local-path-provisioner for persistent storage
 echo -e "${GREEN}Installing local-path-provisioner...${NC}"
-kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/49b2be8e26d6d34c9afaa21fa33108d2e82f8955/deploy/local-path-storage.yaml
 
 # Set default storage class
 kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
@@ -47,7 +47,7 @@ kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storagec
 # Install CNPG operator
 echo -e "${GREEN}Installing CloudNativePG operator...${NC}"
 kubectl apply --server-side -f \
-  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.0.yaml
+  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/4b5e244a7d031f67e025c83c1555e7726ecbbfa1/releases/cnpg-1.30.0.yaml
 
 # Wait for CNPG operator to be ready
 echo -e "${GREEN}Waiting for CNPG operator...${NC}"
@@ -62,7 +62,7 @@ helm repo add haproxytech https://haproxytech.github.io/helm-charts 2>/dev/null 
 helm repo update haproxytech
 
 helm upgrade --install haproxy-ingress haproxytech/kubernetes-ingress \
-  --version 1.47.1 \
+  --version 1.54.0 \
   --namespace haproxy-controller --create-namespace \
   --set controller.kind=DaemonSet \
   --set controller.daemonset.useHostPort=true \

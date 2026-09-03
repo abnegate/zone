@@ -11,7 +11,7 @@ postgres:
 
   # CNPG Cluster configuration
   instances: 1
-  image: ghcr.io/cloudnative-pg/postgresql:16.14@sha256:93d0456be6e8e7a5d2d4e54953967f8b2d7f410c5ab7ca1739f42383436df035
+  image: ghcr.io/cloudnative-pg/postgresql:16.15@sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a
 
   # Database initialization
   database: zone
