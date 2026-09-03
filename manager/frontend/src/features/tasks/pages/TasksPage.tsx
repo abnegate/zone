@@ -8,6 +8,7 @@ import { CreateTaskWizard } from '../components';
 import { Button, Badge, EmptyState } from '@zone/ui';
 import type { Task, TaskProgressMessage } from '../types';
 import './TasksPage.css';
+import { useWorkspace } from '../../../shared/context';
 
 // Note: Using client.getSources() since there's no sources feature API yet.
 // When a sources feature is created, import from there instead.
@@ -260,9 +261,12 @@ export default function TasksPage() {
   } = useTasks(filterProject || undefined, filterStatus || undefined);
 
   const { projects, loading: projectsLoading } = useProjects('all');
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
   const { data: sources = [] } = useQuery({
-    queryKey: ['sources'],
-    queryFn: () => client.getSources('00000000-0000-0000-0000-000000000001'),
+    queryKey: ['sources', workspaceId],
+    queryFn: () => client.getSources(workspaceId as string),
+    enabled: !!workspaceId,
   });
 
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);

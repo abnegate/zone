@@ -29,6 +29,7 @@ import {
 import { getErrors } from '../../../validation';
 import { formatDate } from '../utils/formatters';
 import './ProjectsPage.css';
+import { useWorkspace } from '../../../shared/context';
 
 const statusLabels: Record<ProjectStatus, string> = {
   active: 'Active',
@@ -57,10 +58,12 @@ export default function ProjectsPage() {
   } = useProjects(statusFilter);
 
   // Sources query
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
   const { data: sources = [] } = useQuery({
-    queryKey: ['sources'],
-    queryFn: () => client.getSources('00000000-0000-0000-0000-000000000001'),
-    enabled: isAuthenticated
+    queryKey: ['sources', workspaceId],
+    queryFn: () => client.getSources(workspaceId as string),
+    enabled: isAuthenticated && !!workspaceId
   });
 
   // State
