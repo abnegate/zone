@@ -1,12 +1,13 @@
+import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
-import { Button, Modal, Tabs, TabsList, TabsTrigger, Badge, EmptyState } from '@zone/ui';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
-import type { BrowseModel, InstalledModel } from '../types';
+import type { BrowseModel, InstalledModel, ModelSort } from '../types';
+import { MODEL_FAMILY_FILTERS, MODEL_SIZE_FILTERS, MODEL_SORT_OPTIONS } from '../types';
 import './ModelsPage.css';
 
 function formatBytes(bytes: number): string {
@@ -151,11 +152,7 @@ export default function ModelsPage() {
                   onChange={(e) => setModelInput(e.target.value)}
                   disabled={pull.pulling}
                 />
-                <Button
-                  type="submit"
-                  loading={pull.pulling}
-                  disabled={!modelInput.trim()}
-                >
+                <Button type="submit" loading={pull.pulling} disabled={!modelInput.trim()}>
                   {pull.pulling ? 'Installing...' : 'Install'}
                 </Button>
               </div>
@@ -245,9 +242,21 @@ export default function ModelsPage() {
                     <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
                 }
-                title={modelsError.includes('401') ? 'Authentication required' : 'Cannot connect to Ollama'}
-                description={modelsError.includes('401') ? 'Please log in to view installed models.' : 'Unable to fetch models. Make sure Ollama is running and accessible.'}
-                action={<Button onClick={refresh} variant="secondary">Retry</Button>}
+                title={
+                  modelsError.includes('401')
+                    ? 'Authentication required'
+                    : 'Cannot connect to Ollama'
+                }
+                description={
+                  modelsError.includes('401')
+                    ? 'Please log in to view installed models.'
+                    : 'Unable to fetch models. Make sure Ollama is running and accessible.'
+                }
+                action={
+                  <Button onClick={refresh} variant="secondary">
+                    Retry
+                  </Button>
+                }
               />
             ) : models.length === 0 ? (
               <EmptyState
@@ -344,6 +353,59 @@ export default function ModelsPage() {
             </Button>
           </form>
 
+          <div className="browse-controls">
+            <label className="browse-sort">
+              <span>Sort</span>
+              <select
+                aria-label="Sort models"
+                value={browse.sort}
+                onChange={(e) => browse.setSort(e.target.value as ModelSort)}
+              >
+                {MODEL_SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="browse-filter-groups">
+              <div className="filter-pills" role="group" aria-label="Filter by family">
+                {MODEL_FAMILY_FILTERS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`filter-pill ${browse.family === option.value ? 'active' : ''}`}
+                    aria-pressed={browse.family === option.value}
+                    onClick={() => browse.setFamily(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="filter-pills" role="group" aria-label="Filter by size">
+                {MODEL_SIZE_FILTERS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`filter-pill ${browse.size === option.value ? 'active' : ''}`}
+                    aria-pressed={browse.size === option.value}
+                    onClick={() => browse.setSize(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {browse.hasActiveFilters && (
+              <button type="button" className="browse-clear-filters" onClick={browse.clearFilters}>
+                Clear filters
+              </button>
+            )}
+          </div>
+
           {browse.loading ? (
             <div className="loading-placeholder">
               <span className="spinner" /> Loading...
@@ -421,7 +483,9 @@ export default function ModelsPage() {
             <div className="modal-details-header">
               <h3>{detailsModel.name}</h3>
               <span className="details-source">
-                {isInstalledModel(detailsModel) ? 'Installed' : (detailsModel.source || browse.source)}
+                {isInstalledModel(detailsModel)
+                  ? 'Installed'
+                  : detailsModel.source || browse.source}
               </span>
             </div>
 
@@ -552,9 +616,7 @@ export default function ModelsPage() {
                 )}
 
                 <div className="modal-actions">
-                  <Button onClick={() => handleInstall(detailsModel)}>
-                    Install Model
-                  </Button>
+                  <Button onClick={() => handleInstall(detailsModel)}>Install Model</Button>
                 </div>
               </>
             )}

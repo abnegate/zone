@@ -1,7 +1,7 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Create mock functions
 const mockUseModels = mock();
@@ -118,6 +118,14 @@ const defaultBrowseHook = {
   source: 'all' as const,
   query: '',
   setQuery: mock(),
+  sort: 'relevance' as const,
+  setSort: mock(),
+  family: 'all',
+  setFamily: mock(),
+  size: 'all' as const,
+  setSize: mock(),
+  hasActiveFilters: false,
+  clearFilters: mock(),
   models: [],
   loading: false,
   loadingMore: false,
@@ -381,7 +389,7 @@ describe('ModelsPage', () => {
     it('switches to browse tab', async () => {
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -397,7 +405,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -410,13 +418,13 @@ describe('ModelsPage', () => {
     it('shows source tabs', async () => {
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
 
       await waitFor(() => {
-        expect(screen.getByText('All')).toBeInTheDocument();
+        expect(screen.getByRole('tab', { name: 'All' })).toBeInTheDocument();
       });
       expect(screen.getByText('Ollama')).toBeInTheDocument();
       expect(screen.getByText('HuggingFace')).toBeInTheDocument();
@@ -430,7 +438,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -454,7 +462,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -469,7 +477,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -479,13 +487,100 @@ describe('ModelsPage', () => {
       });
     });
 
+    it('shows sort and filter controls', async () => {
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Sort models')).toBeInTheDocument();
+      });
+      expect(screen.getByRole('group', { name: 'Filter by family' })).toBeInTheDocument();
+      expect(screen.getByRole('group', { name: 'Filter by size' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Llama' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '≤3B' })).toBeInTheDocument();
+    });
+
+    it('changes sort when select changes', async () => {
+      const setSortMock = mock();
+      mockUseBrowse.mockReturnValue({ ...defaultBrowseHook, setSort: setSortMock });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByLabelText('Sort models')).toBeInTheDocument();
+      });
+
+      fireEvent.change(screen.getByLabelText('Sort models'), { target: { value: 'name_asc' } });
+      expect(setSortMock).toHaveBeenCalledWith('name_asc');
+    });
+
+    it('filters by family and size pills', async () => {
+      const setFamilyMock = mock();
+      const setSizeMock = mock();
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        setFamily: setFamilyMock,
+        setSize: setSizeMock,
+      });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Qwen' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Qwen' }));
+      fireEvent.click(screen.getByRole('button', { name: '7–13B' }));
+
+      expect(setFamilyMock).toHaveBeenCalledWith('qwen');
+      expect(setSizeMock).toHaveBeenCalledWith('medium');
+    });
+
+    it('shows clear filters when filters are active', async () => {
+      const clearFiltersMock = mock();
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        family: 'llama',
+        hasActiveFilters: true,
+        clearFilters: clearFiltersMock,
+      });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Clear filters' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+      expect(clearFiltersMock).toHaveBeenCalled();
+    });
+
     it('searches when form submitted', async () => {
       const searchMock = mock();
       mockUseBrowse.mockReturnValue({ ...defaultBrowseHook, search: searchMock });
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -578,7 +673,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -612,7 +707,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -649,7 +744,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -682,7 +777,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -718,7 +813,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -756,7 +851,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -789,7 +884,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -823,7 +918,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -949,7 +1044,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);
@@ -974,7 +1069,7 @@ describe('ModelsPage', () => {
 
       renderModelsPage();
 
-      const tab = screen.getByRole("tab", { name: 'Browse' });
+      const tab = screen.getByRole('tab', { name: 'Browse' });
       fireEvent.mouseDown(tab);
       fireEvent.mouseUp(tab);
       fireEvent.click(tab);

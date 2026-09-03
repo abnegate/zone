@@ -1,10 +1,30 @@
 import type {
+  CreateKnowledgeRequest,
+  GatherContextRequest,
+  SearchOptions,
+} from '../features/knowledge/types';
+import type {
+  CreateProjectRequest,
+  CreateSyncConfigRequest,
+  Project,
+  SyncConfig,
+  UpdateProjectRequest,
+} from '../features/projects/types';
+import type { SourceTypesResponse, SourceVerifyResponse } from '../features/sources/schemas';
+import type {
+  CreateSourceRequest,
+  Source,
+  SourceType,
+  UpdateSourceRequest,
+} from '../features/sources/types';
+import type {
   AddOrgMemberRequest,
   AddWorkspaceMemberRequest,
   AiSettings,
   AuditLog,
   AuditLogFilters,
   AuditLogsResponse,
+  BrowseOptions,
   Chat,
   ChatSearchOptions,
   ChatSearchResponse,
@@ -38,31 +58,6 @@ import type {
   WorkspaceMembersResponse,
   WorkspaceTheme,
 } from '../types';
-import type {
-  CreateKnowledgeRequest,
-  GatherContextRequest,
-  SearchOptions,
-} from '../features/knowledge/types';
-import type {
-  Project,
-  CreateProjectRequest,
-  UpdateProjectRequest,
-  SyncConfig,
-  CreateSyncConfigRequest,
-} from '../features/projects/types';
-import type {
-  Source,
-  SourceType,
-  CreateSourceRequest,
-  UpdateSourceRequest,
-} from '../features/sources/types';
-import type { SourceVerifyResponse, SourceTypesResponse } from '../features/sources/schemas';
-import { modelsApi } from './models';
-import { chatsApi } from './chats';
-import { projectsApi } from './projects';
-import { tasksApi } from './tasks';
-import { sourcesApi } from './sources';
-import { knowledgeApi } from './knowledge';
 import { parse } from '../validation';
 import {
   AiSettingsResponseSchema,
@@ -92,6 +87,12 @@ import {
   WorkspaceThemeResponseSchema,
   WorkspacesResponseSchema,
 } from '../validation/schemas';
+import { chatsApi } from './chats';
+import { knowledgeApi } from './knowledge';
+import { modelsApi } from './models';
+import { projectsApi } from './projects';
+import { sourcesApi } from './sources';
+import { tasksApi } from './tasks';
 
 // In development, set REACT_APP_API_URL=http://localhost:8000
 // In production (served by backend), leave empty to use relative URLs
@@ -137,8 +138,14 @@ class Client {
     return modelsApi.deleteModel(name);
   }
 
-  async browseModels(source: ModelSource, query = '', cursor?: string | null, limit = 20) {
-    return modelsApi.browseModels(source, query, cursor, limit);
+  async browseModels(
+    source: ModelSource,
+    query = '',
+    cursor?: string | null,
+    limit = 20,
+    options?: BrowseOptions
+  ) {
+    return modelsApi.browseModels(source, query, cursor, limit, options);
   }
 
   async getModelInfo(modelId: string) {
@@ -267,7 +274,10 @@ class Client {
     return tasksApi.getTask(id);
   }
 
-  async createTask(workspaceId: string, request: import('../features/tasks/types').CreateTaskRequest) {
+  async createTask(
+    workspaceId: string,
+    request: import('../features/tasks/types').CreateTaskRequest
+  ) {
     return tasksApi.createTask(workspaceId, request);
   }
 
@@ -323,7 +333,11 @@ class Client {
     return sourcesApi.createSource(workspaceId, request);
   }
 
-  async updateSource(workspaceId: string, id: string, request: UpdateSourceRequest): Promise<Source> {
+  async updateSource(
+    workspaceId: string,
+    id: string,
+    request: UpdateSourceRequest
+  ): Promise<Source> {
     return sourcesApi.updateSource(workspaceId, id, request);
   }
 
@@ -474,10 +488,9 @@ class Client {
   // =============================================================================
 
   async getWorkspaceTheme(_orgId: string, wsId: string): Promise<WorkspaceTheme> {
-    const response = await fetch(
-      `${API_BASE}/api/workspaces/${wsId}/theme`,
-      { headers: this.getHeaders() }
-    );
+    const response = await fetch(`${API_BASE}/api/workspaces/${wsId}/theme`, {
+      headers: this.getHeaders(),
+    });
     if (!response.ok) {
       throw new Error(`Failed to fetch workspace theme: ${response.status}`);
     }
@@ -490,14 +503,11 @@ class Client {
     wsId: string,
     request: UpdateWorkspaceThemeRequest
   ): Promise<WorkspaceTheme> {
-    const response = await fetch(
-      `${API_BASE}/api/workspaces/${wsId}/theme`,
-      {
-        method: 'PUT',
-        headers: this.getHeaders(),
-        body: JSON.stringify(request),
-      }
-    );
+    const response = await fetch(`${API_BASE}/api/workspaces/${wsId}/theme`, {
+      method: 'PUT',
+      headers: this.getHeaders(),
+      body: JSON.stringify(request),
+    });
     if (!response.ok) {
       throw new Error(`Failed to update workspace theme: ${response.status}`);
     }
@@ -506,13 +516,10 @@ class Client {
   }
 
   async resetWorkspaceTheme(_orgId: string, wsId: string): Promise<WorkspaceTheme> {
-    const response = await fetch(
-      `${API_BASE}/api/workspaces/${wsId}/theme`,
-      {
-        method: 'DELETE',
-        headers: this.getHeaders(),
-      }
-    );
+    const response = await fetch(`${API_BASE}/api/workspaces/${wsId}/theme`, {
+      method: 'DELETE',
+      headers: this.getHeaders(),
+    });
     if (!response.ok) {
       throw new Error(`Failed to reset workspace theme: ${response.status}`);
     }

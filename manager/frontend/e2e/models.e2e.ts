@@ -162,6 +162,73 @@ test.describe('Models Page', () => {
     await expect(firstItem.locator('.tag').first()).toHaveText('llama');
   });
 
+  test('sorts browse results', async ({ page }) => {
+    await switchToBrowseTab(page);
+
+    await page.unroute('**/api/models**');
+    await routeApi(page, '**/api/models**', (route) => {
+      const url = route.request().url();
+      const method = route.request().method();
+
+      if (method === 'GET' && url.includes('?')) {
+        const params = new URL(url).searchParams;
+        const models = params.get('sort') === 'name_desc'
+          ? [...mockBrowseModels].reverse()
+          : mockBrowseModels;
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source: 'ollama', models, next_cursor: null }),
+        });
+      } else if (method === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: mockInstalledModels }),
+        });
+      } else {
+        route.continue();
+      }
+    });
+
+    await page.getByLabel('Sort models').selectOption('name_desc');
+    await expect(page.locator('.browse-name').first()).toHaveText('codellama');
+  });
+
+  test('filters browse results by family', async ({ page }) => {
+    await switchToBrowseTab(page);
+
+    await page.unroute('**/api/models**');
+    await routeApi(page, '**/api/models**', (route) => {
+      const url = route.request().url();
+      const method = route.request().method();
+
+      if (method === 'GET' && url.includes('?')) {
+        const params = new URL(url).searchParams;
+        const models = params.get('family') === 'mistral'
+          ? [mockBrowseModels[1]]
+          : mockBrowseModels;
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ source: 'ollama', models, next_cursor: null }),
+        });
+      } else if (method === 'GET') {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ models: mockInstalledModels }),
+        });
+      } else {
+        route.continue();
+      }
+    });
+
+    await page.getByRole('button', { name: 'Mistral' }).click();
+    await expect(page.locator('.browse-item')).toHaveCount(1);
+    await expect(page.locator('.browse-name')).toHaveText('mistral');
+  });
+
   test('search filters browse results', async ({ page }) => {
     await switchToBrowseTab(page);
 

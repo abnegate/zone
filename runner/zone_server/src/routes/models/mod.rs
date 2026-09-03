@@ -6,7 +6,10 @@ mod providers;
 mod types;
 
 pub use providers::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ModelProvider, ProviderError, get_provider};
-pub use types::{BrowseResponse, ErrorResponse, ListModelsQuery, ModelDetails, ModelResponse};
+pub use types::{
+    BrowseQuery, BrowseResponse, ErrorResponse, ListModelsQuery, ModelDetails, ModelResponse,
+    ModelSizeFilter, ModelSort,
+};
 
 use axum::{
     Json,
@@ -78,15 +81,10 @@ pub async fn list(
             if is_browse_mode {
                 // Browse the Ollama library for available models
                 match get_provider("ollama") {
-                    Ok(provider) => {
-                        match provider
-                            .search(query.search.as_deref(), query.cursor.as_deref(), limit)
-                            .await
-                        {
-                            Ok(response) => Json(response).into_response(),
-                            Err(e) => e.into_response(),
-                        }
-                    }
+                    Ok(provider) => match provider.search(query.to_browse_query(limit)).await {
+                        Ok(response) => Json(response).into_response(),
+                        Err(e) => e.into_response(),
+                    },
                     Err(e) => e.into_response(),
                 }
             } else {
@@ -95,15 +93,10 @@ pub async fn list(
             }
         }
         "huggingface" | "gpt4all" | "openrouter" => match get_provider(source) {
-            Ok(provider) => {
-                match provider
-                    .search(query.search.as_deref(), query.cursor.as_deref(), limit)
-                    .await
-                {
-                    Ok(response) => Json(response).into_response(),
-                    Err(e) => e.into_response(),
-                }
-            }
+            Ok(provider) => match provider.search(query.to_browse_query(limit)).await {
+                Ok(response) => Json(response).into_response(),
+                Err(e) => e.into_response(),
+            },
             Err(e) => e.into_response(),
         },
         _ => (

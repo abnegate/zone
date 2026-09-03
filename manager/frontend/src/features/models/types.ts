@@ -29,7 +29,58 @@ export interface BrowseModel {
 export type ModelSource = 'ollama' | 'huggingface' | 'gpt4all' | 'openrouter';
 export type BrowseSource = ModelSource | 'all';
 
+export type ModelSort =
+  | 'relevance'
+  | 'name_asc'
+  | 'name_desc'
+  | 'size_asc'
+  | 'size_desc'
+  | 'params_asc'
+  | 'params_desc'
+  | 'updated_desc'
+  | 'updated_asc';
+
+export type ModelSizeFilter = 'all' | 'small' | 'medium' | 'large' | 'xl';
+
+export interface BrowseOptions {
+  sort?: ModelSort;
+  family?: string;
+  size?: ModelSizeFilter;
+}
+
 export const ALL_SOURCES: ModelSource[] = ['ollama', 'huggingface', 'gpt4all', 'openrouter'];
+
+export const MODEL_SORT_OPTIONS: Array<{ value: ModelSort; label: string }> = [
+  { value: 'relevance', label: 'Relevance' },
+  { value: 'name_asc', label: 'Name A–Z' },
+  { value: 'name_desc', label: 'Name Z–A' },
+  { value: 'size_asc', label: 'Smallest size' },
+  { value: 'size_desc', label: 'Largest size' },
+  { value: 'params_asc', label: 'Fewest parameters' },
+  { value: 'params_desc', label: 'Most parameters' },
+  { value: 'updated_desc', label: 'Recently updated' },
+  { value: 'updated_asc', label: 'Oldest updated' },
+];
+
+export const MODEL_FAMILY_FILTERS: Array<{ value: string; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'llama', label: 'Llama' },
+  { value: 'mistral', label: 'Mistral' },
+  { value: 'qwen', label: 'Qwen' },
+  { value: 'phi', label: 'Phi' },
+  { value: 'gemma', label: 'Gemma' },
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'mixtral', label: 'Mixtral' },
+  { value: 'code', label: 'Code' },
+];
+
+export const MODEL_SIZE_FILTERS: Array<{ value: ModelSizeFilter; label: string }> = [
+  { value: 'all', label: 'All sizes' },
+  { value: 'small', label: '≤3B' },
+  { value: 'medium', label: '7–13B' },
+  { value: 'large', label: '30B+' },
+  { value: 'xl', label: '70B+' },
+];
 
 // =============================================================================
 // Pull Progress Types
