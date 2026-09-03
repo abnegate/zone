@@ -233,6 +233,47 @@ describe('useChat', () => {
     });
   });
 
+  it('renders image metadata on the saved user message', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const metadata = {
+      attachments: [{ name: 'shot.png', mime: 'image/png', url: 'data:image/png;base64,xx' }],
+    };
+    await result.current.sendMessage({ content: 'see this', metadata });
+
+    expect(JSON.parse(lastSocket?.sent.at(-1) ?? '{}')).toEqual({
+      type: 'send',
+      content: 'see this',
+      metadata,
+    });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata).toEqual(metadata);
+    });
+
+    lastSocket?.emit({
+      type: 'message_saved',
+      message_id: 'm-real',
+      role: 'user',
+      content: 'see this',
+      metadata,
+    });
+
+    await waitFor(() => {
+      const saved = result.current.chat?.messages.find((m) => m.id === 'm-real');
+      expect(saved?.metadata).toEqual(metadata);
+      expect(result.current.chat?.messages.filter((m) => m.content === 'see this')).toHaveLength(1);
+    });
+  });
+
   it('should handle sending message with error', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

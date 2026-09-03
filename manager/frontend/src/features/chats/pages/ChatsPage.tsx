@@ -10,6 +10,7 @@ import {
   attachmentMetadata,
   buildMessageWithAttachments,
   formatBytes,
+  imageAttachments,
   isSendable,
   readAttachment,
 } from '../utils';
@@ -440,34 +441,41 @@ export default function ChatsPage() {
                   <p>No messages yet. Start a conversation!</p>
                 </div>
               ) : (
-                displayedChat.messages.map((message) => (
-                  <div key={message.id} className={`message message-${message.role}`}>
-                    <div className="message-header">
-                      <span className="message-role">
-                        {message.role === 'user'
-                          ? 'You'
-                          : message.role === 'assistant'
-                            ? 'Assistant'
-                            : 'System'}
-                      </span>
-                      <span className="message-time">{formatDate(message.created_at)}</span>
-                    </div>
-                    {message.metadata?.attachments?.some((a) =>
-                      a.mime.startsWith('image/')
-                    ) && (
-                      <div className="message-images">
-                        {message.metadata.attachments
-                          .filter((a) => a.mime.startsWith('image/'))
-                          .map((a) => (
-                            <img key={a.url} src={a.url} alt={a.name} title={a.name} />
-                          ))}
+                displayedChat.messages.map((message) => {
+                  const images = imageAttachments(message.metadata);
+                  return (
+                    <div key={message.id} className={`message message-${message.role}`}>
+                      <div className="message-header">
+                        <span className="message-role">
+                          {message.role === 'user'
+                            ? 'You'
+                            : message.role === 'assistant'
+                              ? 'Assistant'
+                              : 'System'}
+                        </span>
+                        <span className="message-time">{formatDate(message.created_at)}</span>
                       </div>
-                    )}
-                    <div className="message-content">
-                      <MessageContent content={message.content} />
+                      {images.length > 0 && (
+                        <div className="message-images">
+                          {images.map((a) => (
+                            <img
+                              key={a.url}
+                              src={a.url}
+                              alt={a.name}
+                              title={a.name}
+                              data-testid="message-image"
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {message.content.trim() ? (
+                        <div className="message-content">
+                          <MessageContent content={message.content} />
+                        </div>
+                      ) : null}
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
               <div ref={messagesEndRef} />
             </div>
@@ -494,8 +502,11 @@ export default function ChatsPage() {
                   {attachments.map((attachment) => (
                     <span
                       key={attachment.id}
-                      className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}`}
+                      className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}${attachment.url ? ' has-thumb' : ''}`}
                     >
+                      {attachment.url ? (
+                        <img className="attachment-chip-thumb" src={attachment.url} alt="" />
+                      ) : null}
                       <span className="attachment-chip-name">{attachment.name}</span>
                       <span className="attachment-chip-size">
                         {attachment.rejected ? (
@@ -539,11 +550,13 @@ export default function ChatsPage() {
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    strokeWidth="2"
-                    width="16"
-                    height="16"
+                    strokeWidth="1.75"
+                    width="18"
+                    height="18"
+                    aria-hidden="true"
                   >
-                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                    <rect x="4.5" y="4.5" width="15" height="15" rx="3.5" />
+                    <path d="M12 8.75v6.5M8.75 12h6.5" strokeLinecap="square" />
                   </svg>
                 </button>
                 <textarea

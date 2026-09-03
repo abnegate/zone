@@ -1,13 +1,25 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
-import type { ChatWithMessages, Message, MessageRole, SendMessageRequest } from '../types';
+import type {
+  ChatWithMessages,
+  Message,
+  MessageMetadata,
+  MessageRole,
+  SendMessageRequest,
+} from '../types';
 
 // The server saves the user message and streams the assistant reply over
 // /ws/chats/:id. Posting to /api/chats/:id/messages only stores the user's
 // message, so sending over the socket is what produces a reply.
 type ServerMessage =
   | { type: 'init'; chat_id: string; status: string }
-  | { type: 'message_saved'; message_id: string; role: MessageRole; content: string }
+  | {
+      type: 'message_saved';
+      message_id: string;
+      role: MessageRole;
+      content: string;
+      metadata?: MessageMetadata | null;
+    }
   | { type: 'message_start'; message_id: string; role: MessageRole }
   | { type: 'chunk'; content: string; index: number }
   | { type: 'message_end'; message_id: string; content: string }
@@ -21,6 +33,7 @@ export function useChat(chatId: string | null) {
   const [streaming, setStreaming] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const requestIdRef = useRef(0);
+  const pendingUserIdRef = useRef<string | null>(null);
 
   const fetchChat = useCallback(async (opts?: { silent?: boolean }) => {
     const requestId = ++requestIdRef.current;
@@ -56,26 +69,68 @@ export function useChat(chatId: string | null) {
     fetchChat();
   }, [fetchChat]);
 
-  const upsertMessage = useCallback((id: string, role: MessageRole, content: string) => {
-    setChat((prev) => {
-      if (!prev) return prev;
-      const existing = prev.messages.find((m) => m.id === id);
-      if (existing) {
-        return {
-          ...prev,
-          messages: prev.messages.map((m) => (m.id === id ? { ...m, content } : m)),
+  const upsertMessage = useCallback(
+    (id: string, role: MessageRole, content: string, metadata?: MessageMetadata | null) => {
+      setChat((prev) => {
+        if (!prev) return prev;
+        const existing = prev.messages.find((m) => m.id === id);
+        if (existing) {
+          return {
+            ...prev,
+            messages: prev.messages.map((m) =>
+              m.id === id
+                ? {
+                    ...m,
+                    content,
+                    metadata: metadata !== undefined ? (metadata ?? undefined) : m.metadata,
+                  }
+                : m
+            ),
+          };
+        }
+        const message: Message = {
+          id,
+          chat_id: prev.id,
+          role,
+          content,
+          created_at: new Date().toISOString(),
+          metadata: metadata ?? undefined,
         };
-      }
-      const message: Message = {
-        id,
-        chat_id: prev.id,
-        role,
-        content,
-        created_at: new Date().toISOString(),
-      };
-      return { ...prev, messages: [...prev.messages, message] };
-    });
-  }, []);
+        return { ...prev, messages: [...prev.messages, message] };
+      });
+    },
+    []
+  );
+
+  const applySavedUserMessage = useCallback(
+    (id: string, content: string, metadata?: MessageMetadata | null) => {
+      setChat((prev) => {
+        if (!prev) return prev;
+        const pendingId = pendingUserIdRef.current;
+        pendingUserIdRef.current = null;
+        const replaceId =
+          pendingId && prev.messages.some((m) => m.id === pendingId) ? pendingId : id;
+        if (prev.messages.some((m) => m.id === replaceId)) {
+          return {
+            ...prev,
+            messages: prev.messages.map((m) =>
+              m.id === replaceId ? { ...m, id, content, metadata: metadata ?? m.metadata } : m
+            ),
+          };
+        }
+        const message: Message = {
+          id,
+          chat_id: prev.id,
+          role: 'user',
+          content,
+          created_at: new Date().toISOString(),
+          metadata: metadata ?? undefined,
+        };
+        return { ...prev, messages: [...prev.messages, message] };
+      });
+    },
+    []
+  );
 
   useEffect(() => {
     if (!chatId) {
@@ -104,7 +159,7 @@ export function useChat(chatId: string | null) {
 
       switch (payload.type) {
         case 'message_saved':
-          upsertMessage(payload.message_id, payload.role, payload.content);
+          applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
           break;
         case 'message_start':
           assistantId = payload.message_id;
@@ -148,7 +203,7 @@ export function useChat(chatId: string | null) {
       socket.close();
       socketRef.current = null;
     };
-  }, [chatId, upsertMessage]);
+  }, [chatId, upsertMessage, applySavedUserMessage]);
 
   const sendMessage = async (request: SendMessageRequest): Promise<void> => {
     if (!chatId) {
@@ -159,14 +214,26 @@ export function useChat(chatId: string | null) {
       throw new Error('Chat connection is not open');
     }
     setError(null);
+    const pendingId = `pending-${crypto.randomUUID()}`;
+    pendingUserIdRef.current = pendingId;
+    upsertMessage(pendingId, 'user', request.content, request.metadata);
     setStreaming(true);
-    socket.send(
-      JSON.stringify({
-        type: 'send',
-        content: request.content,
-        metadata: request.metadata,
-      })
-    );
+    try {
+      socket.send(
+        JSON.stringify({
+          type: 'send',
+          content: request.content,
+          metadata: request.metadata,
+        })
+      );
+    } catch (err) {
+      pendingUserIdRef.current = null;
+      setChat((prev) =>
+        prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== pendingId) } : prev
+      );
+      setStreaming(false);
+      throw err;
+    }
   };
 
   const cancelGeneration = () => {
