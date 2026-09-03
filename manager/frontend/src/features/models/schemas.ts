@@ -22,6 +22,12 @@ export const InstalledModelSchema = z.object({
   details: ModelDetailsSchema.optional(),
 });
 
+export const ModelSizeOptionSchema = z.object({
+  name: z.string(),
+  label: z.string(),
+  size: z.number().nullable().optional(),
+});
+
 export const BrowseModelSchema = z.object({
   name: z.string(),
   display_name: z.string().nullable().optional(),
@@ -35,6 +41,7 @@ export const BrowseModelSchema = z.object({
   likes: z.number().nullable().optional(),
   tags: z.array(z.string()).nullable().optional(),
   use_cases: z.array(z.string()).nullable().optional(),
+  sizes: z.array(ModelSizeOptionSchema).nullable().optional(),
   details: ModelDetailsSchema.nullable().optional(),
   source: z.enum(['ollama', 'huggingface', 'gpt4all', 'openrouter']).optional(),
 });

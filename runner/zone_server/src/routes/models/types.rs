@@ -48,8 +48,22 @@ pub struct ModelResponse {
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_cases: Option<Vec<String>>,
+    /// Distinct downloadable sizes when a catalogue entry ships more than one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<Vec<ModelSize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<ModelDetails>,
+}
+
+/// A concrete downloadable size for a browsed model (e.g. `llama3.2:1b`).
+#[derive(Debug, Serialize, Clone, PartialEq, Default)]
+pub struct ModelSize {
+    /// Name passed to `ollama pull`
+    pub name: String,
+    /// Human label, e.g. `1B`
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Default)]

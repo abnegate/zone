@@ -157,6 +157,19 @@
   margin-bottom: var(--ui-space-4);
 }
 
+.models-page .details-size-picker {
+  margin-bottom: var(--ui-space-4);
+}
+
+.models-page .details-size-picker .ui-select-trigger {
+  background: var(--ui-bg-base);
+}
+
+/* Portaled above the details modal (z-index 1000). */
+.ui-select-content {
+  z-index: 1200;
+}
+
 .models-browse-panel {
   flex: 1;
   min-height: 0;
