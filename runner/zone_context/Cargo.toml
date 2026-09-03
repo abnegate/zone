@@ -9,6 +9,9 @@ rust-version.workspace = true
 
 [features]
 test-utils = []
+# In-process embedding inference (ONNX Runtime via fastembed). Pulls in the
+# onnxruntime native library, so it is opt-in; zone_server enables it.
+local-embeddings = ["dep:fastembed", "dep:dirs"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -68,6 +71,10 @@ base64 = "0.22"
 # URL encoding
 percent-encoding = "2"
 url = "2"
+
+# In-process embeddings (feature: local-embeddings)
+fastembed = { version = "6", optional = true }
+dirs = { workspace = true, optional = true }
 
 # Internal
 zone_core = { path = "../zone_core" }
