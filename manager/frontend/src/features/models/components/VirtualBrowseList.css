@@ -1,10 +1,13 @@
 .virtual-browse-container {
   position: relative;
+  flex: 1;
+  min-height: 16rem;
+  height: 100%;
 }
 
 .virtual-browse-list {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-border) var(--color-bg-card);
+  scrollbar-color: var(--ui-bg-muted) transparent;
 }
 
 .virtual-browse-list::-webkit-scrollbar {
@@ -12,33 +15,53 @@
 }
 
 .virtual-browse-list::-webkit-scrollbar-track {
-  background: var(--color-bg-card);
-  border-radius: 4px;
+  background: transparent;
 }
 
 .virtual-browse-list::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 4px;
+  background: var(--ui-bg-muted);
+  border-radius: var(--ui-radius-full);
 }
 
 .virtual-browse-list::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-dim);
+  background: var(--ui-bg-active);
 }
 
 .virtual-browse-item-wrapper {
-  padding: 0 var(--spacing-xs) var(--spacing-sm) 0;
+  padding: 0 2px 2px 0;
 }
 
 .virtual-browse-item-wrapper .browse-item {
-  height: calc(100% - var(--spacing-sm));
+  height: calc(100% - 2px);
   box-sizing: border-box;
+  align-items: center;
+}
+
+.browse-specs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-1) var(--ui-space-2);
+  margin-bottom: var(--ui-space-1);
+  font-size: var(--ui-text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ui-text-secondary);
+}
+
+.browse-spec:not(:last-child)::after {
+  content: '·';
+  margin-left: var(--ui-space-2);
+  color: var(--ui-text-muted);
+}
+
+.browse-item .browse-description {
+  margin: 0 0 var(--ui-space-1);
 }
 
 .virtual-browse-loading {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--spacing-sm);
-  color: var(--color-text-muted);
-  font-size: 0.875rem;
+  gap: var(--ui-space-2);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-sm);
 }

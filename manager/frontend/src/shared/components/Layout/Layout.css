@@ -20,6 +20,17 @@
   flex-direction: column;
 }
 
+.main-content:has(.page--workspace) {
+  padding: 0;
+  overflow: hidden;
+  height: 100vh;
+}
+
+.page--workspace {
+  height: 100%;
+  min-height: 0;
+}
+
 :root[data-sidebar-collapsed='true'] .main-content {
   margin-left: 64px;
 }
@@ -278,6 +289,12 @@
     margin-left: 0;
     padding: var(--ui-space-4);
     padding-top: calc(var(--ui-space-4) + 60px);
+  }
+
+  .main-content:has(.page--workspace) {
+    padding: 0;
+    padding-top: 60px;
+    height: 100vh;
   }
 
   :root[data-sidebar-collapsed='true'] .main-content {

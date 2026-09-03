@@ -156,10 +156,43 @@ impl From<chats::MessageRow> for MessageResponse {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct ChatWithMessagesResponse {
+    #[serde(flatten)]
+    chat: ChatResponse,
+    messages: Vec<MessageResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct SingleChatResponse {
+    chat: ChatWithMessagesResponse,
+}
+
+/// Load a chat's messages for a single-chat response. A chat whose messages
+/// cannot be read still returns the chat, with an empty list.
+async fn chat_with_messages(state: &AppState, chat: chats::ChatRow) -> ChatWithMessagesResponse {
+    let messages = chats::list_messages(state.db(), chat.id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(MessageResponse::from)
+        .collect();
+
+    ChatWithMessagesResponse {
+        chat: ChatResponse::from(chat),
+        messages,
+    }
+}
+
 /// Chats list response
 #[derive(Debug, Serialize)]
 pub struct ChatsListResponse {
     chats: Vec<ChatResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct SingleMessageResponse {
+    message: MessageResponse,
 }
 
 /// Messages list response
@@ -243,7 +276,7 @@ pub async fn create(
     )
     .await
     {
-        Ok(chat) => (StatusCode::CREATED, Json(ChatResponse::from(chat))).into_response(),
+        Ok(chat) => (StatusCode::CREATED, Json(SingleChatResponse { chat: chat_with_messages(&state, chat).await })).into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -263,7 +296,7 @@ pub async fn get(
 ) -> impl IntoResponse {
     // Get chat and verify access
     match get_chat_with_access(&state, &auth, id).await {
-        Ok(chat) => Json(ChatResponse::from(chat)).into_response(),
+        Ok(chat) => Json(SingleChatResponse { chat: chat_with_messages(&state, chat).await }).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -289,7 +322,7 @@ pub async fn update(
     }
 
     match chats::update_chat(state.db(), id, req.title.as_deref()).await {
-        Ok(Some(chat)) => Json(ChatResponse::from(chat)).into_response(),
+        Ok(Some(chat)) => Json(SingleChatResponse { chat: chat_with_messages(&state, chat).await }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Chat not found")),
@@ -363,7 +396,7 @@ pub async fn archive(
     }
 
     match chats::archive_chat(state.db(), id).await {
-        Ok(Some(chat)) => Json(ChatResponse::from(chat)).into_response(),
+        Ok(Some(chat)) => Json(SingleChatResponse { chat: chat_with_messages(&state, chat).await }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Chat not found")),
@@ -400,7 +433,7 @@ pub async fn unarchive(
     }
 
     match chats::unarchive_chat(state.db(), id).await {
-        Ok(Some(chat)) => Json(ChatResponse::from(chat)).into_response(),
+        Ok(Some(chat)) => Json(SingleChatResponse { chat: chat_with_messages(&state, chat).await }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Chat not found")),
@@ -470,7 +503,7 @@ pub async fn create_message(
             // This is non-blocking and allows the message to be returned immediately
             spawn_message_embedding_task(state.clone(), msg.id, msg.chat_id, msg.content.clone());
 
-            (StatusCode::CREATED, Json(MessageResponse::from(msg))).into_response()
+            (StatusCode::CREATED, Json(SingleMessageResponse { message: MessageResponse::from(msg) })).into_response()
         }
         Err(e) => {
             tracing::error!("Database error: {}", e);

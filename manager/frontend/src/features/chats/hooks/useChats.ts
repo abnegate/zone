@@ -15,13 +15,15 @@ export function useChats(options: UseChatsOptions = {}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchChats = useCallback(async () => {
+  const fetchChats = useCallback(async (opts?: { silent?: boolean }) => {
     if (!workspaceId) {
       setChats([]);
       setLoading(false);
       return;
     }
-    setLoading(true);
+    if (!opts?.silent) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const data = await chatsApi.getChats(workspaceId, archived);
@@ -59,7 +61,7 @@ export function useChats(options: UseChatsOptions = {}) {
   };
 
   const refresh = async (): Promise<void> => {
-    await fetchChats();
+    await fetchChats({ silent: true });
   };
 
   return {

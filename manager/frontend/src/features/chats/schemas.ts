@@ -6,12 +6,23 @@ import { z } from 'zod';
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
 
+export const MessageAttachmentSchema = z.object({
+  name: z.string(),
+  mime: z.string(),
+  url: z.string(),
+});
+
+export const MessageMetadataSchema = z
+  .object({ attachments: z.array(MessageAttachmentSchema).optional() })
+  .passthrough();
+
 export const MessageSchema = z.object({
   id: z.string(),
   chat_id: z.string(),
   role: MessageRoleSchema,
   content: z.string(),
   created_at: z.string(),
+  metadata: MessageMetadataSchema.nullish(),
 });
 
 export const ChatSchema = z.object({

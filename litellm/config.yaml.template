@@ -8,7 +8,7 @@ model_list:
   - model_name: "{{OLLAMA_MODEL_FAST}}"
     litellm_params:
       model: ollama/{{OLLAMA_MODEL_FAST}}
-      api_base: http://ollama:11434
+      api_base: {{OLLAMA_BASE_URL}}
       timeout: 60
 
   # ===========================================================================
@@ -17,7 +17,7 @@ model_list:
   - model_name: "{{OLLAMA_MODEL_REASON}}"
     litellm_params:
       model: ollama/{{OLLAMA_MODEL_REASON}}
-      api_base: http://ollama:11434
+      api_base: {{OLLAMA_BASE_URL}}
       timeout: 180
 
   # ===========================================================================
@@ -26,8 +26,17 @@ model_list:
   - model_name: "{{OLLAMA_MODEL_EMBED}}"
     litellm_params:
       model: ollama/{{OLLAMA_MODEL_EMBED}}
-      api_base: http://ollama:11434
+      api_base: {{OLLAMA_BASE_URL}}
       timeout: 30
+
+  # ===========================================================================
+  # Vision Model - For messages carrying images
+  # ===========================================================================
+  - model_name: "{{OLLAMA_MODEL_VISION}}"
+    litellm_params:
+      model: ollama/{{OLLAMA_MODEL_VISION}}
+      api_base: {{OLLAMA_BASE_URL}}
+      timeout: 180
 
 # =============================================================================
 # Router Configuration

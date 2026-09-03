@@ -221,6 +221,15 @@ describe('Individual Source Definitions', () => {
       expect(name).toBe('myorg/myrepo');
     });
 
+    it('derives a GitHub URL', () => {
+      expect(
+        github.getUrl?.({
+          ghOwner: 'myorg',
+          ghRepo: 'myrepo',
+        })
+      ).toBe('https://github.com/myorg/myrepo');
+    });
+
     it('returns field IDs', () => {
       const ids = github.getFieldIds();
       expect(ids).toContain('ghOwner');

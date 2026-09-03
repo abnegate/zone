@@ -20,6 +20,15 @@ use zone_server::config::Config;
 use zone_server::routes::create_router;
 use zone_server::state::AppState;
 
+/// Send server tracing to the test's stdout. Without this the server's own
+/// logs vanish and a failing integration test says nothing about why.
+pub fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+}
+
 /// Test configuration with sensible defaults
 pub fn test_config() -> Config {
     Config {
@@ -33,9 +42,11 @@ pub fn test_config() -> Config {
         jwt_secret: "test-secret-key-must-be-at-least-32-chars-long".to_string(),
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
-        litellm_host: "http://localhost:4000".to_string(),
-        litellm_key: "test-key".to_string(),
-        ollama_host: "http://localhost:11434".to_string(),
+        litellm_host: std::env::var("LITELLM_HOST")
+            .unwrap_or_else(|_| "http://localhost:4000".to_string()),
+        litellm_key: std::env::var("LITELLM_KEY").unwrap_or_else(|_| "test-key".to_string()),
+        ollama_host: std::env::var("OLLAMA_HOST")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string()),
         encryption_key: "12345678901234567890123456789012".to_string(),
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,

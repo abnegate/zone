@@ -12,6 +12,8 @@ const mockArchiveChat = mock();
 const mockUnarchiveChat = mock();
 const mockDeleteChat = mock();
 const mockSearchChatMessages = mock();
+const mockWsSend = mock();
+const mockWsClose = mock();
 
 // Mock scrollIntoView
 Element.prototype.scrollIntoView = mock();
@@ -31,6 +33,16 @@ mock.module('../../../api/chats', () => ({
     getMessages: mock(),
     updateChatTitle: mock(),
     deleteMessage: mock(),
+    chatAccessToken: () => 'test-token',
+    createChatWebSocket: () => ({
+      readyState: 1,
+      send: mockWsSend,
+      close: mockWsClose,
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      onclose: null,
+    }),
   },
 }));
 
@@ -243,6 +255,8 @@ describe('ChatsPage', () => {
     mockUnarchiveChat.mockReset();
     mockDeleteChat.mockReset();
     mockSearchChatMessages.mockReset();
+    mockWsSend.mockReset();
+    mockWsClose.mockReset();
     mockClient.getChats.mockResolvedValue(mockChats);
     mockClient.getChat.mockResolvedValue(mockChatWithMessages);
   });
@@ -258,7 +272,7 @@ describe('ChatsPage', () => {
     it('renders new chat button', async () => {
       renderChatsPage();
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ New' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
       });
     });
 
@@ -361,6 +375,23 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Chat not found')).toBeInTheDocument();
       });
+      expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      expect(screen.getByText('Chat 2')).toBeInTheDocument();
+    });
+
+    it('keeps the chat list visible while a conversation loads', async () => {
+      mockClient.getChat.mockImplementation(() => new Promise(() => {}));
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      expect(screen.getByText('Chat 2')).toBeInTheDocument();
+      expect(screen.getByText('Chat 3')).toBeInTheDocument();
     });
   });
 
@@ -433,10 +464,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ New' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ New' }));
+      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
 
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
       expect(screen.getByLabelText('Select Model')).toBeInTheDocument();
@@ -446,10 +477,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ New' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ New' }));
+      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
@@ -463,10 +494,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ New' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ New' }));
+      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
@@ -489,10 +520,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ New' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ New' }));
+      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
 
       // Press Escape to close
       fireEvent.keyDown(document, { key: 'Escape' });
@@ -517,10 +548,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ New' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ New' }));
+      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
@@ -559,10 +590,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ New' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ New' }));
+      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
 
       expect(screen.getByRole('button', { name: 'Create Chat' })).toBeDisabled();
     });
@@ -573,10 +604,10 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: '+ New' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('button', { name: '+ New' }));
+      fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
 
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
@@ -629,16 +660,22 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('Type a message...')).toBeInTheDocument();
+        expect(screen.getByPlaceholderText('Type a message, or drop a file...')).toBeInTheDocument();
       });
 
-      fireEvent.change(screen.getByPlaceholderText('Type a message...'), {
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
         target: { value: 'Test message' },
       });
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
       await waitFor(() => {
-        expect(mockClient.sendMessage).toHaveBeenCalledWith('chat-1', { content: 'Test message' });
+        expect(mockWsSend).toHaveBeenCalledWith(
+          JSON.stringify({
+            type: 'send',
+            content: 'Test message',
+            metadata: undefined,
+          })
+        );
       });
     });
 
@@ -661,15 +698,21 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('Type a message...')).toBeInTheDocument();
+        expect(screen.getByPlaceholderText('Type a message, or drop a file...')).toBeInTheDocument();
       });
 
-      const textarea = screen.getByPlaceholderText('Type a message...');
+      const textarea = screen.getByPlaceholderText('Type a message, or drop a file...');
       fireEvent.change(textarea, { target: { value: 'Enter test' } });
       fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
 
       await waitFor(() => {
-        expect(mockClient.sendMessage).toHaveBeenCalled();
+        expect(mockWsSend).toHaveBeenCalledWith(
+          JSON.stringify({
+            type: 'send',
+            content: 'Enter test',
+            metadata: undefined,
+          })
+        );
       });
     });
 
@@ -683,14 +726,14 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('Type a message...')).toBeInTheDocument();
+        expect(screen.getByPlaceholderText('Type a message, or drop a file...')).toBeInTheDocument();
       });
 
-      const textarea = screen.getByPlaceholderText('Type a message...');
+      const textarea = screen.getByPlaceholderText('Type a message, or drop a file...');
       fireEvent.change(textarea, { target: { value: 'Shift enter test' } });
       fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
 
-      expect(mockClient.sendMessage).not.toHaveBeenCalled();
+      expect(mockWsSend).not.toHaveBeenCalled();
     });
 
     it('disables send button when message is empty', async () => {
@@ -708,7 +751,9 @@ describe('ChatsPage', () => {
     });
 
     it('shows error when sending message fails', async () => {
-      mockClient.sendMessage.mockRejectedValueOnce(new Error('Send failed'));
+      mockWsSend.mockImplementationOnce(() => {
+        throw new Error('Send failed');
+      });
 
       renderChatsPage();
 
@@ -719,10 +764,10 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('Type a message...')).toBeInTheDocument();
+        expect(screen.getByPlaceholderText('Type a message, or drop a file...')).toBeInTheDocument();
       });
 
-      fireEvent.change(screen.getByPlaceholderText('Type a message...'), {
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
         target: { value: 'Test' },
       });
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -1112,6 +1157,43 @@ describe('ChatsPage', () => {
 
       await waitFor(() => {
         expect(mockClient.getChat).toHaveBeenCalledWith('chat-1');
+      });
+    });
+
+    it('renders an attached image in the message', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-img',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: "That's what I meant",
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              attachments: [
+                {
+                  name: 'shot.png',
+                  mime: 'image/png',
+                  url: 'data:image/png;base64,aaaa',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        const image = screen.getByRole('img', { name: 'shot.png' });
+        expect(image).toHaveAttribute('src', 'data:image/png;base64,aaaa');
       });
     });
 

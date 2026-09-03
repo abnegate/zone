@@ -6,8 +6,9 @@ Complete documentation of all configuration options available in `.env`
 
 **Zone requires ZERO configuration to start!**
 
-All variables have working defaults. The system will run immediately after:
+All variables have working defaults. Keep host Ollama running, then:
 ```bash
+ollama serve
 cp .env.example .env
 mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
 make up
@@ -99,8 +100,13 @@ For production, regenerate secrets for security.
 
 ### `OLLAMA_HOST`
 - **Default**: `0.0.0.0:11434`
-- **Description**: Internal binding address for Ollama server
-- **Usage**: Usually don't change (internal networking)
+- **Description**: Bind address for a bundled Ollama container
+- **Usage**: Only applies with `--profile bundled-ollama`
+
+### `OLLAMA_BASE_URL`
+- **Default**: `http://host.docker.internal:11434`
+- **Description**: Where LiteLLM, the manager, and metrics reach Ollama
+- **Usage**: Host daemon is the default so Docker Desktop / Apple Silicon can use Metal. For a bundled container, set `http://ollama:11434` and start with `--profile bundled-ollama`.
 
 ---
 

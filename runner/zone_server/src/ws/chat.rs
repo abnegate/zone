@@ -88,6 +88,11 @@ const ALLOWED_MODEL_PREFIXES: &[&str] = &[
     "mistral",
     "mixtral",
     "codellama",
+    // Vision-capable local models, for messages carrying images.
+    "llava",
+    "bakllava",
+    "moondream",
+    "minicpm-v",
 ];
 
 /// Global connection limiter per chat
@@ -125,6 +130,8 @@ pub enum ServerMessage {
         message_id: Uuid,
         role: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
     },
     /// Assistant message started
     MessageStart { message_id: Uuid, role: String },
@@ -182,6 +189,29 @@ impl Drop for ConnectionCleanupGuard {
             }
         });
     }
+}
+
+/// Pull image data URLs out of a message's stored metadata.
+///
+/// Images ride in `metadata.attachments[]` rather than in `content`, so the
+/// text of a message stays readable and the images survive a reload.
+fn image_urls_from_metadata(metadata: Option<&serde_json::Value>) -> Vec<String> {
+    metadata
+        .and_then(|m| m.get("attachments"))
+        .and_then(|a| a.as_array())
+        .map(|attachments| {
+            attachments
+                .iter()
+                .filter(|a| {
+                    a.get("mime")
+                        .and_then(|m| m.as_str())
+                        .is_some_and(|m| m.starts_with("image/"))
+                })
+                .filter_map(|a| a.get("url").and_then(|u| u.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Handle the WebSocket connection
@@ -560,6 +590,7 @@ async fn handle_send_message(
         message_id: user_message.id,
         role: "user".to_string(),
         content: content.to_string(),
+        metadata: user_message.metadata.clone(),
     };
     sender.send(saved_msg.to_ws_message()).await?;
 
@@ -592,6 +623,7 @@ async fn handle_send_message(
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
+                    images: image_urls_from_metadata(msg.metadata.as_ref()),
                 });
             }
         }
@@ -684,6 +716,8 @@ async fn handle_send_message(
     let mut full_content = String::new();
     let mut chunk_index = 0;
     let mut cancelled = false;
+    let mut client_gone = false;
+    let mut stream_failed = false;
     let mut response_truncated = false;
 
     // MAJOR-4: Add overall stream timeout
@@ -732,9 +766,13 @@ async fn handle_send_message(
                                     content: content.clone(),
                                     index: chunk_index,
                                 };
-                                if sender.send(chunk_msg.to_ws_message()).await.is_err() {
-                                    cancelled = true;
-                                    break;
+                                if !client_gone
+                                    && sender.send(chunk_msg.to_ws_message()).await.is_err()
+                                {
+                                    // The reader navigated away. Keep generating:
+                                    // the reply still has to be saved, because the
+                                    // console reloads history from the database.
+                                    client_gone = true;
                                 }
                                 chunk_index += 1;
                             }
@@ -746,13 +784,18 @@ async fn handle_send_message(
                         }
                     }
                     Some(Err(e)) => {
-                        tracing::error!("LLM stream error: {}", e);
-                        let error_msg = ServerMessage::Error {
-                            message: "Stream error".to_string(),
-                        };
-                        let _ = sender.send(error_msg.to_ws_message()).await;
-                        CHAT_CANCELLATIONS.remove(&cancel_key);
-                        return Err(Box::new(e));
+                        // Keep whatever was generated: returning here discarded a
+                        // complete reply whenever the provider sent one chunk the
+                        // envelope could not parse.
+                        tracing::error!("LLM stream error, keeping partial reply: {}", e);
+                        if !client_gone {
+                            let error_msg = ServerMessage::Error {
+                                message: "Stream error".to_string(),
+                            };
+                            let _ = sender.send(error_msg.to_ws_message()).await;
+                        }
+                        stream_failed = true;
+                        break;
                     }
                     None => {
                         // Stream ended
@@ -766,11 +809,14 @@ async fn handle_send_message(
     // Clean up cancellation channel
     CHAT_CANCELLATIONS.remove(&cancel_key);
 
-    if cancelled {
-        let cancel_msg = ServerMessage::Cancelled {
-            message_id: Some(assistant_message_id),
-        };
-        sender.send(cancel_msg.to_ws_message()).await?;
+    // Nothing generated yet: there is no reply worth keeping.
+    if (cancelled || stream_failed) && full_content.is_empty() {
+        if !client_gone {
+            let cancel_msg = ServerMessage::Cancelled {
+                message_id: Some(assistant_message_id),
+            };
+            let _ = sender.send(cancel_msg.to_ws_message()).await;
+        }
         return Ok(());
     }
 
@@ -778,6 +824,8 @@ async fn handle_send_message(
     // Note: We save even truncated responses so users see partial results
     if response_truncated {
         full_content.push_str("\n\n[Response truncated due to length limit]");
+    } else if stream_failed {
+        full_content.push_str("\n\n[Response interrupted]");
     }
 
     match chats::create_message(state.db(), chat_id, "assistant", &full_content, None).await {
@@ -787,11 +835,19 @@ async fn handle_send_message(
 
             // CRITICAL-4: Send message end with the SAME ID we sent in MessageStart
             // The database generates msg.id, but we use assistant_message_id for protocol consistency
-            let end_msg = ServerMessage::MessageEnd {
-                message_id: assistant_message_id,
-                content: full_content,
-            };
-            sender.send(end_msg.to_ws_message()).await?;
+            if !client_gone {
+                let end_msg = if cancelled {
+                    ServerMessage::Cancelled {
+                        message_id: Some(assistant_message_id),
+                    }
+                } else {
+                    ServerMessage::MessageEnd {
+                        message_id: assistant_message_id,
+                        content: full_content.clone(),
+                    }
+                };
+                let _ = sender.send(end_msg.to_ws_message()).await;
+            }
 
             tracing::debug!(
                 "Assistant message completed: chat_id={}, message_id={}, db_id={}, length={}",
@@ -885,11 +941,57 @@ mod tests {
             message_id: Uuid::new_v4(),
             role: "user".to_string(),
             content: "Test message".to_string(),
+            metadata: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"message_saved\""));
         assert!(json.contains("\"role\":\"user\""));
         assert!(json.contains("\"content\":\"Test message\""));
+        assert!(!json.contains("\"metadata\""));
+    }
+
+    #[test]
+    fn test_server_message_message_saved_includes_image_metadata() {
+        let metadata = serde_json::json!({
+            "attachments": [{
+                "name": "shot.png",
+                "mime": "image/png",
+                "url": "data:image/png;base64,xx"
+            }]
+        });
+        let msg = ServerMessage::MessageSaved {
+            message_id: Uuid::new_v4(),
+            role: "user".to_string(),
+            content: "see this".to_string(),
+            metadata: Some(metadata.clone()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"metadata\""));
+        assert!(json.contains("shot.png"));
+        assert!(json.contains("image/png"));
+    }
+
+    #[test]
+    fn test_image_urls_from_metadata() {
+        let metadata = serde_json::json!({
+            "attachments": [
+                {
+                    "name": "shot.png",
+                    "mime": "image/png",
+                    "url": "data:image/png;base64,xx"
+                },
+                {
+                    "name": "notes.md",
+                    "mime": "text/markdown",
+                    "url": "https://example.test/notes.md"
+                }
+            ]
+        });
+        assert_eq!(
+            image_urls_from_metadata(Some(&metadata)),
+            vec!["data:image/png;base64,xx".to_string()]
+        );
+        assert!(image_urls_from_metadata(None).is_empty());
     }
 
     #[test]

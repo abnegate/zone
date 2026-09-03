@@ -52,6 +52,7 @@ export function CreateProjectWizard({
   createProject,
 }: CreateProjectWizardProps) {
   const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
   const [currentStep, setCurrentStep] = useState(0);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -65,15 +66,15 @@ export function CreateProjectWizard({
 
   // Load sources when wizard opens
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && workspaceId) {
       setSourcesLoading(true);
       client
-        .getSources('00000000-0000-0000-0000-000000000001')
+        .getSources(workspaceId)
         .then(setSources)
         .catch((err) => console.error('Failed to load sources:', err))
         .finally(() => setSourcesLoading(false));
     }
-  }, [isOpen]);
+  }, [isOpen, workspaceId]);
 
   const handleStepChange = useCallback((step: number) => {
     setCurrentStep(step);

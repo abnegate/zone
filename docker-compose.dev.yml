@@ -36,13 +36,15 @@ services:
       - REDIS_URL=redis://valkey:6379
       - LITELLM_HOST=http://litellm:4000
       - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - CORS_ORIGINS=http://localhost:3001,http://console:3001
       - SQLX_OFFLINE=true
       - RUST_LOG=zone_server=debug,zone_core=debug,zone_context=debug
       - RUST_BACKTRACE=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       # Relax health check for development (rebuilds take time)
       test: ["CMD", "true"]

@@ -3,11 +3,13 @@
 use async_trait::async_trait;
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use once_cell::sync::Lazy;
+use regex::Regex;
+use scraper::{Html, Selector};
 use std::time::Duration;
 
 use super::types::{
-    BrowseQuery, BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSizeFilter,
-    ModelSort,
+    BrowseQuery, BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSize,
+    ModelSizeFilter, ModelSort,
 };
 
 // =============================================================================
@@ -20,6 +22,20 @@ const HTTP_TIMEOUT_SECS: u64 = 30;
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
 const POOL_MAX_IDLE_PER_HOST: usize = 10;
 const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+/// Ollama publishes exact blob sizes in its registry manifests; the library
+/// listing page carries no size at all, so each browsed model needs one lookup.
+const OLLAMA_REGISTRY_URL: &str = "https://registry.ollama.ai/v2/library";
+const OLLAMA_SIZE_LOOKUP_CONCURRENCY: usize = 8;
+
+static PARAM_SIZE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)(?:^|[^A-Za-z0-9])(\d+(?:\.\d+)?)\s*[bB]\b").expect("param size regex")
+});
+static PARAM_SIZE_CHIP_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^\d+(?:\.\d+)?[bB]$").expect("param size chip regex"));
+static BILLION_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)(\d+(?:\.\d+)?)\s*billion").expect("billion regex"));
+static PULLS_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)([\d,.]+[KMBkmb]?)\s*Pulls").expect("pulls regex"));
 
 // =============================================================================
 // Shared HTTP Client
@@ -133,21 +149,90 @@ impl ModelProvider for OllamaLibraryProvider {
         }
 
         let html = response.text().await?;
-        let models = refine_models(parse_ollama_library_html(&html), &opts);
-        Ok(paginate_models(models, offset, opts.limit))
+        let mut models = parse_ollama_library_html(&html);
+        if matches!(opts.sort, ModelSort::SizeAsc | ModelSort::SizeDesc) {
+            models = attach_ollama_download_sizes(models).await;
+            models = refine_models(models, &opts);
+            return Ok(paginate_models(models, offset, opts.limit));
+        }
+
+        models = refine_models(models, &opts);
+        let mut page = paginate_models(models, offset, opts.limit);
+        page.models = attach_ollama_download_sizes(page.models).await;
+        Ok(page)
     }
+}
+
+/// Look up the download size of each model from the Ollama registry.
+///
+/// A model whose manifest cannot be fetched keeps `size: None` rather than
+/// failing the whole listing.
+async fn attach_ollama_download_sizes(models: Vec<ModelResponse>) -> Vec<ModelResponse> {
+    use futures::stream::{self, StreamExt};
+
+    stream::iter(models)
+        .map(|mut model| async move {
+            model.size = fetch_ollama_manifest_size(&model.name).await;
+            if let Some(sizes) = model.sizes.as_mut() {
+                for variant in sizes.iter_mut() {
+                    variant.size = fetch_ollama_manifest_size(&variant.name).await;
+                }
+            }
+            model
+        })
+        .buffered(OLLAMA_SIZE_LOOKUP_CONCURRENCY)
+        .collect()
+        .await
+}
+
+/// Split `llama3.2:1b` into repository + tag. Untagged names use `latest`.
+fn ollama_manifest_ref(name: &str) -> (&str, &str) {
+    match name.split_once(':') {
+        Some((repo, tag)) if !repo.is_empty() && !tag.is_empty() => (repo, tag),
+        _ => (name, "latest"),
+    }
+}
+
+/// Sum the layer sizes in a model's manifest to get its download size.
+async fn fetch_ollama_manifest_size(name: &str) -> Option<u64> {
+    let (repo, tag) = ollama_manifest_ref(name);
+    let url = format!("{}/{}/manifests/{}", OLLAMA_REGISTRY_URL, repo, tag);
+
+    let response = HTTP_CLIENT
+        .get(&url)
+        .header(
+            "Accept",
+            "application/vnd.docker.distribution.manifest.v2+json",
+        )
+        .send()
+        .await
+        .ok()?;
+
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let manifest: serde_json::Value = response.json().await.ok()?;
+    let total: u64 = manifest
+        .get("layers")?
+        .as_array()?
+        .iter()
+        .filter_map(|layer| layer.get("size")?.as_u64())
+        .sum();
+
+    (total > 0).then_some(total)
 }
 
 /// Parse Ollama library HTML to extract model information
 fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
-    use scraper::{Html, Selector};
-
     let document = Html::parse_document(html);
     let mut models = Vec::new();
 
     // Ollama uses <a> elements with href="/library/modelname" for model cards
     let card_selector =
         Selector::parse("a[href^='/library/']").expect("Static selector should always parse");
+    let paragraph_selector = Selector::parse("p").expect("Static selector should always parse");
+    let span_selector = Selector::parse("span").expect("Static selector should always parse");
 
     for element in document.select(&card_selector) {
         if let Some(href) = element.value().attr("href") {
@@ -158,22 +243,51 @@ fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
                 continue;
             }
 
-            // Try to extract additional info from the card text
-            let text = element.text().collect::<Vec<_>>().join(" ");
-            let param_size = extract_param_size(&text);
+            let text = collapse_whitespace(&element.text().collect::<Vec<_>>().join(" "));
+            let description = element
+                .select(&paragraph_selector)
+                .map(|p| collapse_whitespace(&p.text().collect::<String>()))
+                .find(|t| !t.is_empty() && !is_ollama_stat_line(t));
+            let capability_tags = element
+                .select(&span_selector)
+                .map(|s| collapse_whitespace(&s.text().collect::<String>()))
+                .filter(|t| is_capability_tag(t))
+                .collect::<Vec<_>>();
+            let chip_sizes = element
+                .select(&span_selector)
+                .map(|s| collapse_whitespace(&s.text().collect::<String>()))
+                .filter(|t| is_param_size_chip(t))
+                .collect::<Vec<_>>();
+
+            let size_labels = collect_param_size_labels(&text, chip_sizes);
+            let param_size = format_param_sizes(size_labels.clone())
+                .or_else(|| description.as_deref().and_then(extract_param_size));
+            let sizes = ollama_size_variants(&name, &size_labels);
             let family = extract_model_family(&name);
+            let use_cases = nonempty_vec(infer_use_cases(&[
+                description.as_deref().unwrap_or(""),
+                &capability_tags.join(" "),
+                &name,
+            ]));
+            let tags = nonempty_vec(capability_tags);
+            let downloads = extract_pulls(&text);
+            let url = Some(format!("https://ollama.com/library/{}", name));
 
             models.push(ModelResponse {
                 name,
-                size: None,
-                digest: None,
-                modified_at: None,
+                description,
+                url,
+                downloads,
+                tags,
+                use_cases,
+                sizes,
                 details: Some(ModelDetails {
                     format: Some("gguf".to_string()),
                     family,
                     parameter_size: param_size,
-                    quantization_level: None,
+                    ..Default::default()
                 }),
+                ..Default::default()
             });
         }
     }
@@ -193,26 +307,33 @@ fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
 /// Extract model family from name
 fn extract_model_family(name: &str) -> Option<String> {
     let name_lower = name.to_lowercase();
+    // Longer / more specific names first so "codellama" is not classified as "llama".
     let families = [
-        ("llama", "llama"),
-        ("mistral", "mistral"),
-        ("qwen", "qwen"),
-        ("phi", "phi"),
-        ("gemma", "gemma"),
-        ("deepseek", "deepseek"),
         ("codellama", "codellama"),
-        ("vicuna", "vicuna"),
-        ("falcon", "falcon"),
-        ("yi", "yi"),
-        ("command", "command"),
-        ("mixtral", "mixtral"),
-        ("nomic", "nomic"),
-        ("mxbai", "mxbai"),
-        ("snowflake", "snowflake"),
-        ("starcoder", "starcoder"),
         ("codegemma", "codegemma"),
+        ("starcoder", "starcoder"),
+        ("deepseek", "deepseek"),
+        ("nemotron", "nemotron"),
+        ("snowflake", "snowflake"),
+        ("minimax", "minimax"),
+        ("mixtral", "mixtral"),
+        ("mistral", "mistral"),
+        ("command", "command"),
         ("granite", "granite"),
         ("smollm", "smollm"),
+        ("ornith", "ornith"),
+        ("llama", "llama"),
+        ("qwen", "qwen"),
+        ("gemma", "gemma"),
+        ("vicuna", "vicuna"),
+        ("falcon", "falcon"),
+        ("nomic", "nomic"),
+        ("mxbai", "mxbai"),
+        ("muse", "muse"),
+        ("kimi", "kimi"),
+        ("phi", "phi"),
+        ("glm", "glm"),
+        ("yi", "yi"),
     ];
 
     for (pattern, family) in families {
@@ -226,42 +347,165 @@ fn extract_model_family(name: &str) -> Option<String> {
 /// Return a list of popular Ollama models as fallback
 fn get_popular_ollama_models() -> Vec<ModelResponse> {
     let popular = [
-        ("llama3.2", "llama", "3B"),
-        ("llama3.1", "llama", "8B"),
-        ("llama3.1:70b", "llama", "70B"),
-        ("mistral", "mistral", "7B"),
-        ("mixtral", "mixtral", "47B"),
-        ("qwen2.5", "qwen", "7B"),
-        ("qwen2.5:72b", "qwen", "72B"),
-        ("phi3", "phi", "3.8B"),
-        ("gemma2", "gemma", "9B"),
-        ("deepseek-r1", "deepseek", "7B"),
-        ("deepseek-r1:32b", "deepseek", "32B"),
-        ("codellama", "codellama", "7B"),
-        ("starcoder2", "starcoder", "7B"),
-        ("nomic-embed-text", "nomic", "137M"),
-        ("mxbai-embed-large", "mxbai", "335M"),
-        ("command-r", "command", "35B"),
-        ("yi", "yi", "34B"),
-        ("granite3-dense", "granite", "8B"),
-        ("smollm2", "smollm", "1.7B"),
-        ("dolphin-mixtral", "mixtral", "47B"),
+        (
+            "llama3.2",
+            "llama",
+            "3B",
+            "Meta's compact Llama 3.2 for multilingual chat and on-device assistants.",
+            &["Chat", "Agents"] as &[&str],
+        ),
+        (
+            "llama3.1",
+            "llama",
+            "8B",
+            "Meta Llama 3.1 8B — a strong general-purpose local chat and instruction model.",
+            &["Chat", "Tool use"],
+        ),
+        (
+            "llama3.1:70b",
+            "llama",
+            "70B",
+            "Meta Llama 3.1 70B for higher-quality reasoning, writing, and complex assistants.",
+            &["Chat", "Reasoning"],
+        ),
+        (
+            "mistral",
+            "mistral",
+            "7B",
+            "Mistral 7B — fast, capable instruction following for chat and lightweight agents.",
+            &["Chat"],
+        ),
+        (
+            "mixtral",
+            "mixtral",
+            "47B",
+            "Mixtral 8x7B mixture-of-experts for high-quality chat at a modest active-parameter cost.",
+            &["Chat", "Reasoning"],
+        ),
+        (
+            "qwen2.5",
+            "qwen",
+            "7B",
+            "Qwen2.5 7B — strong multilingual chat, coding, and instruction following.",
+            &["Chat", "Coding"],
+        ),
+        (
+            "qwen2.5:72b",
+            "qwen",
+            "72B",
+            "Qwen2.5 72B for demanding reasoning, coding, and long-form generation.",
+            &["Chat", "Coding", "Reasoning"],
+        ),
+        (
+            "phi3",
+            "phi",
+            "3.8B",
+            "Microsoft Phi-3 Mini — small, efficient model for constrained hardware.",
+            &["Chat"],
+        ),
+        (
+            "gemma2",
+            "gemma",
+            "9B",
+            "Google Gemma 2 9B for lightweight chat and instruction workloads.",
+            &["Chat"],
+        ),
+        (
+            "deepseek-r1",
+            "deepseek",
+            "7B",
+            "DeepSeek-R1 distill focused on step-by-step reasoning and math.",
+            &["Reasoning"],
+        ),
+        (
+            "deepseek-r1:32b",
+            "deepseek",
+            "32B",
+            "Larger DeepSeek-R1 distill for harder reasoning and analysis tasks.",
+            &["Reasoning"],
+        ),
+        (
+            "codellama",
+            "codellama",
+            "7B",
+            "Code Llama 7B for code completion, explanation, and light refactoring.",
+            &["Coding"],
+        ),
+        (
+            "starcoder2",
+            "starcoder",
+            "7B",
+            "StarCoder2 7B trained on permissively licensed code for completion and generation.",
+            &["Coding"],
+        ),
+        (
+            "nomic-embed-text",
+            "nomic",
+            "137M",
+            "Nomic Embed Text — compact embedding model for search and retrieval.",
+            &["Embeddings"],
+        ),
+        (
+            "mxbai-embed-large",
+            "mxbai",
+            "335M",
+            "mixedbread embed-large for higher-quality retrieval embeddings.",
+            &["Embeddings"],
+        ),
+        (
+            "command-r",
+            "command",
+            "35B",
+            "Cohere Command R for retrieval-augmented chat and tool-using agents.",
+            &["Chat", "Tool use", "Agents"],
+        ),
+        (
+            "yi",
+            "yi",
+            "34B",
+            "01.AI Yi 34B bilingual chat model for English and Chinese workloads.",
+            &["Chat"],
+        ),
+        (
+            "granite3-dense",
+            "granite",
+            "8B",
+            "IBM Granite 3 Dense 8B for enterprise chat and instruction following.",
+            &["Chat"],
+        ),
+        (
+            "smollm2",
+            "smollm",
+            "1.7B",
+            "SmolLM2 — very small on-device model for simple chat and experiments.",
+            &["Chat"],
+        ),
+        (
+            "dolphin-mixtral",
+            "mixtral",
+            "47B",
+            "Uncensored Dolphin fine-tune of Mixtral for creative chat and roleplay.",
+            &["Chat"],
+        ),
     ];
 
     popular
         .iter()
-        .map(|(name, family, size)| ModelResponse {
-            name: name.to_string(),
-            size: None,
-            digest: None,
-            modified_at: None,
-            details: Some(ModelDetails {
-                format: Some("gguf".to_string()),
-                family: Some(family.to_string()),
-                parameter_size: Some(size.to_string()),
-                quantization_level: None,
-            }),
-        })
+        .map(
+            |(name, family, size, description, use_cases)| ModelResponse {
+                name: name.to_string(),
+                description: Some(description.to_string()),
+                url: Some(format!("https://ollama.com/library/{}", name)),
+                use_cases: Some(use_cases.iter().map(|s| s.to_string()).collect()),
+                details: Some(ModelDetails {
+                    format: Some("gguf".to_string()),
+                    family: Some(family.to_string()),
+                    parameter_size: Some(size.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
         .collect()
 }
 
@@ -278,105 +522,134 @@ impl ModelProvider for HuggingFaceProvider {
     }
 
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
-        let (sort_field, direction) = huggingface_sort_params(opts.sort);
-        let mut url = format!(
-            "https://huggingface.co/api/models?filter=gguf&sort={}&direction={}&limit={}",
-            sort_field, direction, opts.limit
-        );
-
-        // Add cursor if provided (for pagination)
-        // Note: cursor from Link header is already URL-encoded, don't re-encode
-        if let Some(c) = opts.cursor {
-            url.push_str(&format!("&cursor={}", c));
+        if !huggingface_uses_local_window(&opts) {
+            let (models, next_cursor) =
+                fetch_huggingface_page(&opts, opts.cursor, opts.limit).await?;
+            return Ok(BrowseResponse {
+                models: refine_models(models, &opts),
+                next_cursor,
+            });
         }
 
-        if let Some(q) = opts.query
-            && !q.is_empty()
-        {
-            url.push_str(&format!("&search={}", urlencoding::encode(q)));
+        // Size filters and name/size/parameter sorts cannot be applied to a
+        // single HuggingFace downloads page. Gather a window first, refine it,
+        // then paginate with an offset cursor.
+        let offset = parse_cursor_offset(opts.cursor).unwrap_or(0);
+        let needs_sorted_window = huggingface_uses_local_sort(opts.sort);
+        let mut accumulated = Vec::new();
+        let mut hf_cursor: Option<String> = None;
+        let mut pages = 0;
+
+        loop {
+            let (page, next) =
+                fetch_huggingface_page(&opts, hf_cursor.as_deref(), MAX_PAGE_SIZE).await?;
+            pages += 1;
+            accumulated.extend(page);
+            hf_cursor = next;
+
+            let exhausted = hf_cursor.is_none() || pages >= HF_WINDOW_PAGES;
+            if exhausted {
+                break;
+            }
+
+            // Size-only refinement can stop once this window can fill the page.
+            // Name/size/parameter sorts need the full window before ordering.
+            if !needs_sorted_window
+                && count_matching_models(&accumulated, &opts) >= offset.saturating_add(opts.limit)
+            {
+                break;
+            }
         }
 
-        if let Some(family) = opts.family {
-            url.push_str(&format!("&filter={}", urlencoding::encode(family)));
+        let mut response = paginate_models(refine_models(accumulated, &opts), offset, opts.limit);
+        if response.next_cursor.is_none() && hf_cursor.is_some() {
+            response.next_cursor = Some(format!("offset:{}", offset + response.models.len()));
         }
-
-        let response = HTTP_CLIENT.get(&url).send().await?;
-
-        if !response.status().is_success() {
-            return Err(ProviderError::Unavailable(format!(
-                "HuggingFace API returned status: {}",
-                response.status()
-            )));
-        }
-
-        // Extract next cursor from Link header
-        let next_cursor = extract_cursor_from_link_header(response.headers());
-
-        // Read body as text first for better error messages
-        let body = response.text().await?;
-        let hf_models: Vec<HuggingFaceModel> = serde_json::from_str(&body).map_err(|e| {
-            tracing::error!(
-                "HuggingFace JSON parse error: {}. Body preview: {}",
-                e,
-                &body[..body.len().min(500)]
-            );
-            ProviderError::ParseError(format!("{}", e))
-        })?;
-
-        let models: Vec<ModelResponse> = hf_models
-            .into_iter()
-            .map(|m| {
-                // Try to extract model info from tags
-                let family = m.tags.as_ref().and_then(|tags| {
-                    // Look for common model families in tags
-                    let families = [
-                        "llama",
-                        "mistral",
-                        "qwen",
-                        "phi",
-                        "gemma",
-                        "falcon",
-                        "mpt",
-                        "yi",
-                        "deepseek",
-                        "codellama",
-                        "vicuna",
-                        "orca",
-                    ];
-                    tags.iter()
-                        .find(|t| families.iter().any(|f| t.to_lowercase().contains(f)))
-                        .cloned()
-                });
-
-                // Try to extract parameter size from model ID or tags
-                let param_size = extract_param_size(&m.model_id).or_else(|| {
-                    m.tags.as_ref().and_then(|tags| {
-                        tags.iter()
-                            .find(|t| t.ends_with('b') || t.ends_with('B') || t.contains("param"))
-                            .cloned()
-                    })
-                });
-
-                ModelResponse {
-                    name: m.model_id,
-                    size: None,
-                    digest: m.sha.clone(),
-                    modified_at: m.last_modified,
-                    details: Some(ModelDetails {
-                        format: Some("gguf".to_string()),
-                        family,
-                        parameter_size: param_size,
-                        quantization_level: None,
-                    }),
-                }
-            })
-            .collect();
-
-        Ok(BrowseResponse {
-            models: refine_models(models, &opts),
-            next_cursor,
-        })
+        Ok(response)
     }
+}
+
+const HF_WINDOW_PAGES: usize = 5;
+
+fn huggingface_uses_local_sort(sort: ModelSort) -> bool {
+    matches!(
+        sort,
+        ModelSort::NameAsc
+            | ModelSort::NameDesc
+            | ModelSort::SizeAsc
+            | ModelSort::SizeDesc
+            | ModelSort::ParamsAsc
+            | ModelSort::ParamsDesc
+    )
+}
+
+fn huggingface_uses_local_window(opts: &BrowseQuery<'_>) -> bool {
+    opts.size != ModelSizeFilter::All || huggingface_uses_local_sort(opts.sort)
+}
+
+async fn fetch_huggingface_page(
+    opts: &BrowseQuery<'_>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<ModelResponse>, Option<String>), ProviderError> {
+    let (sort_field, direction) = huggingface_sort_params(opts.sort);
+    let mut url = format!(
+        "https://huggingface.co/api/models?filter=gguf&sort={}&direction={}&limit={}",
+        sort_field, direction, limit
+    );
+    for field in [
+        "cardData",
+        "gguf",
+        "downloads",
+        "likes",
+        "tags",
+        "pipeline_tag",
+        "createdAt",
+        "author",
+        "lastModified",
+    ] {
+        url.push_str("&expand%5B%5D=");
+        url.push_str(field);
+    }
+
+    if let Some(c) = cursor {
+        url.push_str(&format!("&cursor={}", c));
+    }
+
+    if let Some(q) = opts.query
+        && !q.is_empty()
+    {
+        url.push_str(&format!("&search={}", urlencoding::encode(q)));
+    }
+
+    if let Some(family) = opts.family {
+        url.push_str(&format!("&filter={}", urlencoding::encode(family)));
+    }
+
+    let response = HTTP_CLIENT.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        return Err(ProviderError::Unavailable(format!(
+            "HuggingFace API returned status: {}",
+            response.status()
+        )));
+    }
+
+    let next_cursor = extract_cursor_from_link_header(response.headers());
+    let body = response.text().await?;
+    let hf_models: Vec<HuggingFaceModel> = serde_json::from_str(&body).map_err(|e| {
+        tracing::error!(
+            "HuggingFace JSON parse error: {}. Body preview: {}",
+            e,
+            &body[..body.len().min(500)]
+        );
+        ProviderError::ParseError(format!("{}", e))
+    })?;
+
+    Ok((
+        hf_models.into_iter().map(huggingface_to_model).collect(),
+        next_cursor,
+    ))
 }
 
 /// Extract cursor from Link header
@@ -409,18 +682,157 @@ fn extract_cursor_from_link_header(headers: &reqwest::header::HeaderMap) -> Opti
 
 #[derive(Debug, serde::Deserialize)]
 struct HuggingFaceModel {
-    #[serde(rename = "modelId")]
-    model_id: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(rename = "modelId", default)]
+    model_id: Option<String>,
     #[serde(default)]
     sha: Option<String>,
     #[serde(rename = "lastModified", default)]
     last_modified: Option<String>,
+    #[serde(rename = "createdAt", default)]
+    created_at: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
     #[serde(default)]
     downloads: Option<u64>,
     #[serde(default)]
     likes: Option<u64>,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(rename = "pipeline_tag", default)]
+    pipeline_tag: Option<String>,
+    #[serde(rename = "cardData", default)]
+    card_data: Option<HuggingFaceCardData>,
+    #[serde(default)]
+    gguf: Option<HuggingFaceGguf>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HuggingFaceCardData {
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(rename = "pipeline_tag", default)]
+    pipeline_tag: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HuggingFaceGguf {
+    #[serde(default)]
+    total: Option<u64>,
+    #[serde(rename = "totalFileSize", default)]
+    total_file_size: Option<u64>,
+    #[serde(default)]
+    architecture: Option<String>,
+    #[serde(rename = "context_length", default)]
+    context_length: Option<u64>,
+}
+
+fn huggingface_model_id(m: &HuggingFaceModel) -> String {
+    m.model_id
+        .clone()
+        .or_else(|| m.id.clone())
+        .unwrap_or_default()
+}
+
+fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
+    let model_id = huggingface_model_id(&m);
+    let tags = m.tags.clone().unwrap_or_default();
+    let pipeline = m
+        .pipeline_tag
+        .clone()
+        .or_else(|| m.card_data.as_ref().and_then(|c| c.pipeline_tag.clone()));
+    let family = m
+        .gguf
+        .as_ref()
+        .and_then(|g| g.architecture.clone())
+        .or_else(|| {
+            tags.iter()
+                .find_map(|t| extract_model_family(t))
+                .or_else(|| extract_model_family(&model_id))
+        });
+    let param_size = extract_param_size(&model_id).or_else(|| {
+        tags.iter().find_map(|t| {
+            if is_param_size_chip(t) {
+                Some(t.to_uppercase())
+            } else {
+                extract_param_size(t)
+            }
+        })
+    });
+    let size = m.gguf.as_ref().and_then(|g| g.total_file_size.or(g.total));
+    let context_length = m.gguf.as_ref().and_then(|g| g.context_length);
+    let license = m.card_data.as_ref().and_then(|c| c.license.clone());
+    let author = m
+        .author
+        .clone()
+        .or_else(|| model_id.split_once('/').map(|(owner, _)| owner.to_string()));
+    let description = huggingface_description(&m, pipeline.as_deref(), family.as_deref());
+    let use_cases = nonempty_vec(use_cases_from_pipeline(pipeline.as_deref(), &tags));
+    let public_tags = nonempty_vec(
+        tags.into_iter()
+            .filter(|t| {
+                let lower = t.to_lowercase();
+                !lower.starts_with("arxiv:")
+                    && !lower.starts_with("base_model:")
+                    && !lower.starts_with("license:")
+                    && !lower.starts_with("region:")
+                    && lower != "endpoints_compatible"
+                    && lower != "transformers"
+            })
+            .take(8)
+            .collect(),
+    );
+
+    ModelResponse {
+        name: model_id.clone(),
+        size,
+        digest: m.sha,
+        modified_at: m.last_modified.or(m.created_at),
+        description,
+        author,
+        url: Some(format!("https://huggingface.co/{}", model_id)),
+        downloads: m.downloads,
+        likes: m.likes,
+        tags: public_tags,
+        use_cases,
+        details: Some(ModelDetails {
+            format: Some("gguf".to_string()),
+            family,
+            parameter_size: param_size,
+            context_length,
+            license,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn huggingface_description(
+    m: &HuggingFaceModel,
+    pipeline: Option<&str>,
+    family: Option<&str>,
+) -> Option<String> {
+    let mut sentence = match pipeline {
+        Some(tag) => format!("{} GGUF model", humanize_label(tag)),
+        None => "GGUF model".to_string(),
+    };
+    if let Some(author) = m.author.as_deref() {
+        sentence.push_str(" by ");
+        sentence.push_str(author);
+    }
+    if let Some(family) = family {
+        sentence.push_str(". ");
+        sentence.push_str(&humanize_label(family));
+        sentence.push_str(" architecture");
+    }
+    if let Some(ctx) = m.gguf.as_ref().and_then(|g| g.context_length) {
+        sentence.push_str(" with ");
+        sentence.push_str(&format_context_tokens(ctx));
+        sentence.push_str(" context");
+    }
+    sentence.push('.');
+    Some(sentence)
 }
 
 // =============================================================================
@@ -469,6 +881,10 @@ impl ModelProvider for Gpt4AllProvider {
                 .filter(|m| {
                     m.name.to_lowercase().contains(&q_lower)
                         || m.filename.to_lowercase().contains(&q_lower)
+                        || m.description
+                            .as_ref()
+                            .map(|d| d.to_lowercase().contains(&q_lower))
+                            .unwrap_or(false)
                         || m.model_type
                             .as_ref()
                             .map(|t| t.to_lowercase().contains(&q_lower))
@@ -479,28 +895,7 @@ impl ModelProvider for Gpt4AllProvider {
             gpt4all_models
         };
 
-        let models: Vec<ModelResponse> = filtered
-            .into_iter()
-            .map(|m| {
-                let param_size = m
-                    .parameters
-                    .clone()
-                    .or_else(|| extract_param_size(&m.filename));
-
-                ModelResponse {
-                    name: m.name.clone(),
-                    size: Some(m.filesize),
-                    digest: None,
-                    modified_at: None,
-                    details: Some(ModelDetails {
-                        format: Some("gguf".to_string()),
-                        family: m.model_type.clone(),
-                        parameter_size: param_size,
-                        quantization_level: extract_quantization(&m.filename),
-                    }),
-                }
-            })
-            .collect();
+        let models: Vec<ModelResponse> = filtered.into_iter().map(gpt4all_to_model).collect();
 
         Ok(paginate_models(
             refine_models(models, &opts),
@@ -520,6 +915,63 @@ struct Gpt4AllModel {
     parameters: Option<String>,
     #[serde(rename = "type", default)]
     model_type: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    quant: Option<String>,
+    #[serde(rename = "ramrequired", default)]
+    ram_required: Option<serde_json::Value>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+fn gpt4all_to_model(m: Gpt4AllModel) -> ModelResponse {
+    let description = m
+        .description
+        .as_deref()
+        .map(html_to_plain_text)
+        .filter(|s| !s.is_empty());
+    let param_size = m
+        .parameters
+        .as_deref()
+        .map(normalize_parameter_label)
+        .or_else(|| extract_param_size(&m.filename));
+    let quantization = m
+        .quant
+        .as_deref()
+        .map(|q| q.to_uppercase())
+        .or_else(|| extract_quantization(&m.filename));
+    let ram_required_gb = m.ram_required.as_ref().and_then(|v| match v {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    });
+    let use_cases = nonempty_vec(infer_use_cases(&[
+        description.as_deref().unwrap_or(""),
+        m.model_type.as_deref().unwrap_or(""),
+        &m.name,
+        m.description.as_deref().unwrap_or(""),
+    ]));
+
+    ModelResponse {
+        name: m.name.clone(),
+        size: Some(m.filesize),
+        description,
+        url: m.url,
+        use_cases,
+        details: Some(ModelDetails {
+            format: Some("gguf".to_string()),
+            family: m
+                .model_type
+                .clone()
+                .or_else(|| extract_model_family(&m.filename)),
+            parameter_size: param_size,
+            quantization_level: quantization,
+            ram_required_gb,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 /// Deserialize a value that can be either a string or a number into u64
@@ -625,31 +1077,17 @@ impl ModelProvider for OpenRouterProvider {
                 .filter(|m| {
                     m.id.to_lowercase().contains(&q_lower)
                         || m.name.to_lowercase().contains(&q_lower)
+                        || m.description
+                            .as_ref()
+                            .map(|d| d.to_lowercase().contains(&q_lower))
+                            .unwrap_or(false)
                 })
                 .collect()
         } else {
             or_response.data
         };
 
-        let models: Vec<ModelResponse> = filtered
-            .into_iter()
-            .map(|m| {
-                let param_size = extract_param_size(&m.id);
-
-                ModelResponse {
-                    name: m.id,
-                    size: None,
-                    digest: None,
-                    modified_at: None,
-                    details: Some(ModelDetails {
-                        format: Some("api".to_string()),
-                        family: m.architecture.and_then(|a| a.tokenizer),
-                        parameter_size: param_size,
-                        quantization_level: None,
-                    }),
-                }
-            })
-            .collect();
+        let models: Vec<ModelResponse> = filtered.into_iter().map(openrouter_to_model).collect();
 
         Ok(paginate_models(
             refine_models(models, &opts),
@@ -669,13 +1107,75 @@ struct OpenRouterModel {
     id: String,
     name: String,
     #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    context_length: Option<u64>,
+    #[serde(default)]
     architecture: Option<OpenRouterArchitecture>,
+    #[serde(default)]
+    supported_parameters: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct OpenRouterArchitecture {
     #[serde(default)]
     tokenizer: Option<String>,
+    #[serde(default)]
+    modality: Option<String>,
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
+}
+
+fn openrouter_to_model(m: OpenRouterModel) -> ModelResponse {
+    let param_size = extract_param_size(&m.id).or_else(|| extract_param_size(&m.name));
+    let family = extract_model_family(&m.id)
+        .or_else(|| extract_model_family(&m.name))
+        .or_else(|| m.architecture.as_ref().and_then(|a| a.tokenizer.clone()));
+    let description = m
+        .description
+        .as_deref()
+        .map(collapse_whitespace)
+        .filter(|s| !s.is_empty());
+    let mut capability_bits = vec![
+        m.name.as_str(),
+        m.id.as_str(),
+        description.as_deref().unwrap_or(""),
+        m.architecture
+            .as_ref()
+            .and_then(|a| a.modality.as_deref())
+            .unwrap_or(""),
+    ];
+    let input_modalities = m
+        .architecture
+        .as_ref()
+        .and_then(|a| a.input_modalities.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    let supported = m.supported_parameters.clone().unwrap_or_default();
+    let joined_inputs = input_modalities.join(" ");
+    let joined_params = supported.join(" ");
+    capability_bits.push(&joined_inputs);
+    capability_bits.push(&joined_params);
+    let use_cases = nonempty_vec(infer_use_cases(&capability_bits));
+    let author = m.id.split_once('/').map(|(owner, _)| owner.to_string());
+    let display_name = (m.name != m.id).then_some(m.name.clone());
+
+    ModelResponse {
+        name: m.id.clone(),
+        display_name,
+        description,
+        author,
+        url: Some(format!("https://openrouter.ai/{}", m.id)),
+        use_cases,
+        details: Some(ModelDetails {
+            format: Some("api".to_string()),
+            family,
+            parameter_size: param_size,
+            context_length: m.context_length,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 // =============================================================================
@@ -697,16 +1197,26 @@ fn huggingface_sort_params(sort: ModelSort) -> (&'static str, i8) {
 }
 
 fn refine_models(mut models: Vec<ModelResponse>, opts: &BrowseQuery<'_>) -> Vec<ModelResponse> {
-    if let Some(family) = opts.family {
-        models.retain(|model| model_matches_family(model, family));
-    }
-
-    if opts.size != ModelSizeFilter::All {
-        models.retain(|model| model_matches_size(model, opts.size));
-    }
-
+    models.retain(|model| model_matches_query(model, opts));
     sort_models(&mut models, opts.sort);
     models
+}
+
+fn count_matching_models(models: &[ModelResponse], opts: &BrowseQuery<'_>) -> usize {
+    models
+        .iter()
+        .filter(|model| model_matches_query(model, opts))
+        .count()
+}
+
+fn model_matches_query(model: &ModelResponse, opts: &BrowseQuery<'_>) -> bool {
+    if let Some(family) = opts.family
+        && !model_matches_family(model, family)
+    {
+        return false;
+    }
+
+    opts.size == ModelSizeFilter::All || model_matches_size(model, opts.size)
 }
 
 fn paginate_models(models: Vec<ModelResponse>, offset: usize, limit: usize) -> BrowseResponse {
@@ -891,22 +1401,244 @@ fn parse_cursor_offset(cursor: Option<&str>) -> Result<usize, ProviderError> {
 
 /// Extract parameter size from model name (e.g., "7b", "13B", "70B")
 fn extract_param_size(name: &str) -> Option<String> {
-    let name_lower = name.to_lowercase();
+    format_param_sizes(extract_all_param_sizes(name))
+        .or_else(|| BILLION_RE.captures(name).map(|cap| format!("{}B", &cap[1])))
+}
 
-    // Common patterns: 7b, 13b, 70b, 1.5b, 0.5b, etc.
-    // Sorted by length (longest first) to match longer patterns first
-    let patterns = [
-        "180b", "72b", "70b", "65b", "34b", "33b", "32b", "30b", "14b", "13b", "8b", "7b", "4b",
-        "3b", "2b", "1.5b", "1b", "0.5b",
-    ];
-
-    for pattern in patterns {
-        if name_lower.contains(pattern) {
-            return Some(pattern.to_uppercase());
+fn extract_all_param_sizes(text: &str) -> Vec<String> {
+    let mut sizes = Vec::new();
+    for cap in PARAM_SIZE_RE.captures_iter(text) {
+        let formatted = format!("{}B", &cap[1]);
+        if !sizes.iter().any(|existing| existing == &formatted) {
+            sizes.push(formatted);
         }
     }
+    sizes.sort_by(|a, b| {
+        param_size_value(a)
+            .partial_cmp(&param_size_value(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sizes
+}
 
-    None
+fn collect_param_size_labels(text: &str, chip_sizes: Vec<String>) -> Vec<String> {
+    let mut sizes = extract_all_param_sizes(text);
+    for chip in chip_sizes {
+        let formatted = chip.to_uppercase();
+        if !sizes.iter().any(|existing| existing == &formatted) {
+            sizes.push(formatted);
+        }
+    }
+    sizes.sort_by(|a, b| {
+        param_size_value(a)
+            .partial_cmp(&param_size_value(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sizes.dedup();
+    sizes
+}
+
+fn ollama_size_tag(label: &str) -> String {
+    label.trim().to_lowercase()
+}
+
+/// Build pullable size options when a library card lists more than one.
+fn ollama_size_variants(model_name: &str, labels: &[String]) -> Option<Vec<ModelSize>> {
+    if labels.len() < 2 || model_name.contains(':') {
+        return None;
+    }
+    Some(
+        labels
+            .iter()
+            .map(|label| ModelSize {
+                name: format!("{}:{}", model_name, ollama_size_tag(label)),
+                label: label.clone(),
+                size: None,
+            })
+            .collect(),
+    )
+}
+
+fn format_param_sizes(mut sizes: Vec<String>) -> Option<String> {
+    sizes.sort_by(|a, b| {
+        param_size_value(a)
+            .partial_cmp(&param_size_value(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sizes.dedup();
+    match sizes.len() {
+        0 => None,
+        1 => Some(sizes.remove(0)),
+        2 | 3 => Some(sizes.join(" · ")),
+        _ => Some(format!("{}–{}", sizes[0], sizes[sizes.len() - 1])),
+    }
+}
+
+fn param_size_value(label: &str) -> f64 {
+    label
+        .trim()
+        .trim_end_matches(['B', 'b'])
+        .parse()
+        .unwrap_or(0.0)
+}
+
+fn is_param_size_chip(text: &str) -> bool {
+    PARAM_SIZE_CHIP_RE.is_match(text.trim())
+}
+
+fn is_capability_tag(text: &str) -> bool {
+    matches!(
+        text.trim().to_lowercase().as_str(),
+        "tools" | "thinking" | "vision" | "embedding" | "embeddings" | "audio" | "code" | "cloud"
+    )
+}
+
+fn is_ollama_stat_line(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("pulls") || lower.contains("updated") || lower.contains("tag")
+}
+
+fn extract_pulls(text: &str) -> Option<u64> {
+    PULLS_RE
+        .captures(text)
+        .and_then(|cap| parse_compact_count(&cap[1]))
+}
+
+fn parse_compact_count(raw: &str) -> Option<u64> {
+    let s = raw.trim().replace(',', "");
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = match s.chars().last()? {
+        'K' | 'k' => (&s[..s.len() - 1], 1_000.0),
+        'M' | 'm' => (&s[..s.len() - 1], 1_000_000.0),
+        _ => (s.as_str(), 1.0),
+    };
+    let parsed: f64 = num.trim().parse().ok()?;
+    Some((parsed * mult).round() as u64)
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn html_to_plain_text(html: &str) -> String {
+    let fragment = Html::parse_fragment(html);
+    collapse_whitespace(&fragment.root_element().text().collect::<Vec<_>>().join(" "))
+}
+
+fn nonempty_vec(values: Vec<String>) -> Option<Vec<String>> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+fn normalize_parameter_label(raw: &str) -> String {
+    if let Some(cap) = BILLION_RE.captures(raw) {
+        return format!("{}B", &cap[1]);
+    }
+    extract_param_size(raw).unwrap_or_else(|| raw.to_string())
+}
+
+fn humanize_label(raw: &str) -> String {
+    raw.split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_context_tokens(tokens: u64) -> String {
+    const BINARY_WINDOWS: &[u64] = &[
+        4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576, 2_097_152,
+        4_194_304, 8_388_608,
+    ];
+    if BINARY_WINDOWS.contains(&tokens) {
+        if tokens >= 1_048_576 {
+            return format!("{}M", tokens / 1_048_576);
+        }
+        return format!("{}K", tokens / 1024);
+    }
+    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+        return format!("{}M", tokens / 1_000_000);
+    }
+    if tokens >= 1_000_000 {
+        return format!("{:.1}M", tokens as f64 / 1_000_000.0);
+    }
+    if tokens >= 1000 {
+        return format!("{}K", tokens / 1000);
+    }
+    tokens.to_string()
+}
+
+fn use_cases_from_pipeline(pipeline: Option<&str>, tags: &[String]) -> Vec<String> {
+    let mut cases = Vec::new();
+    if let Some(tag) = pipeline {
+        let mapped = match tag {
+            "text-generation" | "text2text-generation" | "conversational" => Some("Chat"),
+            "feature-extraction" | "sentence-similarity" => Some("Embeddings"),
+            "text-to-image" | "image-to-image" | "image-text-to-image" => Some("Image generation"),
+            "automatic-speech-recognition" | "text-to-speech" | "audio-to-audio" => Some("Audio"),
+            "image-text-to-text" | "image-to-text" => Some("Vision"),
+            _ => None,
+        };
+        if let Some(label) = mapped {
+            cases.push(label.to_string());
+        }
+    }
+    let extras = infer_use_cases(
+        &std::iter::once(pipeline.unwrap_or(""))
+            .chain(tags.iter().map(String::as_str))
+            .collect::<Vec<_>>(),
+    );
+    for label in extras {
+        if !cases.iter().any(|existing| existing == &label) {
+            cases.push(label);
+        }
+    }
+    cases.truncate(5);
+    cases
+}
+
+fn infer_use_cases(parts: &[&str]) -> Vec<String> {
+    let blob = parts.join(" ").to_lowercase();
+    let mut cases = Vec::new();
+    let rules = [
+        ("vision", "Vision"),
+        ("image", "Vision"),
+        ("multimodal", "Multimodal"),
+        ("function call", "Tool use"),
+        ("tool_choice", "Tool use"),
+        ("tools", "Tool use"),
+        ("tool use", "Tool use"),
+        ("thinking", "Reasoning"),
+        ("reasoning", "Reasoning"),
+        ("include_reasoning", "Reasoning"),
+        ("embedding", "Embeddings"),
+        ("audio", "Audio"),
+        ("speech", "Audio"),
+        ("coding", "Coding"),
+        ("code", "Coding"),
+        ("agent", "Agents"),
+        ("instruct", "Chat"),
+        ("conversational", "Chat"),
+        ("chat", "Chat"),
+    ];
+    for (needle, label) in rules {
+        if blob.contains(needle) && !cases.iter().any(|existing| existing == label) {
+            cases.push(label.to_string());
+        }
+    }
+    cases.truncate(5);
+    cases
 }
 
 // =============================================================================
@@ -978,7 +1710,9 @@ mod tests {
                 family: family.map(ToString::to_string),
                 parameter_size: params.map(ToString::to_string),
                 quantization_level: None,
+                ..Default::default()
             }),
+            ..Default::default()
         }
     }
 
@@ -1113,6 +1847,79 @@ mod tests {
     }
 
     #[test]
+    fn test_huggingface_uses_local_window() {
+        assert!(!huggingface_uses_local_window(&browse_opts(
+            ModelSort::Relevance,
+            None,
+            ModelSizeFilter::All
+        )));
+        assert!(!huggingface_uses_local_window(&browse_opts(
+            ModelSort::UpdatedDesc,
+            Some("llama"),
+            ModelSizeFilter::All
+        )));
+        assert!(huggingface_uses_local_window(&browse_opts(
+            ModelSort::NameAsc,
+            None,
+            ModelSizeFilter::All
+        )));
+        assert!(huggingface_uses_local_window(&browse_opts(
+            ModelSort::SizeDesc,
+            None,
+            ModelSizeFilter::All
+        )));
+        assert!(huggingface_uses_local_window(&browse_opts(
+            ModelSort::Relevance,
+            None,
+            ModelSizeFilter::Small
+        )));
+        assert!(huggingface_uses_local_sort(ModelSort::ParamsDesc));
+        assert!(!huggingface_uses_local_sort(ModelSort::UpdatedDesc));
+    }
+
+    #[test]
+    fn test_count_matching_models() {
+        let models = vec![
+            test_model("llama-3b", None, Some("llama"), Some("3B"), None),
+            test_model("llama-70b", None, Some("llama"), Some("70B"), None),
+            test_model("mistral", None, Some("mistral"), Some("7B"), None),
+        ];
+
+        assert_eq!(
+            count_matching_models(
+                &models,
+                &browse_opts(ModelSort::Relevance, Some("llama"), ModelSizeFilter::Small)
+            ),
+            1
+        );
+        assert_eq!(
+            count_matching_models(
+                &models,
+                &browse_opts(ModelSort::Relevance, None, ModelSizeFilter::All)
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn test_ollama_manifest_ref() {
+        assert_eq!(ollama_manifest_ref("llama3.2"), ("llama3.2", "latest"));
+        assert_eq!(ollama_manifest_ref("llama3.2:1b"), ("llama3.2", "1b"));
+        assert_eq!(ollama_manifest_ref("llama3.1:70b"), ("llama3.1", "70b"));
+        assert_eq!(ollama_manifest_ref("model:"), ("model:", "latest"));
+    }
+
+    #[test]
+    fn test_ollama_size_variants() {
+        let variants = ollama_size_variants("llama3.2", &["1B".into(), "3B".into()]).unwrap();
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0].name, "llama3.2:1b");
+        assert_eq!(variants[1].name, "llama3.2:3b");
+        assert!(ollama_size_variants("llama3.2", &["3B".into()]).is_none());
+        assert!(ollama_size_variants("llama3.1:70b", &["8B".into(), "70B".into()]).is_none());
+    }
+
+    #[test]
     fn test_extract_param_size() {
         assert_eq!(extract_param_size("llama-7b"), Some("7B".to_string()));
         assert_eq!(
@@ -1122,6 +1929,19 @@ mod tests {
         assert_eq!(extract_param_size("qwen-72b-chat"), Some("72B".to_string()));
         assert_eq!(extract_param_size("phi-3b"), Some("3B".to_string()));
         assert_eq!(extract_param_size("model-without-size"), None);
+        assert_eq!(
+            extract_param_size("llama-70b-chat"),
+            Some("70B".to_string())
+        );
+        assert_eq!(
+            extract_param_size("granite 3B 8B 30B"),
+            Some("3B · 8B · 30B".to_string())
+        );
+        assert_eq!(extract_param_size("8 billion"), Some("8B".to_string()));
+        assert_eq!(
+            extract_param_size("Qwen3-Coder-30B-A3B-Instruct-GGUF"),
+            Some("30B".to_string())
+        );
     }
 
     #[test]
@@ -1159,6 +1979,11 @@ mod tests {
             Some("deepseek".to_string())
         );
         assert_eq!(extract_model_family("unknown-model"), None);
+        assert_eq!(
+            extract_model_family("codellama"),
+            Some("codellama".to_string())
+        );
+        assert_eq!(extract_model_family("glm-5.3"), Some("glm".to_string()));
     }
 
     #[test]
@@ -1286,8 +2111,8 @@ mod tests {
         // We use serde flatten or ignore unknown fields to handle the extra `id` field
         let models: Vec<HuggingFaceModel> = serde_json::from_str(json).unwrap();
         assert_eq!(models.len(), 2);
-        assert_eq!(models[0].model_id, "author/model");
-        assert_eq!(models[1].model_id, "other/model2");
+        assert_eq!(huggingface_model_id(&models[0]), "author/model");
+        assert_eq!(huggingface_model_id(&models[1]), "other/model2");
     }
 
     #[test]
@@ -1333,5 +2158,181 @@ mod tests {
         );
         assert_eq!(response.data[1].id, "anthropic/claude-3");
         assert!(response.data[1].architecture.is_none());
+    }
+
+    #[test]
+    fn test_parse_ollama_library_html_extracts_description_and_use_cases() {
+        let html = r#"
+            <ul role="list">
+              <li>
+                <a href="/library/llama3.2">
+                  <h2><span>llama3.2</span></h2>
+                  <p class="max-w-lg">Meta's compact Llama 3.2 for multilingual dialogue and agents.</p>
+                  <span>tools</span>
+                  <span>3B</span>
+                  <span>1B</span>
+                  <p><span>28.7K</span><span>Pulls</span></p>
+                </a>
+              </li>
+            </ul>
+        "#;
+
+        let models = parse_ollama_library_html(html);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "llama3.2");
+        assert_eq!(
+            models[0].description.as_deref(),
+            Some("Meta's compact Llama 3.2 for multilingual dialogue and agents.")
+        );
+        assert_eq!(
+            models[0]
+                .details
+                .as_ref()
+                .unwrap()
+                .parameter_size
+                .as_deref(),
+            Some("1B · 3B")
+        );
+        let sizes = models[0].sizes.as_ref().expect("multiple sizes");
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(sizes[0].name, "llama3.2:1b");
+        assert_eq!(sizes[0].label, "1B");
+        assert_eq!(sizes[1].name, "llama3.2:3b");
+        assert_eq!(sizes[1].label, "3B");
+        assert_eq!(models[0].downloads, Some(28_700));
+        assert!(
+            models[0]
+                .use_cases
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|c| c == "Tool use" || c == "Agents" || c == "Chat")
+        );
+    }
+
+    #[test]
+    fn test_huggingface_to_model_includes_catalog_metadata() {
+        let json = r#"{
+            "id": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            "modelId": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            "author": "unsloth",
+            "likes": 12,
+            "downloads": 1000,
+            "pipeline_tag": "text-generation",
+            "tags": ["gguf", "qwen", "text-generation", "conversational"],
+            "gguf": {"totalFileSize": 17000000000, "architecture": "qwen3moe", "context_length": 262144},
+            "cardData": {"license": "apache-2.0", "pipeline_tag": "text-generation"}
+        }"#;
+        let parsed: HuggingFaceModel = serde_json::from_str(json).unwrap();
+        let model = huggingface_to_model(parsed);
+        assert_eq!(model.size, Some(17_000_000_000));
+        assert_eq!(
+            model.details.as_ref().unwrap().parameter_size.as_deref(),
+            Some("30B")
+        );
+        assert_eq!(model.details.as_ref().unwrap().context_length, Some(262144));
+        assert_eq!(
+            model.details.as_ref().unwrap().license.as_deref(),
+            Some("apache-2.0")
+        );
+        assert!(
+            model
+                .description
+                .as_ref()
+                .unwrap()
+                .contains("Text Generation")
+        );
+        assert!(
+            model
+                .use_cases
+                .as_ref()
+                .unwrap()
+                .contains(&"Chat".to_string())
+        );
+        assert_eq!(model.author.as_deref(), Some("unsloth"));
+    }
+
+    #[test]
+    fn test_gpt4all_to_model_strips_html_and_exposes_ram() {
+        let json = r#"{
+            "name":"Reasoner v1",
+            "filename":"qwen2.5-coder-7b-instruct-q4_0.gguf",
+            "filesize":"4431390720",
+            "parameters":"8 billion",
+            "type":"qwen2",
+            "quant":"q4_0",
+            "ramrequired":"8",
+            "description":"<ul><li>Use for complex reasoning tasks</li><li>#reasoning</li></ul>",
+            "url":"https://example.com/model.gguf"
+        }"#;
+        let parsed: Gpt4AllModel = serde_json::from_str(json).unwrap();
+        let model = gpt4all_to_model(parsed);
+        assert_eq!(
+            model.details.as_ref().unwrap().parameter_size.as_deref(),
+            Some("8B")
+        );
+        assert_eq!(
+            model
+                .details
+                .as_ref()
+                .unwrap()
+                .quantization_level
+                .as_deref(),
+            Some("Q4_0")
+        );
+        assert_eq!(model.details.as_ref().unwrap().ram_required_gb, Some(8));
+        assert!(
+            model
+                .description
+                .as_ref()
+                .unwrap()
+                .contains("complex reasoning")
+        );
+        assert!(!model.description.as_ref().unwrap().contains("<li>"));
+        assert!(
+            model
+                .use_cases
+                .as_ref()
+                .unwrap()
+                .contains(&"Reasoning".to_string())
+        );
+    }
+
+    #[test]
+    fn test_openrouter_to_model_keeps_description_and_context() {
+        let json = r#"{
+            "id":"anthropic/claude-sonnet-4",
+            "name":"Anthropic: Claude Sonnet 4",
+            "description":"A balanced model for coding and agents.",
+            "context_length":200000,
+            "architecture":{"tokenizer":"Claude","modality":"text+image->text","input_modalities":["text","image"]},
+            "supported_parameters":["tools","include_reasoning"]
+        }"#;
+        let parsed: OpenRouterModel = serde_json::from_str(json).unwrap();
+        let model = openrouter_to_model(parsed);
+        assert_eq!(model.name, "anthropic/claude-sonnet-4");
+        assert_eq!(
+            model.display_name.as_deref(),
+            Some("Anthropic: Claude Sonnet 4")
+        );
+        assert_eq!(
+            model.description.as_deref(),
+            Some("A balanced model for coding and agents.")
+        );
+        assert_eq!(model.details.as_ref().unwrap().context_length, Some(200000));
+        let cases = model.use_cases.unwrap();
+        assert!(cases.contains(&"Coding".to_string()));
+        assert!(cases.contains(&"Vision".to_string()));
+        assert!(cases.contains(&"Tool use".to_string()));
+    }
+
+    #[test]
+    fn test_parse_compact_count_and_context_formatting() {
+        assert_eq!(parse_compact_count("28.7K"), Some(28_700));
+        assert_eq!(parse_compact_count("1.4M"), Some(1_400_000));
+        assert_eq!(parse_compact_count("1234"), Some(1234));
+        assert_eq!(format_context_tokens(262144), "256K");
+        assert_eq!(format_context_tokens(1048576), "1M");
+        assert_eq!(format_context_tokens(128000), "128K");
     }
 }

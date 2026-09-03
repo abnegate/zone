@@ -150,13 +150,35 @@ stats: ## Show resource usage
 
 ##@ Model Management
 
-pull-models: ## Manually trigger model pulling
+pull-models: ## Pull models into the host Ollama daemon
 	@echo "$(BLUE)Pulling Ollama models...$(NC)"
-	@$(DOCKER_COMPOSE) run --rm ollama-init
+	@if ! command -v ollama >/dev/null 2>&1; then \
+		echo "$(RED)ollama CLI not found. Install from https://ollama.com$(NC)"; \
+		echo "$(YELLOW)Or use the bundled engine: docker compose --profile bundled-ollama run --rm ollama-init$(NC)"; \
+		exit 1; \
+	fi
+	@if ! curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then \
+		echo "$(RED)Host Ollama is not reachable at http://127.0.0.1:11434$(NC)"; \
+		echo "$(YELLOW)Start it with: ollama serve$(NC)"; \
+		echo "$(YELLOW)Or use the bundled engine: docker compose --profile bundled-ollama run --rm ollama-init$(NC)"; \
+		exit 1; \
+	fi
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	ollama pull $${OLLAMA_MODEL_FAST:-llama3.1:8b}; \
+	ollama pull $${OLLAMA_MODEL_REASON:-deepseek-r1:32b}; \
+	ollama pull $${OLLAMA_MODEL_EMBED:-nomic-embed-text}; \
+	echo "$(GREEN)Models pulled.$(NC)"
 
 list-models: ## List downloaded Ollama models
 	@echo "$(BLUE)Downloaded Ollama models:$(NC)"
-	@docker exec ollama ollama list
+	@if curl -sf http://127.0.0.1:11434/api/tags >/dev/null; then \
+		ollama list; \
+	elif docker ps --format '{{.Names}}' | grep -q '^ollama$$'; then \
+		docker exec ollama ollama list; \
+	else \
+		echo "$(RED)Ollama is not running. Start the host daemon or use --profile bundled-ollama.$(NC)"; \
+		exit 1; \
+	fi
 
 ##@ Database Operations
 
@@ -279,8 +301,16 @@ update: ## Pull latest images and restart
 
 ##@ Shell Access
 
-shell-ollama: ## Open shell in ollama container
-	@docker exec -it ollama /bin/bash
+shell-ollama: ## Open the host Ollama CLI (or a bundled container shell)
+	@if docker ps --format '{{.Names}}' | grep -q '^ollama$$'; then \
+		docker exec -it ollama /bin/bash; \
+	elif command -v ollama >/dev/null 2>&1; then \
+		echo "$(GREEN)Host Ollama is the default engine.$(NC)"; \
+		ollama list; \
+	else \
+		echo "$(RED)No Ollama container or host CLI found.$(NC)"; \
+		exit 1; \
+	fi
 
 shell-litellm: ## Open shell in litellm container
 	@docker exec -it litellm /bin/sh
@@ -494,7 +524,8 @@ urls: ## Show access URLs for services
 	@if [ -f .env ]; then \
 		. ./.env; \
 		echo "  Web UI:       https://$$DOMAIN_HOST_WEBUI"; \
-		echo "  Manager:      https://manager.$$DOMAIN_HOST_WEBUI"; \
+		echo "  Manager:      https://manager.localhost"; \
+		echo "  Manager (alt): https://manager.$$DOMAIN_HOST_WEBUI"; \
 		echo "  LiteLLM:      https://litellm.$$DOMAIN_HOST_WEBUI"; \
 		echo "  Traefik:      https://traefik.$$DOMAIN_HOST_WEBUI"; \
 		echo "  Grafana:      https://grafana.$$DOMAIN_HOST_WEBUI (monitoring profile)"; \

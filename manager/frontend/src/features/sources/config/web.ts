@@ -36,5 +36,10 @@ export const webSource: SourceDefinition = {
     }
   },
 
+  getUrl: (state) => {
+    const url = state.webUrl as string;
+    return url || undefined;
+  },
+
   getFieldIds: () => ['webUrl'],
 };

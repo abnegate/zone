@@ -30,7 +30,8 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
       const response = await client.getInvitations(orgId);
       setInvitations(response.invitations);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load invitations');
+      const message = err instanceof Error ? err.message : 'Failed to load invitations';
+      setError(message.startsWith('Validation failed') ? 'Couldn’t load invitations' : message);
     } finally {
       setLoading(false);
     }
@@ -141,7 +142,11 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                       {invitation.org_role}
                     </span>
                   </td>
-                  <td>{invitation.workspace_name || '-'}</td>
+                  <td>
+                    {invitation.workspace_name ||
+                      workspaces.find((workspace) => workspace.id === invitation.workspace_id)?.name ||
+                      '-'}
+                  </td>
                   <td>
                     {invitation.workspace_role ? (
                       <span className={`role-badge role-${invitation.workspace_role}`}>
@@ -151,7 +156,7 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                       '-'
                     )}
                   </td>
-                  <td>{invitation.invited_by_email}</td>
+                  <td>{invitation.invited_by_email || '—'}</td>
                   <td className={isExpired(invitation.expires_at) ? 'text-danger' : ''}>
                     {formatDate(invitation.expires_at)}
                     {isExpired(invitation.expires_at) && ' (Expired)'}

@@ -1,4 +1,5 @@
 import React, { forwardRef, useEffect, useCallback, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 import { Button } from '../Button';
@@ -8,7 +9,6 @@ const overlayVariants = cva([
   'flex items-center justify-center',
   'bg-[var(--ui-overlay-medium)]',
   'backdrop-blur-sm',
-  'animate-in fade-in duration-200',
 ]);
 
 const wizardVariants = cva(
@@ -19,7 +19,6 @@ const wizardVariants = cva(
     'rounded-[var(--ui-radius-xl)]',
     'shadow-[var(--ui-shadow-xl)]',
     'max-h-[90vh] overflow-hidden',
-    'animate-in zoom-in-95 fade-in duration-200',
   ],
   {
     variants: {
@@ -182,7 +181,7 @@ const stepDescriptionVariants = cva([
 
 const contentVariants = cva(
   [
-    'flex-1 overflow-auto',
+    'overflow-auto',
     'p-[var(--ui-space-6)]',
     'transition-all duration-150 ease-out',
   ],
@@ -266,20 +265,28 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
     const [animatingStep, setAnimatingStep] = useState<'next' | 'prev' | null>(null);
 
     useEffect(() => {
+      if (!isOpen) return undefined;
+
       const handleEscape = (e: KeyboardEvent) => {
         if (e.key === 'Escape' && onClose) {
           onClose();
         }
       };
 
-      if (isOpen) {
-        document.addEventListener('keydown', handleEscape);
-        document.body.style.overflow = 'hidden';
+      const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+      const previousOverflow = document.body.style.overflow;
+      const previousPaddingRight = document.body.style.paddingRight;
+
+      document.addEventListener('keydown', handleEscape);
+      document.body.style.overflow = 'hidden';
+      if (scrollbarWidth > 0) {
+        document.body.style.paddingRight = `${scrollbarWidth}px`;
       }
 
       return () => {
         document.removeEventListener('keydown', handleEscape);
-        document.body.style.overflow = '';
+        document.body.style.overflow = previousOverflow;
+        document.body.style.paddingRight = previousPaddingRight;
       };
     }, [isOpen, onClose]);
 
@@ -348,11 +355,11 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
       return 'upcoming';
     };
 
-    return (
-      <div className={cn(overlayVariants())} onClick={onClose}>
+    const dialog = (
+      <div className={cn('ui-wizard-overlay', overlayVariants())} onClick={onClose}>
         <div
           ref={ref}
-          className={cn(wizardVariants({ size, className }))}
+          className={cn('ui-wizard', `ui-wizard--${size ?? 'md'}`, wizardVariants({ size, className }))}
           onClick={(e) => e.stopPropagation()}
           role="dialog"
           aria-modal="true"
@@ -360,17 +367,17 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
           {...props}
         >
           {/* Header */}
-          <header className={cn(headerVariants())}>
+          <header className={cn('ui-wizard-header', headerVariants())}>
             <div>
               <h2 id="wizard-title" className={cn(titleVariants())}>
                 {title}
               </h2>
-              {subtitle && <p className={cn(subtitleVariants())}>{subtitle}</p>}
+              {subtitle && <p className={cn('ui-wizard-subtitle', subtitleVariants())}>{subtitle}</p>}
             </div>
             {onClose && (
               <button
                 type="button"
-                className={cn(closeButtonVariants())}
+                className={cn('ui-wizard-close', closeButtonVariants())}
                 onClick={onClose}
                 aria-label="Close wizard"
                 disabled={loading}
@@ -391,8 +398,8 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
           </header>
 
           {/* Step Indicator */}
-          <nav className={cn(stepsNavVariants())} aria-label="Wizard steps">
-            <div className={cn(progressTrackVariants())}>
+          <nav className={cn('ui-wizard-steps', stepsNavVariants())} aria-label="Wizard steps">
+            <div className={cn('ui-wizard-progress', progressTrackVariants())}>
               <div
                 className={cn(progressFillVariants())}
                 style={{ width: `${progressPercent}%` }}
@@ -436,10 +443,10 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
                           <span className="w-2 h-2 rounded-full bg-current" />
                         )}
                       </span>
-                      <span className="flex flex-col items-start">
-                        <span className={cn(stepTitleVariants({ state }))}>{step.title}</span>
+                      <span className="ui-wizard-step-copy flex flex-col items-start">
+                        <span className={cn('ui-wizard-step-title', stepTitleVariants({ state }))}>{step.title}</span>
                         {step.description && (
-                          <span className={cn(stepDescriptionVariants())}>{step.description}</span>
+                          <span className={cn('ui-wizard-step-description', stepDescriptionVariants())}>{step.description}</span>
                         )}
                       </span>
                     </button>
@@ -451,13 +458,13 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
 
           {/* Content */}
           <div
-            className={cn(contentVariants({ animating: animatingStep || 'none' }))}
+            className={cn('ui-wizard-content', contentVariants({ animating: animatingStep || 'none' }))}
           >
             {children}
           </div>
 
           {/* Footer */}
-          <footer className={cn(footerVariants())}>
+          <footer className={cn('ui-wizard-footer', footerVariants())}>
             <div>
               <Button
                 variant="ghost"
@@ -500,6 +507,12 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
         </div>
       </div>
     );
+
+    if (typeof document === 'undefined') {
+      return dialog;
+    }
+
+    return createPortal(dialog, document.body);
   }
 );
 

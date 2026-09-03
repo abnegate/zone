@@ -506,7 +506,10 @@ async fn setup_test_workspace(client: &TestClient, token: &str) -> (String, Stri
             token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Create workspace
     let response = client
@@ -519,7 +522,10 @@ async fn setup_test_workspace(client: &TestClient, token: &str) -> (String, Stri
             token,
         )
         .await;
-    let workspace_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let workspace_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .expect("workspace create must return a wrapped `workspace` object")
+        .to_string();
 
     (org_id, workspace_id)
 }
@@ -546,11 +552,11 @@ async fn test_organization_create() {
     response.assert_status(StatusCode::CREATED);
 
     let body = response.json_value();
-    assert!(body["id"].is_string());
-    assert_eq!(body["name"], "Test Organization");
-    assert_eq!(body["slug"], slug);
-    assert_eq!(body["description"], "A test organization");
-    assert_eq!(body["is_active"], true);
+    assert!(body["organization"]["id"].is_string());
+    assert_eq!(body["organization"]["name"], "Test Organization");
+    assert_eq!(body["organization"]["slug"], slug);
+    assert_eq!(body["organization"]["description"], "A test organization");
+    assert_eq!(body["organization"]["is_active"], true);
 }
 
 #[tokio::test]
@@ -571,7 +577,7 @@ async fn test_organization_get() {
         )
         .await;
     let body = response.json_value();
-    let org_id = body["id"].as_str().unwrap();
+    let org_id = body["organization"]["id"].as_str().unwrap();
 
     // Get organization
     let response = client
@@ -580,7 +586,7 @@ async fn test_organization_get() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["name"], "Get Test Org");
+    assert_eq!(body["organization"]["name"], "Get Test Org");
 }
 
 #[tokio::test]
@@ -616,7 +622,7 @@ async fn test_organization_update() {
         )
         .await;
     let body = response.json_value();
-    let org_id = body["id"].as_str().unwrap();
+    let org_id = body["organization"]["id"].as_str().unwrap();
 
     // Update organization
     let response = client
@@ -633,9 +639,9 @@ async fn test_organization_update() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["name"], "Updated Org Name");
-    assert_eq!(body["description"], "Updated description");
-    assert_eq!(body["is_active"], false);
+    assert_eq!(body["organization"]["name"], "Updated Org Name");
+    assert_eq!(body["organization"]["description"], "Updated description");
+    assert_eq!(body["organization"]["is_active"], false);
 }
 
 #[tokio::test]
@@ -675,7 +681,7 @@ async fn test_organization_delete() {
         )
         .await;
     let body = response.json_value();
-    let org_id = body["id"].as_str().unwrap();
+    let org_id = body["organization"]["id"].as_str().unwrap();
 
     // Delete organization
     let response = client
@@ -728,7 +734,7 @@ async fn test_workspace_create() {
         )
         .await;
     let body = response.json_value();
-    let org_id = body["id"].as_str().unwrap();
+    let org_id = body["organization"]["id"].as_str().unwrap();
 
     // Create workspace
     let response = client
@@ -745,9 +751,9 @@ async fn test_workspace_create() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["id"].is_string());
-    assert_eq!(body["name"], "Test Workspace");
-    assert_eq!(body["organization_id"], org_id);
+    assert!(body["workspace"]["id"].is_string());
+    assert_eq!(body["workspace"]["name"], "Test Workspace");
+    assert_eq!(body["workspace"]["organization_id"], org_id);
 }
 
 #[tokio::test]
@@ -767,7 +773,10 @@ async fn test_workspace_list() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Create workspaces
     for i in 1..=2 {
@@ -790,8 +799,10 @@ async fn test_workspace_list() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert!(body.is_array());
-    assert_eq!(body.as_array().unwrap().len(), 2);
+    let workspaces = body["workspaces"]
+        .as_array()
+        .expect("workspace list must be wrapped in a `workspaces` key, not a bare array");
+    assert_eq!(workspaces.len(), 2);
 }
 
 #[tokio::test]
@@ -808,7 +819,10 @@ async fn test_workspace_get() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Create workspace
     let response = client
@@ -818,7 +832,7 @@ async fn test_workspace_get() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Get workspace
     let response = client
@@ -826,7 +840,7 @@ async fn test_workspace_get() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["name"], "Get Test WS");
+    assert_eq!(response.json_value()["workspace"]["name"], "Get Test WS");
 }
 
 #[tokio::test]
@@ -858,7 +872,10 @@ async fn test_workspace_update() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -867,7 +884,7 @@ async fn test_workspace_update() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Update workspace
     let response = client
@@ -884,8 +901,8 @@ async fn test_workspace_update() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["name"], "Updated WS");
-    assert_eq!(body["is_active"], false);
+    assert_eq!(body["workspace"]["name"], "Updated WS");
+    assert_eq!(body["workspace"]["is_active"], false);
 }
 
 #[tokio::test]
@@ -902,7 +919,10 @@ async fn test_workspace_delete() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -911,7 +931,7 @@ async fn test_workspace_delete() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Delete workspace
     let response = client
@@ -1567,10 +1587,10 @@ async fn test_chat_create() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["id"].is_string());
-    assert_eq!(body["title"], "Test Chat");
-    assert_eq!(body["model_name"], "gpt-4");
-    assert_eq!(body["archived"], false);
+    assert!(body["chat"]["id"].is_string());
+    assert_eq!(body["chat"]["title"], "Test Chat");
+    assert_eq!(body["chat"]["model_name"], "gpt-4");
+    assert_eq!(body["chat"]["archived"], false);
 }
 
 #[tokio::test]
@@ -1585,7 +1605,7 @@ async fn test_chat_get() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
 
     // Get chat
     let response = client
@@ -1596,7 +1616,7 @@ async fn test_chat_get() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["title"], "Get Test Chat");
+    assert_eq!(response.json_value()["chat"]["title"], "Get Test Chat");
 }
 
 #[tokio::test]
@@ -1624,7 +1644,7 @@ async fn test_chat_update() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
 
     // Update chat
     let response = client
@@ -1636,7 +1656,7 @@ async fn test_chat_update() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["title"], "Updated Chat Title");
+    assert_eq!(response.json_value()["chat"]["title"], "Updated Chat Title");
 }
 
 #[tokio::test]
@@ -1651,7 +1671,7 @@ async fn test_chat_delete() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
 
     // Delete chat
     let response = client
@@ -1676,7 +1696,7 @@ async fn test_chat_archive_unarchive() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
 
     // Archive chat
     let response = client
@@ -1691,7 +1711,7 @@ async fn test_chat_archive_unarchive() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["archived"], true);
+    assert_eq!(response.json_value()["chat"]["archived"], true);
 
     // Unarchive chat
     let response = client
@@ -1706,7 +1726,7 @@ async fn test_chat_archive_unarchive() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["archived"], false);
+    assert_eq!(response.json_value()["chat"]["archived"], false);
 }
 
 #[tokio::test]
@@ -1765,7 +1785,7 @@ async fn test_chat_messages() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
 
     // Create message
     let response = client
@@ -1784,9 +1804,9 @@ async fn test_chat_messages() {
         .await;
 
     response.assert_status(StatusCode::CREATED);
-    let message_id = response.json_value()["id"].as_str().unwrap().to_string();
-    assert_eq!(response.json_value()["role"], "user");
-    assert_eq!(response.json_value()["content"], "Hello, world!");
+    let message_id = response.json_value()["message"]["id"].as_str().unwrap().to_string();
+    assert_eq!(response.json_value()["message"]["role"], "user");
+    assert_eq!(response.json_value()["message"]["content"], "Hello, world!");
 
     // List messages
     let response = client
@@ -1821,7 +1841,7 @@ async fn test_chat_message_delete_not_found() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
 
     let response = client
         .delete_auth(
@@ -1868,10 +1888,41 @@ async fn test_source_create() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["id"].is_string());
-    assert_eq!(body["name"], name);
-    assert_eq!(body["source_type"], "github");
-    assert_eq!(body["is_active"], true);
+    assert!(body["source"]["id"].is_string());
+    assert_eq!(body["source"]["name"], name);
+    assert_eq!(body["source"]["source_type"], "github");
+    assert_eq!(body["source"]["category"], "file");
+    assert_eq!(body["source"]["url"], "https://github.com/test-org/test-repo");
+    assert_eq!(body["source"]["is_active"], true);
+}
+
+#[tokio::test]
+async fn test_source_create_derives_github_url() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+    let name = test_source_name();
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{}/sources", workspace_id),
+            &json!({
+                "name": &name,
+                "source_type": "github",
+                "config": {
+                    "owner": "acme",
+                    "repo": "zone",
+                    "branch": "main"
+                }
+            }),
+            &token,
+        )
+        .await;
+
+    response.assert_status(StatusCode::CREATED);
+    let body = response.json_value();
+    assert_eq!(body["source"]["category"], "file");
+    assert_eq!(body["source"]["url"], "https://github.com/acme/zone");
 }
 
 #[tokio::test]
@@ -1894,7 +1945,7 @@ async fn test_source_get() {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let source_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
 
     // Get source
     let response = client
@@ -1905,7 +1956,7 @@ async fn test_source_get() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["name"], name);
+    assert_eq!(response.json_value()["source"]["name"], name);
 }
 
 #[tokio::test]
@@ -1948,7 +1999,7 @@ async fn test_source_update() {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let source_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
 
     // Update source
     let updated_name = test_source_name();
@@ -1967,8 +2018,8 @@ async fn test_source_update() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["name"], updated_name);
-    assert_eq!(body["is_active"], false);
+    assert_eq!(body["source"]["name"], updated_name);
+    assert_eq!(body["source"]["is_active"], false);
 }
 
 #[tokio::test]
@@ -1991,7 +2042,7 @@ async fn test_source_delete() {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let source_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
 
     // Delete source
     let response = client
@@ -2024,7 +2075,7 @@ async fn test_source_verify() {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let source_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
 
     // Verify source - accepts both NO_CONTENT (success) and SERVICE_UNAVAILABLE (no verification service in test)
     let response = client
@@ -2170,7 +2221,7 @@ async fn test_organization_create_minimal() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["description"].is_null());
+    assert!(body["organization"]["description"].is_null());
 }
 
 #[tokio::test]
@@ -2256,7 +2307,7 @@ async fn test_chat_create_minimal() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert_eq!(body["workspace_id"].as_str().unwrap(), &workspace_id);
+    assert_eq!(body["chat"]["workspace_id"].as_str().unwrap(), &workspace_id);
 }
 
 #[tokio::test]
@@ -2281,8 +2332,8 @@ async fn test_source_create_minimal() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert!(body["description"].is_null());
-    assert!(body["url"].is_null());
+    assert!(body["source"]["description"].is_null());
+    assert!(body["source"]["url"].is_null());
 }
 
 // =============================================================================
@@ -2303,7 +2354,10 @@ async fn test_workspace_theme_upsert() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -2312,7 +2366,7 @@ async fn test_workspace_theme_upsert() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Upsert theme
     let response = client
@@ -2333,8 +2387,8 @@ async fn test_workspace_theme_upsert() {
 
     response.assert_status(StatusCode::OK);
     let body = response.json_value();
-    assert_eq!(body["primary_color_light"], "#3B82F6");
-    assert_eq!(body["font_family"], "Inter, sans-serif");
+    assert_eq!(body["theme"]["primary_color_light"], "#3B82F6");
+    assert_eq!(body["theme"]["font_family"], "Inter, sans-serif");
 }
 
 #[tokio::test]
@@ -2351,7 +2405,10 @@ async fn test_workspace_theme_get() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -2360,7 +2417,7 @@ async fn test_workspace_theme_get() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Upsert theme first
     client
@@ -2377,7 +2434,7 @@ async fn test_workspace_theme_get() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["primary_color_light"], "#FF0000");
+    assert_eq!(response.json_value()["theme"]["primary_color_light"], "#FF0000");
 }
 
 #[tokio::test]
@@ -2394,7 +2451,10 @@ async fn test_workspace_theme_get_not_found() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -2403,7 +2463,7 @@ async fn test_workspace_theme_get_not_found() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Get theme (should be 404)
     let response = client
@@ -2427,7 +2487,10 @@ async fn test_workspace_theme_delete() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -2436,7 +2499,7 @@ async fn test_workspace_theme_delete() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Create theme first
     client
@@ -2475,7 +2538,10 @@ async fn test_workspace_theme_delete_not_found() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -2484,7 +2550,7 @@ async fn test_workspace_theme_delete_not_found() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Try to delete non-existent theme
     let response = client
@@ -2881,7 +2947,7 @@ async fn test_organization_with_all_fields() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert_eq!(body["description"], "Description here");
+    assert_eq!(body["organization"]["description"], "Description here");
 }
 
 #[tokio::test]
@@ -2898,7 +2964,10 @@ async fn test_workspace_with_all_fields() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Create workspace with all fields
     let response = client
@@ -2915,7 +2984,7 @@ async fn test_workspace_with_all_fields() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert_eq!(body["description"], "Full description");
+    assert_eq!(body["workspace"]["description"], "Full description");
 }
 
 #[tokio::test]
@@ -2932,7 +3001,10 @@ async fn test_project_with_workspace() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -2941,7 +3013,7 @@ async fn test_project_with_workspace() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Create project with workspace
     let response = client
@@ -2975,7 +3047,10 @@ async fn test_chat_with_workspace() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -2984,7 +3059,7 @@ async fn test_chat_with_workspace() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Create chat with workspace
     let response = client
@@ -3001,7 +3076,7 @@ async fn test_chat_with_workspace() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert_eq!(body["workspace_id"], ws_id);
+    assert_eq!(body["chat"]["workspace_id"], ws_id);
 }
 
 #[tokio::test]
@@ -3186,7 +3261,7 @@ async fn test_source_with_gitlab_type() {
         .await;
 
     response.assert_status(StatusCode::CREATED);
-    assert_eq!(response.json_value()["source_type"], "gitlab");
+    assert_eq!(response.json_value()["source"]["source_type"], "gitlab");
 }
 
 // =============================================================================
@@ -3422,7 +3497,7 @@ async fn test_chat_archived_filter() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
 
     // Archive it
     client
@@ -3470,7 +3545,10 @@ async fn test_organization_inactive_filter() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Deactivate
     client
@@ -3509,7 +3587,7 @@ async fn test_source_inactive_filter() {
             &token,
         )
         .await;
-    let source_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
 
     // Deactivate
     client
@@ -3779,7 +3857,10 @@ async fn test_org_ai_settings_upsert() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Upsert AI settings
     let response = client
@@ -3820,7 +3901,10 @@ async fn test_org_ai_settings_get() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Upsert AI settings
     client
@@ -3864,7 +3948,10 @@ async fn test_org_ai_settings_delete() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Upsert AI settings
     client
@@ -3920,7 +4007,10 @@ async fn test_workspace_ai_settings_upsert() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -3929,7 +4019,7 @@ async fn test_workspace_ai_settings_upsert() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Upsert workspace AI settings
     let response = client
@@ -3969,7 +4059,10 @@ async fn test_workspace_ai_settings_get() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -3978,7 +4071,7 @@ async fn test_workspace_ai_settings_get() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Upsert settings
     client
@@ -4021,7 +4114,10 @@ async fn test_workspace_ai_settings_effective() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     let response = client
         .post_json_auth(
@@ -4030,7 +4126,7 @@ async fn test_workspace_ai_settings_effective() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
 
     // Set org-level settings
     client
@@ -4109,7 +4205,10 @@ async fn test_ai_settings_provider_validation() {
             &token,
         )
         .await;
-    let org_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let org_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .expect("organization create must return a wrapped `organization` object")
+        .to_string();
 
     // Try invalid provider
     let response = client
@@ -4154,7 +4253,7 @@ async fn test_audit_logs_list_empty() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     // List audit logs (should be empty initially, or only have org creation log)
     let response = client
@@ -4182,7 +4281,7 @@ async fn test_audit_logs_list_with_pagination() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     // List with pagination parameters
     let response = client
@@ -4215,7 +4314,7 @@ async fn test_audit_logs_list_with_action_filter() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     // List with action filter
     let response = client
@@ -4255,7 +4354,7 @@ async fn test_audit_logs_list_with_resource_type_filter() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     // List with resource_type filter
     let response = client
@@ -4295,7 +4394,7 @@ async fn test_audit_logs_list_with_date_range() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     let now = chrono::Utc::now();
     // Use format that's safe for URLs (Z suffix instead of +00:00)
@@ -4337,7 +4436,7 @@ async fn test_audit_logs_get_single() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     // List logs to get an ID
     let response = client
@@ -4382,7 +4481,7 @@ async fn test_audit_logs_get_not_found() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     let fake_log_id = uuid::Uuid::new_v4();
 
@@ -4411,7 +4510,7 @@ async fn test_audit_logs_export_csv() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     let now = chrono::Utc::now();
     // Use format that's safe for URLs (Z suffix instead of +00:00)
@@ -4457,7 +4556,7 @@ async fn test_audit_logs_export_requires_date_range() {
         )
         .await;
     let json_val = response.json_value();
-    let org_id = json_val["id"].as_str().unwrap();
+    let org_id = json_val["organization"]["id"].as_str().unwrap();
 
     // Try export without date range
     let response = client
@@ -4484,7 +4583,7 @@ async fn test_audit_logs_cannot_access_other_org() {
             &token,
         )
         .await;
-    let _org1_id = response.json_value()["id"].as_str().unwrap().to_string();
+    let _org1_id = response.json_value()["organization"]["id"].as_str().unwrap().to_string();
 
     // Create second user with different organization
     let token2 = get_auth_token(&client).await;
@@ -4496,7 +4595,7 @@ async fn test_audit_logs_cannot_access_other_org() {
         )
         .await;
     let json_val2 = response.json_value();
-    let org2_id = json_val2["id"].as_str().unwrap();
+    let org2_id = json_val2["organization"]["id"].as_str().unwrap();
 
     // Try to access org2's logs with token1
     let response = client
@@ -4508,4 +4607,73 @@ async fn test_audit_logs_cannot_access_other_org() {
 
     // Should be forbidden or not found
     assert!(response.status == StatusCode::FORBIDDEN || response.status == StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_chat_single_responses_carry_messages() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+
+    let response = client
+        .post_json_auth(
+            "/api/chats",
+            &json!({
+                "workspace_id": workspace_id,
+                "title": "Envelope Test Chat",
+                "model_name": "llama3.1:8b"
+            }),
+            &token,
+        )
+        .await;
+    response.assert_status(StatusCode::CREATED);
+    let created = response.json_value();
+    assert!(
+        created["chat"]["messages"].is_array(),
+        "chat create must return chat.messages; the console rejects the response without it"
+    );
+
+    let chat_id = created["chat"]["id"].as_str().unwrap().to_string();
+
+    for (label, response) in [
+        (
+            "get",
+            client
+                .get_auth(
+                    &format!("/api/chats/{}?workspace_id={}", chat_id, workspace_id),
+                    &token,
+                )
+                .await,
+        ),
+        (
+            "archive",
+            client
+                .post_json_auth(
+                    &format!("/api/chats/{}/archive?workspace_id={}", chat_id, workspace_id),
+                    &json!({}),
+                    &token,
+                )
+                .await,
+        ),
+        (
+            "unarchive",
+            client
+                .post_json_auth(
+                    &format!(
+                        "/api/chats/{}/unarchive?workspace_id={}",
+                        chat_id, workspace_id
+                    ),
+                    &json!({}),
+                    &token,
+                )
+                .await,
+        ),
+    ] {
+        response.assert_status(StatusCode::OK);
+        assert!(
+            response.json_value()["chat"]["messages"].is_array(),
+            "chat {} must return chat.messages",
+            label
+        );
+    }
 }
