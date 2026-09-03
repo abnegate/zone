@@ -35,6 +35,58 @@ pub struct Config {
     pub app_base_url: String,
     /// Live web search via SearXNG (through Gluetun when the VPN profile is up)
     pub web_search: WebSearchConfig,
+    /// Direct ComfyUI image generation and artifact storage.
+    pub comfyui: ComfyUiConfig,
+}
+
+/// Direct image generation settings loaded from `COMFYUI_*` environment variables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComfyUiConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub checkpoint: String,
+    pub artifact_root: std::path::PathBuf,
+    pub classifier_model: String,
+    pub classifier_timeout_secs: u64,
+    pub generation_timeout_secs: u64,
+    pub poll_interval_ms: u64,
+}
+
+impl Default for ComfyUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: "http://comfyui:8188".to_string(),
+            checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
+            artifact_root: "/app/artifacts".into(),
+            classifier_model: "llama3.2:3b".to_string(),
+            classifier_timeout_secs: 3,
+            generation_timeout_secs: 300,
+            poll_interval_ms: 500,
+        }
+    }
+}
+
+impl ComfyUiConfig {
+    pub fn from_env() -> Self {
+        Self {
+            enabled: env_truthy("COMFYUI_ENABLED", false),
+            base_url: env::var("COMFYUI_URL")
+                .unwrap_or_else(|_| "http://comfyui:8188".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            checkpoint: env::var("COMFYUI_CHECKPOINT")
+                .unwrap_or_else(|_| "flux1-schnell-fp8.safetensors".to_string()),
+            artifact_root: env::var("ARTIFACT_ROOT")
+                .unwrap_or_else(|_| "/app/artifacts".to_string())
+                .into(),
+            classifier_model: env::var("COMFYUI_CLASSIFIER_MODEL")
+                .unwrap_or_else(|_| "llama3.2:3b".to_string()),
+            classifier_timeout_secs: env_u64("COMFYUI_CLASSIFIER_TIMEOUT_SECS", 3, 1, 30),
+            generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),
+            poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
+        }
+    }
 }
 
 /// Default SearXNG query URL. SearXNG shares Gluetun's network namespace, so
@@ -111,6 +163,14 @@ fn env_truthy(name: &str, default: bool) -> bool {
         Ok(s) => matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
         Err(_) => default,
     }
+}
+
+fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
 }
 
 impl Config {
@@ -199,6 +259,7 @@ impl Config {
             cors_allow_credentials,
             app_base_url,
             web_search: WebSearchConfig::from_env(),
+            comfyui: ComfyUiConfig::from_env(),
         })
     }
 }
@@ -222,6 +283,7 @@ impl std::fmt::Debug for Config {
             .field("cors_allow_credentials", &self.cors_allow_credentials)
             .field("app_base_url", &self.app_base_url)
             .field("web_search", &self.web_search)
+            .field("comfyui", &self.comfyui)
             .finish()
     }
 }
@@ -260,6 +322,7 @@ mod tests {
             cors_allow_credentials: false,
             app_base_url: "http://localhost:3000".to_string(),
             web_search: WebSearchConfig::default(),
+            comfyui: ComfyUiConfig::default(),
         }
     }
 

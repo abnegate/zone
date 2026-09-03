@@ -20,6 +20,11 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
+use zone_server::config::Config;
 
 /// Serve the real router on an ephemeral port and return its address.
 async fn spawn_server() -> String {
@@ -33,6 +38,18 @@ async fn spawn_server() -> String {
         let _ = axum::serve(listener, router).await;
     });
 
+    format!("{}:{}", addr.ip(), addr.port())
+}
+
+async fn spawn_server_with_config(config: Config) -> String {
+    init_tracing();
+    let state = create_test_state(config, create_test_pool().await);
+    let router = create_test_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
     format!("{}:{}", addr.ip(), addr.port())
 }
 
@@ -376,4 +393,110 @@ async fn test_chat_ws_sends_images_to_a_vision_model() {
         reply.to_lowercase().contains("red"),
         "the vision model must describe the image it was sent, got: {reply}"
     );
+}
+
+#[tokio::test]
+async fn test_image_request_routes_directly_and_serves_protected_artifact() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "flux-1"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/flux-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "flux-1": {
+                "status": {"status_str": "success"},
+                "outputs": {"7": {"images": [{
+                    "filename": "zone_flux.png", "subfolder": "", "type": "output"
+                }]}}
+            }
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(vec![137, 80, 78, 71]),
+        )
+        .expect(1)
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    // This model deliberately fails normal-chat validation. Image routing must
+    // still succeed because the selected chat model is not changed or invoked.
+    let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-artifacts-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let addr = spawn_server_with_config(config).await;
+
+    let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "Please generate an image of a blue fox",
+                "metadata": {"image_generation": true}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut image_url = None;
+    let mut saw_progress = false;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("status") => saw_progress = true,
+            Some("image") => {
+                image_url = frame["attachment"]["url"].as_str().map(str::to_string);
+            }
+            Some("message_end") => break,
+            Some("error") => panic!("unexpected image generation error: {frame}"),
+            _ => {}
+        }
+    }
+    assert!(saw_progress);
+    let image_url = image_url.expect("image event must contain an artifact URL");
+    assert!(image_url.starts_with("/api/artifacts/"));
+
+    let artifact = reqwest::Client::new()
+        .get(format!("http://{addr}{image_url}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(artifact.status(), reqwest::StatusCode::OK);
+    assert_eq!(artifact.bytes().await.unwrap().as_ref(), &[137, 80, 78, 71]);
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    assert!(
+        reloaded["chat"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["metadata"]["attachments"][0]["url"] == image_url)
+    );
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
 }
