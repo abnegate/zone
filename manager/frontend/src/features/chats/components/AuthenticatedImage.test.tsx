@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen, waitFor } from '@testing-library/react';
-import { client } from '../../../api/client';
 import { isProtectedArtifactUrl } from '../api/protectedImages';
 import { AuthenticatedImage } from './AuthenticatedImage';
 
@@ -16,14 +15,12 @@ beforeEach(() => {
   fetchMock.mockReset();
   createObjectUrlMock.mockClear();
   revokeObjectUrlMock.mockClear();
-  client.setAccessToken('secret-token');
   globalThis.fetch = fetchMock;
   URL.createObjectURL = createObjectUrlMock;
   URL.revokeObjectURL = revokeObjectUrlMock;
 });
 
 afterEach(() => {
-  client.setAccessToken(null);
   globalThis.fetch = originalFetch;
   URL.createObjectURL = originalCreateObjectUrl;
   URL.revokeObjectURL = originalRevokeObjectUrl;
@@ -39,7 +36,11 @@ describe('AuthenticatedImage', () => {
     } as Response);
 
     const { unmount } = render(
-      <AuthenticatedImage src="/api/artifacts/chat/image.webp" alt="Generated landscape" />
+      <AuthenticatedImage
+        src="/api/artifacts/chat/image.webp"
+        alt="Generated landscape"
+        accessToken="secret-token"
+      />
     );
 
     expect(screen.getByRole('status')).toHaveTextContent('Loading image');
@@ -86,7 +87,13 @@ describe('AuthenticatedImage', () => {
       blob: async () => new Blob(),
     } as Response);
 
-    render(<AuthenticatedImage src="/api/artifacts/chat/denied.webp" alt="Denied image" />);
+    render(
+      <AuthenticatedImage
+        src="/api/artifacts/chat/denied.webp"
+        alt="Denied image"
+        accessToken="secret-token"
+      />
+    );
 
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent('Image unavailable');

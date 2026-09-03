@@ -79,9 +79,7 @@ impl ComfyUiConfig {
                 .trim_end_matches('/')
                 .to_string(),
             workflow_path: env::var("COMFYUI_WORKFLOW_PATH")
-                .unwrap_or_else(|_| {
-                    "/app/comfyui/workflows/flux1-schnell-fp8-api.json".to_string()
-                })
+                .unwrap_or_else(|_| "/app/comfyui/workflows/flux1-schnell-fp8-api.json".to_string())
                 .into(),
             checkpoint: env::var("COMFYUI_CHECKPOINT")
                 .unwrap_or_else(|_| "flux1-schnell-fp8.safetensors".to_string()),

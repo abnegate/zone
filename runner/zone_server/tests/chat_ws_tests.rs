@@ -463,6 +463,7 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
         .unwrap();
 
     let mut image_url = None;
+    let mut assistant_message_id = None;
     let mut saw_progress = false;
     while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
         match frame["type"].as_str() {
@@ -470,14 +471,20 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
             Some("image") => {
                 image_url = frame["attachment"]["url"].as_str().map(str::to_string);
             }
-            Some("message_end") => break,
+            Some("message_end") => {
+                assistant_message_id = frame["message_id"].as_str().map(str::to_string);
+                break;
+            }
             Some("error") => panic!("unexpected image generation error: {frame}"),
             _ => {}
         }
     }
     assert!(saw_progress);
     let image_url = image_url.expect("image event must contain an artifact URL");
+    let assistant_message_id =
+        assistant_message_id.expect("message_end must contain the persisted message ID");
     assert!(image_url.starts_with("/api/artifacts/"));
+    assert!(image_url.contains(&format!("/{assistant_message_id}/")));
 
     let artifact = reqwest::Client::new()
         .get(format!("http://{addr}{image_url}"))
@@ -491,12 +498,29 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
         .get_auth(&format!("/api/chats/{chat_id}"), &token)
         .await
         .json_value();
-    assert!(
-        reloaded["chat"]["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| message["metadata"]["attachments"][0]["url"] == image_url)
-    );
+    let persisted = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["metadata"]["attachments"][0]["url"] == image_url)
+        .expect("generated image metadata must survive reload");
+    assert_eq!(persisted["id"], assistant_message_id);
+
+    let deleted = reqwest::Client::new()
+        .delete(format!(
+            "http://{addr}/api/chats/{chat_id}/messages/{assistant_message_id}"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), reqwest::StatusCode::NO_CONTENT);
+    let removed_artifact = reqwest::Client::new()
+        .get(format!("http://{addr}{image_url}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed_artifact.status(), reqwest::StatusCode::NOT_FOUND);
     let _ = tokio::fs::remove_dir_all(artifact_root).await;
 }

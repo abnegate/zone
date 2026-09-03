@@ -4,6 +4,7 @@ import { fetchProtectedImage, isProtectedArtifactUrl } from '../api/protectedIma
 interface AuthenticatedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'src' | 'alt'> {
   src: string;
   alt: string;
+  accessToken?: string | null;
   openLabel?: string;
   linkClassName?: string;
 }
@@ -16,6 +17,7 @@ interface LoadedImage {
 export function AuthenticatedImage({
   src,
   alt,
+  accessToken,
   openLabel = `Open ${alt || 'image'} full size`,
   linkClassName,
   ...imageProps
@@ -32,7 +34,7 @@ export function AuthenticatedImage({
     const controller = new AbortController();
     let objectUrl: string | null = null;
 
-    fetchProtectedImage(src, controller.signal)
+    fetchProtectedImage(src, controller.signal, accessToken)
       .then((blob) => {
         if (controller.signal.aborted) {
           return;
@@ -53,7 +55,7 @@ export function AuthenticatedImage({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [protectedArtifact, src]);
+  }, [accessToken, protectedArtifact, src]);
 
   if (protectedArtifact && failedSource === src) {
     return (
