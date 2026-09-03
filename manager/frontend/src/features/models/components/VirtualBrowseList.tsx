@@ -1,15 +1,8 @@
 import React, { useCallback, useEffect, useRef } from 'react';
-import { FixedSizeList as List, type ListChildComponentProps } from 'react-window';
+import { VariableSizeList as List, type ListChildComponentProps } from 'react-window';
 import type { BrowseModel } from '../types';
+import { formatBytes, formatContextLength, formatNumber } from '../utils';
 import './VirtualBrowseList.css';
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${Number.parseFloat((bytes / k ** i).toFixed(1))} ${sizes[i]}`;
-}
 
 interface VirtualBrowseListProps {
   models: BrowseModel[];
@@ -20,7 +13,30 @@ interface VirtualBrowseListProps {
   onLoadMore: () => void;
 }
 
-const ITEM_HEIGHT = 88;
+const LOADING_ROW_HEIGHT = 56;
+
+function browseItemHeight(model: BrowseModel): number {
+  let height = 76;
+  if (model.description) height += 40;
+  if (hasUseCases(model) || model.downloads) height += 28;
+  return height;
+}
+
+function hasUseCases(model: BrowseModel): boolean {
+  return Boolean(model.use_cases && model.use_cases.length > 0);
+}
+
+function specParts(model: BrowseModel): string[] {
+  const parts: string[] = [];
+  if (model.details?.parameter_size) parts.push(model.details.parameter_size);
+  if (model.size) parts.push(formatBytes(model.size));
+  if (model.details?.quantization_level) parts.push(model.details.quantization_level);
+  if (model.details?.context_length) {
+    parts.push(`${formatContextLength(model.details.context_length)} ctx`);
+  }
+  if (model.details?.family) parts.push(model.details.family);
+  return parts;
+}
 
 export default function VirtualBrowseList({
   models,
@@ -33,7 +49,6 @@ export default function VirtualBrowseList({
   const listRef = useRef<List>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Load more when scrolling near the end
   const handleItemsRendered = useCallback(
     ({ visibleStopIndex }: { visibleStopIndex: number }) => {
       if (hasMore && !loadingMore && visibleStopIndex >= models.length - 5) {
@@ -43,12 +58,24 @@ export default function VirtualBrowseList({
     [hasMore, loadingMore, models.length, onLoadMore]
   );
 
-  // Get total item count including loading indicator
   const itemCount = models.length + (hasMore ? 1 : 0);
+
+  const getItemSize = useCallback(
+    (index: number) => {
+      if (index >= models.length) return LOADING_ROW_HEIGHT;
+      return browseItemHeight(models[index]);
+    },
+    [models]
+  );
+
+  // Reset cached row heights whenever the catalogue contents change.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: models identity is the catalogue snapshot
+  useEffect(() => {
+    listRef.current?.resetAfterIndex(0);
+  }, [models]);
 
   const Row = useCallback(
     ({ index, style }: ListChildComponentProps) => {
-      // Loading row
       if (index >= models.length) {
         return (
           <div style={style} className="virtual-browse-loading">
@@ -58,6 +85,9 @@ export default function VirtualBrowseList({
       }
 
       const model = models[index];
+      const specs = specParts(model);
+      const useCases = model.use_cases ?? [];
+      const title = model.display_name || model.name;
 
       return (
         <div style={style} className="virtual-browse-item-wrapper">
@@ -70,15 +100,36 @@ export default function VirtualBrowseList({
           >
             <div className="browse-info">
               <div className="browse-header">
-                <span className="browse-name">{model.name}</span>
-                {model.source && <span className={`browse-source browse-source-${model.source}`}>{model.source}</span>}
-                {model.size && <span className="browse-size">{formatBytes(model.size)}</span>}
+                <span className="browse-name">{title}</span>
+                {model.source && (
+                  <span className={`browse-source browse-source-${model.source}`}>
+                    {model.source}
+                  </span>
+                )}
               </div>
-              {model.details && (
+              {specs.length > 0 && (
+                <div className="browse-specs">
+                  {specs.map((part) => (
+                    <span key={part} className="browse-spec">
+                      {part}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {model.description && <p className="browse-description">{model.description}</p>}
+              {(useCases.length > 0 || model.downloads) && (
                 <div className="browse-tags">
-                  {model.details.family && <span className="tag">{model.details.family}</span>}
-                  {model.details.parameter_size && <span className="tag">{model.details.parameter_size}</span>}
-                  {model.details.quantization_level && <span className="tag">{model.details.quantization_level}</span>}
+                  {useCases.slice(0, 4).map((useCase) => (
+                    <span key={useCase} className="tag">
+                      {useCase}
+                    </span>
+                  ))}
+                  {model.downloads ? (
+                    <span className="browse-downloads">
+                      {formatNumber(model.downloads)}
+                      {model.source === 'ollama' ? ' pulls' : ' downloads'}
+                    </span>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -127,8 +178,9 @@ export default function VirtualBrowseList({
         ref={listRef}
         height={containerHeight}
         itemCount={itemCount}
-        itemSize={ITEM_HEIGHT}
+        itemSize={getItemSize}
         width="100%"
+        overscanCount={8}
         onItemsRendered={handleItemsRendered}
         className="virtual-browse-list"
       >

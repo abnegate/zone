@@ -698,6 +698,49 @@ describe('ModelsPage', () => {
       });
     });
 
+    it('shows description and use cases for browse models', async () => {
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        source: 'ollama',
+        models: [
+          {
+            id: 'llama3',
+            name: 'llama3:7b',
+            size: 3800000000,
+            description: 'A general-purpose local chat model.',
+            use_cases: ['Chat', 'Coding'],
+            details: {
+              family: 'llama',
+              parameter_size: '7B',
+              context_length: 131072,
+            },
+          },
+        ],
+      });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole("tab", { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('browse-model-llama3')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Details'));
+
+      await waitFor(() => {
+        expect(screen.getByText('A general-purpose local chat model.')).toBeInTheDocument();
+        expect(screen.getByText('Use cases')).toBeInTheDocument();
+        expect(screen.getByText('Chat')).toBeInTheDocument();
+        expect(screen.getByText('Coding')).toBeInTheDocument();
+        expect(screen.getByText('Parameters')).toBeInTheDocument();
+        expect(screen.getByText('128K')).toBeInTheDocument();
+      });
+    });
+
     it('shows model details tags when available', async () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
