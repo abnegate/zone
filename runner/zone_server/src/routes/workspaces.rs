@@ -70,7 +70,10 @@ pub async fn list_accessible_workspaces(
         .await
     {
         Ok(workspaces) => Json(WorkspacesListResponse {
-            workspaces: workspaces.into_iter().map(WorkspaceResponse::from).collect(),
+            workspaces: workspaces
+                .into_iter()
+                .map(WorkspaceResponse::from)
+                .collect(),
         })
         .into_response(),
         Err(e) => {
@@ -90,7 +93,10 @@ pub async fn get_workspace(
     member: WorkspaceMember,
 ) -> impl IntoResponse {
     match workspaces::get_workspace(state.db(), member.workspace_id).await {
-        Ok(Some(ws)) => Json(SingleWorkspaceResponse { workspace: WorkspaceResponse::from(ws) }).into_response(),
+        Ok(Some(ws)) => Json(SingleWorkspaceResponse {
+            workspace: WorkspaceResponse::from(ws),
+        })
+        .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -129,7 +135,10 @@ pub async fn update_workspace(
     )
     .await
     {
-        Ok(Some(ws)) => Json(SingleWorkspaceResponse { workspace: WorkspaceResponse::from(ws) }).into_response(),
+        Ok(Some(ws)) => Json(SingleWorkspaceResponse {
+            workspace: WorkspaceResponse::from(ws),
+        })
+        .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -225,7 +234,10 @@ pub async fn list_members(
 ) -> impl IntoResponse {
     match workspace_members::list_members(state.db(), member.workspace_id).await {
         Ok(members) => Json(WorkspaceMembersListResponse {
-            members: members.into_iter().map(WorkspaceMemberResponse::from).collect(),
+            members: members
+                .into_iter()
+                .map(WorkspaceMemberResponse::from)
+                .collect(),
         })
         .into_response(),
         Err(e) => {

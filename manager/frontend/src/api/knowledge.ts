@@ -1,4 +1,9 @@
-import { parse } from '../validation';
+import {
+  GatherContextResponseSchema,
+  KnowledgeEntrySchema,
+  KnowledgeResponseSchema,
+  SearchResponseSchema,
+} from '../features/knowledge/schemas';
 import type {
   CreateKnowledgeRequest,
   GatherContextRequest,
@@ -7,12 +12,7 @@ import type {
   SearchOptions,
   SearchResponse,
 } from '../features/knowledge/types';
-import {
-  KnowledgeEntrySchema,
-  KnowledgeResponseSchema,
-  SearchResponseSchema,
-  GatherContextResponseSchema,
-} from '../features/knowledge/schemas';
+import { parse } from '../validation';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 

@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react';
 import { mock } from 'bun:test';
+import type { ReactNode } from 'react';
 
 // Mock implementations
 export const useNavigate = mock(() => mock());

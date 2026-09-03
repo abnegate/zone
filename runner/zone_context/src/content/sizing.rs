@@ -212,7 +212,7 @@ pub fn prioritize_paths(paths: &[(String, Option<usize>)]) -> Vec<PriorityScore>
         .collect();
 
     // Sort by score descending
-    scores.sort_by(|a, b| b.score.cmp(&a.score));
+    scores.sort_by_key(|score| std::cmp::Reverse(score.score));
 
     scores
 }

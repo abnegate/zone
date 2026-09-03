@@ -1,7 +1,7 @@
 import { type ReactNode, createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { client } from '../../api/client';
-import type { Organization, Workspace } from '../../types';
 import { useAuth } from '../../features/auth';
+import type { Organization, Workspace } from '../../types';
 
 interface WorkspaceContextType {
   organizations: Organization[];

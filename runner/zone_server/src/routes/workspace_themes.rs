@@ -83,7 +83,10 @@ pub async fn get(
     Path(workspace_id): Path<Uuid>,
 ) -> impl IntoResponse {
     match workspace_themes::get_theme(state.db(), workspace_id).await {
-        Ok(Some(theme)) => Json(SingleThemeResponse { theme: ThemeResponse::from(theme) }).into_response(),
+        Ok(Some(theme)) => Json(SingleThemeResponse {
+            theme: ThemeResponse::from(theme),
+        })
+        .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Theme not found")),
@@ -120,7 +123,10 @@ pub async fn upsert(
     )
     .await
     {
-        Ok(theme) => Json(SingleThemeResponse { theme: ThemeResponse::from(theme) }).into_response(),
+        Ok(theme) => Json(SingleThemeResponse {
+            theme: ThemeResponse::from(theme),
+        })
+        .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (

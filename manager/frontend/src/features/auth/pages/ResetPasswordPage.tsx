@@ -1,12 +1,12 @@
+import { Button, Input } from '@zone/ui';
 import type React from 'react';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
-import { Button, Input } from '@zone/ui';
-import { isValidTokenFormat } from '../utils';
-import { ResetPasswordSchema } from '../schemas';
-import { getErrors } from '../../../validation';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
+import { getErrors } from '../../../validation';
+import { ResetPasswordSchema } from '../schemas';
+import { isValidTokenFormat } from '../utils';
 import './AuthPage.css';
 
 export default function ResetPasswordPage() {

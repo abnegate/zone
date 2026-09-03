@@ -1,10 +1,10 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterAll, mock, beforeAll, beforeEach, describe, it, expect, spyOn } from 'bun:test';
-import type { Project } from '../types';
-import type { Source } from '../../../types';
 import type React from 'react';
+import type { Source } from '../../../types';
+import type { Project } from '../types';
 
 let ProjectsPage: typeof import('./ProjectsPage').default;
 

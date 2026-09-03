@@ -39,7 +39,11 @@ async fn spawn_server() -> String {
 /// Register a user and create a workspace and chat for it, over the same
 /// database the spawned server uses.
 async fn seed_chat(client: &TestClient) -> (String, String) {
-    seed_chat_with_model(client, &std::env::var("TEST_MODEL").unwrap_or_else(|_| "llama3.2:3b".into())).await
+    seed_chat_with_model(
+        client,
+        &std::env::var("TEST_MODEL").unwrap_or_else(|_| "llama3.2:3b".into()),
+    )
+    .await
 }
 
 /// Register a user and create a workspace and chat on a specific model.
@@ -102,8 +106,9 @@ async fn seed_chat_with_model(client: &TestClient, model: &str) -> (String, Stri
 }
 
 async fn next_frame(
-    stream: &mut (impl StreamExt<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
-              + Unpin),
+    stream: &mut (
+             impl StreamExt<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin
+         ),
     within: Duration,
 ) -> Option<Value> {
     loop {
@@ -128,7 +133,9 @@ async fn test_chat_ws_rejects_unauthenticated_send() {
 
     socket
         .send(WsMessage::Text(
-            json!({ "type": "send", "content": "no auth" }).to_string().into(),
+            json!({ "type": "send", "content": "no auth" })
+                .to_string()
+                .into(),
         ))
         .await
         .expect("send");
@@ -287,7 +294,11 @@ async fn test_reply_survives_the_reader_navigating_away() {
 
         if let Some(message) = assistant {
             assert!(
-                !message["content"].as_str().unwrap_or_default().trim().is_empty(),
+                !message["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty(),
                 "a persisted reply must not be empty"
             );
             return;
@@ -303,7 +314,8 @@ async fn test_reply_survives_the_reader_navigating_away() {
 
 /// A 64x64 solid red PNG, inlined so the test needs no image dependencies.
 fn red_png_data_url() -> String {
-    format!("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC")
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC"
+        .to_string()
 }
 
 #[tokio::test]

@@ -1,12 +1,12 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
-import { Wizard } from '../../../components';
 import type { WizardStep } from '@zone/ui';
-import type { CreateProjectRequest, Project, ProjectStatus } from '../types';
-import type { Source } from '../../../types';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { client } from '../../../api/client';
+import { Wizard } from '../../../components';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import type { Source } from '../../../types';
 import { getErrors } from '../../../validation';
 import { CreateProjectRequestSchema } from '../schemas';
+import type { CreateProjectRequest, Project, ProjectStatus } from '../types';
 
 interface CreateProjectWizardProps {
   isOpen: boolean;
@@ -154,8 +154,7 @@ export function CreateProjectWizard({
                   setName(e.target.value);
                   if (fieldErrors.name) {
                     setFieldErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.name;
+                      const { name: _name, ...next } = prev;
                       return next;
                     });
                   }

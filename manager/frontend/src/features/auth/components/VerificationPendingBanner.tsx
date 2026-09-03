@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
 import { Button } from '@zone/ui';
+import { useEffect, useState } from 'react';
 import { client } from '../../../api/client';
 import './VerificationPendingBanner.css';
 

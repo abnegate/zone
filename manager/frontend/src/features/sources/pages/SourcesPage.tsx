@@ -1,12 +1,15 @@
+import { Badge, Button, EmptyState } from '@zone/ui';
 import { useState } from 'react';
-import { Button, Badge, EmptyState } from '@zone/ui';
-import { useSources } from '../hooks';
-import { getSourceLabel } from '../config';
-import type { Source, SourceType } from '../types';
 import { CreateSourceWizard } from '../components/CreateSourceWizard';
+import { getSourceLabel } from '../config';
+import { useSources } from '../hooks';
+import type { Source, SourceType } from '../types';
 import './SourcesPage.css';
 
-const sourceTypeVariants: Record<SourceType, 'default' | 'secondary' | 'info' | 'success' | 'warning' | 'destructive'> = {
+const sourceTypeVariants: Record<
+  SourceType,
+  'default' | 'secondary' | 'info' | 'success' | 'warning' | 'destructive'
+> = {
   github: 'default',
   gitlab: 'warning',
   filesystem: 'info',
@@ -19,9 +22,7 @@ const sourceTypeVariants: Record<SourceType, 'default' | 'secondary' | 'info' | 
 };
 
 function SourceTypeBadge({ type }: { type: SourceType }) {
-  return (
-    <Badge variant={sourceTypeVariants[type] || 'secondary'}>{getSourceLabel(type)}</Badge>
-  );
+  return <Badge variant={sourceTypeVariants[type] || 'secondary'}>{getSourceLabel(type)}</Badge>;
 }
 
 function SourceStatusBadge({ source }: { source: Source }) {
@@ -93,9 +94,7 @@ export default function SourcesPage() {
           <h1>Sources</h1>
           <p>Connect repositories, calendars, email, and other data sources</p>
         </div>
-        <Button onClick={() => setShowCreateModal(true)}>
-          + Add Source
-        </Button>
+        <Button onClick={() => setShowCreateModal(true)}>+ Add Source</Button>
       </header>
 
       {displayError && (
@@ -106,22 +105,22 @@ export default function SourcesPage() {
 
       {loading ? (
         <div className="sources-workspace">
-        <div className="sources-list">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="source-card skeleton-card">
-              <div className="skeleton-header">
-                <div className="skeleton skeleton-title" />
-                <div className="skeleton skeleton-badge" />
+          <div className="sources-list">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="source-card skeleton-card">
+                <div className="skeleton-header">
+                  <div className="skeleton skeleton-title" />
+                  <div className="skeleton skeleton-badge" />
+                </div>
+                <div className="skeleton skeleton-text" />
+                <div className="skeleton skeleton-text short" />
+                <div className="skeleton-actions">
+                  <div className="skeleton skeleton-btn" />
+                  <div className="skeleton skeleton-btn" />
+                </div>
               </div>
-              <div className="skeleton skeleton-text" />
-              <div className="skeleton skeleton-text short" />
-              <div className="skeleton-actions">
-                <div className="skeleton skeleton-btn" />
-                <div className="skeleton skeleton-btn" />
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
         </div>
       ) : sources.length === 0 ? (
         <EmptyState
@@ -145,59 +144,59 @@ export default function SourcesPage() {
         />
       ) : (
         <div className="sources-workspace">
-        <div className="sources-list">
-          {sources.map((source) => (
-            <div
-              key={source.id}
-              className={`source-card ${!source.is_active ? 'source-inactive' : ''}`}
-            >
-              <div className="source-card-header">
-                <h3>{source.name}</h3>
-                <div className="source-badges">
-                  <SourceTypeBadge type={source.source_type} />
-                  <SourceStatusBadge source={source} />
+          <div className="sources-list">
+            {sources.map((source) => (
+              <div
+                key={source.id}
+                className={`source-card ${!source.is_active ? 'source-inactive' : ''}`}
+              >
+                <div className="source-card-header">
+                  <h3>{source.name}</h3>
+                  <div className="source-badges">
+                    <SourceTypeBadge type={source.source_type} />
+                    <SourceStatusBadge source={source} />
+                  </div>
+                </div>
+
+                {source.description && <p className="source-description">{source.description}</p>}
+
+                <div className="source-url">
+                  <a href={source.url} target="_blank" rel="noopener noreferrer">
+                    {source.url}
+                  </a>
+                </div>
+
+                {source.last_error && <div className="source-error">{source.last_error}</div>}
+
+                <div className="source-meta">
+                  {source.last_verified_at && (
+                    <span>Verified: {new Date(source.last_verified_at).toLocaleDateString()}</span>
+                  )}
+                </div>
+
+                <div className="source-actions">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleVerify(source.id)}
+                    loading={verifying === source.id}
+                  >
+                    {verifying === source.id ? 'Verifying...' : 'Verify'}
+                  </Button>
+                  <Button
+                    variant={source.is_active ? 'secondary' : 'default'}
+                    size="sm"
+                    onClick={() => handleToggleActive(source)}
+                  >
+                    {source.is_active ? 'Disable' : 'Enable'}
+                  </Button>
+                  <Button variant="destructive" size="sm" onClick={() => handleDelete(source.id)}>
+                    Delete
+                  </Button>
                 </div>
               </div>
-
-              {source.description && <p className="source-description">{source.description}</p>}
-
-              <div className="source-url">
-                <a href={source.url} target="_blank" rel="noopener noreferrer">
-                  {source.url}
-                </a>
-              </div>
-
-              {source.last_error && <div className="source-error">{source.last_error}</div>}
-
-              <div className="source-meta">
-                {source.last_verified_at && (
-                  <span>Verified: {new Date(source.last_verified_at).toLocaleDateString()}</span>
-                )}
-              </div>
-
-              <div className="source-actions">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => handleVerify(source.id)}
-                  loading={verifying === source.id}
-                >
-                  {verifying === source.id ? 'Verifying...' : 'Verify'}
-                </Button>
-                <Button
-                  variant={source.is_active ? 'secondary' : 'default'}
-                  size="sm"
-                  onClick={() => handleToggleActive(source)}
-                >
-                  {source.is_active ? 'Disable' : 'Enable'}
-                </Button>
-                <Button variant="destructive" size="sm" onClick={() => handleDelete(source.id)}>
-                  Delete
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
         </div>
       )}
 

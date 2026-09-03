@@ -1,6 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { Project, SyncConfig } from '../types';
 
 const mockGetProjects = mock();

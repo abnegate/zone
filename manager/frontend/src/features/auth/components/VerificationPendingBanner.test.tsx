@@ -1,6 +1,6 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 // Mock client
 const mockResendVerification = mock();

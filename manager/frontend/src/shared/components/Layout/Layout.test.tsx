@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+import { render, screen } from '@testing-library/react';
 
 // Mock Sidebar to avoid its dependencies
 mock.module('../Sidebar/Sidebar', () => ({
@@ -15,8 +15,12 @@ mock.module('react-router-dom', () => ({
   useNavigate: () => mock(),
   useSearchParams: () => [new URLSearchParams(), mock()],
   BrowserRouter: ({ children }: { children: React.ReactNode }) => children,
-  Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
-  NavLink: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
+    <a href={to}>{children}</a>
+  ),
+  NavLink: ({ children, to }: { children: React.ReactNode; to: string }) => (
+    <a href={to}>{children}</a>
+  ),
 }));
 
 // Mock auth context

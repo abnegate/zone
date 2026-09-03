@@ -39,7 +39,10 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      const result = await client.searchContext({ workspace_id: testWorkspaceId, query: 'test query' });
+      const result = await client.searchContext({
+        workspace_id: testWorkspaceId,
+        query: 'test query',
+      });
 
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/context/search?'),
@@ -63,7 +66,11 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      await client.searchContext({ workspace_id: testWorkspaceId, query: 'test', mode: 'semantic' });
+      await client.searchContext({
+        workspace_id: testWorkspaceId,
+        query: 'test',
+        mode: 'semantic',
+      });
 
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('mode=semantic'),
@@ -79,7 +86,11 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      await client.searchContext({ workspace_id: testWorkspaceId, query: 'test', source_ids: ['s1', 's2'] });
+      await client.searchContext({
+        workspace_id: testWorkspaceId,
+        query: 'test',
+        source_ids: ['s1', 's2'],
+      });
 
       const call = mockFetch.mock.calls[0][0];
       expect(call).toContain('source_ids=s1');
@@ -110,7 +121,10 @@ describe('Context Search API', () => {
         json: async () => mockResponse,
       });
 
-      await client.searchContext({ workspace_id: testWorkspaceId, query: 'test query with spaces & symbols' });
+      await client.searchContext({
+        workspace_id: testWorkspaceId,
+        query: 'test query with spaces & symbols',
+      });
 
       const call = mockFetch.mock.calls[0][0];
       expect(call).toContain('q=test+query+with+spaces+%26+symbols');
@@ -123,7 +137,9 @@ describe('Context Search API', () => {
         json: async () => ({ message: 'Server error' }),
       });
 
-      await expect(client.searchContext({ workspace_id: testWorkspaceId, query: 'test' })).rejects.toThrow('Server error');
+      await expect(
+        client.searchContext({ workspace_id: testWorkspaceId, query: 'test' })
+      ).rejects.toThrow('Server error');
     });
   });
 

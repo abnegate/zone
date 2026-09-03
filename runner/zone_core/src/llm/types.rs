@@ -48,12 +48,12 @@ impl Serialize for Message {
             }
         } else {
             let mut parts = Vec::with_capacity(self.images.len() + 1);
-            if let Some(content) = &self.content {
-                if !content.is_empty() {
-                    parts.push(ContentPart::Text {
-                        text: content.clone(),
-                    });
-                }
+            if let Some(content) = &self.content
+                && !content.is_empty()
+            {
+                parts.push(ContentPart::Text {
+                    text: content.clone(),
+                });
             }
             for url in &self.images {
                 parts.push(ContentPart::ImageUrl {

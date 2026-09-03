@@ -1,8 +1,8 @@
+import { Button } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
-import type { CreateInvitationRequest, Invitation, OrgRole } from '../types';
 import type { Workspace, WorkspaceRole } from '../../workspace/types';
-import { Button } from '@zone/ui';
+import type { CreateInvitationRequest, Invitation, OrgRole } from '../types';
 import './InvitationsSection.css';
 
 interface InvitationsSectionProps {
@@ -144,7 +144,8 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
                   </td>
                   <td>
                     {invitation.workspace_name ||
-                      workspaces.find((workspace) => workspace.id === invitation.workspace_id)?.name ||
+                      workspaces.find((workspace) => workspace.id === invitation.workspace_id)
+                        ?.name ||
                       '-'}
                   </td>
                   <td>

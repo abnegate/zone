@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Chat, CreateChatRequest } from '../types';
@@ -15,25 +15,28 @@ export function useChats(options: UseChatsOptions = {}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchChats = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!workspaceId) {
-      setChats([]);
-      setLoading(false);
-      return;
-    }
-    if (!opts?.silent) {
-      setLoading(true);
-    }
-    setError(null);
-    try {
-      const data = await chatsApi.getChats(workspaceId, archived);
-      setChats(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch chats');
-    } finally {
-      setLoading(false);
-    }
-  }, [workspaceId, archived]);
+  const fetchChats = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!workspaceId) {
+        setChats([]);
+        setLoading(false);
+        return;
+      }
+      if (!opts?.silent) {
+        setLoading(true);
+      }
+      setError(null);
+      try {
+        const data = await chatsApi.getChats(workspaceId, archived);
+        setChats(data);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch chats');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [workspaceId, archived]
+  );
 
   useEffect(() => {
     fetchChats();

@@ -1,31 +1,31 @@
-import { useState } from 'react';
 import {
   createColumnHelper,
   flexRender,
   getCoreRowModel,
   useReactTable,
 } from '@tanstack/react-table';
-import { formatDistanceToNow } from 'date-fns';
-import { toast } from 'sonner';
 import { Button, Modal } from '@zone/ui';
+import { formatDistanceToNow } from 'date-fns';
+import { useState } from 'react';
+import { toast } from 'sonner';
 import { useSessions } from '../hooks';
-import { parseUserAgent } from '../utils';
 import type { Session } from '../types';
+import { parseUserAgent } from '../utils';
 import './SessionsPage.css';
 
 const columnHelper = createColumnHelper<Session>();
 
 export default function SessionsPage() {
-  const { 
-    sessions, 
-    isLoading, 
-    error, 
-    revokeSession, 
-    isRevoking, 
-    revokeAllSessions, 
-    isRevokingAll 
+  const {
+    sessions,
+    isLoading,
+    error,
+    revokeSession,
+    isRevoking,
+    revokeAllSessions,
+    isRevokingAll,
   } = useSessions();
-  
+
   const [sessionToRevoke, setSessionToRevoke] = useState<string | null>(null);
   const [showRevokeModal, setShowRevokeModal] = useState(false);
   const [showRevokeAllModal, setShowRevokeAllModal] = useState(false);
@@ -81,8 +81,7 @@ export default function SessionsPage() {
             info.row.original.is_current
               ? 'Cannot revoke current session'
               : `Revoke session from ${
-                  info.row.original.device_info ||
-                  parseUserAgent(info.row.original.user_agent)
+                  info.row.original.device_info || parseUserAgent(info.row.original.user_agent)
                 }`
           }
         >
@@ -166,10 +165,7 @@ export default function SessionsPage() {
                         <th key={header.id}>
                           {header.isPlaceholder
                             ? null
-                            : flexRender(
-                                header.column.columnDef.header,
-                                header.getContext()
-                              )}
+                            : flexRender(header.column.columnDef.header, header.getContext())}
                         </th>
                       ))}
                     </tr>
@@ -177,16 +173,10 @@ export default function SessionsPage() {
                 </thead>
                 <tbody>
                   {table.getRowModel().rows.map((row) => (
-                    <tr
-                      key={row.id}
-                      className={row.original.is_current ? 'current-session' : ''}
-                    >
+                    <tr key={row.id} className={row.original.is_current ? 'current-session' : ''}>
                       {row.getVisibleCells().map((cell) => (
                         <td key={cell.id}>
-                          {flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext()
-                          )}
+                          {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
                       ))}
                     </tr>

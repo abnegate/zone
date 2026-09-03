@@ -7,3 +7,4 @@ export {
   formatDownloadSizeLabel,
   defaultDownloadName,
 } from './formatters';
+export { sortBrowseModels } from './sortModels';

@@ -1,10 +1,10 @@
-import { useState, useCallback, useMemo } from 'react';
-import { Wizard } from '../../../components';
 import type { WizardStep } from '@zone/ui';
-import type { CreateKnowledgeRequest, KnowledgeEntry, KnowledgeType } from '../types';
+import { useCallback, useMemo, useState } from 'react';
+import { Wizard } from '../../../components';
+import { useWorkspace } from '../../../shared/context';
 import { getErrors } from '../../../validation';
 import { CreateKnowledgeRequestSchema } from '../schemas';
-import { useWorkspace } from '../../../shared/context';
+import type { CreateKnowledgeRequest, KnowledgeEntry, KnowledgeType } from '../types';
 
 interface CreateKnowledgeWizardProps {
   isOpen: boolean;
@@ -191,9 +191,7 @@ export function CreateKnowledgeWizard({
                 </div>
                 <div className="knowledge-type-info">
                   <span className="knowledge-type-name">URL / Web Page</span>
-                  <span className="knowledge-type-desc">
-                    Fetch and extract content from a URL
-                  </span>
+                  <span className="knowledge-type-desc">Fetch and extract content from a URL</span>
                 </div>
               </button>
             </div>
@@ -209,9 +207,7 @@ export function CreateKnowledgeWizard({
                 : 'Enter the text content you want to add to the knowledge base.'}
             </p>
             <div className="form-group">
-              <label htmlFor="knowledge-content">
-                {type === 'url' ? 'URL' : 'Content'}
-              </label>
+              <label htmlFor="knowledge-content">{type === 'url' ? 'URL' : 'Content'}</label>
               {type === 'url' ? (
                 <input
                   type="url"
@@ -221,8 +217,7 @@ export function CreateKnowledgeWizard({
                     setContent(e.target.value);
                     if (fieldErrors.content) {
                       setFieldErrors((prev) => {
-                        const next = { ...prev };
-                        delete next.content;
+                        const { content: _content, ...next } = prev;
                         return next;
                       });
                     }
@@ -238,8 +233,7 @@ export function CreateKnowledgeWizard({
                     setContent(e.target.value);
                     if (fieldErrors.content) {
                       setFieldErrors((prev) => {
-                        const next = { ...prev };
-                        delete next.content;
+                        const { content: _content, ...next } = prev;
                         return next;
                       });
                     }
@@ -270,8 +264,7 @@ export function CreateKnowledgeWizard({
                   setTitle(e.target.value);
                   if (fieldErrors.title) {
                     setFieldErrors((prev) => {
-                      const next = { ...prev };
-                      delete next.title;
+                      const { title: _title, ...next } = prev;
                       return next;
                     });
                   }

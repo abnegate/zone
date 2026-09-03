@@ -35,32 +35,35 @@ export function useChat(chatId: string | null) {
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
 
-  const fetchChat = useCallback(async (opts?: { silent?: boolean }) => {
-    const requestId = ++requestIdRef.current;
-    if (!chatId) {
-      setChat(null);
-      setLoading(false);
-      setError(null);
-      return;
-    }
-
-    if (!opts?.silent) {
-      setLoading(true);
-    }
-    setError(null);
-    try {
-      const data = await chatsApi.getChat(chatId);
-      if (requestId !== requestIdRef.current) return;
-      setChat(data);
-    } catch (err) {
-      if (requestId !== requestIdRef.current) return;
-      setError(err instanceof Error ? err.message : 'Failed to fetch chat');
-    } finally {
-      if (requestId === requestIdRef.current) {
+  const fetchChat = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const requestId = ++requestIdRef.current;
+      if (!chatId) {
+        setChat(null);
         setLoading(false);
+        setError(null);
+        return;
       }
-    }
-  }, [chatId]);
+
+      if (!opts?.silent) {
+        setLoading(true);
+      }
+      setError(null);
+      try {
+        const data = await chatsApi.getChat(chatId);
+        if (requestId !== requestIdRef.current) return;
+        setChat(data);
+      } catch (err) {
+        if (requestId !== requestIdRef.current) return;
+        setError(err instanceof Error ? err.message : 'Failed to fetch chat');
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+        }
+      }
+    },
+    [chatId]
+  );
 
   useEffect(() => {
     // Drop the previous conversation as soon as the selection changes so the

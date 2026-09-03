@@ -2,13 +2,13 @@
  * Tests for useSource hook
  */
 
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
 import { act } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import type { Source } from '../types';
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
+import type { Source } from '../types';
 
 const mockGetSource = mock();
 const mockUpdateSource = mock();
