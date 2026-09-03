@@ -65,9 +65,11 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 
 ## Quick Start
 
-**Zero configuration required!** Just copy `.env.example` to `.env`, create basic auth, and start:
+**Zero configuration required!** Install Ollama, copy `.env.example` to `.env`, create basic auth, and start:
 
 ```bash
+# Host Ollama is the default engine (Apple GPU / Docker Desktop)
+ollama serve
 cp .env.example .env
 mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
 make up
@@ -80,10 +82,11 @@ Access the services:
 
 ### Prerequisites
 
+- **Ollama** installed and listening on port 11434 (host daemon is the default engine)
 - **Docker** (20.10+) and **Docker Compose** (v2.0+)
 - **8GB+ RAM** (16GB+ recommended for larger models)
 - **50GB+ free disk space** (models can be large)
-- **NVIDIA GPU** (optional, for faster inference)
+- **NVIDIA GPU** (optional, only for `--profile bundled-ollama`)
 - **VPN subscription** (optional, only needed for private web search)
 
 ### Installation
@@ -109,12 +112,13 @@ Open browser to `http://localhost:8000` and follow the 7-step wizard:
 #### Option 2: Quick Start
 
 ```bash
+ollama serve
 cp .env.example .env
 mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
 make up
 ```
 
-Uses insecure defaults (fine for development).
+Uses insecure defaults (fine for development). Host Ollama is the engine.
 
 #### Option 3: CLI Setup Script
 
@@ -124,12 +128,25 @@ Uses insecure defaults (fine for development).
 
 Interactive command-line wizard for terminal users.
 
+### Local Ollama (default)
+
+Zone talks to the Ollama daemon on the host so Docker Desktop can use the Apple GPU. Keep it running on port 11434, then pull models with `make pull-models`.
+
+To run Ollama inside Docker instead (Linux with NVIDIA GPU passthrough):
+
+```bash
+# in .env
+OLLAMA_BASE_URL=http://ollama:11434
+docker compose --profile bundled-ollama up -d
+```
+
 ### Post-Installation
 
-1. **Monitor initial setup** (models downloading)
+1. **Pull models into host Ollama** (if they are not already local)
 
    ```bash
-   make logs-follow
+   make pull-models
+   make list-models
    ```
 
    Wait for models to download (10-30 minutes depending on your connection).
