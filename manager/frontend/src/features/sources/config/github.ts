@@ -56,5 +56,12 @@ export const githubSource: SourceDefinition = {
 
   getDefaultName: (state) => `${state.ghOwner}/${state.ghRepo}`,
 
+  getUrl: (state) => {
+    const owner = state.ghOwner as string;
+    const repo = state.ghRepo as string;
+    if (!owner || !repo) return undefined;
+    return `https://github.com/${owner}/${repo}`;
+  },
+
   getFieldIds: () => ['ghOwner', 'ghRepo', 'ghBranch'],
 };
