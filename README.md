@@ -195,7 +195,7 @@ Browse more models at [Ollama Library](https://ollama.com/library).
 
 ### VPN Configuration (Optional)
 
-VPN is optional. The system works without it - you'll just have direct web search or no search.
+VPN is optional. The system works without it — Open WebUI and Manager chat just won't have private web search.
 
 To enable VPN-protected search:
 ```bash

@@ -40,15 +40,27 @@ type ServerMessage =
       detail: string;
       duration_ms: number;
     }
-  | { type: 'message_end'; message_id: string; content: string }
+  | {
+      type: 'image';
+      message_id: string;
+      attachment: NonNullable<MessageMetadata['attachments']>[number];
+    }
+  | {
+      type: 'message_end';
+      message_id: string;
+      content: string;
+      metadata?: MessageMetadata | null;
+    }
   | { type: 'cancelled'; message_id: string | null }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'status'; message: string };
 
 export function useChat(chatId: string | null) {
   const [chat, setChat] = useState<ChatWithMessages | null>(null);
   const [loading, setLoading] = useState(Boolean(chatId));
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
@@ -103,7 +115,10 @@ export function useChat(chatId: string | null) {
                 ? {
                     ...m,
                     content,
-                    metadata: metadata !== undefined ? (metadata ?? undefined) : m.metadata,
+                    // Merged, not replaced: a streaming turn has several
+                    // writers for one message, and an arriving image must not
+                    // drop the tool trace that patchToolCall put there.
+                    metadata: metadata !== undefined ? { ...m.metadata, ...metadata } : m.metadata,
                   }
                 : m
             ),
@@ -192,10 +207,12 @@ export function useChat(chatId: string | null) {
       return;
     }
 
+    setStatus(null);
     const socket = chatsApi.createChatWebSocket(chatId);
     socketRef.current = socket;
     let assistantId: string | null = null;
     let assistantContent = '';
+    let assistantMetadata: MessageMetadata | undefined;
 
     socket.onopen = () => {
       const token = chatsApi.chatAccessToken();
@@ -216,9 +233,14 @@ export function useChat(chatId: string | null) {
         case 'message_saved':
           applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
           break;
+        case 'status':
+          setStatus(payload.message);
+          break;
         case 'message_start':
+          setStatus(null);
           assistantId = payload.message_id;
           assistantContent = '';
+          assistantMetadata = undefined;
           upsertMessage(payload.message_id, payload.role, '');
           break;
         case 'chunk':
@@ -244,16 +266,38 @@ export function useChat(chatId: string | null) {
             pending: false,
           });
           break;
+        case 'image':
+          if (assistantId === payload.message_id) {
+            const attachments = assistantMetadata?.attachments ?? [];
+            assistantMetadata = {
+              ...assistantMetadata,
+              attachments: [
+                ...attachments.filter((attachment) => attachment.url !== payload.attachment.url),
+                payload.attachment,
+              ],
+            };
+            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+          }
+          break;
         case 'message_end':
-          upsertMessage(payload.message_id, 'assistant', payload.content);
+          setStatus(null);
+          upsertMessage(
+            payload.message_id,
+            'assistant',
+            payload.content,
+            payload.metadata ?? assistantMetadata
+          );
           assistantId = null;
           assistantContent = '';
+          assistantMetadata = undefined;
           setStreaming(false);
           break;
         case 'cancelled':
+          setStatus(null);
           setStreaming(false);
           break;
         case 'error':
+          setStatus(null);
           setError(payload.message);
           setStreaming(false);
           break;
@@ -264,10 +308,12 @@ export function useChat(chatId: string | null) {
 
     socket.onerror = () => {
       setError('Chat connection failed');
+      setStatus(null);
       setStreaming(false);
     };
 
     socket.onclose = () => {
+      setStatus(null);
       setStreaming(false);
     };
 
@@ -381,6 +427,7 @@ export function useChat(chatId: string | null) {
     loading,
     error,
     streaming,
+    status,
     sendMessage,
     cancelGeneration,
     setAgentEnabled,

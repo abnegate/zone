@@ -6598,6 +6598,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "wiremock",
  "zone_context",
  "zone_core",
 ]

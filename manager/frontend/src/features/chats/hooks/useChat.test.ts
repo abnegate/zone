@@ -255,6 +255,41 @@ describe('useChat', () => {
     expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls).toHaveLength(1);
   });
 
+  it('keeps the tool trace when an image arrives on the same message', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const attachment = {
+      name: 'generated-image-1.webp',
+      mime: 'image/webp',
+      url: 'data:image/webp;base64,generated',
+    };
+    lastSocket?.emit({ type: 'message_start', message_id: 'm-both', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm-both',
+      tool_call_id: 'call_1',
+      name: 'run_shell',
+      arguments: '{"command":"ls"}',
+    });
+    lastSocket?.emit({
+      type: 'image',
+      message_id: 'm-both',
+      attachment,
+    });
+
+    await waitFor(() => {
+      const metadata = result.current.chat?.messages.at(-1)?.metadata;
+      expect(metadata?.tool_calls).toHaveLength(1);
+      expect(metadata?.attachments).toEqual([attachment]);
+    });
+  });
+
   it('persists the agent toggle on the chat', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     mockUpdateChat.mockResolvedValue({ ...mockChat, agent_enabled: true });
@@ -391,6 +426,44 @@ describe('useChat', () => {
     });
   });
 
+  it('adds streamed assistant images and keeps final metadata', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const attachment = {
+      name: 'generated-image-1.webp',
+      mime: 'image/webp',
+      url: 'data:image/webp;base64,generated',
+    };
+    lastSocket?.emit({ type: 'message_start', message_id: 'm-image', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'image',
+      message_id: 'm-image',
+      attachment,
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    });
+
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm-image',
+      content: '',
+      metadata: { attachments: [attachment] },
+    });
+
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    });
+  });
+
   it('should handle sending message with error', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
@@ -409,6 +482,31 @@ describe('useChat', () => {
       'Chat connection is not open'
     );
     expect(result.current.chat?.messages).toHaveLength(2); // No new message added
+  });
+
+  it('surfaces a status frame while searching the web', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'status', message: 'Searching the web...' });
+
+    await waitFor(() => {
+      expect(result.current.status).toBe('Searching the web...');
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
+
+    await waitFor(() => {
+      expect(result.current.status).toBeNull();
+    });
   });
 
   it('should not fetch when chatId is null', async () => {
