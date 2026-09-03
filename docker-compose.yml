@@ -8,11 +8,13 @@ services:
       - SECURITY_GENERATE_CERTIFICATE=${SECURITY_GENERATE_CERTIFICATE:-false}
       - ADVANCED_ACME_EMAIL=${ADVANCED_ACME_EMAIL}
       - DOMAIN_HOST_WEBUI=${DOMAIN_HOST_WEBUI}
+      - GODEBUG=http2server=0,http2xconnect=0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${SECURITY_BASIC_AUTH_USERS_FILE:-./auth/users.htpasswd}:/auth/users.htpasswd:ro
       - traefik_letsencrypt:/letsencrypt
       - ./traefik/entrypoint.sh:/custom-entrypoint.sh:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
     entrypoint: ["/custom-entrypoint.sh"]
     command:
       - --api.dashboard=true
@@ -20,6 +22,8 @@ services:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=zone_edge
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
       - --entrypoints.ping.address=:8082
@@ -138,7 +142,7 @@ services:
     container_name: ollama-init
     restart: "no"
     environment:
-      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST}
       - OLLAMA_MODEL_REASON=${OLLAMA_MODEL_REASON}
       - OLLAMA_MODEL_EMBED=${OLLAMA_MODEL_EMBED}
@@ -146,6 +150,8 @@ services:
       - ollama_data:/root/.ollama
       - ./ollama/pull-models.sh:/pull-models.sh:ro
     entrypoint: ["/bin/sh", "/pull-models.sh"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - internal
 
@@ -161,7 +167,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - LITELLM_SALT_KEY=${SECURITY_LITELLM_SALT_KEY}
       - UI_USERNAME=${SECURITY_LITELLM_UI_USERNAME}
@@ -185,6 +191,8 @@ services:
       - --num_workers
       - "${ADVANCED_LITELLM_WORKERS}"
       - --add_function_to_prompt
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - internal
       - edge
@@ -223,7 +231,7 @@ services:
       valkey:
         condition: service_healthy
     environment:
-      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - LITELLM_HOST=http://litellm:4000
       - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
@@ -241,6 +249,8 @@ services:
     volumes:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - internal
       - edge
@@ -248,11 +258,11 @@ services:
       - traefik.enable=true
       - traefik.docker.network=zone_edge
       - traefik.http.services.manager.loadbalancer.server.port=8000
-      - traefik.http.routers.manager.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      - traefik.http.routers.manager.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
       - traefik.http.routers.manager.entrypoints=web
       - traefik.http.routers.manager.service=manager
       - traefik.http.routers.manager.middlewares=security-headers
-      - traefik.http.routers.manager-secure.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      - traefik.http.routers.manager-secure.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
       - traefik.http.routers.manager-secure.entrypoints=websecure
       - traefik.http.routers.manager-secure.service=manager
       - traefik.http.routers.manager-secure.middlewares=security-headers
@@ -281,12 +291,12 @@ services:
       - traefik.docker.network=zone_edge
       - traefik.http.services.console.loadbalancer.server.port=3001
       # Route all other requests to frontend (lower priority than backend routes)
-      - traefik.http.routers.console.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.console.rule=Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.console.entrypoints=web
       - traefik.http.routers.console.service=console
       - traefik.http.routers.console.middlewares=security-headers
       - traefik.http.routers.console.priority=1
-      - traefik.http.routers.console-secure.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.console-secure.rule=Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.console-secure.entrypoints=websecure
       - traefik.http.routers.console-secure.service=console
       - traefik.http.routers.console-secure.middlewares=security-headers
@@ -550,8 +560,10 @@ services:
     profiles:
       - monitoring
     environment:
-      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - PORT=8080
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - internal
 
