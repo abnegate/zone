@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "flux1-schnell-fp8",
+      "filename": "flux1-schnell-fp8.safetensors",
+      "relative_path": "checkpoints/flux1-schnell-fp8.safetensors",
+      "source_repository": "Comfy-Org/flux1-schnell",
+      "source_revision": "1b9a9220e849bf08835aaef57e1ce6723db32bf0",
+      "url": "https://huggingface.co/Comfy-Org/flux1-schnell/resolve/1b9a9220e849bf08835aaef57e1ce6723db32bf0/flux1-schnell-fp8.safetensors",
+      "size_bytes": 17236328572,
+      "sha256": "ead426278b49030e9da5df862994f25ce94ab2ee4df38b556ddddb3db093bf72",
+      "license": "Apache-2.0"
+    }
+  ]
+}
