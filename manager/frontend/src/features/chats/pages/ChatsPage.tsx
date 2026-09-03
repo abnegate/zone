@@ -3,7 +3,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
-import { MessageContent } from '../components';
+import { AuthenticatedImage, MessageContent } from '../components';
 import { useChat, useChatSearch, useChats } from '../hooks';
 import type { ChatSearchResult } from '../types';
 import {
@@ -488,23 +488,17 @@ export default function ChatsPage() {
                           data-image-count={Math.min(images.length, 3)}
                         >
                           {images.map((a, index) => (
-                            <a
-                              className="message-image-link"
+                            <AuthenticatedImage
                               key={a.url}
-                              href={a.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              aria-label={`Open ${a.name || `image ${index + 1}`} full size`}
-                            >
-                              <img
-                                src={a.url}
-                                alt={a.name || `Generated image ${index + 1}`}
-                                title="Open full size"
-                                loading="lazy"
-                                decoding="async"
-                                data-testid="message-image"
-                              />
-                            </a>
+                              src={a.url}
+                              alt={a.name || `Generated image ${index + 1}`}
+                              openLabel={`Open ${a.name || `image ${index + 1}`} full size`}
+                              linkClassName="message-image-link"
+                              title="Open full size"
+                              loading="lazy"
+                              decoding="async"
+                              data-testid="message-image"
+                            />
                           ))}
                         </div>
                       )}

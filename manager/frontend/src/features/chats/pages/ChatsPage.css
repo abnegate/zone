@@ -487,6 +487,23 @@
   margin: var(--ui-space-3) 0;
 }
 
+.message-image-loading,
+.message-image-error {
+  display: grid;
+  min-height: 8rem;
+  place-items: center;
+  padding: var(--ui-space-4);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-bg-surface);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.message-image-error {
+  color: var(--ui-error);
+}
+
 /* Markdown ---------------------------------------------------------------- */
 
 .message-markdown > :first-child {
