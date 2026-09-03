@@ -7,7 +7,7 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use std::time::Duration;
 
-use super::types::{BrowseResponse, ErrorResponse, ModelDetails, ModelResponse};
+use super::types::{BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSize};
 
 // =============================================================================
 // Constants
@@ -195,6 +195,11 @@ async fn attach_ollama_download_sizes(models: Vec<ModelResponse>) -> Vec<ModelRe
     stream::iter(models)
         .map(|mut model| async move {
             model.size = fetch_ollama_manifest_size(&model.name).await;
+            if let Some(sizes) = model.sizes.as_mut() {
+                for variant in sizes.iter_mut() {
+                    variant.size = fetch_ollama_manifest_size(&variant.name).await;
+                }
+            }
             model
         })
         .buffered(OLLAMA_SIZE_LOOKUP_CONCURRENCY)
@@ -202,9 +207,18 @@ async fn attach_ollama_download_sizes(models: Vec<ModelResponse>) -> Vec<ModelRe
         .await
 }
 
-/// Sum the layer sizes in a model's `latest` manifest to get its download size.
+/// Split `llama3.2:1b` into repository + tag. Untagged names use `latest`.
+fn ollama_manifest_ref(name: &str) -> (&str, &str) {
+    match name.split_once(':') {
+        Some((repo, tag)) if !repo.is_empty() && !tag.is_empty() => (repo, tag),
+        _ => (name, "latest"),
+    }
+}
+
+/// Sum the layer sizes in a model's manifest to get its download size.
 async fn fetch_ollama_manifest_size(name: &str) -> Option<u64> {
-    let url = format!("{}/{}/manifests/latest", OLLAMA_REGISTRY_URL, name);
+    let (repo, tag) = ollama_manifest_ref(name);
+    let url = format!("{}/{}/manifests/{}", OLLAMA_REGISTRY_URL, repo, tag);
 
     let response = HTTP_CLIENT
         .get(&url)
@@ -267,13 +281,10 @@ fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
                 .filter(|t| is_param_size_chip(t))
                 .collect::<Vec<_>>();
 
-            let param_size = format_param_sizes(
-                extract_all_param_sizes(&text)
-                    .into_iter()
-                    .chain(chip_sizes.into_iter().map(|s| s.to_uppercase()))
-                    .collect(),
-            )
-            .or_else(|| description.as_deref().and_then(extract_param_size));
+            let size_labels = collect_param_size_labels(&text, chip_sizes);
+            let param_size = format_param_sizes(size_labels.clone())
+                .or_else(|| description.as_deref().and_then(extract_param_size));
+            let sizes = ollama_size_variants(&name, &size_labels);
             let family = extract_model_family(&name);
             let use_cases = nonempty_vec(infer_use_cases(&[
                 description.as_deref().unwrap_or(""),
@@ -291,6 +302,7 @@ fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
                 downloads,
                 tags,
                 use_cases,
+                sizes,
                 details: Some(ModelDetails {
                     format: Some("gguf".to_string()),
                     family,
@@ -1215,6 +1227,44 @@ fn extract_all_param_sizes(text: &str) -> Vec<String> {
     sizes
 }
 
+fn collect_param_size_labels(text: &str, chip_sizes: Vec<String>) -> Vec<String> {
+    let mut sizes = extract_all_param_sizes(text);
+    for chip in chip_sizes {
+        let formatted = chip.to_uppercase();
+        if !sizes.iter().any(|existing| existing == &formatted) {
+            sizes.push(formatted);
+        }
+    }
+    sizes.sort_by(|a, b| {
+        param_size_value(a)
+            .partial_cmp(&param_size_value(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sizes.dedup();
+    sizes
+}
+
+fn ollama_size_tag(label: &str) -> String {
+    label.trim().to_lowercase()
+}
+
+/// Build pullable size options when a library card lists more than one.
+fn ollama_size_variants(model_name: &str, labels: &[String]) -> Option<Vec<ModelSize>> {
+    if labels.len() < 2 || model_name.contains(':') {
+        return None;
+    }
+    Some(
+        labels
+            .iter()
+            .map(|label| ModelSize {
+                name: format!("{}:{}", model_name, ollama_size_tag(label)),
+                label: label.clone(),
+                size: None,
+            })
+            .collect(),
+    )
+}
+
 fn format_param_sizes(mut sizes: Vec<String>) -> Option<String> {
     sizes.sort_by(|a, b| {
         param_size_value(a)
@@ -1447,6 +1497,24 @@ mod tests {
         assert!(parse_cursor_offset(Some("invalid")).is_err());
         assert!(parse_cursor_offset(Some("offset:abc")).is_err());
         assert!(parse_cursor_offset(Some("page:xyz")).is_err());
+    }
+
+    #[test]
+    fn test_ollama_manifest_ref() {
+        assert_eq!(ollama_manifest_ref("llama3.2"), ("llama3.2", "latest"));
+        assert_eq!(ollama_manifest_ref("llama3.2:1b"), ("llama3.2", "1b"));
+        assert_eq!(ollama_manifest_ref("llama3.1:70b"), ("llama3.1", "70b"));
+        assert_eq!(ollama_manifest_ref("model:"), ("model:", "latest"));
+    }
+
+    #[test]
+    fn test_ollama_size_variants() {
+        let variants = ollama_size_variants("llama3.2", &["1B".into(), "3B".into()]).unwrap();
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0].name, "llama3.2:1b");
+        assert_eq!(variants[1].name, "llama3.2:3b");
+        assert!(ollama_size_variants("llama3.2", &["3B".into()]).is_none());
+        assert!(ollama_size_variants("llama3.1:70b", &["8B".into(), "70B".into()]).is_none());
     }
 
     #[test]
@@ -1723,6 +1791,12 @@ mod tests {
                 .as_deref(),
             Some("1B · 3B")
         );
+        let sizes = models[0].sizes.as_ref().expect("multiple sizes");
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(sizes[0].name, "llama3.2:1b");
+        assert_eq!(sizes[0].label, "1B");
+        assert_eq!(sizes[1].name, "llama3.2:3b");
+        assert_eq!(sizes[1].label, "3B");
         assert_eq!(models[0].downloads, Some(28_700));
         assert!(
             models[0]
