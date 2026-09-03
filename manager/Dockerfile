@@ -39,7 +39,6 @@ COPY runner/zone_cli ./zone_cli/
 COPY runner/zone_installer ./zone_installer/
 
 COPY runner/zone_server/migrations ./zone_server/migrations/
-COPY runner/.sqlx ./.sqlx/
 
 # Touch all source files to ensure Cargo detects changes from dummy files
 RUN find . -name "*.rs" -exec touch {} +
