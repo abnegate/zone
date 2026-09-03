@@ -45,7 +45,7 @@ async fn create_org(client: &TestClient, token: &str) -> String {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    response.json_value()["id"].as_str().unwrap().to_string()
+    response.json_value()["organization"]["id"].as_str().unwrap().to_string()
 }
 
 /// Helper to create a workspace
@@ -65,7 +65,7 @@ async fn create_workspace(client: &TestClient, token: &str, org_id: &str) -> Str
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    response.json_value()["id"].as_str().unwrap().to_string()
+    response.json_value()["workspace"]["id"].as_str().unwrap().to_string()
 }
 
 // =============================================================================

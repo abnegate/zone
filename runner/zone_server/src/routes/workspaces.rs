@@ -51,6 +51,16 @@ pub struct OrgIdPath {
     org_id: Uuid,
 }
 
+#[derive(Debug, Serialize)]
+struct SingleWorkspaceResponse {
+    workspace: WorkspaceResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspacesListResponse {
+    workspaces: Vec<WorkspaceResponse>,
+}
+
 /// GET /api/organizations/:org_id/workspaces - List accessible workspaces
 pub async fn list_accessible_workspaces(
     State(state): State<AppState>,
@@ -59,12 +69,9 @@ pub async fn list_accessible_workspaces(
     match workspace_members::list_user_workspaces_in_org(state.db(), member.user_id, member.org_id)
         .await
     {
-        Ok(workspaces) => Json(
-            workspaces
-                .into_iter()
-                .map(WorkspaceResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(workspaces) => Json(WorkspacesListResponse {
+            workspaces: workspaces.into_iter().map(WorkspaceResponse::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
@@ -83,7 +90,7 @@ pub async fn get_workspace(
     member: WorkspaceMember,
 ) -> impl IntoResponse {
     match workspaces::get_workspace(state.db(), member.workspace_id).await {
-        Ok(Some(ws)) => Json(WorkspaceResponse::from(ws)).into_response(),
+        Ok(Some(ws)) => Json(SingleWorkspaceResponse { workspace: WorkspaceResponse::from(ws) }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -122,7 +129,7 @@ pub async fn update_workspace(
     )
     .await
     {
-        Ok(Some(ws)) => Json(WorkspaceResponse::from(ws)).into_response(),
+        Ok(Some(ws)) => Json(SingleWorkspaceResponse { workspace: WorkspaceResponse::from(ws) }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -206,18 +213,20 @@ pub struct UpdateWorkspaceMemberRoleRequest {
     role: String,
 }
 
+#[derive(Debug, Serialize)]
+struct WorkspaceMembersListResponse {
+    members: Vec<WorkspaceMemberResponse>,
+}
+
 /// GET /api/workspaces/:workspace_id/members - List members (requires member)
 pub async fn list_members(
     State(state): State<AppState>,
     member: WorkspaceMember,
 ) -> impl IntoResponse {
     match workspace_members::list_members(state.db(), member.workspace_id).await {
-        Ok(members) => Json(
-            members
-                .into_iter()
-                .map(WorkspaceMemberResponse::from)
-                .collect::<Vec<_>>(),
-        )
+        Ok(members) => Json(WorkspaceMembersListResponse {
+            members: members.into_iter().map(WorkspaceMemberResponse::from).collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
