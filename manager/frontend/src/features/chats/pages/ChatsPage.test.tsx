@@ -247,6 +247,7 @@ afterAll(() => {
 
 describe('ChatsPage', () => {
   beforeEach(() => {
+    localStorage.removeItem('zone.chat.webSearch');
     mockGetChats.mockReset();
     mockGetChat.mockReset();
     mockCreateChat.mockReset();
@@ -675,7 +676,7 @@ describe('ChatsPage', () => {
           JSON.stringify({
             type: 'send',
             content: 'Test message',
-            metadata: undefined,
+            metadata: { web_search: true },
           })
         );
       });
@@ -714,7 +715,41 @@ describe('ChatsPage', () => {
           JSON.stringify({
             type: 'send',
             content: 'Enter test',
-            metadata: undefined,
+            metadata: { web_search: true },
+          })
+        );
+      });
+    });
+
+    it('can turn web search off before sending', async () => {
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('web-search-toggle')).toBeInTheDocument();
+      });
+
+      const toggle = screen.getByTestId('web-search-toggle');
+      expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
+        target: { value: 'No search' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+      await waitFor(() => {
+        expect(mockWsSend).toHaveBeenCalledWith(
+          JSON.stringify({
+            type: 'send',
+            content: 'No search',
+            metadata: { web_search: false },
           })
         );
       });

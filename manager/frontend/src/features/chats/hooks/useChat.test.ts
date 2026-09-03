@@ -294,6 +294,31 @@ describe('useChat', () => {
     expect(result.current.chat?.messages).toHaveLength(2); // No new message added
   });
 
+  it('surfaces a status frame while searching the web', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'status', message: 'Searching the web...' });
+
+    await waitFor(() => {
+      expect(result.current.status).toBe('Searching the web...');
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
+
+    await waitFor(() => {
+      expect(result.current.status).toBeNull();
+    });
+  });
+
   it('should not fetch when chatId is null', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

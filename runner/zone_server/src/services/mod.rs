@@ -7,3 +7,4 @@ pub mod embedding;
 pub mod git;
 pub mod pr;
 pub mod runner;
+pub mod searxng;
