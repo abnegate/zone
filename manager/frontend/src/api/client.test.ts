@@ -255,7 +255,10 @@ describe('Client', () => {
 
       await client.getChats(testWorkspaceId, true);
 
-      expect(mockFetch).toHaveBeenCalledWith(`/api/chats?workspace_id=${testWorkspaceId}&archived=true`, expect.any(Object));
+      expect(mockFetch).toHaveBeenCalledWith(
+        `/api/chats?workspace_id=${testWorkspaceId}&archived=true`,
+        expect.any(Object)
+      );
     });
 
     it('getChat fetches single chat', async () => {
@@ -586,7 +589,10 @@ describe('Client', () => {
 
       await client.getProjects(testWorkspaceId, 'active');
 
-      expect(mockFetch).toHaveBeenCalledWith(`/api/projects?workspace_id=${testWorkspaceId}&status=active`, expect.any(Object));
+      expect(mockFetch).toHaveBeenCalledWith(
+        `/api/projects?workspace_id=${testWorkspaceId}&status=active`,
+        expect.any(Object)
+      );
     });
 
     it('getProject fetches single project', async () => {
@@ -751,7 +757,11 @@ describe('Client', () => {
         json: async () => ({ task: mockTask }),
       });
 
-      await client.createTask(testWorkspaceId, { project_ids: ['p1'], title: 'Task', description: 'Do something' });
+      await client.createTask(testWorkspaceId, {
+        project_ids: ['p1'],
+        title: 'Task',
+        description: 'Do something',
+      });
 
       expect(mockFetch).toHaveBeenCalledWith(
         `/api/workspaces/${testWorkspaceId}/tasks`,
@@ -883,6 +893,23 @@ describe('Client', () => {
         `/api/workspaces/${testWorkspaceId}/sources`,
         expect.objectContaining({ method: 'POST' })
       );
+    });
+
+    it('createSource accepts an unwrapped API response without category', async () => {
+      const { category: _category, url: _url, ...unwrapped } = mockSource;
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ...unwrapped, url: null }),
+      });
+
+      const source = await client.createSource(testWorkspaceId, {
+        name: 'Test',
+        source_type: 'github',
+        config: { owner: 'test', repo: 'test' },
+      });
+
+      expect(source.category).toBe('file');
+      expect(source.url).toBe('https://github.com/test/test');
     });
 
     it('verifySource verifies source', async () => {
