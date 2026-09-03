@@ -208,6 +208,10 @@ For production, regenerate secrets for security.
 - **Description**: Display name for SearXNG instance
 - **Example**: `My Private Search`
 
+### Manager / zone-server chat
+
+Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). When `SEARCH_ENABLE_WEB_SEARCH` is true, Manager chat queries SearXNG at `SEARCH_SEARXNG_QUERY_URL` (default `http://gluetun:8080/search?q=<query>&format=json`) and injects the top results into the model prompt. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. A message can opt out with `metadata.web_search: false`.
+
 ---
 
 ## 🔒 VPN Configuration - Optional
@@ -405,7 +409,7 @@ Need to find a specific config? Quick lookup:
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
-- **Search**: ENABLE_RAG_WEB_SEARCH, RAG_WEB_SEARCH_*, SEARXNG_*
+- **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*

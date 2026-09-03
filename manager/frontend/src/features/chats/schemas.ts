@@ -13,7 +13,10 @@ export const MessageAttachmentSchema = z.object({
 });
 
 export const MessageMetadataSchema = z
-  .object({ attachments: z.array(MessageAttachmentSchema).optional() })
+  .object({
+    attachments: z.array(MessageAttachmentSchema).optional(),
+    web_search: z.boolean().optional(),
+  })
   .passthrough();
 
 export const MessageSchema = z.object({

@@ -689,6 +689,20 @@
   color: var(--ui-text-secondary);
 }
 
+.message-status {
+  width: 100%;
+  max-width: var(--chat-column);
+  margin: 0 auto var(--ui-space-3);
+  padding: 0 var(--ui-space-1);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.message-form-row .btn-icon.is-active {
+  background-color: color-mix(in srgb, var(--ui-accent) 12%, transparent);
+  color: var(--ui-accent);
+}
+
 .message-form textarea {
   flex: 1;
   min-height: 2.25rem;

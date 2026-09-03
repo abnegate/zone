@@ -8,15 +8,36 @@ import { useChat, useChatSearch, useChats } from '../hooks';
 import type { ChatSearchResult } from '../types';
 import {
   type Attachment,
-  attachmentMetadata,
   buildMessageWithAttachments,
   formatBytes,
   imageAttachments,
   isSendable,
   readAttachment,
+  sendMetadata,
 } from '../utils';
 import { formatDate } from '../utils';
 import './ChatsPage.css';
+
+const WEB_SEARCH_STORAGE_KEY = 'zone.chat.webSearch';
+
+function readWebSearchPref(): boolean {
+  try {
+    const stored = localStorage.getItem(WEB_SEARCH_STORAGE_KEY);
+    if (stored === 'false') return false;
+    if (stored === 'true') return true;
+  } catch {
+    // ignore quota / private-mode failures
+  }
+  return true;
+}
+
+function persistWebSearchPref(enabled: boolean) {
+  try {
+    localStorage.setItem(WEB_SEARCH_STORAGE_KEY, String(enabled));
+  } catch {
+    // ignore quota / private-mode failures
+  }
+}
 
 export default function ChatsPage() {
   const { isAuthenticated } = useAuth();
@@ -33,6 +54,7 @@ export default function ChatsPage() {
   const [messageInput, setMessageInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [webSearch, setWebSearch] = useState(readWebSearchPref);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const addFiles = async (files: FileList | null) => {
@@ -46,6 +68,14 @@ export default function ChatsPage() {
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const toggleWebSearch = () => {
+    setWebSearch((prev) => {
+      const next = !prev;
+      persistWebSearchPref(next);
+      return next;
+    });
   };
   const [sending, setSending] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
@@ -65,6 +95,7 @@ export default function ChatsPage() {
   const {
     chat: activeChat,
     error: chatError,
+    status: chatStatus,
     sendMessage: sendMessageFn,
   } = useChat(selectedChatId);
 
@@ -136,7 +167,7 @@ export default function ChatsPage() {
     try {
       await sendMessageFn({
         content: buildMessageWithAttachments(messageInput.trim(), sendable),
-        metadata: attachmentMetadata(sendable),
+        metadata: sendMetadata(sendable, webSearch),
       });
       setMessageInput('');
       setAttachments([]);
@@ -503,6 +534,11 @@ export default function ChatsPage() {
                   );
                 })
               )}
+              {chatStatus ? (
+                <div className="message-status" role="status">
+                  {chatStatus}
+                </div>
+              ) : null}
               <div ref={messagesEndRef} />
             </div>
 
@@ -565,6 +601,32 @@ export default function ChatsPage() {
                     e.target.value = '';
                   }}
                 />
+                <button
+                  type="button"
+                  className={`btn-icon${webSearch ? ' is-active' : ''}`}
+                  onClick={toggleWebSearch}
+                  aria-pressed={webSearch}
+                  aria-label="Web search"
+                  title={
+                    webSearch
+                      ? 'Web search on — queries go through SearXNG and the VPN'
+                      : 'Web search off'
+                  }
+                  data-testid="web-search-toggle"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    width="18"
+                    height="18"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M3 12h18M12 3c2.5 3 3.5 6 3.5 9s-1 6-3.5 9c-2.5-3-3.5-6-3.5-9s1-6 3.5-9z" />
+                  </svg>
+                </button>
                 <button
                   type="button"
                   className="btn-icon"
