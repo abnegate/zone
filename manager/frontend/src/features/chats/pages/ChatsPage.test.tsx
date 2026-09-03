@@ -1160,6 +1160,43 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('renders an attached image in the message', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-img',
+            chat_id: 'chat-1',
+            role: 'user',
+            content: "That's what I meant",
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              attachments: [
+                {
+                  name: 'shot.png',
+                  mime: 'image/png',
+                  url: 'data:image/png;base64,aaaa',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        const image = screen.getByRole('img', { name: 'shot.png' });
+        expect(image).toHaveAttribute('src', 'data:image/png;base64,aaaa');
+      });
+    });
+
     it('displays chat model name', async () => {
       renderChatsPage();
 

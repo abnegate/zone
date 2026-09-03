@@ -14,8 +14,8 @@ export default defineConfig({
         name: 'Zone Dashboard',
         short_name: 'Zone',
         description: 'Zone Dashboard - AI Infrastructure Management',
-        theme_color: '#121214',
-        background_color: '#121214',
+        theme_color: '#1a1612',
+        background_color: '#1a1612',
         icons: [
           {
             src: 'logo192.png',
