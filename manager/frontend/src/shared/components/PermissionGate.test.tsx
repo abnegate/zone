@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { render, screen } from '@testing-library/react';
 import PermissionGate from './PermissionGate';
 
 type AuthState = {
@@ -127,10 +127,7 @@ describe('PermissionGate', () => {
       });
 
       render(
-        <PermissionGate
-          permissions={['chats:update', 'chats:delete']}
-          useAuthHook={useAuthHook}
-        >
+        <PermissionGate permissions={['chats:update', 'chats:delete']} useAuthHook={useAuthHook}>
           <ProtectedButton />
         </PermissionGate>
       );
@@ -144,10 +141,7 @@ describe('PermissionGate', () => {
       });
 
       render(
-        <PermissionGate
-          permissions={['chats:update', 'chats:delete']}
-          useAuthHook={useAuthHook}
-        >
+        <PermissionGate permissions={['chats:update', 'chats:delete']} useAuthHook={useAuthHook}>
           <ProtectedButton />
         </PermissionGate>
       );

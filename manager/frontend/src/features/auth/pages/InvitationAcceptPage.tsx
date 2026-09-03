@@ -1,7 +1,7 @@
+import { Button } from '@zone/ui';
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
-import { Button } from '@zone/ui';
 import { useAuth } from '../hooks';
 import type { InvitationDetails } from '../types';
 import './InvitationAcceptPage.css';

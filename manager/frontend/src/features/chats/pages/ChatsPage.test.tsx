@@ -1,6 +1,6 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Chat, ChatSearchResult, ChatWithMessages, Message } from '../types';
 
 // Create mock functions
@@ -660,7 +660,9 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('Type a message, or drop a file...')).toBeInTheDocument();
+        expect(
+          screen.getByPlaceholderText('Type a message, or drop a file...')
+        ).toBeInTheDocument();
       });
 
       fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
@@ -698,7 +700,9 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('Type a message, or drop a file...')).toBeInTheDocument();
+        expect(
+          screen.getByPlaceholderText('Type a message, or drop a file...')
+        ).toBeInTheDocument();
       });
 
       const textarea = screen.getByPlaceholderText('Type a message, or drop a file...');
@@ -726,7 +730,9 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('Type a message, or drop a file...')).toBeInTheDocument();
+        expect(
+          screen.getByPlaceholderText('Type a message, or drop a file...')
+        ).toBeInTheDocument();
       });
 
       const textarea = screen.getByPlaceholderText('Type a message, or drop a file...');
@@ -764,7 +770,9 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByText('Chat 1'));
 
       await waitFor(() => {
-        expect(screen.getByPlaceholderText('Type a message, or drop a file...')).toBeInTheDocument();
+        expect(
+          screen.getByPlaceholderText('Type a message, or drop a file...')
+        ).toBeInTheDocument();
       });
 
       fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {

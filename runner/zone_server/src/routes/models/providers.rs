@@ -7,7 +7,10 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use std::time::Duration;
 
-use super::types::{BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSize};
+use super::types::{
+    BrowseQuery, BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSize,
+    ModelSizeFilter, ModelSort,
+};
 
 // =============================================================================
 // Constants
@@ -93,21 +96,8 @@ pub trait ModelProvider: Send + Sync {
     /// Get the provider name
     fn name(&self) -> &'static str;
 
-    /// Search for models with pagination
-    ///
-    /// # Arguments
-    /// * `query` - Optional search query
-    /// * `cursor` - Optional pagination cursor (provider-specific format)
-    /// * `limit` - Maximum number of results to return
-    ///
-    /// # Returns
-    /// A BrowseResponse containing models and optional next_cursor
-    async fn search(
-        &self,
-        query: Option<&str>,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<BrowseResponse, ProviderError>;
+    /// Search for models with pagination, sorting, and filtering
+    async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError>;
 }
 
 /// Get a provider by name
@@ -136,16 +126,10 @@ impl ModelProvider for OllamaLibraryProvider {
         "ollama"
     }
 
-    async fn search(
-        &self,
-        query: Option<&str>,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<BrowseResponse, ProviderError> {
-        // Parse offset from cursor
-        let offset = parse_cursor_offset(cursor)?;
+    async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
+        let offset = parse_cursor_offset(opts.cursor)?;
 
-        let search_query = query.unwrap_or_default();
+        let search_query = opts.query.unwrap_or_default();
         let url = if search_query.is_empty() {
             "https://ollama.com/search".to_string()
         } else {
@@ -165,23 +149,17 @@ impl ModelProvider for OllamaLibraryProvider {
         }
 
         let html = response.text().await?;
-        let all_models = parse_ollama_library_html(&html);
-        let total = all_models.len();
-        let models: Vec<_> = all_models.into_iter().skip(offset).take(limit).collect();
-        let models = attach_ollama_download_sizes(models).await;
+        let mut models = parse_ollama_library_html(&html);
+        if matches!(opts.sort, ModelSort::SizeAsc | ModelSort::SizeDesc) {
+            models = attach_ollama_download_sizes(models).await;
+            models = refine_models(models, &opts);
+            return Ok(paginate_models(models, offset, opts.limit));
+        }
 
-        // For offset-based pagination, encode next offset as cursor
-        let next_offset = offset + models.len();
-        let next_cursor = if next_offset < total {
-            Some(format!("offset:{}", next_offset))
-        } else {
-            None
-        };
-
-        Ok(BrowseResponse {
-            models,
-            next_cursor,
-        })
+        models = refine_models(models, &opts);
+        let mut page = paginate_models(models, offset, opts.limit);
+        page.models = attach_ollama_download_sizes(page.models).await;
+        Ok(page)
     }
 }
 
@@ -543,74 +521,171 @@ impl ModelProvider for HuggingFaceProvider {
         "huggingface"
     }
 
-    async fn search(
-        &self,
-        query: Option<&str>,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<BrowseResponse, ProviderError> {
-        // Build URL with cursor-based pagination and expanded metadata
-        let mut url = format!(
-            "https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit={}",
-            limit
+    async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
+        if !huggingface_uses_local_window(&opts) {
+            let (models, next_cursor) =
+                fetch_huggingface_page(&opts, opts.cursor, opts.limit).await?;
+            return Ok(BrowseResponse {
+                models: refine_models(models, &opts),
+                next_cursor,
+            });
+        }
+
+        // Size filters and name/size/parameter sorts cannot be applied to a
+        // single HuggingFace downloads page. Gather a window first, refine it,
+        // then paginate with an offset cursor.
+        let offset = parse_cursor_offset(opts.cursor).unwrap_or(0);
+        let needs_sorted_window = huggingface_uses_local_sort(opts.sort);
+        let max_pages = huggingface_window_pages(needs_sorted_window);
+        let mut accumulated = Vec::new();
+        let mut hf_cursor: Option<String> = None;
+        let mut pages = 0;
+
+        loop {
+            let (page, next) =
+                fetch_huggingface_page(&opts, hf_cursor.as_deref(), MAX_PAGE_SIZE).await?;
+            pages += 1;
+            accumulated.extend(page);
+            hf_cursor = next;
+
+            let exhausted = hf_cursor.is_none() || pages >= max_pages;
+            if exhausted {
+                break;
+            }
+
+            // Size-only refinement can stop once this window can fill the page.
+            // Name/size/parameter sorts need the full window before ordering.
+            if !needs_sorted_window
+                && count_matching_models(&accumulated, &opts) >= offset.saturating_add(opts.limit)
+            {
+                break;
+            }
+        }
+
+        let mut response = paginate_models(refine_models(accumulated, &opts), offset, opts.limit);
+        response.next_cursor = huggingface_window_next_cursor(
+            response.next_cursor,
+            hf_cursor.is_some(),
+            needs_sorted_window,
+            pages >= max_pages,
+            offset,
+            response.models.len(),
         );
-        for field in [
-            "cardData",
-            "gguf",
-            "downloads",
-            "likes",
-            "tags",
-            "pipeline_tag",
-            "createdAt",
-            "author",
-            "lastModified",
-        ] {
-            url.push_str("&expand%5B%5D=");
-            url.push_str(field);
-        }
-
-        // Add cursor if provided (for pagination)
-        // Note: cursor from Link header is already URL-encoded, don't re-encode
-        if let Some(c) = cursor {
-            url.push_str(&format!("&cursor={}", c));
-        }
-
-        if let Some(q) = query
-            && !q.is_empty()
-        {
-            url.push_str(&format!("&search={}", urlencoding::encode(q)));
-        }
-
-        let response = HTTP_CLIENT.get(&url).send().await?;
-
-        if !response.status().is_success() {
-            return Err(ProviderError::Unavailable(format!(
-                "HuggingFace API returned status: {}",
-                response.status()
-            )));
-        }
-
-        // Extract next cursor from Link header
-        let next_cursor = extract_cursor_from_link_header(response.headers());
-
-        // Read body as text first for better error messages
-        let body = response.text().await?;
-        let hf_models: Vec<HuggingFaceModel> = serde_json::from_str(&body).map_err(|e| {
-            tracing::error!(
-                "HuggingFace JSON parse error: {}. Body preview: {}",
-                e,
-                &body[..body.len().min(500)]
-            );
-            ProviderError::ParseError(format!("{}", e))
-        })?;
-
-        let models: Vec<ModelResponse> = hf_models.into_iter().map(huggingface_to_model).collect();
-
-        Ok(BrowseResponse {
-            models,
-            next_cursor,
-        })
+        Ok(response)
     }
+}
+
+/// Pages fetched when HuggingFace cannot apply the requested sort natively.
+const HF_WINDOW_PAGES: usize = 5;
+/// Extra scan budget for size filters, which can skip most downloads-ranked rows.
+const HF_FILTER_MAX_PAGES: usize = 15;
+
+fn huggingface_window_pages(needs_sorted_window: bool) -> usize {
+    if needs_sorted_window {
+        HF_WINDOW_PAGES
+    } else {
+        HF_FILTER_MAX_PAGES
+    }
+}
+
+/// Keep pagination inside the fetched window for local sorts. Size filters may
+/// continue only while we stopped early with more HuggingFace pages available.
+fn huggingface_window_next_cursor(
+    page_next: Option<String>,
+    hf_has_more: bool,
+    needs_sorted_window: bool,
+    hit_page_cap: bool,
+    offset: usize,
+    page_len: usize,
+) -> Option<String> {
+    if page_next.is_some() {
+        return page_next;
+    }
+    if hf_has_more && !needs_sorted_window && !hit_page_cap {
+        return Some(format!("offset:{}", offset + page_len));
+    }
+    None
+}
+
+fn huggingface_uses_local_sort(sort: ModelSort) -> bool {
+    matches!(
+        sort,
+        ModelSort::NameAsc
+            | ModelSort::NameDesc
+            | ModelSort::SizeAsc
+            | ModelSort::SizeDesc
+            | ModelSort::ParamsAsc
+            | ModelSort::ParamsDesc
+    )
+}
+
+fn huggingface_uses_local_window(opts: &BrowseQuery<'_>) -> bool {
+    opts.size != ModelSizeFilter::All || huggingface_uses_local_sort(opts.sort)
+}
+
+async fn fetch_huggingface_page(
+    opts: &BrowseQuery<'_>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<ModelResponse>, Option<String>), ProviderError> {
+    let (sort_field, direction) = huggingface_sort_params(opts.sort);
+    let mut url = format!(
+        "https://huggingface.co/api/models?filter=gguf&sort={}&direction={}&limit={}",
+        sort_field, direction, limit
+    );
+    for field in [
+        "cardData",
+        "gguf",
+        "downloads",
+        "likes",
+        "tags",
+        "pipeline_tag",
+        "createdAt",
+        "author",
+        "lastModified",
+    ] {
+        url.push_str("&expand%5B%5D=");
+        url.push_str(field);
+    }
+
+    if let Some(c) = cursor {
+        url.push_str(&format!("&cursor={}", c));
+    }
+
+    if let Some(q) = opts.query
+        && !q.is_empty()
+    {
+        url.push_str(&format!("&search={}", urlencoding::encode(q)));
+    }
+
+    if let Some(family) = opts.family {
+        url.push_str(&format!("&filter={}", urlencoding::encode(family)));
+    }
+
+    let response = HTTP_CLIENT.get(&url).send().await?;
+
+    if !response.status().is_success() {
+        return Err(ProviderError::Unavailable(format!(
+            "HuggingFace API returned status: {}",
+            response.status()
+        )));
+    }
+
+    let next_cursor = extract_cursor_from_link_header(response.headers());
+    let body = response.text().await?;
+    let hf_models: Vec<HuggingFaceModel> = serde_json::from_str(&body).map_err(|e| {
+        tracing::error!(
+            "HuggingFace JSON parse error: {}. Body preview: {}",
+            e,
+            &body[..body.len().min(500)]
+        );
+        ProviderError::ParseError(format!("{}", e))
+    })?;
+
+    Ok((
+        hf_models.into_iter().map(huggingface_to_model).collect(),
+        next_cursor,
+    ))
 }
 
 /// Extract cursor from Link header
@@ -811,14 +886,9 @@ impl ModelProvider for Gpt4AllProvider {
         "gpt4all"
     }
 
-    async fn search(
-        &self,
-        query: Option<&str>,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<BrowseResponse, ProviderError> {
+    async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
         // GPT4All uses a static JSON catalog, so we fetch all and paginate client-side
-        let offset = parse_cursor_offset(cursor)?;
+        let offset = parse_cursor_offset(opts.cursor)?;
 
         let response = HTTP_CLIENT.get(GPT4ALL_MODELS_URL).send().await?;
 
@@ -840,7 +910,7 @@ impl ModelProvider for Gpt4AllProvider {
         })?;
 
         // Filter by query if provided
-        let filtered: Vec<_> = if let Some(q) = query {
+        let filtered: Vec<_> = if let Some(q) = opts.query {
             let q_lower = q.to_lowercase();
             gpt4all_models
                 .into_iter()
@@ -861,25 +931,13 @@ impl ModelProvider for Gpt4AllProvider {
             gpt4all_models
         };
 
-        let total = filtered.len();
-        let models: Vec<ModelResponse> = filtered
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(gpt4all_to_model)
-            .collect();
+        let models: Vec<ModelResponse> = filtered.into_iter().map(gpt4all_to_model).collect();
 
-        let next_offset = offset + models.len();
-        let next_cursor = if next_offset < total {
-            Some(format!("offset:{}", next_offset))
-        } else {
-            None
-        };
-
-        Ok(BrowseResponse {
-            models,
-            next_cursor,
-        })
+        Ok(paginate_models(
+            refine_models(models, &opts),
+            offset,
+            opts.limit,
+        ))
     }
 }
 
@@ -1024,13 +1082,8 @@ impl ModelProvider for OpenRouterProvider {
         "openrouter"
     }
 
-    async fn search(
-        &self,
-        query: Option<&str>,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<BrowseResponse, ProviderError> {
-        let offset = parse_cursor_offset(cursor)?;
+    async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
+        let offset = parse_cursor_offset(opts.cursor)?;
 
         let response = HTTP_CLIENT.get(OPENROUTER_MODELS_URL).send().await?;
 
@@ -1052,7 +1105,7 @@ impl ModelProvider for OpenRouterProvider {
         })?;
 
         // Filter by query if provided
-        let filtered: Vec<_> = if let Some(q) = query {
+        let filtered: Vec<_> = if let Some(q) = opts.query {
             let q_lower = q.to_lowercase();
             or_response
                 .data
@@ -1070,25 +1123,13 @@ impl ModelProvider for OpenRouterProvider {
             or_response.data
         };
 
-        let total = filtered.len();
-        let models: Vec<ModelResponse> = filtered
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .map(openrouter_to_model)
-            .collect();
+        let models: Vec<ModelResponse> = filtered.into_iter().map(openrouter_to_model).collect();
 
-        let next_offset = offset + models.len();
-        let next_cursor = if next_offset < total {
-            Some(format!("offset:{}", next_offset))
-        } else {
-            None
-        };
-
-        Ok(BrowseResponse {
-            models,
-            next_cursor,
-        })
+        Ok(paginate_models(
+            refine_models(models, &opts),
+            offset,
+            opts.limit,
+        ))
     }
 }
 
@@ -1176,6 +1217,193 @@ fn openrouter_to_model(m: OpenRouterModel) -> ModelResponse {
 // =============================================================================
 // Utility functions
 // =============================================================================
+
+fn huggingface_sort_params(sort: ModelSort) -> (&'static str, i8) {
+    match sort {
+        ModelSort::UpdatedAsc => ("lastModified", 1),
+        ModelSort::UpdatedDesc => ("lastModified", -1),
+        ModelSort::Relevance
+        | ModelSort::NameAsc
+        | ModelSort::NameDesc
+        | ModelSort::SizeAsc
+        | ModelSort::SizeDesc
+        | ModelSort::ParamsAsc
+        | ModelSort::ParamsDesc => ("downloads", -1),
+    }
+}
+
+fn refine_models(mut models: Vec<ModelResponse>, opts: &BrowseQuery<'_>) -> Vec<ModelResponse> {
+    models.retain(|model| model_matches_query(model, opts));
+    sort_models(&mut models, opts.sort);
+    models
+}
+
+fn count_matching_models(models: &[ModelResponse], opts: &BrowseQuery<'_>) -> usize {
+    models
+        .iter()
+        .filter(|model| model_matches_query(model, opts))
+        .count()
+}
+
+fn model_matches_query(model: &ModelResponse, opts: &BrowseQuery<'_>) -> bool {
+    if let Some(family) = opts.family
+        && !model_matches_family(model, family)
+    {
+        return false;
+    }
+
+    opts.size == ModelSizeFilter::All || model_matches_size(model, opts.size)
+}
+
+fn paginate_models(models: Vec<ModelResponse>, offset: usize, limit: usize) -> BrowseResponse {
+    let total = models.len();
+    let page: Vec<_> = models.into_iter().skip(offset).take(limit).collect();
+    let next_offset = offset + page.len();
+    let next_cursor = if next_offset < total {
+        Some(format!("offset:{}", next_offset))
+    } else {
+        None
+    };
+
+    BrowseResponse {
+        models: page,
+        next_cursor,
+    }
+}
+
+fn model_matches_family(model: &ModelResponse, family: &str) -> bool {
+    let needle = family.to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+
+    if let Some(details) = &model.details
+        && let Some(model_family) = &details.family
+        && model_family.to_lowercase().contains(&needle)
+    {
+        return true;
+    }
+
+    model.name.to_lowercase().contains(&needle)
+}
+
+fn model_matches_size(model: &ModelResponse, size: ModelSizeFilter) -> bool {
+    let Some(billions) = model
+        .details
+        .as_ref()
+        .and_then(|details| details.parameter_size.as_deref())
+        .and_then(parse_param_billions)
+    else {
+        return false;
+    };
+
+    match size {
+        ModelSizeFilter::All => true,
+        ModelSizeFilter::Small => billions < 4.0,
+        ModelSizeFilter::Medium => (4.0..16.0).contains(&billions),
+        ModelSizeFilter::Large => (16.0..40.0).contains(&billions),
+        ModelSizeFilter::Xl => billions >= 40.0,
+    }
+}
+
+fn parse_param_billions(raw: &str) -> Option<f64> {
+    let lower = raw.to_lowercase();
+
+    if let Some(prefix) = lower.split("billion").next()
+        && lower.contains("billion")
+    {
+        return prefix.split_whitespace().rev().find_map(|token| {
+            token
+                .trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+                .parse()
+                .ok()
+        });
+    }
+
+    if let Some(prefix) = lower.split("million").next()
+        && lower.contains("million")
+    {
+        return prefix
+            .split_whitespace()
+            .rev()
+            .find_map(|token| {
+                token
+                    .trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+                    .parse::<f64>()
+                    .ok()
+            })
+            .map(|millions| millions / 1000.0);
+    }
+
+    let mut number = String::new();
+    let mut unit = None::<char>;
+
+    for ch in lower.chars() {
+        if ch.is_ascii_digit() || (ch == '.' && !number.contains('.')) {
+            number.push(ch);
+            continue;
+        }
+
+        if !number.is_empty() {
+            if ch == 'b' || ch == 'm' {
+                unit = Some(ch);
+            }
+            break;
+        }
+    }
+
+    if number.is_empty() {
+        return None;
+    }
+
+    let value: f64 = number.parse().ok()?;
+    match unit {
+        Some('m') => Some(value / 1000.0),
+        Some('b') | None => Some(value),
+        _ => None,
+    }
+}
+
+fn sort_models(models: &mut [ModelResponse], sort: ModelSort) {
+    match sort {
+        ModelSort::Relevance => {}
+        ModelSort::NameAsc => models.sort_by_key(|model| model.name.to_lowercase()),
+        ModelSort::NameDesc => {
+            models.sort_by_key(|model| std::cmp::Reverse(model.name.to_lowercase()))
+        }
+        ModelSort::SizeAsc => models.sort_by(|a, b| cmp_optional(a.size, b.size)),
+        ModelSort::SizeDesc => models.sort_by(|a, b| cmp_optional(b.size, a.size)),
+        ModelSort::ParamsAsc => {
+            models.sort_by(|a, b| cmp_optional(param_billions(a), param_billions(b)))
+        }
+        ModelSort::ParamsDesc => {
+            models.sort_by(|a, b| cmp_optional(param_billions(b), param_billions(a)))
+        }
+        ModelSort::UpdatedAsc => {
+            models.sort_by(|a, b| cmp_optional(a.modified_at.as_deref(), b.modified_at.as_deref()))
+        }
+        ModelSort::UpdatedDesc => {
+            models.sort_by(|a, b| cmp_optional(b.modified_at.as_deref(), a.modified_at.as_deref()))
+        }
+    }
+}
+
+fn param_billions(model: &ModelResponse) -> Option<f64> {
+    model
+        .details
+        .as_ref()
+        .and_then(|details| details.parameter_size.as_deref())
+        .and_then(parse_param_billions)
+}
+
+fn cmp_optional<T: PartialOrd>(left: Option<T>, right: Option<T>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
 
 /// Parse cursor to extract offset for providers using offset-based pagination
 fn parse_cursor_offset(cursor: Option<&str>) -> Result<usize, ProviderError> {
@@ -1373,7 +1601,7 @@ fn format_context_tokens(tokens: u64) -> String {
         }
         return format!("{}K", tokens / 1024);
     }
-    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+    if tokens >= 1_000_000 && tokens.is_multiple_of(1_000_000) {
         return format!("{}M", tokens / 1_000_000);
     }
     if tokens >= 1_000_000 {
@@ -1497,6 +1725,236 @@ mod tests {
         assert!(parse_cursor_offset(Some("invalid")).is_err());
         assert!(parse_cursor_offset(Some("offset:abc")).is_err());
         assert!(parse_cursor_offset(Some("page:xyz")).is_err());
+    }
+
+    fn test_model(
+        name: &str,
+        size: Option<u64>,
+        family: Option<&str>,
+        params: Option<&str>,
+        modified_at: Option<&str>,
+    ) -> ModelResponse {
+        ModelResponse {
+            name: name.to_string(),
+            size,
+            digest: None,
+            modified_at: modified_at.map(ToString::to_string),
+            details: Some(ModelDetails {
+                format: Some("gguf".to_string()),
+                family: family.map(ToString::to_string),
+                parameter_size: params.map(ToString::to_string),
+                quantization_level: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn browse_opts<'a>(
+        sort: ModelSort,
+        family: Option<&'a str>,
+        size: ModelSizeFilter,
+    ) -> BrowseQuery<'a> {
+        BrowseQuery {
+            query: None,
+            cursor: None,
+            limit: 20,
+            sort,
+            family,
+            size,
+        }
+    }
+
+    #[test]
+    fn test_parse_param_billions() {
+        assert_eq!(parse_param_billions("7B"), Some(7.0));
+        assert_eq!(parse_param_billions("3.8B"), Some(3.8));
+        assert_eq!(parse_param_billions("7 billion"), Some(7.0));
+        assert_eq!(parse_param_billions("137M"), Some(0.137));
+        assert_eq!(parse_param_billions("335 million"), Some(0.335));
+        assert_eq!(parse_param_billions("unknown"), None);
+    }
+
+    #[test]
+    fn test_model_matches_family() {
+        let llama = test_model("llama3.2", None, Some("llama"), Some("3B"), None);
+        let mistral = test_model("mistral", None, Some("mistral"), Some("7B"), None);
+        let code = test_model("codellama", None, Some("codellama"), Some("7B"), None);
+
+        assert!(model_matches_family(&llama, "llama"));
+        assert!(!model_matches_family(&mistral, "llama"));
+        assert!(model_matches_family(&code, "code"));
+        assert!(model_matches_family(&code, "llama"));
+    }
+
+    #[test]
+    fn test_model_matches_size() {
+        let small = test_model("tiny", None, Some("llama"), Some("3B"), None);
+        let medium = test_model("mid", None, Some("mistral"), Some("7B"), None);
+        let large = test_model("big", None, Some("qwen"), Some("32B"), None);
+        let xl = test_model("huge", None, Some("llama"), Some("70B"), None);
+        let unknown = test_model("mystery", None, Some("llama"), None, None);
+
+        assert!(model_matches_size(&small, ModelSizeFilter::Small));
+        assert!(model_matches_size(&medium, ModelSizeFilter::Medium));
+        assert!(model_matches_size(&large, ModelSizeFilter::Large));
+        assert!(model_matches_size(&xl, ModelSizeFilter::Xl));
+        assert!(!model_matches_size(&unknown, ModelSizeFilter::Small));
+    }
+
+    #[test]
+    fn test_refine_models_filters_and_sorts() {
+        let models = vec![
+            test_model(
+                "mistral",
+                Some(20),
+                Some("mistral"),
+                Some("7B"),
+                Some("2024-01-01"),
+            ),
+            test_model(
+                "llama-70b",
+                Some(40),
+                Some("llama"),
+                Some("70B"),
+                Some("2024-03-01"),
+            ),
+            test_model(
+                "llama-3b",
+                Some(10),
+                Some("llama"),
+                Some("3B"),
+                Some("2024-02-01"),
+            ),
+        ];
+
+        let filtered = refine_models(
+            models.clone(),
+            &browse_opts(ModelSort::NameAsc, Some("llama"), ModelSizeFilter::All),
+        );
+        assert_eq!(
+            filtered.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["llama-3b", "llama-70b"]
+        );
+
+        let small = refine_models(
+            models.clone(),
+            &browse_opts(ModelSort::Relevance, Some("llama"), ModelSizeFilter::Small),
+        );
+        assert_eq!(small.len(), 1);
+        assert_eq!(small[0].name, "llama-3b");
+
+        let by_params = refine_models(
+            models,
+            &browse_opts(ModelSort::ParamsDesc, None, ModelSizeFilter::All),
+        );
+        assert_eq!(by_params[0].name, "llama-70b");
+        assert_eq!(by_params[2].name, "llama-3b");
+    }
+
+    #[test]
+    fn test_paginate_models() {
+        let models: Vec<_> = (0..5)
+            .map(|i| test_model(&format!("m{}", i), None, None, None, None))
+            .collect();
+
+        let page = paginate_models(models, 2, 2);
+        assert_eq!(page.models.len(), 2);
+        assert_eq!(page.models[0].name, "m2");
+        assert_eq!(page.next_cursor, Some("offset:4".to_string()));
+    }
+
+    #[test]
+    fn test_huggingface_sort_params() {
+        assert_eq!(
+            huggingface_sort_params(ModelSort::Relevance),
+            ("downloads", -1)
+        );
+        assert_eq!(
+            huggingface_sort_params(ModelSort::UpdatedDesc),
+            ("lastModified", -1)
+        );
+        assert_eq!(
+            huggingface_sort_params(ModelSort::UpdatedAsc),
+            ("lastModified", 1)
+        );
+    }
+
+    #[test]
+    fn test_huggingface_uses_local_window() {
+        assert!(!huggingface_uses_local_window(&browse_opts(
+            ModelSort::Relevance,
+            None,
+            ModelSizeFilter::All
+        )));
+        assert!(!huggingface_uses_local_window(&browse_opts(
+            ModelSort::UpdatedDesc,
+            Some("llama"),
+            ModelSizeFilter::All
+        )));
+        assert!(huggingface_uses_local_window(&browse_opts(
+            ModelSort::NameAsc,
+            None,
+            ModelSizeFilter::All
+        )));
+        assert!(huggingface_uses_local_window(&browse_opts(
+            ModelSort::SizeDesc,
+            None,
+            ModelSizeFilter::All
+        )));
+        assert!(huggingface_uses_local_window(&browse_opts(
+            ModelSort::Relevance,
+            None,
+            ModelSizeFilter::Small
+        )));
+        assert!(huggingface_uses_local_sort(ModelSort::ParamsDesc));
+        assert!(!huggingface_uses_local_sort(ModelSort::UpdatedDesc));
+        assert_eq!(huggingface_window_pages(true), HF_WINDOW_PAGES);
+        assert_eq!(huggingface_window_pages(false), HF_FILTER_MAX_PAGES);
+    }
+
+    #[test]
+    fn test_huggingface_window_next_cursor() {
+        assert_eq!(
+            huggingface_window_next_cursor(Some("offset:20".into()), true, true, true, 0, 20),
+            Some("offset:20".into())
+        );
+        assert_eq!(
+            huggingface_window_next_cursor(None, true, true, true, 480, 20),
+            None
+        );
+        assert_eq!(
+            huggingface_window_next_cursor(None, true, false, false, 0, 20),
+            Some("offset:20".into())
+        );
+        assert_eq!(
+            huggingface_window_next_cursor(None, true, false, true, 0, 20),
+            None
+        );
+    }
+
+    #[test]
+    fn test_count_matching_models() {
+        let models = vec![
+            test_model("llama-3b", None, Some("llama"), Some("3B"), None),
+            test_model("llama-70b", None, Some("llama"), Some("70B"), None),
+            test_model("mistral", None, Some("mistral"), Some("7B"), None),
+        ];
+
+        assert_eq!(
+            count_matching_models(
+                &models,
+                &browse_opts(ModelSort::Relevance, Some("llama"), ModelSizeFilter::Small)
+            ),
+            1
+        );
+        assert_eq!(
+            count_matching_models(
+                &models,
+                &browse_opts(ModelSort::Relevance, None, ModelSizeFilter::All)
+            ),
+            3
+        );
     }
 
     #[test]

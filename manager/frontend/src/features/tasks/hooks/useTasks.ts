@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { tasksApi } from '../../../api/tasks';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { CreateTaskRequest, UpdateTaskRequest } from '../types';
@@ -9,7 +9,12 @@ export function useTasks(projectId?: string, status?: string) {
   const workspaceId = currentWorkspace?.id;
   const queryKey = ['tasks', workspaceId, projectId, status];
 
-  const { data: tasks = [], isLoading: loading, error, refetch } = useQuery({
+  const {
+    data: tasks = [],
+    isLoading: loading,
+    error,
+    refetch,
+  } = useQuery({
     queryKey,
     queryFn: () => {
       if (!workspaceId) {

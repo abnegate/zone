@@ -2,13 +2,13 @@
  * Tests for useSources hook
  */
 
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
 import { act } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import type { Source } from '../types';
 import { createElement } from 'react';
 import type { ReactNode } from 'react';
+import type { Source } from '../types';
 
 const mockGetSources = mock();
 const mockCreateSource = mock();
@@ -140,7 +140,9 @@ describe('useSources', () => {
   it('should filter sources by type', async () => {
     mockGetSources.mockResolvedValue(mockSources);
 
-    const { result } = renderHook(() => useSources({ type: 'github' }), { wrapper: createWrapper() });
+    const { result } = renderHook(() => useSources({ type: 'github' }), {
+      wrapper: createWrapper(),
+    });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -152,7 +154,9 @@ describe('useSources', () => {
   it('should filter active sources only', async () => {
     mockGetSources.mockResolvedValue([mockSources[0]]);
 
-    const { result } = renderHook(() => useSources({ activeOnly: true }), { wrapper: createWrapper() });
+    const { result } = renderHook(() => useSources({ activeOnly: true }), {
+      wrapper: createWrapper(),
+    });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);

@@ -1,8 +1,8 @@
+import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { useState } from 'react';
-import type { KnowledgeEntry } from '../types';
-import { useKnowledge } from '../hooks';
 import { CreateKnowledgeWizard } from '../components';
-import { Button, Badge, Tabs, TabsList, TabsTrigger, EmptyState } from '@zone/ui';
+import { useKnowledge } from '../hooks';
+import type { KnowledgeEntry } from '../types';
 import './WikiPage.css';
 
 type FilterType = 'all' | 'text' | 'url';
@@ -114,9 +114,7 @@ export default function WikiPage() {
               aria-label="Search knowledge"
             />
           </div>
-          <Button onClick={() => setShowCreateWizard(true)}>
-            + Add Knowledge
-          </Button>
+          <Button onClick={() => setShowCreateWizard(true)}>+ Add Knowledge</Button>
         </div>
       </header>
 
@@ -151,112 +149,121 @@ export default function WikiPage() {
               ? 'Try adjusting your filters or search query'
               : 'Add your first knowledge entry to build your knowledge base'
           }
-          action={!searchQuery && filterType === 'all' ? <Button onClick={() => setShowCreateWizard(true)}>Add Entry</Button> : undefined}
+          action={
+            !searchQuery && filterType === 'all' ? (
+              <Button onClick={() => setShowCreateWizard(true)}>Add Entry</Button>
+            ) : undefined
+          }
         />
       ) : (
         <div className="wiki-workspace">
-        <div className="knowledge-grid">
-          {filteredEntries.map((entry) => (
-            <div
-              key={entry.id}
-              className="knowledge-card"
-              onClick={() => setSelectedEntry(entry)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  setSelectedEntry(entry);
-                }
-              }}
-              role="button"
-              tabIndex={0}
-            >
-              <div className="knowledge-card-header">
-                <h3 className="knowledge-card-title">{entry.title}</h3>
-                <Badge variant={entry.type === 'url' ? 'info' : 'secondary'}>{entry.type}</Badge>
-              </div>
-
-              {entry.type === 'url' && (
-                <a
-                  href={entry.content}
-                  className="knowledge-card-url"
-                  onClick={(e) => e.stopPropagation()}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {entry.content}
-                </a>
-              )}
-
-              <div className="knowledge-card-content">
-                {entry.type === 'url' && entry.fetched_content
-                  ? entry.fetched_content
-                  : entry.content}
-              </div>
-
-              {entry.tags.length > 0 && (
-                <div className="knowledge-card-tags">
-                  {entry.tags.map((tag) => (
-                    <span key={tag} className="knowledge-tag">
-                      {tag}
-                    </span>
-                  ))}
+          <div className="knowledge-grid">
+            {filteredEntries.map((entry) => (
+              <div
+                key={entry.id}
+                className="knowledge-card"
+                onClick={() => setSelectedEntry(entry)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setSelectedEntry(entry);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+              >
+                <div className="knowledge-card-header">
+                  <h3 className="knowledge-card-title">{entry.title}</h3>
+                  <Badge variant={entry.type === 'url' ? 'info' : 'secondary'}>{entry.type}</Badge>
                 </div>
-              )}
 
-              <div className="knowledge-card-footer">
-                <div className="knowledge-card-date">
-                  {entry.updated_at ? <span>Updated {formatDate(entry.updated_at)}</span> : null}
-                  {entry.type === 'url' && entry.last_refreshed_at && (
-                    <span> • Refreshed {formatDate(entry.last_refreshed_at)}</span>
-                  )}
+                {entry.type === 'url' && (
+                  <a
+                    href={entry.content}
+                    className="knowledge-card-url"
+                    onClick={(e) => e.stopPropagation()}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {entry.content}
+                  </a>
+                )}
+
+                <div className="knowledge-card-content">
+                  {entry.type === 'url' && entry.fetched_content
+                    ? entry.fetched_content
+                    : entry.content}
                 </div>
-                <div className="knowledge-card-actions">
-                  {entry.type === 'url' && (
+
+                {entry.tags.length > 0 && (
+                  <div className="knowledge-card-tags">
+                    {entry.tags.map((tag) => (
+                      <span key={tag} className="knowledge-tag">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="knowledge-card-footer">
+                  <div className="knowledge-card-date">
+                    {entry.updated_at ? <span>Updated {formatDate(entry.updated_at)}</span> : null}
+                    {entry.type === 'url' && entry.last_refreshed_at && (
+                      <span> • Refreshed {formatDate(entry.last_refreshed_at)}</span>
+                    )}
+                  </div>
+                  <div className="knowledge-card-actions">
+                    {entry.type === 'url' && (
+                      <button
+                        type="button"
+                        className={`knowledge-action-btn refresh ${refreshing === entry.id ? 'refreshing' : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRefreshKnowledge(entry.id);
+                        }}
+                        disabled={refreshing === entry.id}
+                        title="Refresh URL content"
+                        aria-label="Refresh URL content"
+                      >
+                        <svg
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          aria-hidden="true"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                          />
+                        </svg>
+                      </button>
+                    )}
                     <button
                       type="button"
-                      className={`knowledge-action-btn refresh ${refreshing === entry.id ? 'refreshing' : ''}`}
+                      className="knowledge-action-btn delete"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleRefreshKnowledge(entry.id);
+                        handleDeleteKnowledge(entry.id);
                       }}
-                      disabled={refreshing === entry.id}
-                      title="Refresh URL content"
-                      aria-label="Refresh URL content"
+                      title="Delete entry"
+                      aria-label="Delete entry"
                     >
                       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                         <path
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           strokeWidth={2}
-                          d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
                         />
                       </svg>
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    className="knowledge-action-btn delete"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteKnowledge(entry.id);
-                    }}
-                    title="Delete entry"
-                    aria-label="Delete entry"
-                  >
-                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                      />
-                    </svg>
-                  </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
         </div>
       )}
 

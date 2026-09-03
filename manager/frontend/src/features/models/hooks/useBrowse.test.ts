@@ -1,5 +1,5 @@
-import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { act, renderHook, waitFor } from '@testing-library/react';
 
 const mockBrowseModels = mock();
 
@@ -45,6 +45,10 @@ describe('useBrowse', () => {
 
     expect(result.current.source).toBe('all');
     expect(result.current.query).toBe('');
+    expect(result.current.sort).toBe('relevance');
+    expect(result.current.family).toBe('all');
+    expect(result.current.size).toBe('all');
+    expect(result.current.hasActiveFilters).toBe(false);
     expect(result.current.models).toEqual([]);
     expect(result.current.loading).toBe(false);
     expect(result.current.loadingMore).toBe(false);
@@ -76,9 +80,13 @@ describe('useBrowse', () => {
     });
 
     // Models should have source field added
-    expect(result.current.models).toEqual(mockModels.map(m => ({ ...m, source: 'ollama' })));
+    expect(result.current.models).toEqual(mockModels.map((m) => ({ ...m, source: 'ollama' })));
     expect(result.current.hasMore).toBe(false); // next_cursor is null
-    expect(mockBrowseModels).toHaveBeenCalledWith('ollama', '', null, 20);
+    expect(mockBrowseModels).toHaveBeenCalledWith('ollama', '', null, 20, {
+      sort: 'relevance',
+      family: undefined,
+      size: undefined,
+    });
   });
 
   it('searches all sources when source is all', async () => {
@@ -105,8 +113,8 @@ describe('useBrowse', () => {
     // Should have interleaved results from both sources
     expect(result.current.models.length).toBe(2);
     // Models should have source field set
-    expect(result.current.models.some(m => m.source === 'ollama')).toBe(true);
-    expect(result.current.models.some(m => m.source === 'huggingface')).toBe(true);
+    expect(result.current.models.some((m) => m.source === 'ollama')).toBe(true);
+    expect(result.current.models.some((m) => m.source === 'huggingface')).toBe(true);
   });
 
   it('does not search when not authenticated', async () => {
@@ -177,7 +185,11 @@ describe('useBrowse', () => {
     expect(result.current.models).toHaveLength(21);
     expect(result.current.hasMore).toBe(false); // next_cursor is null
     // Verify cursor was passed in loadMore call
-    expect(mockBrowseModels).toHaveBeenLastCalledWith('ollama', '', 'cursor-page-2', 20);
+    expect(mockBrowseModels).toHaveBeenLastCalledWith('ollama', '', 'cursor-page-2', 20, {
+      sort: 'relevance',
+      family: undefined,
+      size: undefined,
+    });
   });
 
   it('does not load more when no more results available', async () => {
@@ -210,8 +222,14 @@ describe('useBrowse', () => {
 
   it('changes source and clears results', async () => {
     mockBrowseModels
-      .mockResolvedValueOnce({ models: [{ name: 'ollama-model', size: 1000000000 }], next_cursor: null })
-      .mockResolvedValueOnce({ models: [{ name: 'hf-model', size: 2000000000 }], next_cursor: null });
+      .mockResolvedValueOnce({
+        models: [{ name: 'ollama-model', size: 1000000000 }],
+        next_cursor: null,
+      })
+      .mockResolvedValueOnce({
+        models: [{ name: 'hf-model', size: 2000000000 }],
+        next_cursor: null,
+      });
 
     const { result } = renderHook(() => useBrowse());
 
@@ -235,7 +253,11 @@ describe('useBrowse', () => {
     });
 
     expect(result.current.query).toBe('');
-    expect(mockBrowseModels).toHaveBeenLastCalledWith('huggingface', '', null, 20);
+    expect(mockBrowseModels).toHaveBeenLastCalledWith('huggingface', '', null, 20, {
+      sort: 'relevance',
+      family: undefined,
+      size: undefined,
+    });
   });
 
   it('sets query', () => {
@@ -333,5 +355,220 @@ describe('useBrowse', () => {
 
     expect(result.current.error).toBe('Failed to load more models');
     expect(result.current.models).toHaveLength(20);
+  });
+
+  it('passes sort and filters to the browse API', async () => {
+    mockBrowseModels.mockResolvedValue({ models: [{ name: 'llama-7b' }], next_cursor: null });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      result.current.changeSource('ollama');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    mockBrowseModels.mockClear();
+    mockBrowseModels.mockResolvedValue({ models: [{ name: 'llama-7b' }], next_cursor: null });
+
+    await act(async () => {
+      result.current.setSort('name_asc');
+    });
+
+    await waitFor(() => {
+      expect(result.current.sort).toBe('name_asc');
+    });
+
+    expect(mockBrowseModels).toHaveBeenCalledWith('ollama', '', null, 20, {
+      sort: 'name_asc',
+      family: undefined,
+      size: undefined,
+    });
+
+    mockBrowseModels.mockClear();
+    mockBrowseModels.mockResolvedValue({ models: [{ name: 'llama-7b' }], next_cursor: null });
+
+    await act(async () => {
+      result.current.setFamily('llama');
+    });
+
+    await waitFor(() => {
+      expect(result.current.family).toBe('llama');
+      expect(result.current.hasActiveFilters).toBe(true);
+    });
+
+    expect(mockBrowseModels).toHaveBeenCalledWith('ollama', '', null, 20, {
+      sort: 'name_asc',
+      family: 'llama',
+      size: undefined,
+    });
+
+    mockBrowseModels.mockClear();
+    mockBrowseModels.mockResolvedValue({ models: [{ name: 'llama-7b' }], next_cursor: null });
+
+    await act(async () => {
+      result.current.setSize('medium');
+    });
+
+    await waitFor(() => {
+      expect(result.current.size).toBe('medium');
+    });
+
+    expect(mockBrowseModels).toHaveBeenCalledWith('ollama', '', null, 20, {
+      sort: 'name_asc',
+      family: 'llama',
+      size: 'medium',
+    });
+  });
+
+  it('clears sort and filters', async () => {
+    mockBrowseModels.mockResolvedValue({ models: [], next_cursor: null });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      result.current.changeSource('ollama');
+    });
+
+    await act(async () => {
+      result.current.setFamily('qwen');
+      result.current.setSize('small');
+    });
+
+    await waitFor(() => {
+      expect(result.current.hasActiveFilters).toBe(true);
+    });
+
+    mockBrowseModels.mockClear();
+    mockBrowseModels.mockResolvedValue({ models: [], next_cursor: null });
+
+    await act(async () => {
+      result.current.clearFilters();
+    });
+
+    await waitFor(() => {
+      expect(result.current.sort).toBe('relevance');
+      expect(result.current.family).toBe('all');
+      expect(result.current.size).toBe('all');
+      expect(result.current.hasActiveFilters).toBe(false);
+    });
+
+    expect(mockBrowseModels).toHaveBeenCalledWith('ollama', '', null, 20, {
+      sort: 'relevance',
+      family: undefined,
+      size: undefined,
+    });
+  });
+
+  it('sorts the combined All-source list instead of interleaving', async () => {
+    mockBrowseModels.mockImplementation(async (src: string) => {
+      if (src === 'ollama') {
+        return { models: [{ name: 'zeta', size: 30 }], next_cursor: null };
+      }
+      if (src === 'huggingface') {
+        return { models: [{ name: 'alpha', size: 10 }], next_cursor: null };
+      }
+      return { models: [], next_cursor: null };
+    });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      await result.current.search('', 'all', 'name_asc');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.models.map((m) => m.name)).toEqual(['alpha', 'zeta']);
+  });
+
+  it('re-sorts accumulated All-source pages when loading more', async () => {
+    mockBrowseModels.mockImplementation(async (src: string, _q: string, cursor: string | null) => {
+      if (!cursor) {
+        if (src === 'ollama') {
+          return { models: [{ name: 'zeta' }], next_cursor: 'ollama-2' };
+        }
+        if (src === 'huggingface') {
+          return { models: [{ name: 'mid' }], next_cursor: 'hf-2' };
+        }
+        return { models: [], next_cursor: null };
+      }
+      if (src === 'ollama') {
+        return { models: [{ name: 'beta' }], next_cursor: null };
+      }
+      if (src === 'huggingface') {
+        return { models: [{ name: 'alpha' }], next_cursor: null };
+      }
+      return { models: [], next_cursor: null };
+    });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      result.current.setSort('name_asc');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(result.current.models.map((m) => m.name)).toEqual(['mid', 'zeta']);
+    });
+
+    await act(async () => {
+      await result.current.loadMore();
+    });
+
+    await waitFor(() => {
+      expect(result.current.loadingMore).toBe(false);
+    });
+
+    expect(result.current.models.map((m) => m.name)).toEqual(['alpha', 'beta', 'mid', 'zeta']);
+  });
+
+  it('ignores stale overlapping searches', async () => {
+    mockBrowseModels.mockResolvedValue({ models: [], next_cursor: null });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      result.current.changeSource('ollama');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    let resolveSlow:
+      | ((value: { models: Array<{ name: string }>; next_cursor: null }) => void)
+      | undefined;
+    const slow = new Promise<{ models: Array<{ name: string }>; next_cursor: null }>((resolve) => {
+      resolveSlow = resolve;
+    });
+
+    mockBrowseModels.mockReset();
+    mockBrowseModels
+      .mockReturnValueOnce(slow)
+      .mockResolvedValueOnce({ models: [{ name: 'qwen' }], next_cursor: null });
+
+    await act(async () => {
+      result.current.setFamily('llama');
+      result.current.setFamily('qwen');
+    });
+
+    await waitFor(() => {
+      expect(result.current.family).toBe('qwen');
+      expect(result.current.models.map((m) => m.name)).toEqual(['qwen']);
+      expect(result.current.loading).toBe(false);
+    });
+
+    await act(async () => {
+      resolveSlow?.({ models: [{ name: 'llama-stale' }], next_cursor: null });
+    });
+
+    expect(result.current.models.map((m) => m.name)).toEqual(['qwen']);
+    expect(result.current.error).toBeNull();
   });
 });

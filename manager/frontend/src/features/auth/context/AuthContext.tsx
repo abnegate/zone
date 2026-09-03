@@ -133,27 +133,30 @@ export function AuthProvider({
     });
   }, [apiClient, storage]);
 
-  const handleAuthResponse = useCallback((response: AuthResponse) => {
-    // Set client token synchronously: WorkspaceProvider is a child of this
-    // provider, so its effects run before the effect below syncs the client.
-    apiClient.setAccessToken(response.access_token);
+  const handleAuthResponse = useCallback(
+    (response: AuthResponse) => {
+      // Set client token synchronously: WorkspaceProvider is a child of this
+      // provider, so its effects run before the effect below syncs the client.
+      apiClient.setAccessToken(response.access_token);
 
-    storage.setItem(ACCESS_TOKEN_KEY, response.access_token);
-    storage.setItem(REFRESH_TOKEN_KEY, response.refresh_token);
-    storage.setItem(USER_KEY, JSON.stringify(response.user));
+      storage.setItem(ACCESS_TOKEN_KEY, response.access_token);
+      storage.setItem(REFRESH_TOKEN_KEY, response.refresh_token);
+      storage.setItem(USER_KEY, JSON.stringify(response.user));
 
-    setState({
-      user: response.user,
-      roles: response.roles,
-      permissions: response.permissions,
-      accessToken: response.access_token,
-      refreshToken: response.refresh_token,
-      isAuthenticated: true,
-      isLoading: false,
-    });
+      setState({
+        user: response.user,
+        roles: response.roles,
+        permissions: response.permissions,
+        accessToken: response.access_token,
+        refreshToken: response.refresh_token,
+        isAuthenticated: true,
+        isLoading: false,
+      });
 
-    scheduleRefreshRef.current?.(response.expires_in);
-  }, [apiClient, storage]);
+      scheduleRefreshRef.current?.(response.expires_in);
+    },
+    [apiClient, storage]
+  );
 
   const scheduleRefresh = useCallback(
     (expiresIn: number) => {

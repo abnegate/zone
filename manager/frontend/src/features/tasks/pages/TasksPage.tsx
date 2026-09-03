@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Badge, Button, EmptyState } from '@zone/ui';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../../../api/client';
-import { useTasks } from '../hooks';
-import { useProjects } from '../../projects/hooks';
 import { tasksApi } from '../../../api/tasks';
+import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard } from '../components';
-import { Button, Badge, EmptyState } from '@zone/ui';
+import { useTasks } from '../hooks';
 import type { Task, TaskProgressMessage } from '../types';
 import './TasksPage.css';
 import { useWorkspace } from '../../../shared/context';
@@ -25,7 +25,10 @@ const PHASES: Record<string, { name: string; progress: number }> = {
 };
 
 function TaskStatusBadge({ status }: { status: string }) {
-  const variants: Record<string, 'secondary' | 'info' | 'warning' | 'destructive' | 'default' | 'success'> = {
+  const variants: Record<
+    string,
+    'secondary' | 'info' | 'warning' | 'destructive' | 'default' | 'success'
+  > = {
     created: 'secondary',
     queued: 'info',
     in_progress: 'warning',
@@ -33,11 +36,7 @@ function TaskStatusBadge({ status }: { status: string }) {
     review: 'default',
     complete: 'success',
   };
-  return (
-    <Badge variant={variants[status] || 'secondary'}>
-      {status.replace('_', ' ')}
-    </Badge>
-  );
+  return <Badge variant={variants[status] || 'secondary'}>{status.replace('_', ' ')}</Badge>;
 }
 
 function PrStatusBadge({ status }: { status: 'pending' | 'open' | 'merged' | 'closed' }) {
@@ -170,7 +169,14 @@ function TaskExecutionView({ task, onClose }: TaskExecutionViewProps) {
         <header className="task-execution-header">
           <h2>{task.title}</h2>
           <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="20" height="20">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              width="20"
+              height="20"
+            >
               <path d="M6 18L18 6M6 6l12 12" />
             </svg>
           </Button>
@@ -183,20 +189,14 @@ function TaskExecutionView({ task, onClose }: TaskExecutionViewProps) {
           </div>
 
           <div className="execution-controls">
-            {status === 'idle' && (
-              <Button onClick={startExecution}>
-                Start Execution
-              </Button>
-            )}
+            {status === 'idle' && <Button onClick={startExecution}>Start Execution</Button>}
             {status === 'running' && (
               <Button variant="destructive" onClick={stopExecution}>
                 Stop Execution
               </Button>
             )}
             {(status === 'complete' || status === 'error') && (
-              <Button onClick={startExecution}>
-                Run Again
-              </Button>
+              <Button onClick={startExecution}>Run Again</Button>
             )}
           </div>
 
@@ -292,9 +292,7 @@ export default function TasksPage() {
 
   const getProjectNames = (projectIds: string[]) => {
     if (!projectIds || projectIds.length === 0) return 'No projects';
-    return projectIds
-      .map((id) => projects.find((p) => p.id === id)?.name || 'Unknown')
-      .join(', ');
+    return projectIds.map((id) => projects.find((p) => p.id === id)?.name || 'Unknown').join(', ');
   };
 
   return (

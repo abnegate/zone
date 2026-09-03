@@ -35,9 +35,14 @@ export function useKnowledge() {
   }, [loadEntries]);
 
   const createEntry = useCallback(
-    async (request: Omit<import('../types').CreateKnowledgeRequest, 'workspace_id'>): Promise<KnowledgeEntry> => {
+    async (
+      request: Omit<import('../types').CreateKnowledgeRequest, 'workspace_id'>
+    ): Promise<KnowledgeEntry> => {
       if (!workspaceId) throw new Error('No workspace selected');
-      const newEntry = await knowledgeApi.createKnowledge({ ...request, workspace_id: workspaceId });
+      const newEntry = await knowledgeApi.createKnowledge({
+        ...request,
+        workspace_id: workspaceId,
+      });
       setEntries((prev) => [newEntry, ...prev]);
       return newEntry;
     },

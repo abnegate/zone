@@ -365,6 +365,26 @@ async fn test_list_models_gpt4all_with_search() {
 }
 
 #[tokio::test]
+async fn test_list_models_accepts_sort_and_filter_params() {
+    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let token = get_auth_token(&router).await;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/models?source=gpt4all&sort=name_asc&family=llama&size=medium")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(result["models"].is_array());
+}
+
+#[tokio::test]
 async fn test_list_models_unknown_source() {
     let router = create_test_router_with_ollama("http://localhost:9999").await;
     let token = get_auth_token(&router).await;

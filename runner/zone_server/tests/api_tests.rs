@@ -832,7 +832,10 @@ async fn test_workspace_get() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Get workspace
     let response = client
@@ -884,7 +887,10 @@ async fn test_workspace_update() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update workspace
     let response = client
@@ -931,7 +937,10 @@ async fn test_workspace_delete() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Delete workspace
     let response = client
@@ -1605,7 +1614,10 @@ async fn test_chat_get() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Get chat
     let response = client
@@ -1644,7 +1656,10 @@ async fn test_chat_update() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update chat
     let response = client
@@ -1671,7 +1686,10 @@ async fn test_chat_delete() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Delete chat
     let response = client
@@ -1696,7 +1714,10 @@ async fn test_chat_archive_unarchive() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Archive chat
     let response = client
@@ -1785,7 +1806,10 @@ async fn test_chat_messages() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create message
     let response = client
@@ -1804,7 +1828,10 @@ async fn test_chat_messages() {
         .await;
 
     response.assert_status(StatusCode::CREATED);
-    let message_id = response.json_value()["message"]["id"].as_str().unwrap().to_string();
+    let message_id = response.json_value()["message"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(response.json_value()["message"]["role"], "user");
     assert_eq!(response.json_value()["message"]["content"], "Hello, world!");
 
@@ -1841,7 +1868,10 @@ async fn test_chat_message_delete_not_found() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let response = client
         .delete_auth(
@@ -1892,7 +1922,10 @@ async fn test_source_create() {
     assert_eq!(body["source"]["name"], name);
     assert_eq!(body["source"]["source_type"], "github");
     assert_eq!(body["source"]["category"], "file");
-    assert_eq!(body["source"]["url"], "https://github.com/test-org/test-repo");
+    assert_eq!(
+        body["source"]["url"],
+        "https://github.com/test-org/test-repo"
+    );
     assert_eq!(body["source"]["is_active"], true);
 }
 
@@ -1945,7 +1978,10 @@ async fn test_source_get() {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Get source
     let response = client
@@ -1999,7 +2035,10 @@ async fn test_source_update() {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Update source
     let updated_name = test_source_name();
@@ -2042,7 +2081,10 @@ async fn test_source_delete() {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Delete source
     let response = client
@@ -2075,7 +2117,10 @@ async fn test_source_verify() {
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Verify source - accepts both NO_CONTENT (success) and SERVICE_UNAVAILABLE (no verification service in test)
     let response = client
@@ -2307,7 +2352,10 @@ async fn test_chat_create_minimal() {
 
     response.assert_status(StatusCode::CREATED);
     let body = response.json_value();
-    assert_eq!(body["chat"]["workspace_id"].as_str().unwrap(), &workspace_id);
+    assert_eq!(
+        body["chat"]["workspace_id"].as_str().unwrap(),
+        &workspace_id
+    );
 }
 
 #[tokio::test]
@@ -2366,7 +2414,10 @@ async fn test_workspace_theme_upsert() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Upsert theme
     let response = client
@@ -2417,7 +2468,10 @@ async fn test_workspace_theme_get() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Upsert theme first
     client
@@ -2434,7 +2488,10 @@ async fn test_workspace_theme_get() {
         .await;
 
     response.assert_status(StatusCode::OK);
-    assert_eq!(response.json_value()["theme"]["primary_color_light"], "#FF0000");
+    assert_eq!(
+        response.json_value()["theme"]["primary_color_light"],
+        "#FF0000"
+    );
 }
 
 #[tokio::test]
@@ -2463,7 +2520,10 @@ async fn test_workspace_theme_get_not_found() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Get theme (should be 404)
     let response = client
@@ -2499,7 +2559,10 @@ async fn test_workspace_theme_delete() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create theme first
     client
@@ -2550,7 +2613,10 @@ async fn test_workspace_theme_delete_not_found() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Try to delete non-existent theme
     let response = client
@@ -3013,7 +3079,10 @@ async fn test_project_with_workspace() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create project with workspace
     let response = client
@@ -3059,7 +3128,10 @@ async fn test_chat_with_workspace() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create chat with workspace
     let response = client
@@ -3497,7 +3569,10 @@ async fn test_chat_archived_filter() {
             &token,
         )
         .await;
-    let chat_id = response.json_value()["chat"]["id"].as_str().unwrap().to_string();
+    let chat_id = response.json_value()["chat"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Archive it
     client
@@ -3587,7 +3662,10 @@ async fn test_source_inactive_filter() {
             &token,
         )
         .await;
-    let source_id = response.json_value()["source"]["id"].as_str().unwrap().to_string();
+    let source_id = response.json_value()["source"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Deactivate
     client
@@ -4019,7 +4097,10 @@ async fn test_workspace_ai_settings_upsert() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Upsert workspace AI settings
     let response = client
@@ -4071,7 +4152,10 @@ async fn test_workspace_ai_settings_get() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Upsert settings
     client
@@ -4126,7 +4210,10 @@ async fn test_workspace_ai_settings_effective() {
             &token,
         )
         .await;
-    let ws_id = response.json_value()["workspace"]["id"].as_str().unwrap().to_string();
+    let ws_id = response.json_value()["workspace"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Set org-level settings
     client
@@ -4583,7 +4670,10 @@ async fn test_audit_logs_cannot_access_other_org() {
             &token,
         )
         .await;
-    let _org1_id = response.json_value()["organization"]["id"].as_str().unwrap().to_string();
+    let _org1_id = response.json_value()["organization"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Create second user with different organization
     let token2 = get_auth_token(&client).await;
@@ -4649,7 +4739,10 @@ async fn test_chat_single_responses_carry_messages() {
             "archive",
             client
                 .post_json_auth(
-                    &format!("/api/chats/{}/archive?workspace_id={}", chat_id, workspace_id),
+                    &format!(
+                        "/api/chats/{}/archive?workspace_id={}",
+                        chat_id, workspace_id
+                    ),
                     &json!({}),
                     &token,
                 )

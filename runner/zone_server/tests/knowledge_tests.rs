@@ -54,7 +54,12 @@ async fn create_test_workspace(client: &TestClient, token: &str, _user_id: Uuid)
         .post_json_auth("/api/organizations", &org_body, token)
         .await;
     response.assert_status(StatusCode::CREATED);
-    let org_id = Uuid::parse_str(response.json_value()["organization"]["id"].as_str().unwrap()).unwrap();
+    let org_id = Uuid::parse_str(
+        response.json_value()["organization"]["id"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
 
     // Create workspace (note: endpoint is under organizations)
     let ws_body = json!({
@@ -69,7 +74,8 @@ async fn create_test_workspace(client: &TestClient, token: &str, _user_id: Uuid)
         )
         .await;
     response.assert_status(StatusCode::CREATED);
-    let workspace_id = Uuid::parse_str(response.json_value()["workspace"]["id"].as_str().unwrap()).unwrap();
+    let workspace_id =
+        Uuid::parse_str(response.json_value()["workspace"]["id"].as_str().unwrap()).unwrap();
 
     // Note: Workspace creation now auto-adds the creator as a workspace admin
 

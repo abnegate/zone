@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import { knowledgeApi } from './knowledge';
 import type { CreateKnowledgeRequest, GatherContextRequest } from '../features/knowledge/types';
+import { knowledgeApi } from './knowledge';
 
 describe('KnowledgeApi', () => {
   let mockFetch: ReturnType<typeof spyOn>;

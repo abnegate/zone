@@ -1,10 +1,10 @@
+import { Button, Tabs, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
-import { WorkspaceMembersSection } from '../components';
-import { Button, Tabs, TabsList, TabsTrigger, TabsContent } from '@zone/ui';
-import { useAuth } from '../../../auth';
 import { useTheme } from '../../../../shared/context/ThemeContext';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
+import { useAuth } from '../../../auth';
+import { WorkspaceMembersSection } from '../components';
 import type {
   AiProvider,
   AiSettings,
@@ -269,11 +269,7 @@ export default function WorkspaceSettingsPage() {
             if (bedrockSecretKey) aiRequest.bedrock_secret_key = bedrockSecretKey;
           }
         }
-        const aiSettings = await client.updateWorkspaceAiSettings(
-          orgId,
-          workspaceId,
-          aiRequest
-        );
+        const aiSettings = await client.updateWorkspaceAiSettings(orgId, workspaceId, aiRequest);
         applyAiSettingsToForm(aiSettings);
         const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
         setEffectiveSettings(effective);
@@ -351,533 +347,537 @@ export default function WorkspaceSettingsPage() {
         <h1 className="page-title">Workspace Settings</h1>
       </header>
       <div className="settings-page-body">
+        {error && <div className="alert alert-error">{error}</div>}
+        {success && <div className="alert alert-success">{success}</div>}
 
-      {error && <div className="alert alert-error">{error}</div>}
-      {success && <div className="alert alert-success">{success}</div>}
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Tab)}>
+          <TabsList>
+            <TabsTrigger value="theme">Theme</TabsTrigger>
+            <TabsTrigger value="ai">AI Settings</TabsTrigger>
+            <TabsTrigger value="members">Members</TabsTrigger>
+          </TabsList>
 
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Tab)}>
-        <TabsList>
-          <TabsTrigger value="theme">Theme</TabsTrigger>
-          <TabsTrigger value="ai">AI Settings</TabsTrigger>
-          <TabsTrigger value="members">Members</TabsTrigger>
-        </TabsList>
+          <TabsContent value="members">
+            <WorkspaceMembersSection workspaceId={workspaceId} orgId={orgId} />
+          </TabsContent>
 
-        <TabsContent value="members">
-          <WorkspaceMembersSection workspaceId={workspaceId} orgId={orgId} />
-        </TabsContent>
+          <TabsContent value="theme">
+            <form onSubmit={handleSave} className="settings-form">
+              <section className="settings-section">
+                <h2 className="section-title">Theme Configuration</h2>
 
-        <TabsContent value="theme">
-          <form onSubmit={handleSave} className="settings-form">
-            <section className="settings-section">
-              <h2 className="section-title">Theme Configuration</h2>
-
-              <div className="settings-grid">
-                {/* Light Mode Colors */}
-                <div className="settings-card">
-                  <h3 className="card-title">Light Mode Colors</h3>
-                  <div className="form-group">
-                    <label htmlFor="primary-light">Primary Color</label>
-                    <div className="color-input-wrapper">
-                      <input
-                        type="color"
-                        id="primary-light"
-                        value={primaryColorLight}
-                        onChange={(e) => setPrimaryColorLight(e.target.value)}
-                      />
-                      <input
-                        type="text"
-                        value={primaryColorLight}
-                        onChange={(e) => setPrimaryColorLight(e.target.value)}
-                        pattern="^#[0-9A-Fa-f]{6}$"
-                        className="color-text-input"
-                      />
-                    </div>
-                  </div>
-                  <div className="form-group">
-                    <label htmlFor="secondary-light">Secondary Color</label>
-                    <div className="color-input-wrapper">
-                      <input
-                        type="color"
-                        id="secondary-light"
-                        value={secondaryColorLight}
-                        onChange={(e) => setSecondaryColorLight(e.target.value)}
-                      />
-                      <input
-                        type="text"
-                        value={secondaryColorLight}
-                        onChange={(e) => setSecondaryColorLight(e.target.value)}
-                        pattern="^#[0-9A-Fa-f]{6}$"
-                        className="color-text-input"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Dark Mode Colors */}
-                <div className="settings-card">
-                  <h3 className="card-title">Dark Mode Colors</h3>
-                  <div className="form-group">
-                    <label htmlFor="primary-dark">Primary Color</label>
-                    <div className="color-input-wrapper">
-                      <input
-                        type="color"
-                        id="primary-dark"
-                        value={primaryColorDark}
-                        onChange={(e) => setPrimaryColorDark(e.target.value)}
-                      />
-                      <input
-                        type="text"
-                        value={primaryColorDark}
-                        onChange={(e) => setPrimaryColorDark(e.target.value)}
-                        pattern="^#[0-9A-Fa-f]{6}$"
-                        className="color-text-input"
-                      />
-                    </div>
-                  </div>
-                  <div className="form-group">
-                    <label htmlFor="secondary-dark">Secondary Color</label>
-                    <div className="color-input-wrapper">
-                      <input
-                        type="color"
-                        id="secondary-dark"
-                        value={secondaryColorDark}
-                        onChange={(e) => setSecondaryColorDark(e.target.value)}
-                      />
-                      <input
-                        type="text"
-                        value={secondaryColorDark}
-                        onChange={(e) => setSecondaryColorDark(e.target.value)}
-                        pattern="^#[0-9A-Fa-f]{6}$"
-                        className="color-text-input"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Typography */}
-              <div className="settings-card">
-                <h3 className="card-title">Typography</h3>
-                <div className="settings-row">
-                  <div className="form-group">
-                    <label htmlFor="font-family">Font Family</label>
-                    <select
-                      id="font-family"
-                      value={fontFamily}
-                      onChange={(e) => setFontFamily(e.target.value as FontFamily)}
-                      className="form-select"
-                    >
-                      {fontOptions.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="form-group">
-                    <label htmlFor="font-size">Base Font Size</label>
-                    <div className="slider-input-wrapper">
-                      <input
-                        type="range"
-                        id="font-size"
-                        min="12"
-                        max="20"
-                        value={fontSize}
-                        onChange={(e) => setFontSize(e.target.value)}
-                        className="form-slider"
-                      />
-                      <span className="slider-value">{fontSize}px</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Appearance */}
-              <div className="settings-card">
-                <h3 className="card-title">Appearance</h3>
-                <div className="form-group">
-                  <span className="form-label">Corner Radius</span>
-                  <div className="radio-group">
-                    {radiusOptions.map((opt) => (
-                      <label key={opt.value} className="radio-option">
-                        <input
-                          type="radio"
-                          name="border-radius"
-                          value={opt.value}
-                          checked={borderRadius === opt.value}
-                          onChange={() => setBorderRadius(opt.value)}
-                        />
-                        <span className="radio-label">{opt.label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Preview */}
-              <div className="settings-card">
-                <h3 className="card-title">Preview</h3>
-                <div className="preview-box">
-                  <p className="preview-text">
-                    This is a preview of your theme settings. Changes are applied live.
-                  </p>
-                  <div className="preview-buttons">
-                    <Button type="button" variant="primary">
-                      Primary Button
-                    </Button>
-                    <Button type="button" variant="secondary">
-                      Secondary Button
-                    </Button>
-                  </div>
-                  <div className="preview-card">
-                    <strong>Sample Card</strong>
-                    <p>This card demonstrates the corner radius and colors.</p>
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            {/* Actions */}
-            <div className="settings-actions">
-              <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
-                Reset to Defaults
-              </Button>
-              <Button type="submit" loading={saving} variant="primary">
-                {saving ? 'Saving...' : 'Save Changes'}
-              </Button>
-            </div>
-          </form>
-        </TabsContent>
-
-        <TabsContent value="ai">
-          <form onSubmit={handleSave} className="settings-form">
-            <section className="settings-section">
-              <h2 className="section-title">AI Provider Settings</h2>
-
-              <div className="settings-card">
-                <div className="form-group">
-                  <label className="checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={overrideAiSettings}
-                      onChange={(e) => setOverrideAiSettings(e.target.checked)}
-                    />
-                    <span>Override organization AI settings</span>
-                  </label>
-                  <p className="form-hint">
-                    When disabled, this workspace will use the organization's AI provider settings.
-                  </p>
-                </div>
-              </div>
-
-              {overrideAiSettings ? (
-                <>
-                  {/* Provider Selection */}
+                <div className="settings-grid">
+                  {/* Light Mode Colors */}
                   <div className="settings-card">
-                    <h3 className="card-title">Provider</h3>
+                    <h3 className="card-title">Light Mode Colors</h3>
                     <div className="form-group">
-                      <label htmlFor="ai-provider">AI Provider</label>
+                      <label htmlFor="primary-light">Primary Color</label>
+                      <div className="color-input-wrapper">
+                        <input
+                          type="color"
+                          id="primary-light"
+                          value={primaryColorLight}
+                          onChange={(e) => setPrimaryColorLight(e.target.value)}
+                        />
+                        <input
+                          type="text"
+                          value={primaryColorLight}
+                          onChange={(e) => setPrimaryColorLight(e.target.value)}
+                          pattern="^#[0-9A-Fa-f]{6}$"
+                          className="color-text-input"
+                        />
+                      </div>
+                    </div>
+                    <div className="form-group">
+                      <label htmlFor="secondary-light">Secondary Color</label>
+                      <div className="color-input-wrapper">
+                        <input
+                          type="color"
+                          id="secondary-light"
+                          value={secondaryColorLight}
+                          onChange={(e) => setSecondaryColorLight(e.target.value)}
+                        />
+                        <input
+                          type="text"
+                          value={secondaryColorLight}
+                          onChange={(e) => setSecondaryColorLight(e.target.value)}
+                          pattern="^#[0-9A-Fa-f]{6}$"
+                          className="color-text-input"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Dark Mode Colors */}
+                  <div className="settings-card">
+                    <h3 className="card-title">Dark Mode Colors</h3>
+                    <div className="form-group">
+                      <label htmlFor="primary-dark">Primary Color</label>
+                      <div className="color-input-wrapper">
+                        <input
+                          type="color"
+                          id="primary-dark"
+                          value={primaryColorDark}
+                          onChange={(e) => setPrimaryColorDark(e.target.value)}
+                        />
+                        <input
+                          type="text"
+                          value={primaryColorDark}
+                          onChange={(e) => setPrimaryColorDark(e.target.value)}
+                          pattern="^#[0-9A-Fa-f]{6}$"
+                          className="color-text-input"
+                        />
+                      </div>
+                    </div>
+                    <div className="form-group">
+                      <label htmlFor="secondary-dark">Secondary Color</label>
+                      <div className="color-input-wrapper">
+                        <input
+                          type="color"
+                          id="secondary-dark"
+                          value={secondaryColorDark}
+                          onChange={(e) => setSecondaryColorDark(e.target.value)}
+                        />
+                        <input
+                          type="text"
+                          value={secondaryColorDark}
+                          onChange={(e) => setSecondaryColorDark(e.target.value)}
+                          pattern="^#[0-9A-Fa-f]{6}$"
+                          className="color-text-input"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Typography */}
+                <div className="settings-card">
+                  <h3 className="card-title">Typography</h3>
+                  <div className="settings-row">
+                    <div className="form-group">
+                      <label htmlFor="font-family">Font Family</label>
                       <select
-                        id="ai-provider"
-                        value={aiProvider}
-                        onChange={(e) => {
-                          setAiProvider(e.target.value as AiProvider);
-                          setModelFast('');
-                          setModelReasoning('');
-                          setModelEmbedding('');
-                        }}
+                        id="font-family"
+                        value={fontFamily}
+                        onChange={(e) => setFontFamily(e.target.value as FontFamily)}
                         className="form-select"
                       >
-                        {providerOptions.map((opt) => (
+                        {fontOptions.map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.label}
                           </option>
                         ))}
                       </select>
                     </div>
+                    <div className="form-group">
+                      <label htmlFor="font-size">Base Font Size</label>
+                      <div className="slider-input-wrapper">
+                        <input
+                          type="range"
+                          id="font-size"
+                          min="12"
+                          max="20"
+                          value={fontSize}
+                          onChange={(e) => setFontSize(e.target.value)}
+                          className="form-slider"
+                        />
+                        <span className="slider-value">{fontSize}px</span>
+                      </div>
+                    </div>
                   </div>
+                </div>
 
-                  {/* Provider-specific Credentials */}
-                  <div className="settings-card">
-                    <h3 className="card-title">Credentials</h3>
+                {/* Appearance */}
+                <div className="settings-card">
+                  <h3 className="card-title">Appearance</h3>
+                  <div className="form-group">
+                    <span className="form-label">Corner Radius</span>
+                    <div className="radio-group">
+                      {radiusOptions.map((opt) => (
+                        <label key={opt.value} className="radio-option">
+                          <input
+                            type="radio"
+                            name="border-radius"
+                            value={opt.value}
+                            checked={borderRadius === opt.value}
+                            onChange={() => setBorderRadius(opt.value)}
+                          />
+                          <span className="radio-label">{opt.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
 
-                    {aiProvider === 'self_hosted' && (
-                      <>
-                        <div className="form-group">
-                          <label htmlFor="litellm-host">LiteLLM Host</label>
-                          <input
-                            type="text"
-                            id="litellm-host"
-                            value={litellmHost}
-                            onChange={(e) => setLitellmHost(e.target.value)}
-                            placeholder="http://localhost:4000"
-                            className="form-input"
-                          />
-                        </div>
-                        <div className="form-group">
-                          <label htmlFor="litellm-key">
-                            LiteLLM API Key
-                            {hasLitellmKey && <span className="credential-set"> (configured)</span>}
-                          </label>
-                          <input
-                            type="password"
-                            id="litellm-key"
-                            value={litellmKey}
-                            onChange={(e) => setLitellmKey(e.target.value)}
-                            placeholder={hasLitellmKey ? '••••••••' : 'Enter API key'}
-                            className="form-input"
-                          />
-                        </div>
-                      </>
-                    )}
+                {/* Preview */}
+                <div className="settings-card">
+                  <h3 className="card-title">Preview</h3>
+                  <div className="preview-box">
+                    <p className="preview-text">
+                      This is a preview of your theme settings. Changes are applied live.
+                    </p>
+                    <div className="preview-buttons">
+                      <Button type="button" variant="primary">
+                        Primary Button
+                      </Button>
+                      <Button type="button" variant="secondary">
+                        Secondary Button
+                      </Button>
+                    </div>
+                    <div className="preview-card">
+                      <strong>Sample Card</strong>
+                      <p>This card demonstrates the corner radius and colors.</p>
+                    </div>
+                  </div>
+                </div>
+              </section>
 
-                    {aiProvider === 'openai' && (
-                      <>
-                        <div className="form-group">
-                          <label htmlFor="openai-key">
-                            OpenAI API Key
-                            {hasOpenaiKey && <span className="credential-set"> (configured)</span>}
-                          </label>
-                          <input
-                            type="password"
-                            id="openai-key"
-                            value={openaiApiKey}
-                            onChange={(e) => setOpenaiApiKey(e.target.value)}
-                            placeholder={hasOpenaiKey ? '••••••••' : 'sk-...'}
-                            className="form-input"
-                          />
-                        </div>
-                        <div className="form-group">
-                          <label htmlFor="openai-base-url">Base URL (optional)</label>
-                          <input
-                            type="text"
-                            id="openai-base-url"
-                            value={openaiBaseUrl}
-                            onChange={(e) => setOpenaiBaseUrl(e.target.value)}
-                            placeholder="https://api.openai.com/v1"
-                            className="form-input"
-                          />
-                        </div>
-                      </>
-                    )}
+              {/* Actions */}
+              <div className="settings-actions">
+                <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
+                  Reset to Defaults
+                </Button>
+                <Button type="submit" loading={saving} variant="primary">
+                  {saving ? 'Saving...' : 'Save Changes'}
+                </Button>
+              </div>
+            </form>
+          </TabsContent>
 
-                    {aiProvider === 'anthropic' && (
-                      <>
-                        <div className="form-group">
-                          <label htmlFor="anthropic-key">
-                            Anthropic API Key
-                            {hasAnthropicKey && (
-                              <span className="credential-set"> (configured)</span>
-                            )}
-                          </label>
-                          <input
-                            type="password"
-                            id="anthropic-key"
-                            value={anthropicApiKey}
-                            onChange={(e) => setAnthropicApiKey(e.target.value)}
-                            placeholder={hasAnthropicKey ? '••••••••' : 'sk-ant-...'}
-                            className="form-input"
-                          />
-                        </div>
-                        <div className="form-group">
-                          <label htmlFor="anthropic-base-url">Base URL (optional)</label>
-                          <input
-                            type="text"
-                            id="anthropic-base-url"
-                            value={anthropicBaseUrl}
-                            onChange={(e) => setAnthropicBaseUrl(e.target.value)}
-                            placeholder="https://api.anthropic.com"
-                            className="form-input"
-                          />
-                        </div>
-                      </>
-                    )}
+          <TabsContent value="ai">
+            <form onSubmit={handleSave} className="settings-form">
+              <section className="settings-section">
+                <h2 className="section-title">AI Provider Settings</h2>
 
-                    {aiProvider === 'bedrock' && (
-                      <>
+                <div className="settings-card">
+                  <div className="form-group">
+                    <label className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={overrideAiSettings}
+                        onChange={(e) => setOverrideAiSettings(e.target.checked)}
+                      />
+                      <span>Override organization AI settings</span>
+                    </label>
+                    <p className="form-hint">
+                      When disabled, this workspace will use the organization's AI provider
+                      settings.
+                    </p>
+                  </div>
+                </div>
+
+                {overrideAiSettings ? (
+                  <>
+                    {/* Provider Selection */}
+                    <div className="settings-card">
+                      <h3 className="card-title">Provider</h3>
+                      <div className="form-group">
+                        <label htmlFor="ai-provider">AI Provider</label>
+                        <select
+                          id="ai-provider"
+                          value={aiProvider}
+                          onChange={(e) => {
+                            setAiProvider(e.target.value as AiProvider);
+                            setModelFast('');
+                            setModelReasoning('');
+                            setModelEmbedding('');
+                          }}
+                          className="form-select"
+                        >
+                          {providerOptions.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Provider-specific Credentials */}
+                    <div className="settings-card">
+                      <h3 className="card-title">Credentials</h3>
+
+                      {aiProvider === 'self_hosted' && (
+                        <>
+                          <div className="form-group">
+                            <label htmlFor="litellm-host">LiteLLM Host</label>
+                            <input
+                              type="text"
+                              id="litellm-host"
+                              value={litellmHost}
+                              onChange={(e) => setLitellmHost(e.target.value)}
+                              placeholder="http://localhost:4000"
+                              className="form-input"
+                            />
+                          </div>
+                          <div className="form-group">
+                            <label htmlFor="litellm-key">
+                              LiteLLM API Key
+                              {hasLitellmKey && (
+                                <span className="credential-set"> (configured)</span>
+                              )}
+                            </label>
+                            <input
+                              type="password"
+                              id="litellm-key"
+                              value={litellmKey}
+                              onChange={(e) => setLitellmKey(e.target.value)}
+                              placeholder={hasLitellmKey ? '••••••••' : 'Enter API key'}
+                              className="form-input"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      {aiProvider === 'openai' && (
+                        <>
+                          <div className="form-group">
+                            <label htmlFor="openai-key">
+                              OpenAI API Key
+                              {hasOpenaiKey && (
+                                <span className="credential-set"> (configured)</span>
+                              )}
+                            </label>
+                            <input
+                              type="password"
+                              id="openai-key"
+                              value={openaiApiKey}
+                              onChange={(e) => setOpenaiApiKey(e.target.value)}
+                              placeholder={hasOpenaiKey ? '••••••••' : 'sk-...'}
+                              className="form-input"
+                            />
+                          </div>
+                          <div className="form-group">
+                            <label htmlFor="openai-base-url">Base URL (optional)</label>
+                            <input
+                              type="text"
+                              id="openai-base-url"
+                              value={openaiBaseUrl}
+                              onChange={(e) => setOpenaiBaseUrl(e.target.value)}
+                              placeholder="https://api.openai.com/v1"
+                              className="form-input"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      {aiProvider === 'anthropic' && (
+                        <>
+                          <div className="form-group">
+                            <label htmlFor="anthropic-key">
+                              Anthropic API Key
+                              {hasAnthropicKey && (
+                                <span className="credential-set"> (configured)</span>
+                              )}
+                            </label>
+                            <input
+                              type="password"
+                              id="anthropic-key"
+                              value={anthropicApiKey}
+                              onChange={(e) => setAnthropicApiKey(e.target.value)}
+                              placeholder={hasAnthropicKey ? '••••••••' : 'sk-ant-...'}
+                              className="form-input"
+                            />
+                          </div>
+                          <div className="form-group">
+                            <label htmlFor="anthropic-base-url">Base URL (optional)</label>
+                            <input
+                              type="text"
+                              id="anthropic-base-url"
+                              value={anthropicBaseUrl}
+                              onChange={(e) => setAnthropicBaseUrl(e.target.value)}
+                              placeholder="https://api.anthropic.com"
+                              className="form-input"
+                            />
+                          </div>
+                        </>
+                      )}
+
+                      {aiProvider === 'bedrock' && (
+                        <>
+                          <div className="form-group">
+                            <label htmlFor="bedrock-region">AWS Region</label>
+                            <select
+                              id="bedrock-region"
+                              value={bedrockRegion}
+                              onChange={(e) => setBedrockRegion(e.target.value)}
+                              className="form-select"
+                            >
+                              {awsRegions.map((region) => (
+                                <option key={region} value={region}>
+                                  {region}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="form-group">
+                            <label className="checkbox-label">
+                              <input
+                                type="checkbox"
+                                checked={bedrockUseIamRole}
+                                onChange={(e) => setBedrockUseIamRole(e.target.checked)}
+                              />
+                              <span>Use IAM Role (EC2 instance profile / ECS task role)</span>
+                            </label>
+                          </div>
+                          {!bedrockUseIamRole && (
+                            <>
+                              <div className="form-group">
+                                <label htmlFor="bedrock-access-key">
+                                  Access Key ID
+                                  {hasBedrockCreds && (
+                                    <span className="credential-set"> (configured)</span>
+                                  )}
+                                </label>
+                                <input
+                                  type="password"
+                                  id="bedrock-access-key"
+                                  value={bedrockAccessKey}
+                                  onChange={(e) => setBedrockAccessKey(e.target.value)}
+                                  placeholder={hasBedrockCreds ? '••••••••' : 'AKIA...'}
+                                  className="form-input"
+                                />
+                              </div>
+                              <div className="form-group">
+                                <label htmlFor="bedrock-secret-key">Secret Access Key</label>
+                                <input
+                                  type="password"
+                                  id="bedrock-secret-key"
+                                  value={bedrockSecretKey}
+                                  onChange={(e) => setBedrockSecretKey(e.target.value)}
+                                  placeholder={hasBedrockCreds ? '••••••••' : 'Secret key'}
+                                  className="form-input"
+                                />
+                              </div>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+
+                    {/* Model Selection */}
+                    <div className="settings-card">
+                      <h3 className="card-title">Default Models</h3>
+                      <div className="settings-row">
                         <div className="form-group">
-                          <label htmlFor="bedrock-region">AWS Region</label>
+                          <label htmlFor="model-fast">Fast Model</label>
                           <select
-                            id="bedrock-region"
-                            value={bedrockRegion}
-                            onChange={(e) => setBedrockRegion(e.target.value)}
+                            id="model-fast"
+                            value={modelFast}
+                            onChange={(e) => setModelFast(e.target.value)}
                             className="form-select"
                           >
-                            {awsRegions.map((region) => (
-                              <option key={region} value={region}>
-                                {region}
+                            <option value="">Select a model</option>
+                            {currentModels.fast.map((model) => (
+                              <option key={model} value={model}>
+                                {model}
                               </option>
                             ))}
                           </select>
                         </div>
                         <div className="form-group">
-                          <label className="checkbox-label">
-                            <input
-                              type="checkbox"
-                              checked={bedrockUseIamRole}
-                              onChange={(e) => setBedrockUseIamRole(e.target.checked)}
-                            />
-                            <span>Use IAM Role (EC2 instance profile / ECS task role)</span>
-                          </label>
+                          <label htmlFor="model-reasoning">Reasoning Model</label>
+                          <select
+                            id="model-reasoning"
+                            value={modelReasoning}
+                            onChange={(e) => setModelReasoning(e.target.value)}
+                            className="form-select"
+                          >
+                            <option value="">Select a model</option>
+                            {currentModels.reasoning.map((model) => (
+                              <option key={model} value={model}>
+                                {model}
+                              </option>
+                            ))}
+                          </select>
                         </div>
-                        {!bedrockUseIamRole && (
-                          <>
-                            <div className="form-group">
-                              <label htmlFor="bedrock-access-key">
-                                Access Key ID
-                                {hasBedrockCreds && (
-                                  <span className="credential-set"> (configured)</span>
-                                )}
-                              </label>
-                              <input
-                                type="password"
-                                id="bedrock-access-key"
-                                value={bedrockAccessKey}
-                                onChange={(e) => setBedrockAccessKey(e.target.value)}
-                                placeholder={hasBedrockCreds ? '••••••••' : 'AKIA...'}
-                                className="form-input"
-                              />
-                            </div>
-                            <div className="form-group">
-                              <label htmlFor="bedrock-secret-key">Secret Access Key</label>
-                              <input
-                                type="password"
-                                id="bedrock-secret-key"
-                                value={bedrockSecretKey}
-                                onChange={(e) => setBedrockSecretKey(e.target.value)}
-                                placeholder={hasBedrockCreds ? '••••••••' : 'Secret key'}
-                                className="form-input"
-                              />
-                            </div>
-                          </>
-                        )}
-                      </>
-                    )}
-                  </div>
-
-                  {/* Model Selection */}
-                  <div className="settings-card">
-                    <h3 className="card-title">Default Models</h3>
-                    <div className="settings-row">
-                      <div className="form-group">
-                        <label htmlFor="model-fast">Fast Model</label>
-                        <select
-                          id="model-fast"
-                          value={modelFast}
-                          onChange={(e) => setModelFast(e.target.value)}
-                          className="form-select"
-                        >
-                          <option value="">Select a model</option>
-                          {currentModels.fast.map((model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ))}
-                        </select>
                       </div>
                       <div className="form-group">
-                        <label htmlFor="model-reasoning">Reasoning Model</label>
-                        <select
-                          id="model-reasoning"
-                          value={modelReasoning}
-                          onChange={(e) => setModelReasoning(e.target.value)}
-                          className="form-select"
-                        >
-                          <option value="">Select a model</option>
-                          {currentModels.reasoning.map((model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                    <div className="form-group">
-                      <label htmlFor="model-embedding">Embedding Model</label>
-                      {currentModels.embedding.length > 0 ? (
-                        <select
-                          id="model-embedding"
-                          value={modelEmbedding}
-                          onChange={(e) => setModelEmbedding(e.target.value)}
-                          className="form-select"
-                        >
-                          <option value="">Select a model</option>
-                          {currentModels.embedding.map((model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <>
-                          <input
-                            type="text"
+                        <label htmlFor="model-embedding">Embedding Model</label>
+                        {currentModels.embedding.length > 0 ? (
+                          <select
                             id="model-embedding"
                             value={modelEmbedding}
                             onChange={(e) => setModelEmbedding(e.target.value)}
-                            placeholder="Enter embedding model name"
-                            className="form-input"
-                          />
-                          <p className="form-hint">
-                            {aiProvider === 'anthropic'
-                              ? 'Anthropic does not provide embedding models. Use a model from another provider (e.g., OpenAI text-embedding-3-small).'
-                              : 'Enter a custom embedding model name.'}
-                          </p>
-                        </>
-                      )}
+                            className="form-select"
+                          >
+                            <option value="">Select a model</option>
+                            {currentModels.embedding.map((model) => (
+                              <option key={model} value={model}>
+                                {model}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <>
+                            <input
+                              type="text"
+                              id="model-embedding"
+                              value={modelEmbedding}
+                              onChange={(e) => setModelEmbedding(e.target.value)}
+                              placeholder="Enter embedding model name"
+                              className="form-input"
+                            />
+                            <p className="form-hint">
+                              {aiProvider === 'anthropic'
+                                ? 'Anthropic does not provide embedding models. Use a model from another provider (e.g., OpenAI text-embedding-3-small).'
+                                : 'Enter a custom embedding model name.'}
+                            </p>
+                          </>
+                        )}
+                      </div>
                     </div>
+                  </>
+                ) : (
+                  <div className="settings-card">
+                    <h3 className="card-title">Effective Settings (from Organization)</h3>
+                    {effectiveSettings ? (
+                      <div className="effective-settings">
+                        <div className="effective-row">
+                          <span className="effective-label">Provider:</span>
+                          <span className="effective-value">
+                            {providerOptions.find((p) => p.value === effectiveSettings.provider)
+                              ?.label || effectiveSettings.provider}
+                          </span>
+                        </div>
+                        <div className="effective-row">
+                          <span className="effective-label">Fast Model:</span>
+                          <span className="effective-value">
+                            {effectiveSettings.model_fast || 'Not configured'}
+                          </span>
+                        </div>
+                        <div className="effective-row">
+                          <span className="effective-label">Reasoning Model:</span>
+                          <span className="effective-value">
+                            {effectiveSettings.model_reasoning || 'Not configured'}
+                          </span>
+                        </div>
+                        <div className="effective-row">
+                          <span className="effective-label">Embedding Model:</span>
+                          <span className="effective-value">
+                            {effectiveSettings.model_embedding || 'Not configured'}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="form-hint">No organization settings configured.</p>
+                    )}
                   </div>
-                </>
-              ) : (
-                <div className="settings-card">
-                  <h3 className="card-title">Effective Settings (from Organization)</h3>
-                  {effectiveSettings ? (
-                    <div className="effective-settings">
-                      <div className="effective-row">
-                        <span className="effective-label">Provider:</span>
-                        <span className="effective-value">
-                          {providerOptions.find((p) => p.value === effectiveSettings.provider)
-                            ?.label || effectiveSettings.provider}
-                        </span>
-                      </div>
-                      <div className="effective-row">
-                        <span className="effective-label">Fast Model:</span>
-                        <span className="effective-value">
-                          {effectiveSettings.model_fast || 'Not configured'}
-                        </span>
-                      </div>
-                      <div className="effective-row">
-                        <span className="effective-label">Reasoning Model:</span>
-                        <span className="effective-value">
-                          {effectiveSettings.model_reasoning || 'Not configured'}
-                        </span>
-                      </div>
-                      <div className="effective-row">
-                        <span className="effective-label">Embedding Model:</span>
-                        <span className="effective-value">
-                          {effectiveSettings.model_embedding || 'Not configured'}
-                        </span>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="form-hint">No organization settings configured.</p>
-                  )}
-                </div>
-              )}
-            </section>
+                )}
+              </section>
 
-            {/* Actions */}
-            <div className="settings-actions">
-              <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
-                Reset to Defaults
-              </Button>
-              <Button type="submit" loading={saving} variant="primary">
-                {saving ? 'Saving...' : 'Save Changes'}
-              </Button>
-            </div>
-          </form>
-        </TabsContent>
-      </Tabs>
+              {/* Actions */}
+              <div className="settings-actions">
+                <Button type="button" onClick={handleReset} disabled={saving} variant="secondary">
+                  Reset to Defaults
+                </Button>
+                <Button type="submit" loading={saving} variant="primary">
+                  {saving ? 'Saving...' : 'Save Changes'}
+                </Button>
+              </div>
+            </form>
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );

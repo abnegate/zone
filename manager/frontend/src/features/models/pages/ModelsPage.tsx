@@ -1,12 +1,13 @@
+import { Badge, Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
-import { Button, Modal, Select, Tabs, TabsList, TabsTrigger, Badge, EmptyState } from '@zone/ui';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
-import type { BrowseModel, InstalledModel } from '../types';
+import type { BrowseModel, InstalledModel, ModelSort } from '../types';
+import { MODEL_FAMILY_FILTERS, MODEL_SIZE_FILTERS, MODEL_SORT_OPTIONS } from '../types';
 import {
   defaultDownloadName,
   formatBytes,
@@ -367,6 +368,63 @@ export default function ModelsPage() {
                 Search
               </Button>
             </form>
+
+            <div className="browse-controls">
+              <label className="browse-sort">
+                <span>Sort</span>
+                <select
+                  aria-label="Sort models"
+                  value={browse.sort}
+                  onChange={(e) => browse.setSort(e.target.value as ModelSort)}
+                >
+                  {MODEL_SORT_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="browse-filter-groups">
+                <div className="filter-pills" role="group" aria-label="Filter by family">
+                  {MODEL_FAMILY_FILTERS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`filter-pill ${browse.family === option.value ? 'active' : ''}`}
+                      aria-pressed={browse.family === option.value}
+                      onClick={() => browse.setFamily(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="filter-pills" role="group" aria-label="Filter by size">
+                  {MODEL_SIZE_FILTERS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`filter-pill ${browse.size === option.value ? 'active' : ''}`}
+                      aria-pressed={browse.size === option.value}
+                      onClick={() => browse.setSize(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {browse.hasActiveFilters && (
+                <button
+                  type="button"
+                  className="browse-clear-filters"
+                  onClick={browse.clearFilters}
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
 
             {browse.loading ? (
               <div className="loading-placeholder">

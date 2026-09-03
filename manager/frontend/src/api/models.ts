@@ -1,6 +1,11 @@
-import type { ModelSource, ModelsResponse, BrowseResponse } from '../features/models/types';
+import { BrowseResponseSchema, ModelsResponseSchema } from '../features/models/schemas';
+import type {
+  BrowseOptions,
+  BrowseResponse,
+  ModelSource,
+  ModelsResponse,
+} from '../features/models/types';
 import { parse } from '../validation';
-import { ModelsResponseSchema, BrowseResponseSchema } from '../features/models/schemas';
 import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -58,15 +63,23 @@ export const modelsApi = {
     source: ModelSource,
     query = '',
     cursor?: string | null,
-    limit = 20
+    limit = 20,
+    options: BrowseOptions = {}
   ): Promise<BrowseResponse> {
     const params = new URLSearchParams({
       source,
       q: query,
       limit: limit.toString(),
+      sort: options.sort ?? 'relevance',
     });
     if (cursor) {
       params.set('cursor', cursor);
+    }
+    if (options.family) {
+      params.set('family', options.family);
+    }
+    if (options.size && options.size !== 'all') {
+      params.set('size', options.size);
     }
     const response = await fetch(`${API_BASE}/api/models?${params}`, {
       headers: client.getHeaders(),

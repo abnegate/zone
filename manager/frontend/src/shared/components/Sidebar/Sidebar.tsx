@@ -141,7 +141,9 @@ export default function Sidebar() {
             <NavLink
               key={item.path}
               to={item.path}
-              className={({ isActive }) => `nav-item ${isNavActive(item.path, isActive) ? 'active' : ''}`}
+              className={({ isActive }) =>
+                `nav-item ${isNavActive(item.path, isActive) ? 'active' : ''}`
+              }
               onClick={() => setMobileOpen(false)}
               title={collapsed ? item.label : undefined}
             >

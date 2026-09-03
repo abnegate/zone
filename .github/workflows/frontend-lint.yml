@@ -26,7 +26,7 @@ jobs:
       - name: Setup Biome
         uses: biomejs/setup-biome@v2
         with:
-          version: latest
+          version: 1.9.4
 
       - name: Run Biome lint
         working-directory: manager/frontend
@@ -42,11 +42,11 @@ jobs:
       - name: Setup Biome
         uses: biomejs/setup-biome@v2
         with:
-          version: latest
+          version: 1.9.4
 
       - name: Check formatting
         working-directory: manager/frontend
-        run: biome format --check src
+        run: biome format src
 
   biome-imports:
     name: Import Organization
@@ -58,7 +58,7 @@ jobs:
       - name: Setup Biome
         uses: biomejs/setup-biome@v2
         with:
-          version: latest
+          version: 1.9.4
 
       - name: Check import organization
         working-directory: manager/frontend
