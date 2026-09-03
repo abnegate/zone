@@ -1,8 +1,9 @@
 import {
+  type StockFeatures,
   createColumnHelper,
   flexRender,
-  getCoreRowModel,
-  useReactTable,
+  stockFeatures,
+  useTable,
 } from '@tanstack/react-table';
 import { Button, Modal } from '@zone/ui';
 import { formatDistanceToNow } from 'date-fns';
@@ -13,7 +14,7 @@ import type { Session } from '../types';
 import { parseUserAgent } from '../utils';
 import './SessionsPage.css';
 
-const columnHelper = createColumnHelper<Session>();
+const columnHelper = createColumnHelper<StockFeatures, Session>();
 
 export default function SessionsPage() {
   const {
@@ -30,7 +31,7 @@ export default function SessionsPage() {
   const [showRevokeModal, setShowRevokeModal] = useState(false);
   const [showRevokeAllModal, setShowRevokeAllModal] = useState(false);
 
-  const columns = [
+  const columns = columnHelper.columns([
     columnHelper.accessor((row) => row.device_info || parseUserAgent(row.user_agent), {
       id: 'device',
       header: 'Device / Browser',
@@ -89,12 +90,12 @@ export default function SessionsPage() {
         </Button>
       ),
     }),
-  ];
+  ]);
 
-  const table = useReactTable({
+  const table = useTable({
+    features: stockFeatures,
     data: sessions,
     columns,
-    getCoreRowModel: getCoreRowModel(),
   });
 
   const handleRevokeConfirm = async () => {
