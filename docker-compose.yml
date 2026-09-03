@@ -218,6 +218,7 @@ services:
       start_period: 60s
 
   manager:
+    image: zone-manager:prod
     build:
       context: .
       dockerfile: manager/Dockerfile
@@ -232,6 +233,8 @@ services:
         condition: service_healthy
     environment:
       - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - EMBEDDING_ENGINE=${EMBEDDING_ENGINE:-ollama}
+      - ZONE_EMBED_CACHE_DIR=/app/embed-cache
       - LITELLM_HOST=http://litellm:4000
       - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
@@ -249,6 +252,7 @@ services:
     volumes:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts
+      - manager_embed_cache:/app/embed-cache
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -273,9 +277,12 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      # EMBEDDING_ENGINE=local downloads ~520MB of model weights on first boot
+      # (measured ~60s on a warm connection) before the server binds.
+      start_period: 180s
 
   console:
+    image: zone-console:prod
     build:
       context: .
       dockerfile: manager/frontend/Dockerfile
@@ -373,6 +380,8 @@ services:
       - vpn
     cap_add:
       - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     environment:
       - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
       - VPN_TYPE=${VPN_TYPE}
@@ -382,8 +391,13 @@ services:
       # VPN_TYPE=wireguard
       - WIREGUARD_PRIVATE_KEY=${VPN_WIREGUARD_PRIVATE_KEY}
       - WIREGUARD_ADDRESSES=${VPN_WIREGUARD_ADDRESSES}
+      - SERVER_COUNTRIES=${VPN_SERVER_COUNTRIES:-}
+      - SERVER_CITIES=${VPN_SERVER_CITIES:-}
+      - SERVER_REGIONS=${VPN_SERVER_REGIONS:-}
       - TZ=${ADVANCED_TZ}
-      - FIREWALL_OUTBOUND_SUBNETS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      # Do not include 10.0.0.0/8 — overlaps Surfshark WG (10.14.0.2/16)
+      - FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12,192.168.0.0/16
+      - FIREWALL_INPUT_PORTS=8080,8001
       - UPDATER_PERIOD=24h
     networks:
       - internal
@@ -625,6 +639,8 @@ volumes:
     name: zone_manager_repos
   manager_artifacts:
     name: zone_manager_artifacts
+  manager_embed_cache:
+    name: zone_manager_embed_cache
   openwebui_data:
     name: zone_openwebui_data
   prometheus_data:
