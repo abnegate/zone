@@ -105,6 +105,7 @@ services:
 
   ollama:
     image: ollama/ollama:${DOCKER_VERSION_OLLAMA:-0.13.5}
+    profiles: [bundled-ollama]
     container_name: ollama
     restart: unless-stopped
     environment:
@@ -133,13 +134,11 @@ services:
 
   ollama-init:
     image: ollama/ollama:${DOCKER_VERSION_OLLAMA:-0.13.5}
+    profiles: [bundled-ollama]
     container_name: ollama-init
     restart: "no"
-    depends_on:
-      ollama:
-        condition: service_healthy
     environment:
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_MODEL_FAST=${OLLAMA_MODEL_FAST}
       - OLLAMA_MODEL_REASON=${OLLAMA_MODEL_REASON}
       - OLLAMA_MODEL_EMBED=${OLLAMA_MODEL_EMBED}
@@ -161,11 +160,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
-      ollama-init:
-        condition: service_completed_successfully
     environment:
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - LITELLM_SALT_KEY=${SECURITY_LITELLM_SALT_KEY}
       - UI_USERNAME=${SECURITY_LITELLM_UI_USERNAME}
@@ -220,8 +216,6 @@ services:
     container_name: manager
     restart: unless-stopped
     depends_on:
-      ollama:
-        condition: service_healthy
       litellm:
         condition: service_healthy
       postgres:
@@ -229,7 +223,7 @@ services:
       valkey:
         condition: service_healthy
     environment:
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://ollama:11434}
       - LITELLM_HOST=http://litellm:4000
       - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
@@ -555,11 +549,8 @@ services:
     restart: unless-stopped
     profiles:
       - monitoring
-    depends_on:
-      ollama:
-        condition: service_healthy
     environment:
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://ollama:11434}
       - PORT=8080
     networks:
       - internal
