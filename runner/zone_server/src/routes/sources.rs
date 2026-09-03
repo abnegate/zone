@@ -392,7 +392,11 @@ pub async fn create(
     }
 
     let response = SourceResponse::from_row(&state, source_row).await;
-    (StatusCode::CREATED, Json(response)).into_response()
+    (
+        StatusCode::CREATED,
+        Json(SingleSourceResponse { source: response }),
+    )
+        .into_response()
 }
 
 /// GET /api/workspaces/:workspace_id/sources/:id
@@ -409,7 +413,7 @@ pub async fn get(
     match sources::get_source(state.db(), id, workspace_id).await {
         Ok(Some(source)) => {
             let response = SourceResponse::from_row(&state, source).await;
-            Json(response).into_response()
+            Json(SingleSourceResponse { source: response }).into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -539,7 +543,7 @@ pub async fn update(
     }
 
     let response = SourceResponse::from_row(&state, updated_source).await;
-    Json(response).into_response()
+    Json(SingleSourceResponse { source: response }).into_response()
 }
 
 /// DELETE /api/workspaces/:workspace_id/sources/:id

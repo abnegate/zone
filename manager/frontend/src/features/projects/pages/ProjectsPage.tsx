@@ -29,6 +29,7 @@ import {
 import { getErrors } from '../../../validation';
 import { formatDate } from '../utils/formatters';
 import './ProjectsPage.css';
+import { useWorkspace } from '../../../shared/context';
 
 const statusLabels: Record<ProjectStatus, string> = {
   active: 'Active',
@@ -57,10 +58,12 @@ export default function ProjectsPage() {
   } = useProjects(statusFilter);
 
   // Sources query
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
   const { data: sources = [] } = useQuery({
-    queryKey: ['sources'],
-    queryFn: () => client.getSources('00000000-0000-0000-0000-000000000001'),
-    enabled: isAuthenticated
+    queryKey: ['sources', workspaceId],
+    queryFn: () => client.getSources(workspaceId as string),
+    enabled: isAuthenticated && !!workspaceId
   });
 
   // State
@@ -235,12 +238,24 @@ export default function ProjectsPage() {
   };
 
   return (
-    <div className="page projects-page">
-      <header className="flex justify-between items-start mb-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Projects</h1>
-          <p className="text-muted-foreground mt-1">Organize work with GitHub integration</p>
+    <div className="page page--workspace projects-page">
+      <header className="projects-header">
+        <div className="projects-header-copy">
+          <h1>Projects</h1>
+          <p>Organize work with GitHub integration</p>
         </div>
+        <Tabs
+          value={statusFilter}
+          onValueChange={(v) => setStatusFilter(v as ProjectStatus | 'all')}
+          className="projects-tabs"
+        >
+          <TabsList>
+            <TabsTrigger value="all">All</TabsTrigger>
+            <TabsTrigger value="active">Active</TabsTrigger>
+            <TabsTrigger value="on_hold">On Hold</TabsTrigger>
+            <TabsTrigger value="cancelled">Cancelled</TabsTrigger>
+          </TabsList>
+        </Tabs>
         <Button
           onClick={() => {
             resetForm();
@@ -251,99 +266,92 @@ export default function ProjectsPage() {
         </Button>
       </header>
 
-      <Tabs value={statusFilter} onValueChange={(v) => setStatusFilter(v as ProjectStatus | 'all')} className="mb-6">
-        <TabsList>
-          <TabsTrigger value="all">All</TabsTrigger>
-          <TabsTrigger value="active">Active</TabsTrigger>
-          <TabsTrigger value="on_hold">On Hold</TabsTrigger>
-          <TabsTrigger value="cancelled">Cancelled</TabsTrigger>
-        </TabsList>
-      </Tabs>
-
-      {loading ? (
-        <div className="flex items-center justify-center py-12 text-muted-foreground">
-          <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent mr-2" />
-          Loading projects...
-        </div>
-      ) : error ? (
-        <div className="text-destructive py-12 text-center">{error}</div>
-      ) : projects.length === 0 ? (
-        <EmptyState
-          icon={
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              width="48"
-              height="48"
-            >
-              <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-            </svg>
-          }
-          title="No projects yet"
-          description="Create your first project to get started"
-          action={
-            <Button
-              onClick={() => {
-                resetForm();
-                setShowCreateModal(true);
-              }}
-            >
-              Create Project
-            </Button>
-          }
-        />
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {projects.map((project) => (
-            <Card
-              key={project.id}
-              className={`cursor-pointer transition-all hover:border-primary ${selectedProject?.id === project.id ? 'border-primary bg-primary/5' : ''}`}
-              onClick={() => setSelectedProject(project)}
-              onKeyDown={(e) => e.key === 'Enter' && setSelectedProject(project)}
-              role="button"
-              tabIndex={0}
-            >
-              <CardContent className="p-4">
-                <div className="flex justify-between items-start mb-2">
-                  <h3 className="font-semibold text-foreground">{project.name}</h3>
-                  <Badge variant={statusVariants[project.status]}>
-                    {statusLabels[project.status]}
-                  </Badge>
-                </div>
-                {project.description && (
-                  <p className="text-sm text-muted-foreground line-clamp-2 mb-3">{project.description}</p>
-                )}
-                <div className="flex justify-between items-center text-xs text-muted-foreground">
-                  {(() => {
-                    const source = getProjectSource(project);
-                    return source ? (
-                      <a
-                        href={source.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-1 hover:text-primary"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <span className={`w-3 h-3 rounded-sm source-type-icon ${source.source_type}`} />
-                        {source.name}
-                      </a>
-                    ) : (
-                      <span className="opacity-50">No source</span>
-                    );
-                  })()}
-                  <span>{formatDate(project.updated_at)}</span>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {/* Project Details Sidebar */}
-      {selectedProject && (
-        <div className="project-details">
+      <div className="projects-workspace">
+        {loading ? (
+          <div className="projects-state">
+            <span className="spinner" />
+            Loading projects...
+          </div>
+        ) : error ? (
+          <div className="projects-state projects-state--error">{error}</div>
+        ) : projects.length === 0 ? (
+          <EmptyState
+            className="projects-empty"
+            icon={
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                width="48"
+                height="48"
+              >
+                <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+            }
+            title="No projects yet"
+            description="Create your first project to get started"
+            action={
+              <Button
+                onClick={() => {
+                  resetForm();
+                  setShowCreateModal(true);
+                }}
+              >
+                Create Project
+              </Button>
+            }
+          />
+        ) : (
+          <>
+            <div className="projects-list-pane">
+              <div className="projects-list">
+                {projects.map((project) => (
+                  <Card
+                    key={project.id}
+                    className={`project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
+                    onClick={() => setSelectedProject(project)}
+                    onKeyDown={(e) => e.key === 'Enter' && setSelectedProject(project)}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <CardContent className="project-card-body">
+                      <div className="project-card-header">
+                        <h3 className="project-name">{project.name}</h3>
+                        <Badge variant={statusVariants[project.status]}>
+                          {statusLabels[project.status]}
+                        </Badge>
+                      </div>
+                      {project.description && (
+                        <p className="project-description">{project.description}</p>
+                      )}
+                      <div className="project-card-footer">
+                        {(() => {
+                          const source = getProjectSource(project);
+                          return source ? (
+                            <a
+                              href={source.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="source-link"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <span className={`source-type-icon ${source.source_type}`} />
+                              {source.name}
+                            </a>
+                          ) : (
+                            <span className="no-source">No source</span>
+                          );
+                        })()}
+                        <span>{formatDate(project.updated_at)}</span>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            </div>
+            {selectedProject ? (
+              <aside className="project-details">
           <div className="details-header">
             <h2>{selectedProject.name}</h2>
             <Button
@@ -499,8 +507,16 @@ export default function ProjectsPage() {
               Delete
             </Button>
           </div>
-        </div>
-      )}
+        </aside>
+            ) : (
+              <div className="projects-detail-placeholder">
+                <h3>Select a project</h3>
+                <p>Choose one from the list, or create a new one.</p>
+              </div>
+            )}
+          </>
+        )}
+      </div>
 
       {/* Create Project Wizard */}
       <CreateProjectWizard

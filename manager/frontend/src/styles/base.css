@@ -10,6 +10,7 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--ui-text-primary);
   line-height: var(--ui-leading-tight);
   letter-spacing: var(--ui-tracking-tight);
+  font-optical-sizing: auto;
 }
 
 h1 {

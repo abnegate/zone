@@ -1,31 +1,35 @@
 /* =============================================================================
-   Buttons - Midnight Design
-   Premium button styles extending @zone/ui
+   Buttons - shadcn/ui defaults
+   Flat surfaces, one accent colour, contrast carried by --ui-text-inverse so
+   both themes stay legible. No gradients or glows.
    ============================================================================= */
 
 .btn {
-  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--ui-space-2);
-  height: 40px;
-  padding: 0 var(--ui-space-5);
+  height: 2.25rem;
+  padding: 0 var(--ui-space-4);
   font-family: var(--ui-font-body);
-  font-size: var(--ui-text-base);
+  font-size: var(--ui-text-sm);
   font-weight: 500;
-  line-height: 1;
+  line-height: 1.25rem;
   white-space: nowrap;
-  border: none;
-  border-radius: var(--ui-radius-lg);
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-md);
   cursor: pointer;
   transition:
-    background var(--ui-transition-fast),
+    background-color var(--ui-transition-fast),
     color var(--ui-transition-fast),
-    box-shadow var(--ui-transition-fast),
-    transform var(--ui-duration-instant);
+    border-color var(--ui-transition-fast);
   -webkit-tap-highlight-color: transparent;
   user-select: none;
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--ui-bg-base), 0 0 0 3px var(--ui-accent);
 }
 
 .btn:disabled {
@@ -34,155 +38,156 @@
   pointer-events: none;
 }
 
-.btn:active:not(:disabled) {
-  transform: scale(0.98);
-}
+/* Variants ---------------------------------------------------------------- */
 
-/* Primary Button */
 .btn-primary {
-  background: linear-gradient(180deg, var(--ui-accent-500) 0%, var(--ui-accent-600) 100%);
-  color: white;
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.1),
-    0 0 0 1px rgba(255, 255, 255, 0.1) inset,
-    0 -1px 0 rgba(0, 0, 0, 0.15) inset;
+  background-color: var(--ui-accent);
+  color: var(--ui-text-inverse);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: linear-gradient(180deg, var(--ui-accent-400) 0%, var(--ui-accent-500) 100%);
-  box-shadow:
-    0 4px 12px var(--ui-accent-glow),
-    0 0 0 1px rgba(255, 255, 255, 0.15) inset,
-    0 -1px 0 rgba(0, 0, 0, 0.15) inset;
+  background-color: var(--ui-accent-hover);
 }
 
-.btn-primary:focus-visible {
-  box-shadow:
-    0 4px 12px var(--ui-accent-glow),
-    0 0 0 2px var(--ui-bg-base),
-    0 0 0 4px var(--ui-accent-500);
-}
-
-/* Secondary Button */
 .btn-secondary {
-  background: var(--ui-bg-surface);
-  color: var(--ui-text-secondary);
-  box-shadow: 0 0 0 1px var(--ui-border);
+  background-color: var(--ui-bg-surface);
+  color: var(--ui-text-primary);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: var(--ui-bg-hover);
-  color: var(--ui-text-primary);
-  box-shadow: 0 0 0 1px var(--ui-border-strong);
+  background-color: var(--ui-bg-hover);
 }
 
-/* Danger Button */
 .btn-danger {
-  background: linear-gradient(180deg, var(--ui-error-500) 0%, var(--ui-error-600) 100%);
-  color: white;
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.1),
-    0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+  background-color: var(--ui-error);
+  color: var(--ui-text-inverse);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: linear-gradient(180deg, var(--ui-error-400) 0%, var(--ui-error-500) 100%);
-  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+  background-color: color-mix(in srgb, var(--ui-error) 90%, transparent);
 }
 
-/* Small Button */
-.btn-small {
-  height: 32px;
-  padding: 0 var(--ui-space-3);
-  font-size: var(--ui-text-sm);
-  border-radius: var(--ui-radius-md);
+.btn-success {
+  background-color: var(--ui-success);
+  color: var(--ui-text-inverse);
 }
 
-/* Icon Button */
-.btn-icon {
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  background: transparent;
-  color: var(--ui-text-secondary);
-  box-shadow: 0 0 0 1px var(--ui-border);
+.btn-success:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--ui-success) 90%, transparent);
 }
 
-.btn-icon:hover:not(:disabled) {
-  background: var(--ui-bg-hover);
+.btn-warning {
+  background-color: var(--ui-warning);
+  color: var(--ui-text-inverse);
+}
+
+.btn-warning:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--ui-warning) 90%, transparent);
+}
+
+.btn-outline,
+.btn-accent-outline {
+  background-color: transparent;
+  border-color: var(--ui-border);
   color: var(--ui-text-primary);
-  box-shadow: 0 0 0 1px var(--ui-border-strong);
 }
 
-.btn-icon svg {
-  width: 20px;
-  height: 20px;
+.btn-outline:hover:not(:disabled),
+.btn-accent-outline:hover:not(:disabled) {
+  background-color: var(--ui-bg-surface);
 }
 
-/* Danger Icon Button */
-.btn-danger-icon {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--ui-text-muted);
-  background: transparent;
-  border: none;
-  border-radius: var(--ui-radius-md);
-  cursor: pointer;
-  transition: all var(--ui-duration-fast) var(--ui-ease-out);
-}
-
-.btn-danger-icon:hover:not(:disabled) {
-  color: var(--ui-error-500);
-  background: rgba(239, 68, 68, 0.1);
-}
-
-.btn-danger-icon svg {
-  width: 18px;
-  height: 18px;
-}
-
-/* Ghost Button */
 .btn-ghost {
-  background: transparent;
-  color: var(--ui-text-secondary);
-  box-shadow: none;
+  background-color: transparent;
+  color: var(--ui-text-primary);
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: var(--ui-overlay-light);
+  background-color: var(--ui-bg-surface);
+}
+
+.btn-link {
+  height: auto;
+  padding: 0;
+  background-color: transparent;
+  color: var(--ui-accent);
+  text-underline-offset: 4px;
+}
+
+.btn-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+/* Sizes ------------------------------------------------------------------- */
+
+.btn-xs {
+  height: 1.75rem;
+  padding: 0 var(--ui-space-2);
+  font-size: var(--ui-text-xs);
+}
+
+.btn-sm,
+.btn-small {
+  height: 2rem;
+  padding: 0 var(--ui-space-3);
+  font-size: var(--ui-text-xs);
+}
+
+.btn-lg,
+.btn-large {
+  height: 2.5rem;
+  padding: 0 var(--ui-space-6);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.btn-icon,
+.btn-danger-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-md);
+  color: var(--ui-text-secondary);
+  cursor: pointer;
+  transition:
+    background-color var(--ui-transition-fast),
+    color var(--ui-transition-fast);
+}
+
+.btn-icon:hover:not(:disabled) {
+  background-color: var(--ui-bg-surface);
   color: var(--ui-text-primary);
 }
 
-/* Accent Outline Button */
-.btn-accent-outline {
-  background: transparent;
-  color: var(--ui-accent-500);
-  box-shadow: 0 0 0 1px var(--ui-accent-500);
+.btn-danger-icon:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  color: var(--ui-error);
 }
 
-.btn-accent-outline:hover:not(:disabled) {
-  background: var(--ui-accent-muted);
-  box-shadow: 0 0 0 1px var(--ui-accent-400);
+.btn-icon:focus-visible,
+.btn-danger-icon:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--ui-bg-base), 0 0 0 3px var(--ui-accent);
 }
 
-/* Spinner */
-.spinner {
-  display: inline-block;
-  width: 1em;
-  height: 1em;
-  border: 2px solid currentColor;
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: ui-spin 0.6s linear infinite;
+.btn-icon:disabled,
+.btn-danger-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
-/* Button Group */
+/* Groups ------------------------------------------------------------------ */
+
 .btn-group {
-  display: flex;
+  display: inline-flex;
   gap: var(--ui-space-2);
 }
 
@@ -195,9 +200,28 @@
 }
 
 .btn-group--connected .btn:first-child {
-  border-radius: var(--ui-radius-lg) 0 0 var(--ui-radius-lg);
+  border-top-left-radius: var(--ui-radius-md);
+  border-bottom-left-radius: var(--ui-radius-md);
 }
 
 .btn-group--connected .btn:last-child {
-  border-radius: 0 var(--ui-radius-lg) var(--ui-radius-lg) 0;
+  border-top-right-radius: var(--ui-radius-md);
+  border-bottom-right-radius: var(--ui-radius-md);
+}
+
+/* Spinner ----------------------------------------------------------------- */
+
+.btn-spinner {
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 9999px;
+  animation: btn-spin 0.6s linear infinite;
+}
+
+@keyframes btn-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

@@ -27,15 +27,9 @@ export default function ZoneLogo({ size = 'md', showText = true, className = '' 
         className="zone-logo__icon"
         aria-hidden="true"
       >
-        <defs>
-          <linearGradient id="zone-logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#667eea" />
-            <stop offset="100%" stopColor="#764ba2" />
-          </linearGradient>
-        </defs>
-        <circle cx="50" cy="50" r="42" stroke="url(#zone-logo-grad)" strokeWidth="1.5" fill="none" />
-        <circle cx="50" cy="50" r="24" stroke="url(#zone-logo-grad)" strokeWidth="2.5" fill="none" />
-        <circle cx="50" cy="50" r="8" fill="url(#zone-logo-grad)" />
+        <circle cx="50" cy="50" r="42" stroke="currentColor" strokeWidth="1.5" fill="none" />
+        <circle cx="50" cy="50" r="24" stroke="currentColor" strokeWidth="2.5" fill="none" />
+        <circle cx="50" cy="50" r="8" fill="currentColor" />
       </svg>
       {showText && <span className="zone-logo__text">Zone</span>}
     </div>

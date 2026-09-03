@@ -182,7 +182,7 @@ const stepDescriptionVariants = cva([
 
 const contentVariants = cva(
   [
-    'flex-1 overflow-auto',
+    'overflow-auto',
     'p-[var(--ui-space-6)]',
     'transition-all duration-150 ease-out',
   ],
@@ -349,10 +349,10 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
     };
 
     return (
-      <div className={cn(overlayVariants())} onClick={onClose}>
+      <div className={cn('ui-wizard-overlay', overlayVariants())} onClick={onClose}>
         <div
           ref={ref}
-          className={cn(wizardVariants({ size, className }))}
+          className={cn('ui-wizard', `ui-wizard--${size ?? 'md'}`, wizardVariants({ size, className }))}
           onClick={(e) => e.stopPropagation()}
           role="dialog"
           aria-modal="true"
@@ -360,17 +360,17 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
           {...props}
         >
           {/* Header */}
-          <header className={cn(headerVariants())}>
+          <header className={cn('ui-wizard-header', headerVariants())}>
             <div>
               <h2 id="wizard-title" className={cn(titleVariants())}>
                 {title}
               </h2>
-              {subtitle && <p className={cn(subtitleVariants())}>{subtitle}</p>}
+              {subtitle && <p className={cn('ui-wizard-subtitle', subtitleVariants())}>{subtitle}</p>}
             </div>
             {onClose && (
               <button
                 type="button"
-                className={cn(closeButtonVariants())}
+                className={cn('ui-wizard-close', closeButtonVariants())}
                 onClick={onClose}
                 aria-label="Close wizard"
                 disabled={loading}
@@ -391,8 +391,8 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
           </header>
 
           {/* Step Indicator */}
-          <nav className={cn(stepsNavVariants())} aria-label="Wizard steps">
-            <div className={cn(progressTrackVariants())}>
+          <nav className={cn('ui-wizard-steps', stepsNavVariants())} aria-label="Wizard steps">
+            <div className={cn('ui-wizard-progress', progressTrackVariants())}>
               <div
                 className={cn(progressFillVariants())}
                 style={{ width: `${progressPercent}%` }}
@@ -436,10 +436,10 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
                           <span className="w-2 h-2 rounded-full bg-current" />
                         )}
                       </span>
-                      <span className="flex flex-col items-start">
-                        <span className={cn(stepTitleVariants({ state }))}>{step.title}</span>
+                      <span className="ui-wizard-step-copy flex flex-col items-start">
+                        <span className={cn('ui-wizard-step-title', stepTitleVariants({ state }))}>{step.title}</span>
                         {step.description && (
-                          <span className={cn(stepDescriptionVariants())}>{step.description}</span>
+                          <span className={cn('ui-wizard-step-description', stepDescriptionVariants())}>{step.description}</span>
                         )}
                       </span>
                     </button>
@@ -451,13 +451,13 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
 
           {/* Content */}
           <div
-            className={cn(contentVariants({ animating: animatingStep || 'none' }))}
+            className={cn('ui-wizard-content', contentVariants({ animating: animatingStep || 'none' }))}
           >
             {children}
           </div>
 
           {/* Footer */}
-          <footer className={cn(footerVariants())}>
+          <footer className={cn('ui-wizard-footer', footerVariants())}>
             <div>
               <Button
                 variant="ghost"

@@ -23,7 +23,8 @@ export function useKnowledge() {
       const response = await knowledgeApi.getKnowledge(workspaceId);
       setEntries(response.entries);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load knowledge');
+      const message = err instanceof Error ? err.message : 'Failed to load knowledge';
+      setError(message.startsWith('Validation failed') ? 'Couldn’t load knowledge' : message);
     } finally {
       setLoading(false);
     }

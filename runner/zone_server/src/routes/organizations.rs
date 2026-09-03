@@ -100,6 +100,11 @@ pub struct UpdateWorkspaceRequest {
     is_active: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+struct SingleOrganizationResponse {
+    organization: OrganizationResponse,
+}
+
 /// Organizations list response wrapper
 #[derive(Debug, Serialize)]
 struct OrganizationsListResponse {
@@ -217,13 +222,13 @@ pub async fn create(
             .into_response();
     }
 
-    (StatusCode::CREATED, Json(OrganizationResponse::from(org))).into_response()
+    (StatusCode::CREATED, Json(SingleOrganizationResponse { organization: OrganizationResponse::from(org) })).into_response()
 }
 
 /// GET /api/organizations/:org_id - Get org details (requires membership)
 pub async fn get(State(state): State<AppState>, member: OrgMember) -> impl IntoResponse {
     match organizations::get_organization(state.db(), member.org_id).await {
-        Ok(Some(org)) => Json(OrganizationResponse::from(org)).into_response(),
+        Ok(Some(org)) => Json(SingleOrganizationResponse { organization: OrganizationResponse::from(org) }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Organization not found")),
@@ -255,7 +260,7 @@ pub async fn update(
     )
     .await
     {
-        Ok(Some(org)) => Json(OrganizationResponse::from(org)).into_response(),
+        Ok(Some(org)) => Json(SingleOrganizationResponse { organization: OrganizationResponse::from(org) }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Organization not found")),
@@ -290,6 +295,11 @@ pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl Into
                 .into_response()
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+struct SingleWorkspaceResponse {
+    workspace: WorkspaceResponse,
 }
 
 /// Workspaces list response wrapper
@@ -355,7 +365,7 @@ pub async fn create_workspace(
         // Still return success since workspace was created - the user can add themselves later
     }
 
-    (StatusCode::CREATED, Json(WorkspaceResponse::from(ws))).into_response()
+    (StatusCode::CREATED, Json(SingleWorkspaceResponse { workspace: WorkspaceResponse::from(ws) })).into_response()
 }
 
 /// GET /api/workspaces/:id
@@ -364,7 +374,7 @@ pub async fn get_workspace(
     member: WorkspaceMember,
 ) -> impl IntoResponse {
     match workspaces::get_workspace(state.db(), member.workspace_id).await {
-        Ok(Some(ws)) => Json(WorkspaceResponse::from(ws)).into_response(),
+        Ok(Some(ws)) => Json(SingleWorkspaceResponse { workspace: WorkspaceResponse::from(ws) }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -396,7 +406,7 @@ pub async fn update_workspace(
     )
     .await
     {
-        Ok(Some(ws)) => Json(WorkspaceResponse::from(ws)).into_response(),
+        Ok(Some(ws)) => Json(SingleWorkspaceResponse { workspace: WorkspaceResponse::from(ws) }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Workspace not found")),
@@ -480,15 +490,20 @@ pub struct UpdateMemberRoleRequest {
     role: String,
 }
 
+#[derive(Debug, Serialize)]
+struct OrganizationMembersListResponse {
+    members: Vec<OrganizationMemberResponse>,
+}
+
 /// GET /api/organizations/:org_id/members - List members (requires member)
 pub async fn list_members(State(state): State<AppState>, member: OrgMember) -> impl IntoResponse {
     match organization_members::list_members(state.db(), member.org_id).await {
-        Ok(members) => Json(
-            members
+        Ok(members) => Json(OrganizationMembersListResponse {
+            members: members
                 .into_iter()
                 .map(OrganizationMemberResponse::from)
-                .collect::<Vec<_>>(),
-        )
+                .collect(),
+        })
         .into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);

@@ -1,64 +1,114 @@
 .wiki-page {
-  /* Uses standard page-container width from Layout.css */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background:
+    radial-gradient(ellipse 80% 45% at 50% 0%, color-mix(in srgb, var(--ui-accent) 7%, transparent), transparent 55%),
+    var(--ui-bg-base);
+  color: var(--ui-text-primary);
 }
 
 .wiki-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--ui-space-5);
-  flex-wrap: wrap;
+  justify-content: space-between;
   gap: var(--ui-space-4);
+  min-height: 3.5rem;
+  padding: 0 var(--ui-space-6);
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-base);
+  flex-wrap: wrap;
 }
 
+.wiki-header-copy {
+  min-width: 0;
+}
+
+.wiki-header-copy h1,
 .wiki-header h1 {
   margin: 0;
-  font-size: 2rem;
+  font-size: var(--ui-text-xl);
   font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
+.wiki-header-copy p,
 .wiki-subtitle {
-  color: var(--text-secondary);
-  font-size: 0.95rem;
-  margin: 0.5rem 0 0 0;
+  margin: 0.1rem 0 0;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
+}
+
+.wiki-tabs {
+  margin-left: auto;
+}
+
+.wiki-workspace {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--ui-space-6);
+}
+
+.wiki-empty,
+.wiki-empty-state {
+  flex: 1;
+}
+
+.wiki-banner {
+  margin: var(--ui-space-4) var(--ui-space-6) 0;
+  padding: var(--ui-space-3) var(--ui-space-4);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-text-sm);
+}
+
+.wiki-banner--error {
+  background: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
+  color: var(--ui-error);
 }
 
 .wiki-actions {
   display: flex;
-  gap: 1rem;
+  gap: var(--ui-space-3);
   align-items: center;
 }
 
 .wiki-search {
   position: relative;
-  min-width: 300px;
+  width: min(22rem, 40vw);
+  min-width: 12rem;
 }
 
-.wiki-search input {
+.wiki-page .wiki-search input,
+.wiki-page .wiki-search input[type='text'],
+.wiki-page .wiki-search input[type='search'] {
   width: 100%;
-  padding: 0.75rem 1rem 0.75rem 2.5rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 0.9rem;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  transition: all 0.2s;
+  height: 2.25rem;
+  padding: 0 0.75rem 0 2.5rem;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-text-sm);
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text-primary);
 }
 
-.wiki-search input:focus {
+.wiki-page .wiki-search input:focus,
+.wiki-page .wiki-search input[type='text']:focus,
+.wiki-page .wiki-search input[type='search']:focus {
   outline: none;
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: var(--ui-accent);
+  box-shadow: 0 0 0 3px var(--ui-accent-muted);
 }
 
 .wiki-search-icon {
   position: absolute;
-  left: 0.75rem;
+  left: 0.7rem;
   top: 50%;
   transform: translateY(-50%);
-  width: 1.25rem;
-  height: 1.25rem;
-  color: var(--text-secondary);
+  width: 1rem;
+  height: 1rem;
+  color: var(--ui-text-muted);
   pointer-events: none;
 }
 
@@ -127,9 +177,9 @@
 }
 
 .knowledge-card {
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
   padding: 1.5rem;
   transition: all 0.2s;
   cursor: pointer;
@@ -154,7 +204,7 @@
   font-size: 1.1rem;
   font-weight: 600;
   margin: 0;
-  color: var(--text-primary);
+  color: var(--ui-text-primary);
   word-break: break-word;
   flex: 1;
 }
@@ -180,7 +230,7 @@
 }
 
 .knowledge-card-content {
-  color: var(--text-secondary);
+  color: var(--ui-text-secondary);
   font-size: 0.9rem;
   line-height: 1.6;
   margin-bottom: 1rem;
@@ -598,7 +648,7 @@
    ============================================================================= */
 
 .wizard-step-content {
-  min-height: 200px;
+  min-height: 0;
 }
 
 .wizard-step-intro {

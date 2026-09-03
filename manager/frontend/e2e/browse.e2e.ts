@@ -17,11 +17,11 @@ test.describe('Browse Models - Virtual Scrolling', () => {
     // Block service worker to allow route interception to work
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
-    await page.goto('/');
+    await page.goto('/models');
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    // App defaults to Models page, just click the Browse tab
+    // Open the Browse catalogue
     await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
@@ -373,11 +373,11 @@ test.describe('Browse Models - Source Tab Switching', () => {
     // Block service worker to allow route interception to work
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
-    await page.goto('/');
+    await page.goto('/models');
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    // App defaults to Models page, just click the Browse tab
+    // Open the Browse catalogue
     await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
@@ -439,11 +439,11 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     // Block service worker to allow route interception to work
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
-    await page.goto('/');
+    await page.goto('/models');
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    // App defaults to Models page, just click the Browse tab
+    // Open the Browse catalogue
     await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
@@ -605,11 +605,11 @@ test.describe('Browse Models - GPT4All Specific', () => {
     // Block service worker to allow route interception to work
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
-    await page.goto('/');
+    await page.goto('/models');
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    // App defaults to Models page, just click the Browse tab
+    // Open the Browse catalogue
     await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });
@@ -710,11 +710,11 @@ test.describe('Browse Models - OpenRouter Specific', () => {
     // Block service worker to allow route interception to work
     await blockServiceWorker(context);
     await mockCommonEndpoints(page);
-    await page.goto('/');
+    await page.goto('/models');
     await setupAuth(page);
     await page.reload();
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    // App defaults to Models page, just click the Browse tab
+    // Open the Browse catalogue
     await page.click('button[role="tab"]:has-text("Browse")');
     await expect(page.locator('.search-container')).toBeVisible();
   });

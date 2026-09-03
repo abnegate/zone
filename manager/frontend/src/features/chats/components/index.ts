@@ -1,2 +1,1 @@
-// Placeholder for future chat components
-export {};
+export { MessageContent } from './MessageContent';

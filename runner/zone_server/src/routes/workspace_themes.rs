@@ -72,13 +72,18 @@ pub struct UpdateThemeRequest {
 }
 
 /// GET /api/workspaces/:id/theme
+#[derive(Debug, Serialize)]
+struct SingleThemeResponse {
+    theme: ThemeResponse,
+}
+
 pub async fn get(
     State(state): State<AppState>,
     _auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
 ) -> impl IntoResponse {
     match workspace_themes::get_theme(state.db(), workspace_id).await {
-        Ok(Some(theme)) => Json(ThemeResponse::from(theme)).into_response(),
+        Ok(Some(theme)) => Json(SingleThemeResponse { theme: ThemeResponse::from(theme) }).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Theme not found")),
@@ -115,7 +120,7 @@ pub async fn upsert(
     )
     .await
     {
-        Ok(theme) => Json(ThemeResponse::from(theme)).into_response(),
+        Ok(theme) => Json(SingleThemeResponse { theme: ThemeResponse::from(theme) }).into_response(),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (

@@ -213,3 +213,65 @@
   --purple-500: #a855f7;
   --purple-700: #7c3aed;
 }
+
+/* =============================================================================
+   shadcn token aliases
+   These names are referenced across the manager but were never declared, so the
+   properties using them resolved to nothing and the elements rendered
+   uncoloured. They resolve to the @zone/ui shadcn tokens, which are themselves
+   theme-scoped, so one declaration covers light and dark.
+   ============================================================================= */
+
+:root {
+  /* Surfaces */
+  --background: var(--ui-bg-base);
+  --surface: var(--ui-bg-surface);
+  --bg-hover: var(--ui-bg-hover);
+  --color-bg-hover: var(--ui-bg-hover);
+  --color-background-hover: var(--ui-bg-hover);
+  --color-bg-secondary: var(--ui-bg-surface);
+  --color-background-secondary: var(--ui-bg-surface);
+  --color-background-tertiary: var(--ui-bg-muted);
+
+  /* Text */
+  --color-text-primary: var(--ui-text-primary);
+  --color-text-secondary: var(--ui-text-secondary);
+  --color-text-inverse: var(--ui-text-inverse);
+  --color-text-on-primary: var(--ui-text-inverse);
+
+  /* Status */
+  --error: var(--ui-error);
+  --color-danger: var(--ui-error);
+  --color-error-text: var(--ui-error);
+  --color-error-dark: var(--ui-error-600);
+  --color-error-light: color-mix(in srgb, var(--ui-error) 20%, transparent);
+  --color-error-bg: color-mix(in srgb, var(--ui-error) 12%, transparent);
+  --color-error-border: color-mix(in srgb, var(--ui-error) 35%, transparent);
+
+  --color-success-text: var(--ui-success);
+  --color-success-bg: color-mix(in srgb, var(--ui-success) 12%, transparent);
+  --color-success-border: color-mix(in srgb, var(--ui-success) 35%, transparent);
+
+  --color-warning-text: var(--ui-warning);
+  --color-warning-dark: var(--ui-warning);
+  --color-warning-light: color-mix(in srgb, var(--ui-warning) 20%, transparent);
+  --color-warning-bg: color-mix(in srgb, var(--ui-warning) 12%, transparent);
+  --color-warning-border: color-mix(in srgb, var(--ui-warning) 35%, transparent);
+
+  /* Badge pairs: a tinted ground with the same hue for the label. */
+  --color-gray-100: var(--ui-bg-muted);
+  --color-gray-800: var(--ui-text-secondary);
+  --color-blue-100: color-mix(in srgb, var(--ui-accent) 12%, transparent);
+  --color-blue-800: var(--ui-accent);
+  --color-green-100: color-mix(in srgb, var(--ui-success) 12%, transparent);
+  --color-green-800: var(--ui-success);
+  --color-purple-100: color-mix(in srgb, var(--ui-accent) 12%, transparent);
+  --color-purple-800: var(--ui-accent);
+
+  --color-role-owner-bg: color-mix(in srgb, var(--ui-accent) 12%, transparent);
+  --color-role-owner-text: var(--ui-accent);
+  --color-role-admin-bg: color-mix(in srgb, var(--ui-success) 12%, transparent);
+  --color-role-admin-text: var(--ui-success);
+  --color-role-member-bg: var(--ui-bg-muted);
+  --color-role-member-text: var(--ui-text-secondary);
+}

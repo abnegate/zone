@@ -54,6 +54,38 @@ describe('KnowledgeApi', () => {
       );
     });
 
+    it('should accept a raw knowledge list from the API', async () => {
+      const mockResponse = [
+        {
+          id: 'k1',
+          workspace_id: 'w1',
+          title: 'Docs',
+          category: null,
+          tags: ['guide'],
+          token_count: 12,
+          is_active: true,
+          source_url: 'https://example.com/docs',
+          last_fetched_at: '2024-01-02T00:00:00Z',
+        },
+      ];
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockResponse,
+      });
+
+      const result = await knowledgeApi.getKnowledge('w1');
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0]).toMatchObject({
+        id: 'k1',
+        title: 'Docs',
+        type: 'url',
+        content: 'https://example.com/docs',
+        tags: ['guide'],
+        last_refreshed_at: '2024-01-02T00:00:00Z',
+      });
+    });
+
     it('should reject invalid knowledge response', async () => {
       const invalidResponse = {
         entries: [

@@ -40,15 +40,30 @@ export const OrganizationResponseSchema = z.object({
 // Organization Member Schemas
 export const OrgRoleSchema = z.enum(['owner', 'admin', 'member']);
 
-export const OrganizationMemberSchema = z.object({
-  id: z.string().min(1),
-  user_id: z.string().min(1),
-  organization_id: z.string().min(1),
-  role: OrgRoleSchema,
-  email: z.string().email(),
-  display_name: z.string().nullable(),
-  joined_at: z.string().datetime(),
-});
+export const OrganizationMemberSchema = z
+  .object({
+    id: z.string().min(1),
+    user_id: z.string().min(1),
+    organization_id: z.string().min(1),
+    role: OrgRoleSchema,
+    is_active: z.boolean().optional(),
+    invited_by: z.string().nullable().optional(),
+    email: z.string().nullable().optional(),
+    display_name: z.string().nullable().optional(),
+    joined_at: z.string().optional(),
+    created_at: z.string().optional(),
+    updated_at: z.string().optional(),
+    deleted_at: z.string().nullable().optional(),
+  })
+  .transform((member) => ({
+    id: member.id,
+    user_id: member.user_id,
+    organization_id: member.organization_id,
+    role: member.role,
+    email: member.email || '',
+    display_name: member.display_name ?? null,
+    joined_at: member.joined_at || member.created_at || '',
+  }));
 
 export const AddOrgMemberRequestSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -64,19 +79,46 @@ export const OrgMembersResponseSchema = z.object({
 });
 
 // Invitation Schemas
-export const InvitationSchema = z.object({
-  id: z.string().min(1),
-  organization_id: z.string().min(1),
-  organization_name: z.string(),
-  email: z.string().email(),
-  org_role: OrgRoleSchema,
-  workspace_id: z.string().nullable(),
-  workspace_name: z.string().nullable(),
-  workspace_role: WorkspaceRoleSchema.nullable(),
-  invited_by_email: z.string(),
-  created_at: z.string().datetime(),
-  expires_at: z.string().datetime(),
-});
+const workspaceRoles = ['owner', 'admin', 'member', 'viewer'] as const;
+
+export const InvitationSchema = z
+  .object({
+    id: z.string().min(1),
+    organization_id: z.string().min(1),
+    organization_name: z.string().nullable().optional(),
+    email: z.string().min(1),
+    org_role: OrgRoleSchema,
+    workspace_id: z.string().nullable().optional(),
+    workspace_ids: z.array(z.string()).optional(),
+    workspace_name: z.string().nullable().optional(),
+    workspace_role: z.string().nullable().optional(),
+    invited_by: z.string().optional(),
+    invited_by_email: z.string().nullable().optional(),
+    created_at: z.string().optional(),
+    updated_at: z.string().optional(),
+    expires_at: z.string(),
+    token: z.string().optional(),
+    deleted_at: z.string().nullable().optional(),
+  })
+  .transform((invitation) => {
+    const role = invitation.workspace_role;
+    return {
+      id: invitation.id,
+      organization_id: invitation.organization_id,
+      organization_name: invitation.organization_name || '',
+      email: invitation.email,
+      org_role: invitation.org_role,
+      workspace_id: invitation.workspace_id ?? invitation.workspace_ids?.[0] ?? null,
+      workspace_name: invitation.workspace_name ?? null,
+      workspace_role:
+        role && workspaceRoles.includes(role as (typeof workspaceRoles)[number])
+          ? (role as (typeof workspaceRoles)[number])
+          : null,
+      invited_by_email: invitation.invited_by_email || '',
+      created_at: invitation.created_at || '',
+      expires_at: invitation.expires_at,
+    };
+  });
 
 export const CreateInvitationRequestSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -85,9 +127,12 @@ export const CreateInvitationRequestSchema = z.object({
   workspace_role: WorkspaceRoleSchema.optional(),
 });
 
-export const InvitationsResponseSchema = z.object({
-  invitations: z.array(InvitationSchema),
-});
+export const InvitationsResponseSchema = z.preprocess(
+  (data) => (Array.isArray(data) ? { invitations: data } : data),
+  z.object({
+    invitations: z.array(InvitationSchema),
+  })
+);
 
 // Billing & Usage Schemas
 export const SubscriptionStatusSchema = z.enum(['active', 'canceled', 'past_due', 'trialing']);
