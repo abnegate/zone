@@ -281,7 +281,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=zone_edge
-      - traefik.http.services.console.loadbalancer.server.port=3000
+      - traefik.http.services.console.loadbalancer.server.port=3001
       # Route all other requests to frontend (lower priority than backend routes)
       - traefik.http.routers.console.rule=Host(`manager.${DOMAIN_HOST_WEBUI}`)
       - traefik.http.routers.console.entrypoints=web
@@ -296,7 +296,7 @@ services:
       - traefik.http.routers.console-secure.tls.certresolver=letsencrypt
       - traefik.http.routers.console-secure.priority=1
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3001/"]
       interval: 30s
       timeout: 5s
       retries: 3
