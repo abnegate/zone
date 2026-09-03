@@ -10,6 +10,7 @@ import type {
   ModelSource,
 } from '../types';
 import { ALL_SOURCES } from '../types';
+import { sortBrowseModels } from '../utils';
 
 const LIMIT = 20;
 const LIMIT_PER_SOURCE = 5; // For "all" mode, fetch fewer per source to interleave
@@ -25,6 +26,10 @@ function toBrowseOptions(sort: ModelSort, family: string, size: ModelSizeFilter)
     family: family !== 'all' ? family : undefined,
     size: size !== 'all' ? size : undefined,
   };
+}
+
+function flattenSourceResults(resultsBySource: Record<ModelSource, BrowseModel[]>): BrowseModel[] {
+  return ALL_SOURCES.flatMap((src) => resultsBySource[src] ?? []);
 }
 
 export function useBrowse() {
@@ -51,6 +56,9 @@ export function useBrowse() {
     openrouter: { cursor: null, hasMore: true },
   });
 
+  // Drop overlapping search/loadMore results that are no longer current.
+  const searchGenRef = useRef(0);
+
   // Interleave results from multiple sources (round-robin)
   const interleaveResults = useCallback(
     (resultsBySource: Record<ModelSource, BrowseModel[]>): BrowseModel[] => {
@@ -74,8 +82,18 @@ export function useBrowse() {
     []
   );
 
+  const combineSourceResults = useCallback(
+    (resultsBySource: Record<ModelSource, BrowseModel[]>, resultSort: ModelSort): BrowseModel[] => {
+      if (resultSort === 'relevance') {
+        return interleaveResults(resultsBySource);
+      }
+      return sortBrowseModels(flattenSourceResults(resultsBySource), resultSort);
+    },
+    [interleaveResults]
+  );
+
   const searchAllSources = useCallback(
-    async (searchQuery: string, options: BrowseOptions) => {
+    async (searchQuery: string, options: BrowseOptions, resultSort: ModelSort) => {
       // Reset all source cursors
       for (const src of ALL_SOURCES) {
         sourceCursorsRef.current[src] = { cursor: null, hasMore: true };
@@ -119,15 +137,15 @@ export function useBrowse() {
       const anyHasMore = ALL_SOURCES.some((src) => sourceCursorsRef.current[src].hasMore);
 
       return {
-        models: interleaveResults(resultsBySource),
+        models: combineSourceResults(resultsBySource, resultSort),
         hasMore: anyHasMore,
       };
     },
-    [interleaveResults]
+    [combineSourceResults]
   );
 
   const loadMoreAllSources = useCallback(
-    async (searchQuery: string, options: BrowseOptions) => {
+    async (searchQuery: string, options: BrowseOptions, resultSort: ModelSort) => {
       // Find sources that have more results
       const sourcesWithMore = ALL_SOURCES.filter((src) => sourceCursorsRef.current[src].hasMore);
 
@@ -172,11 +190,11 @@ export function useBrowse() {
       const anyHasMore = ALL_SOURCES.some((src) => sourceCursorsRef.current[src].hasMore);
 
       return {
-        models: interleaveResults(resultsBySource),
+        models: combineSourceResults(resultsBySource, resultSort),
         hasMore: anyHasMore,
       };
     },
-    [interleaveResults]
+    [combineSourceResults]
   );
 
   const search = useCallback(
@@ -189,14 +207,17 @@ export function useBrowse() {
     ) => {
       if (!isAuthenticated) return;
 
+      const gen = ++searchGenRef.current;
       const options = toBrowseOptions(searchSort, searchFamily, searchSize);
       setLoading(true);
+      setLoadingMore(false);
       setError(null);
       cursorRef.current = null;
 
       try {
         if (searchSource === 'all') {
-          const result = await searchAllSources(searchQuery, options);
+          const result = await searchAllSources(searchQuery, options, searchSort);
+          if (searchGenRef.current !== gen) return;
           setModels(result.models);
           setHasMore(result.hasMore);
         } else {
@@ -207,6 +228,7 @@ export function useBrowse() {
             LIMIT,
             options
           );
+          if (searchGenRef.current !== gen) return;
           // Tag models with source for consistency
           const modelsWithSource = response.models.map((m) => ({ ...m, source: searchSource }));
           setModels(modelsWithSource);
@@ -214,10 +236,13 @@ export function useBrowse() {
           cursorRef.current = response.next_cursor;
         }
       } catch (err) {
+        if (searchGenRef.current !== gen) return;
         setError(err instanceof Error ? err.message : 'Failed to browse models');
         setModels([]);
       } finally {
-        setLoading(false);
+        if (searchGenRef.current === gen) {
+          setLoading(false);
+        }
       }
     },
     [isAuthenticated, query, source, sort, family, size, searchAllSources]
@@ -226,13 +251,18 @@ export function useBrowse() {
   const loadMore = useCallback(async () => {
     if (!isAuthenticated || loadingMore || !hasMore) return;
 
+    const gen = searchGenRef.current;
     const options = toBrowseOptions(sort, family, size);
     setLoadingMore(true);
 
     try {
       if (source === 'all') {
-        const result = await loadMoreAllSources(query, options);
-        setModels((prev) => [...prev, ...result.models]);
+        const result = await loadMoreAllSources(query, options, sort);
+        if (searchGenRef.current !== gen) return;
+        setModels((prev) => {
+          const combined = [...prev, ...result.models];
+          return sort === 'relevance' ? combined : sortBrowseModels(combined, sort);
+        });
         setHasMore(result.hasMore);
       } else {
         const response = await modelsApi.browseModels(
@@ -242,15 +272,22 @@ export function useBrowse() {
           LIMIT,
           options
         );
+        if (searchGenRef.current !== gen) return;
         const modelsWithSource = response.models.map((m) => ({ ...m, source }));
-        setModels((prev) => [...prev, ...modelsWithSource]);
+        setModels((prev) => {
+          const combined = [...prev, ...modelsWithSource];
+          return sort === 'relevance' ? combined : sortBrowseModels(combined, sort);
+        });
         setHasMore(response.next_cursor !== null);
         cursorRef.current = response.next_cursor;
       }
     } catch (err) {
+      if (searchGenRef.current !== gen) return;
       setError(err instanceof Error ? err.message : 'Failed to load more models');
     } finally {
-      setLoadingMore(false);
+      if (searchGenRef.current === gen) {
+        setLoadingMore(false);
+      }
     }
   }, [
     isAuthenticated,
