@@ -1,3 +1,5 @@
+import type { BrowseModel, ModelSizeOption } from '../types';
+
 /**
  * Format a number with K/M suffix for thousands/millions
  */
@@ -35,4 +37,18 @@ export function formatDate(dateStr: string): string {
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return dateStr;
   return date.toLocaleDateString();
+}
+
+/** Download options shown in the picker — only when a model ships more than one. */
+export function modelDownloadSizes(model: BrowseModel): ModelSizeOption[] {
+  const sizes = (model.sizes ?? []).filter((option) => option.name && option.label);
+  return sizes.length > 1 ? sizes : [];
+}
+
+export function formatDownloadSizeLabel(option: ModelSizeOption): string {
+  return option.size ? `${option.label} · ${formatBytes(option.size)}` : option.label;
+}
+
+export function defaultDownloadName(model: BrowseModel): string {
+  return modelDownloadSizes(model)[0]?.name ?? model.name;
 }

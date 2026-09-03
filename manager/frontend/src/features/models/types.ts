@@ -20,6 +20,12 @@ export interface ModelDetails {
   description?: string | null;
 }
 
+export interface ModelSizeOption {
+  name: string;
+  label: string;
+  size?: number | null;
+}
+
 export interface BrowseModel {
   name: string;
   display_name?: string | null;
@@ -33,6 +39,7 @@ export interface BrowseModel {
   likes?: number | null;
   tags?: string[] | null;
   use_cases?: string[] | null;
+  sizes?: ModelSizeOption[] | null;
   details?: ModelDetails | null;
   source?: ModelSource;
 }

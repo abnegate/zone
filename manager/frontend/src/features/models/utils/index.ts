@@ -1,1 +1,9 @@
-export { formatNumber, formatBytes, formatContextLength, formatDate } from './formatters';
+export {
+  formatNumber,
+  formatBytes,
+  formatContextLength,
+  formatDate,
+  modelDownloadSizes,
+  formatDownloadSizeLabel,
+  defaultDownloadName,
+} from './formatters';
