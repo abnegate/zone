@@ -13,6 +13,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Coverage instrumentation is retained; debug symbols only inflate each
+  # integration-test binary and exhaust the hosted runner's disk.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   coverage:
