@@ -413,23 +413,72 @@
 }
 
 .message-images {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--ui-space-2);
+  width: min(100%, 36rem);
   margin-bottom: var(--ui-space-2);
 }
 
-.message-images img,
-.message-md-image {
-  display: block;
-  max-width: min(18rem, 100%);
-  max-height: 18rem;
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-md);
-  object-fit: cover;
+.message-images[data-image-count='2'],
+.message-images[data-image-count='3'] {
+  grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+  width: min(100%, var(--chat-column));
 }
 
-.message-user .message-images img,
+.message-image-link {
+  display: grid;
+  overflow: hidden;
+  min-width: 0;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background-color: var(--ui-bg-surface);
+  background-image:
+    linear-gradient(45deg, color-mix(in srgb, var(--ui-border) 35%, transparent) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in srgb, var(--ui-border) 35%, transparent) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in srgb, var(--ui-border) 35%, transparent) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in srgb, var(--ui-border) 35%, transparent) 75%);
+  background-position:
+    0 0,
+    0 0.5rem,
+    0.5rem -0.5rem,
+    -0.5rem 0;
+  background-size: 1rem 1rem;
+  transition:
+    border-color 150ms ease,
+    transform 150ms ease;
+}
+
+.message-image-link:hover {
+  border-color: var(--ui-text-secondary);
+  transform: translateY(-1px);
+}
+
+.message-image-link:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.message-image-link img,
+.message-md-image {
+  display: block;
+  width: 100%;
+  max-height: 34rem;
+  object-fit: contain;
+}
+
+.message-images[data-image-count='2'] .message-image-link img,
+.message-images[data-image-count='3'] .message-image-link img {
+  aspect-ratio: 1;
+}
+
+.message-md-image {
+  max-width: min(36rem, 100%);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+}
+
+.message-user .message-image-link,
 .message-user .message-md-image {
   border-color: color-mix(in srgb, var(--ui-text-inverse) 22%, transparent);
 }
