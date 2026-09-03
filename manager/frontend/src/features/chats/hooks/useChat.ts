@@ -22,7 +22,17 @@ type ServerMessage =
     }
   | { type: 'message_start'; message_id: string; role: MessageRole }
   | { type: 'chunk'; content: string; index: number }
-  | { type: 'message_end'; message_id: string; content: string }
+  | {
+      type: 'image';
+      message_id: string;
+      attachment: NonNullable<MessageMetadata['attachments']>[number];
+    }
+  | {
+      type: 'message_end';
+      message_id: string;
+      content: string;
+      metadata?: MessageMetadata | null;
+    }
   | { type: 'cancelled'; message_id: string | null }
   | { type: 'error'; message: string };
 
@@ -144,6 +154,7 @@ export function useChat(chatId: string | null) {
     socketRef.current = socket;
     let assistantId: string | null = null;
     let assistantContent = '';
+    let assistantMetadata: MessageMetadata | undefined;
 
     socket.onopen = () => {
       const token = chatsApi.chatAccessToken();
@@ -167,6 +178,7 @@ export function useChat(chatId: string | null) {
         case 'message_start':
           assistantId = payload.message_id;
           assistantContent = '';
+          assistantMetadata = undefined;
           upsertMessage(payload.message_id, payload.role, '');
           break;
         case 'chunk':
@@ -175,10 +187,28 @@ export function useChat(chatId: string | null) {
             upsertMessage(assistantId, 'assistant', assistantContent);
           }
           break;
+        case 'image':
+          if (assistantId === payload.message_id) {
+            const attachments = assistantMetadata?.attachments ?? [];
+            assistantMetadata = {
+              attachments: [
+                ...attachments.filter((attachment) => attachment.url !== payload.attachment.url),
+                payload.attachment,
+              ],
+            };
+            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+          }
+          break;
         case 'message_end':
-          upsertMessage(payload.message_id, 'assistant', payload.content);
+          upsertMessage(
+            payload.message_id,
+            'assistant',
+            payload.content,
+            payload.metadata ?? assistantMetadata
+          );
           assistantId = null;
           assistantContent = '';
+          assistantMetadata = undefined;
           setStreaming(false);
           break;
         case 'cancelled':
