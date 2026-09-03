@@ -1,11 +1,17 @@
 # =============================================================================
 # Stage 1: Build Rust application
 # =============================================================================
-FROM rust:1.92-alpine3.23 AS builder
+# glibc, not musl: zone_server's `local-embeddings` feature links ONNX Runtime,
+# which publishes no musl prebuilts.
+FROM rust:1.92-slim-trixie AS builder
 
 WORKDIR /build
 
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+# g++ is for libstdc++-dev, not for compiling C++: the statically linked ONNX
+# Runtime needs -lstdc++ and rust:slim ships only gcc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY runner/Cargo.toml runner/Cargo.lock ./runner/
 
@@ -23,6 +29,7 @@ RUN mkdir -p runner/tool_runner/src runner/zone_runner/src runner/zone_core/src 
     echo "fn main() {}" > runner/zone_runner/src/main.rs && \
     echo "fn main() {}" > runner/zone_core/src/lib.rs && \
     echo "fn main() {}" > runner/zone_context/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_server/src/lib.rs && \
     echo "fn main() {}" > runner/zone_server/src/main.rs && \
     echo "fn main() {}" > runner/zone_cli/src/main.rs && \
     echo "fn main() {}" > runner/zone_installer/src/main.rs
@@ -49,11 +56,16 @@ RUN cargo build --release --package zone_server --package zone_runner
 # =============================================================================
 # Stage 2: Runtime
 # =============================================================================
-FROM alpine:3.21 AS runtime
+# Must match the builder's Debian release so the glibc the binaries were
+# linked against is present. libstdc++6 backs the statically linked ONNX Runtime.
+FROM debian:trixie-slim AS runtime
 
-RUN apk add --no-cache curl ca-certificates libssl3
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates libssl3t64 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -S zone && adduser -S -G zone -s /sbin/nologin zone
+RUN groupadd --system zone \
+    && useradd --system --gid zone --shell /usr/sbin/nologin --no-create-home zone
 
 WORKDIR /app
 
@@ -63,6 +75,10 @@ COPY --from=builder /build/runner/zone_server/migrations /app/migrations
 
 RUN chmod +x /app/zone-server /app/zone-runner
 
+# Docker seeds a new named volume from the image directory, so create the
+# embedding model cache up front to give the volume zone's ownership.
+RUN mkdir -p /app/embed-cache
+
 RUN chown -R zone:zone /app
 
 USER zone
@@ -70,6 +86,6 @@ USER zone
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
+    CMD curl -f http://localhost:8000/health || exit 1
 
 CMD ["/app/zone-server"]
