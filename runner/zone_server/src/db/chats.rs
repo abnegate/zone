@@ -305,6 +305,21 @@ pub async fn create_message(
     content: &str,
     metadata: Option<serde_json::Value>,
 ) -> DbResult<MessageRow> {
+    create_message_with_id(pool, Uuid::new_v4(), chat_id, role, content, metadata).await
+}
+
+/// Create a message with a caller-provided ID.
+///
+/// Streaming protocols can publish this ID before persistence and later use it
+/// as the durable owner for message-scoped artifacts.
+pub async fn create_message_with_id(
+    pool: &PgPool,
+    message_id: Uuid,
+    chat_id: Uuid,
+    role: &str,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) -> DbResult<MessageRow> {
     // Also update chat's updated_at
     sqlx::query!("UPDATE chats SET updated_at = NOW() WHERE id = $1", chat_id)
         .execute(pool)
@@ -312,10 +327,11 @@ pub async fn create_message(
 
     let row = sqlx::query!(
         r#"
-        INSERT INTO messages (chat_id, role, content, metadata)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO messages (id, chat_id, role, content, metadata)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id, chat_id, role, content, metadata, created_at
         "#,
+        message_id,
         chat_id,
         role,
         content,
