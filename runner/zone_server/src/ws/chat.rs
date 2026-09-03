@@ -580,7 +580,10 @@ async fn handle_send_message(
         return Ok(()); // Not a fatal error, just reject this message
     }
 
-    let web_search_requested = state.config().web_search.requested_for(metadata.as_ref());
+    let web_search_requested = state
+        .config()
+        .web_search
+        .requested_for(content, metadata.as_ref());
 
     // Save user message to database
     let user_message =

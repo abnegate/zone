@@ -210,7 +210,7 @@ For production, regenerate secrets for security.
 
 ### Manager / zone-server chat
 
-Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). When `SEARCH_ENABLE_WEB_SEARCH` is true, Manager chat queries SearXNG at `SEARCH_SEARXNG_QUERY_URL` (default `http://gluetun:8080/search?q=<query>&format=json`) and injects the top results into the model prompt. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. A message can opt out with `metadata.web_search: false`.
+Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). When `SEARCH_ENABLE_WEB_SEARCH` is true, Manager chat automatically queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. A message can force search on or off with `metadata.web_search`.
 
 ---
 

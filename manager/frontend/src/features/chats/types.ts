@@ -12,7 +12,7 @@ export interface MessageAttachment {
 
 export interface MessageMetadata {
   attachments?: MessageAttachment[];
-  /** When true, zone-server queries SearXNG (through Gluetun) before answering. */
+  /** Optional API override: force web search on/off for one message. */
   web_search?: boolean;
 }
 

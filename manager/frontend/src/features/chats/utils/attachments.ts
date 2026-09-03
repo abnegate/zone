@@ -149,14 +149,6 @@ export function attachmentMetadata(attachments: Attachment[]) {
   };
 }
 
-/** Metadata sent with a chat message, including the web-search opt-in. */
-export function sendMetadata(attachments: Attachment[], webSearch: boolean) {
-  return {
-    ...attachmentMetadata(attachments),
-    web_search: webSearch,
-  };
-}
-
 export function isSendable(attachment: Attachment): boolean {
   return attachment.text !== undefined || attachment.url !== undefined;
 }
