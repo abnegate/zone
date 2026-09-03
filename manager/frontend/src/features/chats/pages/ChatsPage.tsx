@@ -4,6 +4,15 @@ import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { useChats, useChat, useChatSearch } from '../hooks';
+import { MessageContent } from '../components';
+import {
+  type Attachment,
+  attachmentMetadata,
+  buildMessageWithAttachments,
+  formatBytes,
+  isSendable,
+  readAttachment,
+} from '../utils';
 import type { ChatSearchResult } from '../types';
 import { formatDate } from '../utils';
 import './ChatsPage.css';
@@ -21,6 +30,22 @@ export default function ChatsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [messageInput, setMessageInput] = useState('');
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const addFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const read = await Promise.all(Array.from(files).map(readAttachment));
+    setAttachments((prev) => {
+      const seen = new Set(prev.map((a) => a.id));
+      return [...prev, ...read.filter((a) => !seen.has(a.id))];
+    });
+  };
+
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  };
   const [sending, setSending] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
 
@@ -101,13 +126,19 @@ export default function ChatsPage() {
 
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isAuthenticated || !activeChat || !messageInput.trim() || sending) return;
+    const sendable = attachments.filter(isSendable);
+    if (!isAuthenticated || !activeChat || sending) return;
+    if (!messageInput.trim() && sendable.length === 0) return;
 
     setSending(true);
     setOperationError(null);
     try {
-      await sendMessageFn({ content: messageInput.trim() });
+      await sendMessageFn({
+        content: buildMessageWithAttachments(messageInput.trim(), sendable),
+        metadata: attachmentMetadata(sendable),
+      });
       setMessageInput('');
+      setAttachments([]);
       // Refresh chat list to update last message time
       await refreshChats();
     } catch (err) {
@@ -181,9 +212,9 @@ export default function ChatsPage() {
     <div className="page chats-page">
       <div className="chats-sidebar">
         <div className="chats-sidebar-header">
-          <h1 className="text-2xl font-semibold text-foreground">Chats</h1>
+          <h1>Chats</h1>
           <Button variant="primary" size="sm" onClick={() => { setOperationError(null); setShowNewChatModal(true); }}>
-            + New
+            New chat
           </Button>
         </div>
 
@@ -404,35 +435,128 @@ export default function ChatsPage() {
                       </span>
                       <span className="message-time">{formatDate(message.created_at)}</span>
                     </div>
-                    <div className="message-content">{message.content}</div>
+                    {message.metadata?.attachments?.some((a) =>
+                      a.mime.startsWith('image/')
+                    ) && (
+                      <div className="message-images">
+                        {message.metadata.attachments
+                          .filter((a) => a.mime.startsWith('image/'))
+                          .map((a) => (
+                            <img key={a.url} src={a.url} alt={a.name} title={a.name} />
+                          ))}
+                      </div>
+                    )}
+                    <div className="message-content">
+                      <MessageContent content={message.content} />
+                    </div>
                   </div>
                 ))
               )}
               <div ref={messagesEndRef} />
             </div>
 
-            <form className="message-form" onSubmit={handleSendMessage}>
-              <textarea
-                placeholder="Type a message..."
-                value={messageInput}
-                onChange={(e) => setMessageInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSendMessage(e);
-                  }
-                }}
-                disabled={sending}
-                rows={1}
-              />
-              <Button
-                type="submit"
-                variant="primary"
-                loading={sending}
-                disabled={!messageInput.trim()}
-              >
-                Send
-              </Button>
+            <form
+              className={`message-form${isDragging ? ' is-dragging' : ''}`}
+              onSubmit={handleSendMessage}
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={(e) => {
+                if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+                setIsDragging(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                addFiles(e.dataTransfer.files);
+              }}
+            >
+              {attachments.length > 0 && (
+                <div className="message-attachments">
+                  {attachments.map((attachment) => (
+                    <span
+                      key={attachment.id}
+                      className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}`}
+                    >
+                      <span className="attachment-chip-name">{attachment.name}</span>
+                      <span className="attachment-chip-size">
+                        {attachment.rejected ? (
+                          <span className="attachment-chip-note">{attachment.rejected}</span>
+                        ) : (
+                          formatBytes(attachment.size)
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="attachment-chip-remove"
+                        onClick={() => removeAttachment(attachment.id)}
+                        aria-label={`Remove ${attachment.name}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="message-form-row">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    addFiles(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn-icon"
+                  onClick={() => fileInputRef.current?.click()}
+                  aria-label="Attach files"
+                  title="Attach files"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    width="16"
+                    height="16"
+                  >
+                    <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
+                  </svg>
+                </button>
+                <textarea
+                  placeholder="Type a message, or drop a file..."
+                  value={messageInput}
+                  onChange={(e) => setMessageInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage(e);
+                    }
+                  }}
+                  onPaste={(e) => {
+                    if (e.clipboardData.files.length > 0) {
+                      e.preventDefault();
+                      addFiles(e.clipboardData.files);
+                    }
+                  }}
+                  disabled={sending}
+                  rows={1}
+                />
+                <Button
+                  type="submit"
+                  variant="primary"
+                  loading={sending}
+                  disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                >
+                  Send
+                </Button>
+              </div>
             </form>
           </>
         ) : (
