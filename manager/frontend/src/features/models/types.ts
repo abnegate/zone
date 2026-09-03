@@ -6,23 +6,34 @@ export interface InstalledModel {
   name: string;
   size: number;
   modified_at: string;
-  details?: {
-    description?: string;
-    family?: string;
-  };
+  details?: ModelDetails;
+}
+
+export interface ModelDetails {
+  format?: string | null;
+  family?: string | null;
+  parameter_size?: string | null;
+  quantization_level?: string | null;
+  context_length?: number | null;
+  license?: string | null;
+  ram_required_gb?: number | null;
+  description?: string | null;
 }
 
 export interface BrowseModel {
   name: string;
+  display_name?: string | null;
   size?: number | null;
   digest?: string | null;
   modified_at?: string | null;
-  details?: {
-    format?: string | null;
-    family?: string | null;
-    parameter_size?: string | null;
-    quantization_level?: string | null;
-  } | null;
+  description?: string | null;
+  author?: string | null;
+  url?: string | null;
+  downloads?: number | null;
+  likes?: number | null;
+  tags?: string[] | null;
+  use_cases?: string[] | null;
+  details?: ModelDetails | null;
   source?: ModelSource;
 }
 

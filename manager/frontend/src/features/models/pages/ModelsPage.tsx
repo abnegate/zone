@@ -7,20 +7,8 @@ import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
 import type { BrowseModel, InstalledModel } from '../types';
+import { formatBytes, formatContextLength, formatDate, formatNumber } from '../utils';
 import './ModelsPage.css';
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${Number.parseFloat((bytes / k ** i).toFixed(1))} ${sizes[i]}`;
-}
-
-function formatDate(dateStr: string): string {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString();
-}
 
 type Tab = 'installed' | 'browse';
 
@@ -283,7 +271,14 @@ export default function ModelsPage() {
                     <div className="model-info">
                       <span className="model-name">{model.name}</span>
                       <span className="model-meta">
-                        {formatBytes(model.size)} · {formatDate(model.modified_at)}
+                        {[
+                          formatBytes(model.size),
+                          model.details?.parameter_size,
+                          model.details?.quantization_level,
+                          formatDate(model.modified_at),
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
                       </span>
                     </div>
                     <div className="model-actions">
@@ -422,7 +417,11 @@ export default function ModelsPage() {
             </button>
 
             <div className="modal-details-header">
-              <h3>{detailsModel.name}</h3>
+              <h3>
+                {!isInstalledModel(detailsModel) && detailsModel.display_name
+                  ? detailsModel.display_name
+                  : detailsModel.name}
+              </h3>
               <span className="details-source">
                 {isInstalledModel(detailsModel) ? 'Installed' : (detailsModel.source || browse.source)}
               </span>
@@ -430,21 +429,36 @@ export default function ModelsPage() {
 
             {isInstalledModel(detailsModel) ? (
               <>
+                {detailsModel.details?.description && (
+                  <p className="details-description">{detailsModel.details.description}</p>
+                )}
                 <div className="details-meta">
                   <div className="details-meta-item">
                     <span className="details-label">Size</span>
                     <span>{formatBytes(detailsModel.size)}</span>
                   </div>
-                  <div className="details-meta-item">
-                    <span className="details-label">Modified</span>
-                    <span>{formatDate(detailsModel.modified_at)}</span>
-                  </div>
+                  {detailsModel.details?.parameter_size && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Parameters</span>
+                      <span>{detailsModel.details.parameter_size}</span>
+                    </div>
+                  )}
+                  {detailsModel.details?.quantization_level && (
+                    <div className="details-meta-item">
+                      <span className="details-label">Quantization</span>
+                      <span>{detailsModel.details.quantization_level}</span>
+                    </div>
+                  )}
                   {detailsModel.details?.family && (
                     <div className="details-meta-item">
                       <span className="details-label">Family</span>
                       <span>{detailsModel.details.family}</span>
                     </div>
                   )}
+                  <div className="details-meta-item">
+                    <span className="details-label">Modified</span>
+                    <span>{formatDate(detailsModel.modified_at)}</span>
+                  </div>
                 </div>
                 <div className="modal-actions">
                   <Button
@@ -460,53 +474,139 @@ export default function ModelsPage() {
               </>
             ) : (
               <>
-                <div className="details-meta">
-                  {detailsModel.size && (
-                    <div className="details-meta-item">
-                      <span className="details-label">Size</span>
-                      <span>{formatBytes(detailsModel.size)}</span>
-                    </div>
-                  )}
-                  {modelSize && !detailsModel.size && (
-                    <div className="details-meta-item">
-                      <span className="details-label">Size</span>
-                      <span>{formatBytes(modelSize)}</span>
-                    </div>
-                  )}
-                  {detailsModel.details?.family && (
-                    <div className="details-meta-item">
-                      <span className="details-label">Family</span>
-                      <span>{detailsModel.details.family}</span>
-                    </div>
-                  )}
-                  {detailsModel.details?.parameter_size && (
-                    <div className="details-meta-item">
-                      <span className="details-label">Parameters</span>
-                      <span>{detailsModel.details.parameter_size}</span>
-                    </div>
-                  )}
-                  {detailsModel.details?.quantization_level && (
-                    <div className="details-meta-item">
-                      <span className="details-label">Quantization</span>
-                      <span>{detailsModel.details.quantization_level}</span>
-                    </div>
-                  )}
-                </div>
+                {detailsModel.description && (
+                  <p className="details-description">{detailsModel.description}</p>
+                )}
 
-                {detailsModel.details && (
+                {(detailsModel.details?.parameter_size ||
+                  detailsModel.size ||
+                  modelSize ||
+                  detailsModel.details?.context_length) && (
+                  <div className="details-stats">
+                    {detailsModel.details?.parameter_size && (
+                      <div className="details-stat">
+                        <span className="details-stat-value">{detailsModel.details.parameter_size}</span>
+                        <span className="details-stat-label">Parameters</span>
+                      </div>
+                    )}
+                    {(detailsModel.size || modelSize) && (
+                      <div className="details-stat">
+                        <span className="details-stat-value">
+                          {formatBytes(detailsModel.size || modelSize || 0)}
+                        </span>
+                        <span className="details-stat-label">
+                          {detailsModel.source === 'huggingface' ? 'Repo size' : 'Size'}
+                        </span>
+                      </div>
+                    )}
+                    {detailsModel.details?.context_length && (
+                      <div className="details-stat">
+                        <span className="details-stat-value">
+                          {formatContextLength(detailsModel.details.context_length)}
+                        </span>
+                        <span className="details-stat-label">Context</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {(detailsModel.details?.family ||
+                  detailsModel.details?.quantization_level ||
+                  detailsModel.details?.format ||
+                  detailsModel.details?.license ||
+                  detailsModel.details?.ram_required_gb ||
+                  detailsModel.author ||
+                  detailsModel.downloads != null ||
+                  detailsModel.likes != null ||
+                  detailsModel.modified_at) && (
+                  <div className="details-meta">
+                    {detailsModel.details?.family && (
+                      <div className="details-meta-item">
+                        <span className="details-label">Family</span>
+                        <span>{detailsModel.details.family}</span>
+                      </div>
+                    )}
+                    {detailsModel.details?.quantization_level && (
+                      <div className="details-meta-item">
+                        <span className="details-label">Quantization</span>
+                        <span>{detailsModel.details.quantization_level}</span>
+                      </div>
+                    )}
+                    {detailsModel.details?.format && (
+                      <div className="details-meta-item">
+                        <span className="details-label">Format</span>
+                        <span>{detailsModel.details.format}</span>
+                      </div>
+                    )}
+                    {detailsModel.details?.license && (
+                      <div className="details-meta-item">
+                        <span className="details-label">License</span>
+                        <span>{detailsModel.details.license}</span>
+                      </div>
+                    )}
+                    {detailsModel.details?.ram_required_gb && (
+                      <div className="details-meta-item">
+                        <span className="details-label">RAM</span>
+                        <span>{detailsModel.details.ram_required_gb} GB</span>
+                      </div>
+                    )}
+                    {detailsModel.author && (
+                      <div className="details-meta-item details-author">
+                        <span className="details-label">Author</span>
+                        <span>{detailsModel.author}</span>
+                      </div>
+                    )}
+                    {detailsModel.downloads != null && (
+                      <div className="details-meta-item">
+                        <span className="details-label">
+                          {detailsModel.source === 'ollama' ? 'Pulls' : 'Downloads'}
+                        </span>
+                        <span>{formatNumber(detailsModel.downloads)}</span>
+                      </div>
+                    )}
+                    {detailsModel.likes != null && (
+                      <div className="details-meta-item">
+                        <span className="details-label">Likes</span>
+                        <span>{formatNumber(detailsModel.likes)}</span>
+                      </div>
+                    )}
+                    {detailsModel.modified_at && (
+                      <div className="details-meta-item">
+                        <span className="details-label">Updated</span>
+                        <span>{formatDate(detailsModel.modified_at)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {detailsModel.use_cases && detailsModel.use_cases.length > 0 && (
+                  <div className="details-use-cases">
+                    <span className="details-label">Use cases</span>
+                    <div className="details-tags">
+                      {detailsModel.use_cases.map((useCase) => (
+                        <span key={useCase} className="tag">
+                          {useCase}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {detailsModel.tags && detailsModel.tags.length > 0 && (
                   <div className="details-tags">
-                    {detailsModel.details.family && (
-                      <span className="tag">{detailsModel.details.family}</span>
-                    )}
-                    {detailsModel.details.parameter_size && (
-                      <span className="tag">{detailsModel.details.parameter_size}</span>
-                    )}
-                    {detailsModel.details.quantization_level && (
-                      <span className="tag">{detailsModel.details.quantization_level}</span>
-                    )}
-                    {detailsModel.details.format && (
-                      <span className="tag">{detailsModel.details.format}</span>
-                    )}
+                    {detailsModel.tags.slice(0, 8).map((tag) => (
+                      <span key={tag} className="tag">
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {detailsModel.url && (
+                  <div className="details-link">
+                    <a href={detailsModel.url} target="_blank" rel="noreferrer">
+                      View source
+                    </a>
                   </div>
                 )}
 

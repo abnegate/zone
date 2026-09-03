@@ -139,7 +139,9 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
                                     family: d.family,
                                     parameter_size: d.parameter_size,
                                     quantization_level: d.quantization_level,
+                                    ..Default::default()
                                 }),
+                                ..Default::default()
                             })
                             .collect();
 
