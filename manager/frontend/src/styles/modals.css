@@ -18,7 +18,7 @@
   inset: 0;
   background: var(--ui-overlay-heavy);
   backdrop-filter: blur(8px);
-  animation: ui-fade-in var(--ui-duration-normal) var(--ui-ease-out);
+  animation: ui-fade-in var(--ui-duration-fast) var(--ui-ease-out) both;
 }
 
 .modal-content {
@@ -32,7 +32,7 @@
   max-height: calc(100vh - var(--ui-space-8));
   overflow-y: auto;
   box-shadow: var(--ui-shadow-2xl);
-  animation: ui-scale-in var(--ui-duration-normal) var(--ui-ease-bounce);
+  animation: ui-scale-in var(--ui-duration-fast) var(--ui-ease-out) both;
 }
 
 /* Top gradient for depth */
