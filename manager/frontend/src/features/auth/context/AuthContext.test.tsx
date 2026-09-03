@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { AuthProvider, useAuth } from './AuthContext';
+import { RefreshError } from '../../../api/auth';
 
 let loginImpl: (request: { email: string; password: string }) => Promise<unknown>;
 let registerImpl: (request: { email: string; password: string }) => Promise<unknown>;
@@ -358,6 +359,53 @@ describe('AuthContext', () => {
       expect(storage.getItem('manager_access_token')).toBeNull();
       expect(storage.getItem('manager_refresh_token')).toBeNull();
       expect(storage.getItem('manager_user')).toBeNull();
+    });
+  });
+
+  describe('refresh failures', () => {
+    const makeExpiredToken = () => {
+      const payload = {
+        sub: '1',
+        email: 'test@test.com',
+        roles: ['user'],
+        permissions: ['chats:read'],
+        exp: Math.floor(Date.now() / 1000) - 3600,
+      };
+      return `header.${btoa(JSON.stringify(payload))}.signature`;
+    };
+
+    // A proxy reload or a restarting backend used to sign the user out, because
+    // every refresh rejection was treated as a rejected credential.
+    it('keeps the stored session when the server never rejected the token', async () => {
+      storage.setItem('manager_access_token', makeExpiredToken());
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      refreshTokenImpl = async () => {
+        throw new RefreshError('Token refresh failed: 404', 404);
+      };
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+
+      expect(storage.getItem('manager_refresh_token')).toBe('refresh-token');
+    });
+
+    it('signs out when the server rejects the refresh token', async () => {
+      storage.setItem('manager_access_token', makeExpiredToken());
+      storage.setItem('manager_refresh_token', 'refresh-token');
+      refreshTokenImpl = async () => {
+        throw new RefreshError('Token refresh failed: 401', 401);
+      };
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => {
+        expect(storage.getItem('manager_refresh_token')).toBeNull();
+      });
+
+      expect(result.current.isAuthenticated).toBe(false);
     });
   });
 });
