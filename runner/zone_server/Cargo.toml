@@ -88,3 +88,4 @@ bytes = { workspace = true }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 zone_context = { path = "../zone_context", features = ["test-utils"] }
+wiremock = "0.6"

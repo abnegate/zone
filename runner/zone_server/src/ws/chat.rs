@@ -165,6 +165,8 @@ pub enum ServerMessage {
     Cancelled { message_id: Option<Uuid> },
     /// Error message
     Error { message: String },
+    /// Non-fatal progress (e.g. web search in progress)
+    Status { message: String },
 }
 
 impl ServerMessage {
@@ -639,6 +641,11 @@ async fn handle_send_message(
         return Ok(()); // Not a fatal error, just reject this message
     }
 
+    let web_search_requested = state
+        .config()
+        .web_search
+        .requested_for(content, metadata.as_ref());
+
     // Save user message to database
     let user_message =
         chats::create_message(state.db(), chat_id, "user", content, metadata).await?;
@@ -725,6 +732,44 @@ async fn handle_send_message(
             Err(e) => {
                 tracing::warn!("Context search failed: {}", e);
                 // Continue without context
+            }
+        }
+    }
+
+    // Inject live web search via SearXNG (reached through Gluetun in Docker).
+    if web_search_requested {
+        let query = crate::services::searxng::sanitize_query(content);
+        if !query.is_empty() {
+            let status_msg = ServerMessage::Status {
+                message: "Searching the web...".to_string(),
+            };
+            let _ = sender.send(status_msg.to_ws_message()).await;
+
+            match crate::services::searxng::SearxngClient::new(state.config().web_search.clone()) {
+                Ok(client) => match client.search(&query).await {
+                    Ok(hits) if !hits.is_empty() => {
+                        context_messages.insert(
+                            0,
+                            LlmMessage::system(crate::services::searxng::format_search_context(
+                                &hits,
+                            )),
+                        );
+                        tracing::debug!(
+                            "Injected {} web search results for chat {}",
+                            hits.len(),
+                            chat_id
+                        );
+                    }
+                    Ok(_) => {
+                        tracing::debug!("Web search returned no results for chat {}", chat_id);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Web search failed for chat {}: {}", chat_id, e);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("Failed to create web search client: {}", e);
+                }
             }
         }
     }
@@ -1192,6 +1237,16 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"error\""));
         assert!(json.contains("\"message\":\"Something went wrong\""));
+    }
+
+    #[test]
+    fn test_server_message_status_serialize() {
+        let msg = ServerMessage::Status {
+            message: "Searching the web...".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"status\""));
+        assert!(json.contains("Searching the web..."));
     }
 
     #[test]

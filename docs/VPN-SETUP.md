@@ -19,7 +19,7 @@ make up
 - ✅ Chat with local models
 - ✅ Semantic routing (auto/fast/reason)
 - ✅ All core functionality
-- ❌ Web search (SearXNG not available)
+- ❌ Web search (SearXNG not available — Open WebUI RAG and Manager chat)
 
 ## Running With VPN
 
@@ -44,7 +44,7 @@ make up-vpn
 - ✅ Chat with local models
 - ✅ Semantic routing
 - ✅ All core functionality
-- ✅ Private web search via VPN
+- ✅ Private web search via VPN (Open WebUI and Manager chat, through SearXNG on Gluetun)
 
 ## Supported VPN Providers
 

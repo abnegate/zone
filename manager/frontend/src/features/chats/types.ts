@@ -12,6 +12,8 @@ export interface MessageAttachment {
 
 export interface MessageMetadata {
   attachments?: MessageAttachment[];
+  /** Optional API override: force web search on/off for one message. */
+  web_search?: boolean;
 }
 
 export interface Message {
