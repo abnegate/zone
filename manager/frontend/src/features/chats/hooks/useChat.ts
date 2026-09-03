@@ -205,14 +205,37 @@ export function useChat(chatId: string | null) {
     };
   }, [chatId, upsertMessage, applySavedUserMessage]);
 
+  const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
+    if (socket.readyState === WebSocket.OPEN) {
+      return Promise.resolve();
+    }
+    if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+      return Promise.reject(new Error('Chat connection is not open'));
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('Chat connection is not open'));
+      }, timeoutMs);
+      const finish = (ok: boolean) => {
+        clearTimeout(timer);
+        if (ok) resolve();
+        else reject(new Error('Chat connection is not open'));
+      };
+      socket.addEventListener('open', () => finish(true), { once: true });
+      socket.addEventListener('error', () => finish(false), { once: true });
+      socket.addEventListener('close', () => finish(false), { once: true });
+    });
+  };
+
   const sendMessage = async (request: SendMessageRequest): Promise<void> => {
     if (!chatId) {
       throw new Error('No chat selected');
     }
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
+    if (!socket) {
       throw new Error('Chat connection is not open');
     }
+    await waitForOpen(socket);
     setError(null);
     const pendingId = `pending-${crypto.randomUUID()}`;
     pendingUserIdRef.current = pendingId;
