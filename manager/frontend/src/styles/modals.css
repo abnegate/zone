@@ -3,6 +3,110 @@
    Premium modal styles extending @zone/ui
    ============================================================================= */
 
+/* Wizard from @zone/ui may not get Tailwind `fixed` utilities. Pin it. */
+.page > div:has(> [role="dialog"][aria-modal="true"]),
+.ui-wizard-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--ui-space-6);
+  background: var(--ui-overlay-heavy);
+  backdrop-filter: blur(8px);
+}
+
+.page > div:has(> [role="dialog"][aria-modal="true"]) > [role="dialog"],
+.ui-wizard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(40rem, calc(100vw - 3rem));
+  max-height: min(90vh, 44rem);
+  height: fit-content;
+  overflow: hidden;
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-xl);
+  box-shadow: var(--ui-shadow-xl);
+}
+
+.ui-wizard--lg,
+.ui-wizard--xl,
+.page > div:has(> [role="dialog"][aria-modal="true"]) > [role="dialog"].ui-wizard--lg,
+.page > div:has(> [role="dialog"][aria-modal="true"]) > [role="dialog"].ui-wizard--xl {
+  width: min(52rem, calc(100vw - 3rem));
+}
+
+.ui-wizard-header,
+.page [role="dialog"][aria-labelledby="wizard-title"] > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ui-space-4);
+  flex-shrink: 0;
+  padding: var(--ui-space-5) var(--ui-space-6) var(--ui-space-4);
+  border-bottom: 1px solid var(--ui-border);
+}
+
+.ui-wizard-subtitle,
+.page [role="dialog"][aria-labelledby="wizard-title"] > header p {
+  margin: 0.35rem 0 0;
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-secondary);
+}
+
+.ui-wizard-progress,
+.page [role="dialog"][aria-labelledby="wizard-title"] nav[aria-label="Wizard steps"] > div:first-child {
+  display: none;
+}
+
+.ui-wizard-steps,
+.page [role="dialog"][aria-labelledby="wizard-title"] nav[aria-label="Wizard steps"] {
+  flex-shrink: 0;
+  padding: var(--ui-space-3) var(--ui-space-6);
+  border-bottom: 1px solid var(--ui-border);
+  background: var(--ui-bg-surface);
+}
+
+.page [role="dialog"][aria-labelledby="wizard-title"] nav[aria-label="Wizard steps"] ol {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ui-wizard-step-description,
+.page [role="dialog"][aria-labelledby="wizard-title"] nav[aria-label="Wizard steps"] li span.flex.flex-col > :nth-child(2) {
+  display: none;
+}
+
+.ui-wizard-content,
+.page [role="dialog"][aria-labelledby="wizard-title"] > .ui-wizard-content {
+  flex: 0 1 auto !important;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--ui-space-5) var(--ui-space-6);
+}
+
+.ui-wizard-footer,
+.page [role="dialog"][aria-labelledby="wizard-title"] > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-space-3);
+  flex-shrink: 0;
+  padding: var(--ui-space-4) var(--ui-space-6);
+  border-top: 1px solid var(--ui-border);
+}
+
+.wizard-step-content {
+  min-height: 0;
+}
+
 .modal {
   position: fixed;
   inset: 0;
@@ -75,12 +179,13 @@
 }
 
 .modal-error {
-  background-color: #ef4444;
-  color: white;
-  padding: 12px 16px;
-  border-radius: 6px;
-  margin-bottom: 16px;
-  font-size: 14px;
+  background: var(--ui-error-muted);
+  color: var(--ui-error);
+  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
+  padding: var(--ui-space-3) var(--ui-space-4);
+  border-radius: var(--ui-radius-md);
+  margin-bottom: var(--ui-space-4);
+  font-size: var(--ui-text-sm);
   font-weight: 500;
 }
 
@@ -146,9 +251,10 @@
   text-transform: uppercase;
   letter-spacing: var(--ui-tracking-wider);
   padding: var(--ui-space-1) var(--ui-space-2-5);
-  background: linear-gradient(135deg, var(--ui-accent-500) 0%, var(--ui-accent-600) 100%);
-  color: white;
-  border-radius: var(--ui-radius-md);
+  background: var(--ui-accent-muted);
+  color: var(--ui-accent);
+  border: 1px solid color-mix(in srgb, var(--ui-accent) 28%, transparent);
+  border-radius: var(--ui-radius-full);
 }
 
 .details-description {
