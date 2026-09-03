@@ -117,6 +117,7 @@ export interface CreateSourceRequest {
   config: SourceConfig;
   credentials?: string;
   description?: string;
+  url?: string;
 }
 
 export interface UpdateSourceRequest {

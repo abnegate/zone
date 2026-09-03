@@ -1891,7 +1891,38 @@ async fn test_source_create() {
     assert!(body["source"]["id"].is_string());
     assert_eq!(body["source"]["name"], name);
     assert_eq!(body["source"]["source_type"], "github");
+    assert_eq!(body["source"]["category"], "file");
+    assert_eq!(body["source"]["url"], "https://github.com/test-org/test-repo");
     assert_eq!(body["source"]["is_active"], true);
+}
+
+#[tokio::test]
+async fn test_source_create_derives_github_url() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
+    let name = test_source_name();
+
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{}/sources", workspace_id),
+            &json!({
+                "name": &name,
+                "source_type": "github",
+                "config": {
+                    "owner": "acme",
+                    "repo": "zone",
+                    "branch": "main"
+                }
+            }),
+            &token,
+        )
+        .await;
+
+    response.assert_status(StatusCode::CREATED);
+    let body = response.json_value();
+    assert_eq!(body["source"]["category"], "file");
+    assert_eq!(body["source"]["url"], "https://github.com/acme/zone");
 }
 
 #[tokio::test]

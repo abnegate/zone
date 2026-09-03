@@ -1,6 +1,7 @@
-import { useState, useCallback, useMemo } from 'react';
-import { Wizard } from '../../../components';
 import type { WizardStep } from '@zone/ui';
+import { useCallback, useMemo, useState } from 'react';
+import { Wizard } from '../../../components';
+import { getErrors } from '../../../validation';
 import {
   type FormField,
   type FormRow,
@@ -8,9 +9,8 @@ import {
   initializeFormState,
   sourceRegistry,
 } from '../config';
-import type { CreateSourceRequest, Source, SourceType } from '../types';
-import { getErrors } from '../../../validation';
 import { CreateSourceRequestSchema } from '../schemas';
+import type { CreateSourceRequest, Source, SourceType } from '../types';
 
 interface CreateSourceWizardProps {
   isOpen: boolean;
@@ -234,6 +234,7 @@ export function CreateSourceWizard({
       config,
       description: description || undefined,
       credentials: credentials || undefined,
+      url: currentSource.getUrl?.(formState) || undefined,
     };
 
     const errors = getErrors(CreateSourceRequestSchema, request);
@@ -255,7 +256,16 @@ export function CreateSourceWizard({
     } finally {
       setLoading(false);
     }
-  }, [currentSource, formState, name, description, credentials, sourceType, createSource, onCreated]);
+  }, [
+    currentSource,
+    formState,
+    name,
+    description,
+    credentials,
+    sourceType,
+    createSource,
+    onCreated,
+  ]);
 
   const handleClose = useCallback(() => {
     setCurrentStep(0);
@@ -324,9 +334,7 @@ export function CreateSourceWizard({
                 )}
               </>
             ) : (
-              <p className="wizard-step-intro">
-                {currentSource?.name} integration is coming soon.
-              </p>
+              <p className="wizard-step-intro">{currentSource?.name} integration is coming soon.</p>
             )}
           </div>
         );
@@ -349,9 +357,7 @@ export function CreateSourceWizard({
                 onChange={(e) => setName(e.target.value)}
                 placeholder={currentSource?.getDefaultName(formState) || 'Auto-generated if empty'}
               />
-              <span className="form-hint">
-                Leave empty to auto-generate based on configuration
-              </span>
+              <span className="form-hint">Leave empty to auto-generate based on configuration</span>
             </div>
             <div className="form-group">
               <label htmlFor="description">
