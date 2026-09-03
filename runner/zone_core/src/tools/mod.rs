@@ -84,6 +84,13 @@ pub struct ToolContext {
     pub max_file_size: usize,
     /// Command timeout (seconds)
     pub command_timeout: u64,
+    /// Whether tools may act outside `cwd`.
+    ///
+    /// Off by default: file tools stay inside the working directory and
+    /// `run_command` is held to its allow-list. On, they address the host
+    /// directly and paths are taken at face value. Only turn this on where
+    /// the caller has asked for it and knows what it means.
+    pub unrestricted: bool,
 }
 
 impl Default for ToolContext {
@@ -93,6 +100,7 @@ impl Default for ToolContext {
             env: std::env::vars().collect(),
             max_file_size: 10 * 1024 * 1024, // 10MB
             command_timeout: 300,            // 5 minutes
+            unrestricted: false,
         }
     }
 }
@@ -111,6 +119,15 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the given parameters
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError>;
+
+    /// How long a caller should let this tool run before abandoning it.
+    ///
+    /// Tools that shell out enforce their own, finer limit; this is the outer
+    /// bound a caller applies so that a wedged tool cannot hold a loop open
+    /// indefinitely. The default suits tools that query a database.
+    fn timeout(&self, _context: &ToolContext) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
 
     /// Convert to an OpenAI tool definition
     fn to_definition(&self) -> ToolDefinition {
@@ -147,6 +164,17 @@ impl ToolRegistry {
         registry
     }
 
+    /// The default tools plus an unrestricted shell.
+    ///
+    /// Pair this with a [`ToolContext`] that has `unrestricted` set, or the
+    /// file tools will still confine themselves to `cwd` while `run_shell`
+    /// does not, which is the worst of both.
+    pub fn with_host_tools() -> Self {
+        let mut registry = Self::with_defaults();
+        registry.register(Arc::new(RunShellTool));
+        registry
+    }
+
     /// Register a tool
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
@@ -179,6 +207,11 @@ impl ToolRegistry {
     /// List all tool names
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Take the tools out, for folding one registry into another.
+    pub fn into_tools(self) -> Vec<Arc<dyn Tool>> {
+        self.tools.into_values().collect()
     }
 }
 

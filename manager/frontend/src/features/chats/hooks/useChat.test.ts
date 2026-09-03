@@ -94,6 +94,7 @@ describe('useChat', () => {
     updated_at: '2024-01-01T00:01:00Z',
     archived: false,
     agent_enabled: false,
+    agent_sandboxed: true,
     messages: mockMessages,
   };
 
@@ -272,6 +273,31 @@ describe('useChat', () => {
     });
     // Toggling must not disturb the loaded conversation.
     expect(result.current.chat?.messages).toHaveLength(2);
+  });
+
+  it('persists the sandbox toggle separately from agent mode', async () => {
+    mockGetChat.mockResolvedValue({ ...mockChat, agent_enabled: true });
+    mockUpdateChat.mockResolvedValue({
+      ...mockChat,
+      agent_enabled: true,
+      agent_sandboxed: false,
+    });
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await result.current.setAgentSandboxed(false);
+
+    // Only the field being changed is sent, so a concurrent change to agent
+    // mode from another window is not clobbered.
+    expect(mockUpdateChat).toHaveBeenCalledWith('1', { agent_sandboxed: false });
+    await waitFor(() => {
+      expect(result.current.chat?.agent_sandboxed).toBe(false);
+    });
+    expect(result.current.chat?.agent_enabled).toBe(true);
   });
 
   it('should delete a message', async () => {

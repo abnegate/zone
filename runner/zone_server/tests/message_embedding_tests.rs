@@ -186,7 +186,7 @@ async fn test_spawn_message_embedding_task_creates_embedding() {
     let state = AppState::new(config, pool.clone(), None);
 
     // Create a test chat and message directly in the database
-    let chat = chats::create_chat(&pool, None, "Test Chat", "gpt-4", false)
+    let chat = chats::create_chat(&pool, None, "Test Chat", "gpt-4", false, true)
         .await
         .expect("Failed to create chat");
 
@@ -236,7 +236,7 @@ async fn test_spawn_embedding_handles_empty_content() {
     let config = test_config();
     let state = AppState::new(config, pool.clone(), None);
 
-    let chat = chats::create_chat(&pool, None, "Test Chat", "gpt-4", false)
+    let chat = chats::create_chat(&pool, None, "Test Chat", "gpt-4", false, true)
         .await
         .expect("Failed to create chat");
 
@@ -261,7 +261,7 @@ async fn test_spawn_embedding_respects_semaphore_limit() {
     let config = test_config();
     let state = AppState::new(config, pool.clone(), None);
 
-    let chat = chats::create_chat(&pool, None, "Test Chat", "gpt-4", false)
+    let chat = chats::create_chat(&pool, None, "Test Chat", "gpt-4", false, true)
         .await
         .expect("Failed to create chat");
 

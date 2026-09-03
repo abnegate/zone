@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, email, display_name, is_active, is_admin, email_verified,\n               created_at, updated_at, last_login_at, password_hash\n        FROM users\n        WHERE email = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "is_admin",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "email_verified",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 7,
+        "name": "updated_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_login_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 9,
+        "name": "password_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "67fa27451e245bd66054873903bb06cf5af1f98dff8994eeeeb174b69656cb44"
+}

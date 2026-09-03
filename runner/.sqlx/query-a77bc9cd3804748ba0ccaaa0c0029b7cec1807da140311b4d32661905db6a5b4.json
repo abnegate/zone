@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE synced_items\n        SET last_synced_at = NOW(),\n            last_external_state = COALESCE($2, last_external_state)\n        WHERE id = $1\n        RETURNING id, sync_config_id, task_id, external_id, external_url,\n                  last_synced_at, sync_direction, last_external_state, created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "sync_config_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "external_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "external_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_synced_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 6,
+        "name": "sync_direction",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "last_external_state",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "a77bc9cd3804748ba0ccaaa0c0029b7cec1807da140311b4d32661905db6a5b4"
+}

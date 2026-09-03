@@ -359,6 +359,18 @@
   color: var(--ui-accent);
 }
 
+/* Only the first toggle pushes off the title; the rest sit beside it. */
+.agent-toggle + .agent-toggle {
+  margin-left: 0;
+}
+
+/* An agent that can reach the host should not look like every other setting. */
+.agent-toggle-unsandboxed[aria-pressed='true'] {
+  border-color: color-mix(in srgb, var(--ui-warning, #b45309) 55%, transparent);
+  background: color-mix(in srgb, var(--ui-warning, #b45309) 14%, transparent);
+  color: var(--ui-warning, #b45309);
+}
+
 /* Messages ----------------------------------------------------------------- */
 
 .messages-container {

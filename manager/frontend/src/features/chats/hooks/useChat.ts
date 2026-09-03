@@ -7,6 +7,7 @@ import type {
   MessageRole,
   SendMessageRequest,
   ToolCallRecord,
+  UpdateChatRequest,
 } from '../types';
 
 // The server saves the user message and streams the assistant reply over
@@ -339,15 +340,27 @@ export function useChat(chatId: string | null) {
 
   // Persisted on the chat rather than sent per message, so the next reply uses
   // the new mode whichever window or device it comes from.
-  const setAgentEnabled = async (enabled: boolean): Promise<void> => {
+  const updateAgentSettings = async (settings: UpdateChatRequest): Promise<void> => {
     if (!chatId) {
       throw new Error('No chat selected');
     }
-    const updated = await chatsApi.updateChat(chatId, { agent_enabled: enabled });
+    const updated = await chatsApi.updateChat(chatId, settings);
     setChat((prev) =>
-      prev && prev.id === updated.id ? { ...prev, agent_enabled: updated.agent_enabled } : prev
+      prev && prev.id === updated.id
+        ? {
+            ...prev,
+            agent_enabled: updated.agent_enabled,
+            agent_sandboxed: updated.agent_sandboxed,
+          }
+        : prev
     );
   };
+
+  const setAgentEnabled = (enabled: boolean): Promise<void> =>
+    updateAgentSettings({ agent_enabled: enabled });
+
+  const setAgentSandboxed = (sandboxed: boolean): Promise<void> =>
+    updateAgentSettings({ agent_sandboxed: sandboxed });
 
   const deleteMessage = async (messageId: string): Promise<void> => {
     if (!chatId) {
@@ -371,6 +384,7 @@ export function useChat(chatId: string | null) {
     sendMessage,
     cancelGeneration,
     setAgentEnabled,
+    setAgentSandboxed,
     deleteMessage,
     refresh,
   };
