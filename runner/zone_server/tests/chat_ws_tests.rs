@@ -628,6 +628,96 @@ async fn test_image_failure_never_announces_empty_assistant_message() {
     );
 }
 
+#[tokio::test]
+async fn test_image_persist_failure_sends_error_without_empty_message() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "flux-io"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/flux-io"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "flux-io": {
+                "status": {"status_str": "success"},
+                "outputs": {"7": {"images": [{
+                    "filename": "zone.png", "subfolder": "", "type": "temp"
+                }]}}
+            }
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(vec![137, 80, 78, 71]),
+        )
+        .expect(1)
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat(&client).await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-not-a-dir-{}", uuid::Uuid::new_v4()));
+    tokio::fs::write(&artifact_root, b"not a directory")
+        .await
+        .unwrap();
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let addr = spawn_server_with_config(config).await;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/ws/chats/{chat_id}"))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "Generate an image of an unwritable store",
+                "metadata": {"image_generation": true}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_start = false;
+    let mut error = None;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("message_start") => saw_start = true,
+            Some("error") => {
+                error = frame["message"].as_str().map(str::to_string);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !saw_start,
+        "a persist failure must not create an empty bubble"
+    );
+    assert_eq!(
+        error.as_deref(),
+        Some("Image generation failed: could not store the image")
+    );
+    let _ = tokio::fs::remove_file(artifact_root).await;
+}
+
 struct DelayedPrompt {
     prompt_id: String,
     starts: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
