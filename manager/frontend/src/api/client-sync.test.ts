@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import { client } from './client';
 import type { CreateSyncConfigRequest, SyncConfig } from '../features/projects/types';
+import { client } from './client';
 
 describe('Client - Sync Configuration API', () => {
   let mockFetch: ReturnType<typeof mock>;

@@ -1,10 +1,11 @@
+import { Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { Button, Modal, Select, Tabs, TabsList, TabsTrigger, EmptyState } from '@zone/ui';
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
-import { useChats, useChat, useChatSearch } from '../hooks';
 import { MessageContent } from '../components';
+import { useChat, useChatSearch, useChats } from '../hooks';
+import type { ChatSearchResult } from '../types';
 import {
   type Attachment,
   attachmentMetadata,
@@ -14,7 +15,6 @@ import {
   isSendable,
   readAttachment,
 } from '../utils';
-import type { ChatSearchResult } from '../types';
 import { formatDate } from '../utils';
 import './ChatsPage.css';
 
@@ -212,7 +212,14 @@ export default function ChatsPage() {
       <div className="chats-sidebar">
         <div className="chats-sidebar-header">
           <h1>Chats</h1>
-          <Button variant="primary" size="sm" onClick={() => { setOperationError(null); setShowNewChatModal(true); }}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => {
+              setOperationError(null);
+              setShowNewChatModal(true);
+            }}
+          >
             New chat
           </Button>
         </div>
@@ -268,8 +275,12 @@ export default function ChatsPage() {
             className="chats-filter"
           >
             <TabsList className="w-full">
-              <TabsTrigger value="active" className="flex-1">Active</TabsTrigger>
-              <TabsTrigger value="archived" className="flex-1">Archived</TabsTrigger>
+              <TabsTrigger value="active" className="flex-1">
+                Active
+              </TabsTrigger>
+              <TabsTrigger value="archived" className="flex-1">
+                Archived
+              </TabsTrigger>
             </TabsList>
           </Tabs>
         )}
@@ -334,8 +345,23 @@ export default function ChatsPage() {
               </svg>
             }
             title={showArchived ? 'No archived chats' : 'No chats yet'}
-            description={showArchived ? 'Your archived conversations will appear here' : 'Start a new conversation to get started'}
-            action={!showArchived ? <Button onClick={() => { setOperationError(null); setShowNewChatModal(true); }}>New Chat</Button> : undefined}
+            description={
+              showArchived
+                ? 'Your archived conversations will appear here'
+                : 'Start a new conversation to get started'
+            }
+            action={
+              !showArchived ? (
+                <Button
+                  onClick={() => {
+                    setOperationError(null);
+                    setShowNewChatModal(true);
+                  }}
+                >
+                  New Chat
+                </Button>
+              ) : undefined
+            }
           />
         ) : (
           <div className="chats-list">
@@ -615,7 +641,13 @@ export default function ChatsPage() {
             </div>
             <h3>Select a chat to start</h3>
             <p>Choose an existing conversation or create a new one</p>
-            <Button variant="primary" onClick={() => { setOperationError(null); setShowNewChatModal(true); }}>
+            <Button
+              variant="primary"
+              onClick={() => {
+                setOperationError(null);
+                setShowNewChatModal(true);
+              }}
+            >
               Start New Chat
             </Button>
           </div>
@@ -625,9 +657,7 @@ export default function ChatsPage() {
       {/* New Chat Modal */}
       <Modal isOpen={showNewChatModal} onClose={() => setShowNewChatModal(false)} title="New Chat">
         <form onSubmit={handleCreateChat}>
-          {operationError && (
-            <div className="modal-error">{operationError}</div>
-          )}
+          {operationError && <div className="modal-error">{operationError}</div>}
           <Select
             label="Select Model"
             value={newChatModel}

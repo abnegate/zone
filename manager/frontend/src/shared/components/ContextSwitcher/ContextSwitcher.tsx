@@ -6,9 +6,7 @@ type ContextSwitcherProps = {
   useWorkspaceHook?: typeof useWorkspace;
 };
 
-export default function ContextSwitcher({
-  useWorkspaceHook = useWorkspace,
-}: ContextSwitcherProps) {
+export default function ContextSwitcher({ useWorkspaceHook = useWorkspace }: ContextSwitcherProps) {
   const {
     organizations,
     currentOrganization,

@@ -2,10 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import type { BrowseModel } from '../types';
 import { sortBrowseModels } from './sortModels';
 
-function model(
-  name: string,
-  extras: Partial<BrowseModel> = {}
-): BrowseModel {
+function model(name: string, extras: Partial<BrowseModel> = {}): BrowseModel {
   return { name, ...extras };
 }
 
@@ -30,11 +27,7 @@ describe('sortBrowseModels', () => {
   });
 
   it('sorts by size and matches backend null ordering', () => {
-    const models = [
-      model('unknown'),
-      model('large', { size: 40 }),
-      model('small', { size: 10 }),
-    ];
+    const models = [model('unknown'), model('large', { size: 40 }), model('small', { size: 10 })];
     expect(sortBrowseModels(models, 'size_asc').map((m) => m.name)).toEqual([
       'small',
       'large',

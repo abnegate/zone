@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { projectsApi } from '../../../api/projects';
 import type { CreateSyncConfigRequest } from '../types';
 
@@ -6,13 +6,18 @@ export function useSyncConfigs(projectId: string | null) {
   const queryClient = useQueryClient();
   const queryKey = ['syncConfigs', projectId];
 
-  const { data: configs = [], isLoading: loading, error, refetch } = useQuery({
+  const {
+    data: configs = [],
+    isLoading: loading,
+    error,
+    refetch,
+  } = useQuery({
     queryKey,
     queryFn: () => {
-        if (!projectId) return [];
-        return projectsApi.getSyncConfigs(projectId);
+      if (!projectId) return [];
+      return projectsApi.getSyncConfigs(projectId);
     },
-    enabled: !!projectId
+    enabled: !!projectId,
   });
 
   const createSyncConfigMutation = useMutation({
@@ -22,7 +27,7 @@ export function useSyncConfigs(projectId: string | null) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-    }
+    },
   });
 
   const deleteSyncConfigMutation = useMutation({
@@ -32,7 +37,7 @@ export function useSyncConfigs(projectId: string | null) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey });
-    }
+    },
   });
 
   return {

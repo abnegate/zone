@@ -1,9 +1,9 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterAll, mock, beforeEach, describe, it, expect } from 'bun:test';
-import type { Task } from '../types';
-import type { Project } from '../../projects/types';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { Source } from '../../../types';
+import type { Project } from '../../projects/types';
+import type { Task } from '../types';
 import TasksPage from './TasksPage';
 
 // Create mock functions for tasks API
@@ -543,7 +543,9 @@ describe('TasksPage', () => {
       expect(screen.getByLabelText('Title')).toBeInTheDocument();
     });
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Test Task' } });
-    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Test description' } });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Test description' },
+    });
 
     // Go to step 3 (settings)
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
@@ -580,7 +582,9 @@ describe('TasksPage', () => {
       expect(screen.getByLabelText('Title')).toBeInTheDocument();
     });
     fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Test Task' } });
-    fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Test description' } });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Test description' },
+    });
 
     // Go to step 3 (settings)
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));

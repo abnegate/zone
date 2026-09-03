@@ -3,20 +3,20 @@
  * API client methods for source management.
  */
 
-import { parse } from '../validation';
 import {
   SourceResponseSchema,
-  SourcesResponseSchema,
   SourceTypesResponseSchema,
   SourceVerifyResponseSchema,
+  SourcesResponseSchema,
 } from '../features/sources/schemas';
+import type { SourceTypesResponse, SourceVerifyResponse } from '../features/sources/schemas';
 import type {
+  CreateSourceRequest,
   Source,
   SourceType,
-  CreateSourceRequest,
   UpdateSourceRequest,
 } from '../features/sources/types';
-import type { SourceVerifyResponse, SourceTypesResponse } from '../features/sources/schemas';
+import { parse } from '../validation';
 
 export const API_BASE = import.meta.env.VITE_API_URL || '';
 
@@ -65,9 +65,12 @@ class SourcesApi {
     if (activeOnly) params.set('is_active', 'true');
     const query = params.toString() ? `?${params}` : '';
 
-    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources${query}`, {
-      headers: this.getHeaders(),
-    });
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources${query}`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to fetch sources: ${response.status}`);
@@ -77,9 +80,12 @@ class SourcesApi {
   }
 
   async getSource(workspaceId: string, id: string): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`, {
-      headers: this.getHeaders(),
-    });
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`,
+      {
+        headers: this.getHeaders(),
+      }
+    );
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to fetch source: ${response.status}`);
@@ -89,11 +95,14 @@ class SourcesApi {
   }
 
   async createSource(workspaceId: string, request: CreateSourceRequest): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to create source: ${response.status}`);
@@ -102,12 +111,19 @@ class SourcesApi {
     return data.source;
   }
 
-  async updateSource(workspaceId: string, id: string, request: UpdateSourceRequest): Promise<Source> {
-    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-    });
+  async updateSource(
+    workspaceId: string,
+    id: string,
+    request: UpdateSourceRequest
+  ): Promise<Source> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`,
+      {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to update source: ${response.status}`);
@@ -117,10 +133,13 @@ class SourcesApi {
   }
 
   async deleteSource(workspaceId: string, id: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}`,
+      {
+        method: 'DELETE',
+        headers: this.getHeaders(),
+      }
+    );
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to delete source: ${response.status}`);
@@ -128,10 +147,13 @@ class SourcesApi {
   }
 
   async verifySource(workspaceId: string, id: string): Promise<SourceVerifyResponse> {
-    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}/verify`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}/verify`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+      }
+    );
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to verify source: ${response.status}`);
@@ -140,10 +162,13 @@ class SourcesApi {
   }
 
   async reindexSource(workspaceId: string, id: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}/reindex`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/sources/${encodeURIComponent(id)}/reindex`,
+      {
+        method: 'POST',
+        headers: this.getHeaders(),
+      }
+    );
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to reindex source: ${response.status}`);

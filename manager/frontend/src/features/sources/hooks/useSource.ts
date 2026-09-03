@@ -3,11 +3,11 @@
  * Hook for managing a single source.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { sourcesApi } from '../../../api/sources';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import type { Source, UpdateSourceRequest } from '../types';
 import type { SourceVerifyResponse } from '../schemas';
+import type { Source, UpdateSourceRequest } from '../types';
 
 export interface UseSourceResult {
   source: Source | null;

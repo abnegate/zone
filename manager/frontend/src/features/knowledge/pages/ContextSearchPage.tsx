@@ -1,35 +1,80 @@
-import { useEffect, useState } from 'react';
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  EmptyState,
+  Tabs,
+  TabsList,
+  TabsTrigger,
+} from '@zone/ui';
 import DOMPurify from 'dompurify';
+import { useEffect, useState } from 'react';
 import { sourcesApi } from '../../../api/sources';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Source } from '../../sources/types';
-import type { SearchMode } from '../types';
 import { useContextSearch } from '../hooks';
-import { Button, Badge, Card, CardContent, Tabs, TabsList, TabsTrigger, EmptyState } from '@zone/ui';
+import type { SearchMode } from '../types';
 import './ContextSearchPage.css';
 
 const SearchIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <circle cx="11" cy="11" r="8" />
     <path d="m21 21-4.35-4.35" />
   </svg>
 );
 
 const FileIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
     <path d="M14 2v4a2 2 0 0 0 2 2h4" />
   </svg>
 );
 
 const FolderIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    width="16"
+    height="16"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
   </svg>
 );
 
 const SparklesIcon = () => (
-  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    width="48"
+    height="48"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
     <path d="M5 3v4" />
     <path d="M19 17v4" />
@@ -39,7 +84,16 @@ const SparklesIcon = () => (
 );
 
 const SearchEmptyIcon = () => (
-  <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+  <svg
+    width="48"
+    height="48"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
     <circle cx="11" cy="11" r="8" />
     <path d="m21 21-4.35-4.35" />
     <path d="M8 8l6 6" />
@@ -257,13 +311,12 @@ export default function ContextSearchPage() {
                     dangerouslySetInnerHTML={{ __html: highlightText(result.snippet) }}
                   />
 
-                  {result.metadata.type === 'file' &&
-                    typeof result.metadata.path === 'string' && (
-                      <div className="result-meta">
-                        <FileIcon />
-                        <span className="result-path">{result.metadata.path}</span>
-                      </div>
-                    )}
+                  {result.metadata.type === 'file' && typeof result.metadata.path === 'string' && (
+                    <div className="result-meta">
+                      <FileIcon />
+                      <span className="result-path">{result.metadata.path}</span>
+                    </div>
+                  )}
 
                   <div className="relevance-indicator">
                     <div

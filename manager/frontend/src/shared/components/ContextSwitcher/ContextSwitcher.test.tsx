@@ -1,6 +1,6 @@
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it } from 'bun:test';
 import ContextSwitcher from './ContextSwitcher';
 
 const mockOrganizations = [

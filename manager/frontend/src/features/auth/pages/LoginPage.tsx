@@ -1,13 +1,13 @@
+import { zodResolver } from '@hookform/resolvers/zod';
+import { Button, Card, CardContent, CardDescription, CardHeader, Input } from '@zone/ui';
 import { useEffect } from 'react';
+import { useForm } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router-dom';
-import { Button, Input, Card, CardContent, CardDescription, CardHeader } from '@zone/ui';
+import { toast } from 'sonner';
+import type { z } from 'zod';
+import ZoneLogo from '../../../shared/components/ZoneLogo';
 import { useAuth } from '../hooks';
 import { LoginRequestSchema } from '../schemas';
-import ZoneLogo from '../../../shared/components/ZoneLogo';
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import type { z } from 'zod';
-import { toast } from 'sonner';
 
 type LoginForm = z.infer<typeof LoginRequestSchema>;
 
@@ -19,13 +19,13 @@ export default function LoginPage() {
     register,
     handleSubmit,
     formState: { errors, isSubmitting },
-    setError
+    setError,
   } = useForm<LoginForm>({
     resolver: zodResolver(LoginRequestSchema),
     defaultValues: {
       email: '',
-      password: ''
-    }
+      password: '',
+    },
   });
 
   // Redirect if already authenticated

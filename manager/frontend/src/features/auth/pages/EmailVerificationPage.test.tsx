@@ -1,5 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { render, screen, waitFor } from '@testing-library/react';
 
 // Mock client
 const mockVerifyEmail = mock();

@@ -1,8 +1,8 @@
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { beforeEach, describe, expect, it } from 'bun:test';
-import { AuthProvider, useAuth } from './AuthContext';
 import { RefreshError } from '../../../api/auth';
+import { AuthProvider, useAuth } from './AuthContext';
 
 let loginImpl: (request: { email: string; password: string }) => Promise<unknown>;
 let registerImpl: (request: { email: string; password: string }) => Promise<unknown>;
@@ -16,7 +16,7 @@ let storage: {
 };
 
 const createStorage = () => {
-  let store: Record<string, string> = {};
+  const store: Record<string, string> = {};
   return {
     getItem: (key: string) => store[key] ?? null,
     setItem: (key: string, value: string) => {
@@ -81,10 +81,7 @@ describe('AuthContext', () => {
     it('starts in loading state when checking stored tokens', async () => {
       storage.setItem('manager_access_token', 'stored-token');
       storage.setItem('manager_refresh_token', 'refresh-token');
-      storage.setItem(
-        'manager_user',
-        JSON.stringify({ id: '1', email: 'test@test.com' })
-      );
+      storage.setItem('manager_user', JSON.stringify({ id: '1', email: 'test@test.com' }));
       refreshTokenImpl = () => new Promise(() => {});
 
       const { result } = renderHook(() => useAuth(), { wrapper });

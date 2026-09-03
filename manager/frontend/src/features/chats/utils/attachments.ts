@@ -15,10 +15,50 @@ export interface Attachment {
 // vision model. Anything else has no path to the model, so it is surfaced as
 // rejected rather than silently dropped.
 const TEXT_EXTENSIONS = new Set([
-  'md', 'markdown', 'txt', 'log', 'csv', 'tsv', 'json', 'jsonl', 'yaml', 'yml', 'toml', 'ini',
-  'env', 'xml', 'html', 'css', 'scss', 'js', 'jsx', 'ts', 'tsx', 'py', 'rb', 'go', 'rs', 'java',
-  'kt', 'swift', 'c', 'h', 'cpp', 'hpp', 'cs', 'php', 'sh', 'bash', 'zsh', 'sql', 'graphql',
-  'dockerfile', 'gitignore', 'lock', 'diff', 'patch',
+  'md',
+  'markdown',
+  'txt',
+  'log',
+  'csv',
+  'tsv',
+  'json',
+  'jsonl',
+  'yaml',
+  'yml',
+  'toml',
+  'ini',
+  'env',
+  'xml',
+  'html',
+  'css',
+  'scss',
+  'js',
+  'jsx',
+  'ts',
+  'tsx',
+  'py',
+  'rb',
+  'go',
+  'rs',
+  'java',
+  'kt',
+  'swift',
+  'c',
+  'h',
+  'cpp',
+  'hpp',
+  'cs',
+  'php',
+  'sh',
+  'bash',
+  'zsh',
+  'sql',
+  'graphql',
+  'dockerfile',
+  'gitignore',
+  'lock',
+  'diff',
+  'patch',
 ]);
 
 export const MAX_ATTACHMENT_BYTES = 256 * 1024;
@@ -34,7 +74,8 @@ export function formatBytes(bytes: number): string {
 
 export function isTextFile(file: File): boolean {
   if (file.type.startsWith('text/')) return true;
-  if (/^application\/(json|xml|x-yaml|yaml|toml|javascript|typescript)$/.test(file.type)) return true;
+  if (/^application\/(json|xml|x-yaml|yaml|toml|javascript|typescript)$/.test(file.type))
+    return true;
   const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
   return TEXT_EXTENSIONS.has(extension);
 }

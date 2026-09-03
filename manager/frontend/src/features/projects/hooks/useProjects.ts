@@ -1,7 +1,7 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { projectsApi } from '../../../api/projects';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import type { CreateProjectRequest, UpdateProjectRequest, ProjectStatus } from '../types';
+import type { CreateProjectRequest, ProjectStatus, UpdateProjectRequest } from '../types';
 
 export function useProjects(statusFilter?: ProjectStatus | 'all') {
   const queryClient = useQueryClient();
@@ -9,7 +9,13 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
   const workspaceId = currentWorkspace?.id;
   const queryKey = ['projects', workspaceId, statusFilter];
 
-  const { data: projects = [], isLoading, isFetching, error, refetch } = useQuery({
+  const {
+    data: projects = [],
+    isLoading,
+    isFetching,
+    error,
+    refetch,
+  } = useQuery({
     queryKey,
     queryFn: () => {
       if (!workspaceId) {
@@ -28,7 +34,7 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
     mutationFn: (request: CreateProjectRequest) => projectsApi.createProject(request),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
-    }
+    },
   });
 
   const updateProjectMutation = useMutation({
@@ -36,14 +42,14 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
       projectsApi.updateProject(id, request),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
-    }
+    },
   });
 
   const deleteProjectMutation = useMutation({
     mutationFn: (id: string) => projectsApi.deleteProject(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
-    }
+    },
   });
 
   return {
@@ -51,8 +57,8 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
     loading,
     error: error instanceof Error ? error.message : error ? 'Failed to load projects' : null,
     createProject: createProjectMutation.mutateAsync,
-    updateProject: (id: string, request: UpdateProjectRequest) => 
-        updateProjectMutation.mutateAsync({ id, request }),
+    updateProject: (id: string, request: UpdateProjectRequest) =>
+      updateProjectMutation.mutateAsync({ id, request }),
     deleteProject: deleteProjectMutation.mutateAsync,
     refetch,
   };

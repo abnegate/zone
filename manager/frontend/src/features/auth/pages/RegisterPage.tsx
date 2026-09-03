@@ -1,11 +1,11 @@
+import { Button, Input } from '@zone/ui';
 import type React from 'react';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Button, Input } from '@zone/ui';
+import ZoneLogo from '../../../shared/components/ZoneLogo';
+import { getErrors } from '../../../validation';
 import { useAuth } from '../hooks';
 import { RegisterRequestSchema } from '../schemas';
-import { getErrors } from '../../../validation';
-import ZoneLogo from '../../../shared/components/ZoneLogo';
 import './AuthPage.css';
 
 export default function RegisterPage() {

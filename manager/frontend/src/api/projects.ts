@@ -1,4 +1,10 @@
-import { API_BASE } from './client';
+import type {
+  CreateProjectRequest,
+  CreateSyncConfigRequest,
+  Project,
+  SyncConfig,
+  UpdateProjectRequest,
+} from '../features/projects/types';
 import { parse } from '../validation';
 import {
   ProjectResponseSchema,
@@ -6,13 +12,7 @@ import {
   SyncConfigResponseSchema,
   SyncConfigsResponseSchema,
 } from '../validation/schemas';
-import type {
-  Project,
-  CreateProjectRequest,
-  UpdateProjectRequest,
-  SyncConfig,
-  CreateSyncConfigRequest,
-} from '../features/projects/types';
+import { API_BASE } from './client';
 
 /**
  * Projects API client

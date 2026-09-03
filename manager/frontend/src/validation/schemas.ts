@@ -1,36 +1,34 @@
 import { z } from 'zod';
 import type {
-  ChatSchema,
-  MessageSchema,
-  ChatsResponseSchema,
-  ChatResponseSchema,
-  MessagesResponseSchema,
-  MessageResponseSchema,
-} from '../features/chats/schemas';
-import {
-  type UserSchema,
-  type AuthResponseSchema,
-  type LoginRequestSchema,
-  type RegisterRequestSchema,
-  type JwtPayloadSchema,
-  OrgRoleSchema,
-  WorkspaceRoleSchema,
+  AuthResponseSchema,
+  JwtPayloadSchema,
+  LoginRequestSchema,
+  RegisterRequestSchema,
+  UserSchema,
 } from '../features/auth/schemas';
 import type {
-  SourceSchema,
-  SourcesResponseSchema,
+  ChatResponseSchema,
+  ChatSchema,
+  ChatsResponseSchema,
+  MessageResponseSchema,
+  MessageSchema,
+  MessagesResponseSchema,
+} from '../features/chats/schemas';
+import type {
   SourceResponseSchema,
+  SourceSchema,
   SourceTypesResponseSchema,
   SourceVerifyResponseSchema,
+  SourcesResponseSchema,
 } from '../features/sources/schemas';
 import type {
-  TaskSchema,
-  TaskRunSchema,
-  TasksResponseSchema,
   TaskResponseSchema,
-  TaskRunsResponseSchema,
-  TaskRunResponseSchema,
   TaskRunLogsResponseSchema,
+  TaskRunResponseSchema,
+  TaskRunSchema,
+  TaskRunsResponseSchema,
+  TaskSchema,
+  TasksResponseSchema,
 } from '../features/tasks/schemas';
 
 // =============================================================================
