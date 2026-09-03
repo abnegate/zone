@@ -4,10 +4,9 @@
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit, OsRng},
+    aead::{Aead, KeyInit, consts::U12},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use rand::RngCore;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -39,12 +38,13 @@ pub fn encrypt(key: &[u8], plaintext: &str) -> CryptoResult<String> {
 
     // Generate random 12-byte nonce
     let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    rand::fill(&mut nonce_bytes);
+    let nonce = Nonce::<U12>::try_from(nonce_bytes.as_slice())
+        .map_err(|_| CryptoError::EncryptionFailed)?;
 
     // Encrypt plaintext
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_bytes())
+        .encrypt(&nonce, plaintext.as_bytes())
         .map_err(|_| CryptoError::EncryptionFailed)?;
 
     // Concatenate nonce and ciphertext
@@ -79,11 +79,11 @@ pub fn decrypt(key: &[u8], ciphertext: &str) -> CryptoResult<String> {
 
     // Split nonce and ciphertext
     let (nonce_bytes, ciphertext_bytes) = encrypted_data.split_at(12);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = Nonce::<U12>::try_from(nonce_bytes).map_err(|_| CryptoError::DecryptionFailed)?;
 
     // Decrypt
     let plaintext = cipher
-        .decrypt(nonce, ciphertext_bytes)
+        .decrypt(&nonce, ciphertext_bytes)
         .map_err(|_| CryptoError::DecryptionFailed)?;
 
     // Convert to UTF-8 string

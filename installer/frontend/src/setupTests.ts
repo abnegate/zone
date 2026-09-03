@@ -2,6 +2,10 @@ import { mock, expect, afterEach, jest } from 'bun:test';
 import '@testing-library/dom';
 import { cleanup } from '@testing-library/react';
 
+if (typeof globalThis.HTMLFormElement === 'undefined') {
+  globalThis.HTMLFormElement = window.HTMLFormElement;
+}
+
 // Cleanup after each test to prevent DOM accumulation
 afterEach(() => {
   cleanup();
@@ -49,7 +53,8 @@ expect.extend({
       return { pass: false, message: () => 'element is null' };
     }
     // Support both native form elements and Radix UI components
-    const elementValue = 'value' in received ? (received as HTMLInputElement).value : received.textContent?.trim();
+    const elementValue =
+      'value' in received ? (received as HTMLInputElement).value : received.textContent?.trim();
     const pass = elementValue === String(value);
     return {
       pass,
@@ -67,9 +72,7 @@ expect.extend({
     return {
       pass,
       message: () =>
-        pass
-          ? `expected element not to be disabled`
-          : `expected element to be disabled`,
+        pass ? `expected element not to be disabled` : `expected element to be disabled`,
     };
   },
   toBeChecked(received: HTMLElement | null) {
@@ -85,9 +88,7 @@ expect.extend({
     return {
       pass,
       message: () =>
-        pass
-          ? `expected element not to be checked`
-          : `expected element to be checked`,
+        pass ? `expected element not to be checked` : `expected element to be checked`,
     };
   },
   toContainHTML(received: Element | null, html: string) {

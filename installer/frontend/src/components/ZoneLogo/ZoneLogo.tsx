@@ -28,8 +28,24 @@ export default function ZoneLogo({ size = 'md', showText = true }: ZoneLogoProps
         className="shrink-0 text-foreground"
         aria-hidden="true"
       >
-        <circle cx="50" cy="50" r="42" stroke="currentColor" strokeWidth="1.5" fill="none" opacity="0.45" />
-        <circle cx="50" cy="50" r="24" stroke="currentColor" strokeWidth="2.5" fill="none" opacity="0.75" />
+        <circle
+          cx="50"
+          cy="50"
+          r="42"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          fill="none"
+          opacity="0.45"
+        />
+        <circle
+          cx="50"
+          cy="50"
+          r="24"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          fill="none"
+          opacity="0.75"
+        />
         <circle cx="50" cy="50" r="8" fill="currentColor" />
       </svg>
       {showText && (

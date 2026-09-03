@@ -4,7 +4,7 @@
 
 use argon2::{
     Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 
 /// Password error types
@@ -22,11 +22,10 @@ pub enum PasswordError {
 
 /// Hash a password using Argon2id
 pub fn hash_password(password: &str) -> Result<String, PasswordError> {
-    let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
 
     let hash = argon2
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(|_| PasswordError::HashingFailed)?;
 
     Ok(hash.to_string())
@@ -40,7 +39,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, PasswordError
 
     match argon2.verify_password(password.as_bytes(), &parsed_hash) {
         Ok(()) => Ok(true),
-        Err(argon2::password_hash::Error::Password) => Ok(false),
+        Err(argon2::password_hash::Error::PasswordInvalid) => Ok(false),
         Err(_) => Err(PasswordError::VerificationFailed),
     }
 }

@@ -1,7 +1,7 @@
 # =============================================================================
 # Stage 1: Build shared UI package
 # =============================================================================
-FROM oven/bun:1-alpine AS ui-builder
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS ui-builder
 
 WORKDIR /ui
 
@@ -14,7 +14,7 @@ RUN bun run build
 # =============================================================================
 # Stage 2: Install dependencies (cached layer)
 # =============================================================================
-FROM oven/bun:1-alpine AS deps
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS deps
 
 WORKDIR /app
 
@@ -25,7 +25,7 @@ RUN sed 's/"@zone\/ui": "\*",//' package.json.orig > package.json && \
 # =============================================================================
 # Stage 3: Build frontend application
 # =============================================================================
-FROM oven/bun:1-alpine AS builder
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS builder
 
 WORKDIR /app
 
@@ -47,7 +47,7 @@ RUN bun run build
 # =============================================================================
 # Stage 4: Production runtime with bun
 # =============================================================================
-FROM oven/bun:1-alpine AS runtime
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS runtime
 
 WORKDIR /app
 

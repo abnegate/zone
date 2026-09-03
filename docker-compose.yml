@@ -1,6 +1,6 @@
 services:
   traefik:
-    image: traefik:${DOCKER_VERSION_TRAEFIK:-v3.6}
+    image: traefik:${DOCKER_VERSION_TRAEFIK:-v3.7.12}@${DOCKER_DIGEST_TRAEFIK:-sha256:9c2a54d87f76f5c2f5f2682c68394af92fb12c0a2686798d6462a3f84bd78eaf}
     container_name: traefik
     restart: unless-stopped
     environment:
@@ -71,7 +71,7 @@ services:
       start_period: 10s
 
   postgres:
-    image: pgvector/pgvector:${DOCKER_VERSION_POSTGRES:-pg16}
+    image: pgvector/pgvector:${DOCKER_VERSION_POSTGRES:-pg16}@${DOCKER_DIGEST_POSTGRES:-sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b}
     container_name: postgres
     restart: unless-stopped
     environment:
@@ -91,7 +91,7 @@ services:
       start_period: 10s
 
   valkey:
-    image: valkey/valkey:${DOCKER_VERSION_VALKEY:-8.1-alpine}
+    image: valkey/valkey:${DOCKER_VERSION_VALKEY:-8.1.10-alpine}@${DOCKER_DIGEST_VALKEY:-sha256:b21fd94099dcd4bc6b2b9230daef69b6558b887ad4a2a1afe56ff6e745a88cdb}
     container_name: valkey
     restart: unless-stopped
     volumes:
@@ -108,7 +108,7 @@ services:
       start_period: 5s
 
   ollama:
-    image: ollama/ollama:${DOCKER_VERSION_OLLAMA:-0.13.5}
+    image: ollama/ollama:${DOCKER_VERSION_OLLAMA:-0.33.2}@${DOCKER_DIGEST_OLLAMA:-sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2}
     profiles: [bundled-ollama]
     container_name: ollama
     restart: unless-stopped
@@ -137,7 +137,7 @@ services:
       start_period: 60s
 
   ollama-init:
-    image: ollama/ollama:${DOCKER_VERSION_OLLAMA:-0.13.5}
+    image: ollama/ollama:${DOCKER_VERSION_OLLAMA:-0.33.2}@${DOCKER_DIGEST_OLLAMA:-sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2}
     profiles: [bundled-ollama]
     container_name: ollama-init
     restart: "no"
@@ -160,6 +160,7 @@ services:
       context: ./litellm
       args:
         LITELLM_VERSION: ${DOCKER_VERSION_LITELLM:-v1.99.1}
+        LITELLM_DIGEST: ${DOCKER_DIGEST_LITELLM:-sha256:a53a7d3ffebede1925bd3ee8a21e4a7b9b63e2e68ec883af136edcccb6eeb82c}
     image: zone-litellm:${DOCKER_VERSION_LITELLM:-v1.99.1}
     container_name: litellm
     restart: unless-stopped
@@ -322,7 +323,7 @@ services:
       start_period: 10s
 
   openwebui:
-    image: ghcr.io/open-webui/open-webui:${DOCKER_VERSION_OPENWEBUI:-v0.5.6}
+    image: ghcr.io/open-webui/open-webui:${DOCKER_VERSION_OPENWEBUI:-v0.11.3}@${DOCKER_DIGEST_OPENWEBUI:-sha256:751b617714b91e4cfd0186a509c72480c858e012976103b09a30dad053c36175}
     container_name: openwebui
     restart: unless-stopped
     depends_on:
@@ -377,7 +378,7 @@ services:
   # VPN & Search (vpn profile)
   # =============================================================================
   gluetun:
-    image: ghcr.io/thecfu/gluetun-exporter:${DOCKER_VERSION_GLUETUN_BUNDLED:-0.1.1-bundled}
+    image: ghcr.io/thecfu/gluetun-exporter:${DOCKER_VERSION_GLUETUN_BUNDLED:-0.1.1-bundled}@${DOCKER_DIGEST_GLUETUN_BUNDLED:-sha256:bc0d59e2307c8aa1e16d6d0e5173ebd7fb568caceacff8ed29ea87931b61515e}
     container_name: gluetun
     restart: unless-stopped
     profiles:
@@ -414,7 +415,7 @@ services:
       start_period: 30s
 
   searxng:
-    image: searxng/searxng:${DOCKER_VERSION_SEARXNG:-2024.12.28-93f5c6cc0}
+    image: searxng/searxng:${DOCKER_VERSION_SEARXNG:-2025.12.30-a5c946a32}@${DOCKER_DIGEST_SEARXNG:-sha256:1ad4159e74903f8870e3464df701b800a75bd2854f5d11b44ce09ee297f3c158}
     container_name: searxng
     restart: unless-stopped
     profiles:
@@ -445,7 +446,7 @@ services:
   # Monitoring (monitoring profile)
   # =============================================================================
   prometheus:
-    image: prom/prometheus:${DOCKER_VERSION_PROMETHEUS:-v3.4.0}
+    image: prom/prometheus:${DOCKER_VERSION_PROMETHEUS:-v3.14.0}@${DOCKER_DIGEST_PROMETHEUS:-sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0}
     container_name: prometheus
     restart: unless-stopped
     profiles:
@@ -483,7 +484,7 @@ services:
       start_period: 10s
 
   grafana:
-    image: grafana/grafana:${DOCKER_VERSION_GRAFANA:-11.6.0}
+    image: grafana/grafana:${DOCKER_VERSION_GRAFANA:-12.4.10}@${DOCKER_DIGEST_GRAFANA:-sha256:c132a683b2430fff9115a29b2a79c8ab97540cdcc90846e3c81878c778ca3596}
     container_name: grafana
     restart: unless-stopped
     profiles:
@@ -538,7 +539,7 @@ services:
       start_period: 30s
 
   postgres-exporter:
-    image: prometheuscommunity/postgres-exporter:${DOCKER_VERSION_POSTGRES_EXPORTER:-v0.16.0}
+    image: prometheuscommunity/postgres-exporter:${DOCKER_VERSION_POSTGRES_EXPORTER:-v0.20.1}@${DOCKER_DIGEST_POSTGRES_EXPORTER:-sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e}
     container_name: postgres-exporter
     restart: unless-stopped
     profiles:
@@ -558,7 +559,7 @@ services:
       start_period: 10s
 
   valkey-exporter:
-    image: oliver006/redis_exporter:${DOCKER_VERSION_REDIS_EXPORTER:-v1.67.0}
+    image: oliver006/redis_exporter:${DOCKER_VERSION_REDIS_EXPORTER:-v1.90.0}@${DOCKER_DIGEST_REDIS_EXPORTER:-sha256:a129504e65b87c54f79bc92f1afc403475e8ff646a3d7512de469904ceddf986}
     container_name: valkey-exporter
     restart: unless-stopped
     profiles:
@@ -572,7 +573,7 @@ services:
       - internal
 
   ollama-metrics:
-    image: ghcr.io/norskhelsenett/ollama-metrics:${DOCKER_VERSION_OLLAMA_METRICS:-latest}
+    image: ghcr.io/norskhelsenett/ollama-metrics:${DOCKER_VERSION_OLLAMA_METRICS:-latest}@${DOCKER_DIGEST_OLLAMA_METRICS:-sha256:3dd32882666cf0e77272086446b5639c636fb090ac9ea629c11874200c629164}
     container_name: ollama-metrics
     restart: unless-stopped
     profiles:

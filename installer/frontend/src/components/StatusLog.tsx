@@ -37,7 +37,7 @@ export function StatusLog({ lines }: StatusLogProps) {
           {line.type === 'in-progress' ? (
             <span
               className="mt-0.5 inline-flex h-3 w-3 animate-spin rounded-full border border-muted-foreground border-t-transparent"
-              aria-label="In progress"
+              aria-hidden="true"
             />
           ) : (
             <span

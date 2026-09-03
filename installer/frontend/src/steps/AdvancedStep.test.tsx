@@ -120,9 +120,7 @@ describe('AdvancedStep', () => {
     });
 
     it('does not override existing Grafana password when toggled on', () => {
-      renderWithForm(
-        createMockConfig({ MONITORING_GRAFANA_ADMIN_PASSWORD: 'existing-pw' })
-      );
+      renderWithForm(createMockConfig({ MONITORING_GRAFANA_ADMIN_PASSWORD: 'existing-pw' }));
 
       fireEvent.click(screen.getByLabelText(/enable prometheus \+ grafana monitoring/i));
 

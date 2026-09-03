@@ -180,8 +180,8 @@ export default function InstallerForm() {
 
     setCompletedAt(completionTime);
     setSummaryRows(summary);
-    setCompletionSnapshot((prev) =>
-      prev ?? { completedAt: completionTime, summaryRows: summary, webUiHost }
+    setCompletionSnapshot(
+      (prev) => prev ?? { completedAt: completionTime, summaryRows: summary, webUiHost }
     );
   }, [completedAt, isComplete, methods]);
 
@@ -301,7 +301,8 @@ export default function InstallerForm() {
           },
           {
             label: 'Web Search',
-            value: methods.getValues('SEARCH_ENABLE_WEB_SEARCH') === 'true' ? 'Enabled' : 'Disabled',
+            value:
+              methods.getValues('SEARCH_ENABLE_WEB_SEARCH') === 'true' ? 'Enabled' : 'Disabled',
           },
           { label: 'VPN Provider', value: methods.getValues('VPN_SERVICE_PROVIDER') || '—' },
         ];
@@ -444,9 +445,7 @@ export default function InstallerForm() {
                     />
                   </div>
                 </CardHeader>
-                <CardContent className="space-y-6 pt-6">
-                  {renderStep()}
-                </CardContent>
+                <CardContent className="space-y-6 pt-6">{renderStep()}</CardContent>
 
                 <CardFooter className="justify-between border-t px-6 py-4">
                   <Button variant="secondary" onClick={handlePrevious} disabled={currentStep === 1}>
@@ -468,7 +467,13 @@ export default function InstallerForm() {
       <Modal
         isOpen={showModal}
         onClose={isComplete || error ? handleCloseModal : undefined}
-        title={isComplete ? 'Installation complete' : isInstalling ? 'Installing Zone...' : 'Installing Zone'}
+        title={
+          isComplete
+            ? 'Installation complete'
+            : isInstalling
+              ? 'Installing Zone...'
+              : 'Installing Zone'
+        }
         size="xl"
         className="max-h-[90vh] w-[90vw] max-w-[900px] overflow-y-auto"
       >

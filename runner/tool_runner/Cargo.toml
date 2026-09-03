@@ -22,6 +22,6 @@ dashmap = { workspace = true }
 nix = { workspace = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
-tempfile = "3.24"
-proptest = "1.9"
+tokio-test = "=0.4.5"
+tempfile = "=3.27.0"
+proptest = "=1.11.0"

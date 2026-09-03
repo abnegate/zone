@@ -1,7 +1,7 @@
 # =============================================================================
 # Stage 1: Build shared UI package
 # =============================================================================
-FROM oven/bun:1-alpine AS ui-builder
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS ui-builder
 
 WORKDIR /ui
 
@@ -14,7 +14,7 @@ RUN bun run build
 # =============================================================================
 # Stage 2: Install frontend dependencies
 # =============================================================================
-FROM oven/bun:1-alpine AS frontend-deps
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS frontend-deps
 
 WORKDIR /frontend
 
@@ -24,7 +24,7 @@ RUN sed -i 's/"@zone\/ui": "\*",//' package.json && bun install
 # =============================================================================
 # Stage 3: Build React frontend
 # =============================================================================
-FROM oven/bun:1-alpine AS frontend-builder
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS frontend-builder
 
 WORKDIR /frontend
 
@@ -46,7 +46,7 @@ RUN bun run build
 # =============================================================================
 # Stage 4: Build Rust backend with dependency caching
 # =============================================================================
-FROM rust:1.92-alpine3.23 AS builder
+FROM rust:1.97.1-alpine3.23@sha256:c4a364ddbf684fe038e6fa6a4f25b30c8dc85247423e0e660676ece0d17be4a2 AS builder
 
 WORKDIR /build
 
@@ -90,7 +90,7 @@ RUN cargo build --release --package zone_installer
 # =============================================================================
 # Stage 5: Runtime
 # =============================================================================
-FROM alpine:3.21 AS runtime
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS runtime
 
 RUN apk add --no-cache apache2-utils ca-certificates docker-cli docker-cli-compose
 

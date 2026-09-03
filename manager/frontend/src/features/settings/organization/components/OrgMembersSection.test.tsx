@@ -518,8 +518,11 @@ describe('OrgMembersSection', () => {
 
       render(<OrgMembersSection orgId="org-123" />);
       await waitFor(() => {
-        fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+        expect(mockClient.getOrgMembers).toHaveBeenCalled();
       });
+      const initialLoadCount = mockClient.getOrgMembers.mock.calls.length;
+
+      fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
 
       await waitFor(() => {
         const emailInput = screen.getByLabelText(/Email/i);
@@ -536,7 +539,7 @@ describe('OrgMembersSection', () => {
           email: 'newuser@test.com',
           role: 'member',
         });
-        expect(mockClient.getOrgMembers).toHaveBeenCalledTimes(2);
+        expect(mockClient.getOrgMembers).toHaveBeenCalledTimes(initialLoadCount + 1);
       });
     });
   });

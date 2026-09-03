@@ -251,10 +251,10 @@ export function useChat(chatId: string | null) {
   }, [chatId, upsertMessage, applySavedUserMessage]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
-    if (socket.readyState === WebSocket.OPEN) {
+    if (socket.readyState === 1) {
       return Promise.resolve();
     }
-    if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+    if (socket.readyState === 2 || socket.readyState === 3) {
       return Promise.reject(new Error('Chat connection is not open'));
     }
     return new Promise((resolve, reject) => {

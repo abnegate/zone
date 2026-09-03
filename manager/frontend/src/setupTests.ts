@@ -2,6 +2,10 @@ import { afterEach, expect, mock, vi } from 'bun:test';
 import '@testing-library/dom';
 import { cleanup } from '@testing-library/react';
 
+if (typeof globalThis.HTMLFormElement === 'undefined') {
+  globalThis.HTMLFormElement = window.HTMLFormElement;
+}
+
 // Polyfill NodeFilter for Radix UI's focus-scope (uses document.createTreeWalker)
 if (typeof globalThis.NodeFilter === 'undefined') {
   (globalThis as Record<string, unknown>).NodeFilter = {

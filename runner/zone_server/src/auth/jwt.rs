@@ -152,8 +152,10 @@ pub fn create_refresh_token(
 pub fn validate_token(token: &str, secret: &str) -> Result<Claims, JwtError> {
     validate_secret(secret)?;
 
-    let mut validation = Validation::default();
-    validation.validate_exp = true;
+    let validation = Validation {
+        validate_exp: true,
+        ..Validation::default()
+    };
 
     let token_data = decode::<Claims>(
         token,

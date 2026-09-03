@@ -129,9 +129,7 @@ describe('SecurityStep', () => {
   });
 
   it('generates an individual secret when Generate is clicked', () => {
-    const { methods } = renderWithForm(
-      createMockConfig({ SECURITY_LITELLM_MASTER_KEY: '' })
-    );
+    const { methods } = renderWithForm(createMockConfig({ SECURITY_LITELLM_MASTER_KEY: '' }));
 
     const generateButtons = screen.getAllByRole('button', { name: /^generate$/i });
     fireEvent.click(generateButtons[0]);
@@ -176,17 +174,13 @@ describe('SecurityStep', () => {
   it('shows ACME email info box when TLS is enabled', () => {
     renderWithForm(createMockConfig());
 
-    expect(
-      screen.getByText(/set your acme email in advanced settings/i)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/set your acme email in advanced settings/i)).toBeInTheDocument();
   });
 
   it('hides ACME email info box when TLS is disabled', () => {
     renderWithForm(createMockConfig({ SECURITY_GENERATE_CERTIFICATE: 'false' }));
 
-    expect(
-      screen.queryByText(/set your acme email in advanced settings/i)
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/set your acme email in advanced settings/i)).not.toBeInTheDocument();
   });
 
   it('displays warning about empty keys when a secret is missing', () => {
@@ -198,9 +192,7 @@ describe('SecurityStep', () => {
   it('hides warning about empty keys when all secrets are provided', () => {
     renderWithForm(createMockConfig());
 
-    expect(
-      screen.queryByText(/empty keys are insecure/i)
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/empty keys are insecure/i)).not.toBeInTheDocument();
   });
 
   it('displays Production Settings header', () => {

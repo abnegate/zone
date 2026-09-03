@@ -11,7 +11,7 @@ use std::process::Command;
 
 use console::{Style, style};
 use dialoguer::{Confirm, Select};
-use rand::Rng;
+use rand::RngExt;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -422,7 +422,7 @@ fn docker_compose_plugin_exists() -> bool {
 fn generate_secret() -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill(&mut bytes);
+    rand::rng().fill(&mut bytes);
     STANDARD.encode(bytes)
 }
 

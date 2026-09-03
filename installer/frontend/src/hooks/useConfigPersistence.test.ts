@@ -210,7 +210,9 @@ describe('useConfigPersistence', () => {
   it('clears config and resets to default', () => {
     const setConfig = mock();
 
-    const { result } = renderHook(() => useConfigPersistence(defaultConfig, setConfig, defaultConfig));
+    const { result } = renderHook(() =>
+      useConfigPersistence(defaultConfig, setConfig, defaultConfig)
+    );
 
     act(() => {
       result.current.resetConfig();

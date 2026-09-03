@@ -565,7 +565,7 @@ export const AuditLogSchema = z.object({
   action: AuditActionSchema,
   resource_type: AuditResourceTypeSchema,
   resource_id: z.string().min(1),
-  metadata: z.record(z.unknown()),
+  metadata: z.record(z.string(), z.unknown()),
   created_at: z.string().datetime(),
 });
 

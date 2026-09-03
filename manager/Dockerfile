@@ -3,7 +3,7 @@
 # =============================================================================
 # glibc, not musl: zone_server's `local-embeddings` feature links ONNX Runtime,
 # which publishes no musl prebuilts.
-FROM rust:1.92-slim-trixie AS builder
+FROM rust:1.97.1-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c AS builder
 
 WORKDIR /build
 
@@ -58,7 +58,7 @@ RUN cargo build --release --package zone_server --package zone_runner
 # =============================================================================
 # Must match the builder's Debian release so the glibc the binaries were
 # linked against is present. libstdc++6 backs the statically linked ONNX Runtime.
-FROM debian:trixie-slim AS runtime
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates libssl3t64 libstdc++6 \

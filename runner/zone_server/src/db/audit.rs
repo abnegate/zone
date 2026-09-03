@@ -227,7 +227,8 @@ pub async fn list_audit_logs(
     param_count += 1;
     query.push_str(&format!(" OFFSET ${}", param_count));
 
-    let mut query_builder = sqlx::query_as::<_, AuditLog>(&query);
+    // The dynamic fragments above are fixed SQL literals; all user values remain bound.
+    let mut query_builder = sqlx::query_as::<_, AuditLog>(sqlx::AssertSqlSafe(query));
     query_builder = query_builder.bind(org_id);
 
     if let Some(ref action) = filters.action {
@@ -353,7 +354,8 @@ pub async fn count_audit_logs(
         query.push_str(&conditions.join(" AND "));
     }
 
-    let mut query_builder = sqlx::query_scalar::<_, i64>(&query);
+    // The dynamic fragments above are fixed SQL literals; all user values remain bound.
+    let mut query_builder = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(query));
     query_builder = query_builder.bind(org_id);
 
     if let Some(ref action) = filters.action {

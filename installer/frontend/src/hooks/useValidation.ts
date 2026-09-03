@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import type { ZodError } from 'zod';
+import { ZodError } from 'zod';
 import type { InstallerConfig } from '../types';
 import { type StepSchemaKey, StepSchemas } from '../validation/schemas';
 
@@ -20,10 +20,9 @@ export function useValidation() {
         setErrors({});
         return true;
       } catch (error) {
-        if (error && typeof error === 'object' && 'errors' in error) {
-          const zodError = error as ZodError;
+        if (error instanceof ZodError) {
           const newErrors: ValidationErrors = {};
-          zodError.errors.forEach((err) => {
+          error.issues.forEach((err) => {
             const path = err.path.join('.');
             if (path) {
               newErrors[path] = err.message;

@@ -54,7 +54,7 @@ describe('validation utilities', () => {
       expect(result.success).toBe(false);
       if (!result.success) {
         expect(result.error).toBeInstanceOf(z.ZodError);
-        expect(result.error.errors.length).toBeGreaterThan(0);
+        expect(result.error.issues.length).toBeGreaterThan(0);
       }
     });
   });

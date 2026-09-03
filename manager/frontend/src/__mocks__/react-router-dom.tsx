@@ -18,7 +18,10 @@ export const BrowserRouter = ({ children }: { children: ReactNode }) => <>{child
 export const MemoryRouter = ({
   children,
   initialEntries = ['/'],
-}: { children: ReactNode; initialEntries?: string[] }) => <>{children}</>;
+}: {
+  children: ReactNode;
+  initialEntries?: string[];
+}) => <>{children}</>;
 export const Routes = ({ children }: { children: ReactNode }) => <>{children}</>;
 export const Route = ({ element }: { path?: string; element?: ReactNode; index?: boolean }) => (
   <>{element}</>
@@ -30,7 +33,11 @@ export const Link = ({
   to,
   children,
   ...props
-}: { to: string; children: ReactNode; [key: string]: unknown }) => (
+}: {
+  to: string;
+  children: ReactNode;
+  [key: string]: unknown;
+}) => (
   <a href={typeof to === 'string' ? to : '/'} {...props}>
     {children}
   </a>

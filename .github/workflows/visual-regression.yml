@@ -25,14 +25,14 @@ jobs:
 
     steps:
       - name: Checkout PR
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install ImageMagick
         run: sudo apt-get update && sudo apt-get install -y imagemagick
@@ -64,7 +64,7 @@ jobs:
           cp screenshots/*.png screenshots-pr/
 
       - name: Download baseline screenshots
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7 # v24
         with:
           workflow: visual-regression.yml
           branch: main
@@ -138,7 +138,7 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Upload diff screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.compare.outputs.changed_count != '0'
         with:
           name: screenshot-diffs
@@ -146,14 +146,14 @@ jobs:
           retention-days: 14
 
       - name: Upload PR screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pr-screenshots
           path: manager/frontend/screenshots-pr/
           retention-days: 14
 
       - name: Comment on PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         if: always()
         with:
           script: |
@@ -229,14 +229,14 @@ jobs:
 
     steps:
       - name: Checkout PR
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install ImageMagick
         run: sudo apt-get update && sudo apt-get install -y imagemagick
@@ -268,7 +268,7 @@ jobs:
           cp screenshots/*.png screenshots-pr/
 
       - name: Download baseline screenshots
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@d63b86af1b34672e53c440b1b83979861906bad7 # v24
         with:
           workflow: visual-regression.yml
           branch: main
@@ -342,7 +342,7 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Upload diff screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.compare.outputs.changed_count != '0'
         with:
           name: installer-screenshot-diffs
@@ -350,14 +350,14 @@ jobs:
           retention-days: 14
 
       - name: Upload PR screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: installer-pr-screenshots
           path: installer/frontend/screenshots-pr/
           retention-days: 14
 
       - name: Comment on PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         if: always()
         with:
           script: |
@@ -433,12 +433,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install
@@ -464,7 +464,7 @@ jobs:
         run: PLAYWRIGHT_REUSE_SERVER=true PLAYWRIGHT_PORT=4173 bunx playwright test e2e/screenshots.spec.ts --project=chromium
 
       - name: Upload baseline screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: baseline-screenshots
           path: manager/frontend/screenshots/
@@ -480,12 +480,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: latest
+          bun-version: 1.4.0
 
       - name: Install dependencies
         run: bun install
@@ -511,7 +511,7 @@ jobs:
         run: PLAYWRIGHT_REUSE_SERVER=true PORT=4173 bunx playwright test e2e/screenshots.e2e.ts --project=chromium
 
       - name: Upload baseline screenshots
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: baseline-screenshots-installer
           path: installer/frontend/screenshots/

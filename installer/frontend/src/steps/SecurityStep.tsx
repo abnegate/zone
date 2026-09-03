@@ -22,19 +22,14 @@ export function SecurityStep() {
   const { generateSecret } = useSecretGenerator();
   const httpRedirectEnabled = watch('SECURITY_HTTP_REDIRECT') === 'true';
   const certificateEnabled = watch('SECURITY_GENERATE_CERTIFICATE') === 'true';
-  const [
-    litellmMasterKey,
-    litellmSaltKey,
-    searxngSecretKey,
-    managerApiKey,
-    postgresPassword,
-  ] = watch([
-    'SECURITY_LITELLM_MASTER_KEY',
-    'SECURITY_LITELLM_SALT_KEY',
-    'SECURITY_SEARXNG_SECRET_KEY',
-    'SECURITY_MANAGER_API_KEY',
-    'POSTGRES_PASSWORD',
-  ]);
+  const [litellmMasterKey, litellmSaltKey, searxngSecretKey, managerApiKey, postgresPassword] =
+    watch([
+      'SECURITY_LITELLM_MASTER_KEY',
+      'SECURITY_LITELLM_SALT_KEY',
+      'SECURITY_SEARXNG_SECRET_KEY',
+      'SECURITY_MANAGER_API_KEY',
+      'POSTGRES_PASSWORD',
+    ]);
   const hasEmptySecrets = [
     litellmMasterKey,
     litellmSaltKey,
