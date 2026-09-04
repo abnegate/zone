@@ -1,0 +1,43 @@
+# typed: false
+# frozen_string_literal: true
+
+cask "zone" do
+  version "{{VERSION}}"
+
+  on_arm do
+    sha256 "{{SHA256_ARM}}"
+
+    url "https://github.com/{{REPO_OWNER}}/zone/releases/download/{{TAG}}/Zone-{{VERSION}}-darwin-arm64.zip"
+  end
+  on_intel do
+    sha256 "{{SHA256_INTEL}}"
+
+    url "https://github.com/{{REPO_OWNER}}/zone/releases/download/{{TAG}}/Zone-{{VERSION}}-darwin-x86_64.zip"
+  end
+
+  name "Zone"
+  desc "Self-hosted AI platform"
+  homepage "https://github.com/{{REPO_OWNER}}/zone"
+
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  depends_on macos: ">= :ventura"
+
+  app "Zone.app"
+  binary "#{appdir}/Zone.app/Contents/MacOS/zone"
+
+  zap trash: [
+    "~/Library/Caches/com.abnegate.zone",
+    "~/.zone",
+  ]
+
+  caveats <<~EOS
+    On first launch, Zone.app asks for your Zone server URL, then opens
+    the manager console. Change it later from the Zone menu or with:
+
+      zone login https://your-zone.example.com
+  EOS
+end

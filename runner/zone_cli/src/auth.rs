@@ -126,6 +126,16 @@ impl AuthManager {
         };
         self.store_token(METADATA_KEY, &serde_json::to_string(&metadata)?)?;
 
+        match crate::config::Config::load() {
+            Ok(mut cfg) => {
+                cfg.host = Some(host.trim_end_matches('/').to_string());
+                if let Err(err) = cfg.save() {
+                    eprintln!("warning: could not save host to config: {err}");
+                }
+            }
+            Err(err) => eprintln!("warning: could not load config to save host: {err}"),
+        }
+
         Ok(metadata)
     }
 
