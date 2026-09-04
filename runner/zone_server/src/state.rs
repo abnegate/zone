@@ -228,6 +228,39 @@ impl AppState {
 }
 
 #[cfg(test)]
+impl AppState {
+    /// State for unit tests that never reach the database.
+    ///
+    /// The pool is lazy, so nothing connects unless a test actually queries.
+    pub fn for_tests() -> Self {
+        let db =
+            PgPool::connect_lazy("postgres://localhost/test").expect("a lazy pool needs no server");
+        Self::new(test_config(), db, None)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_config() -> Config {
+    Config {
+        host: "localhost".to_string(),
+        port: 8000,
+        database_url: "postgres://localhost/test".to_string(),
+        redis_url: "redis://localhost:6379".to_string(),
+        jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
+        jwt_access_lifetime: 900,
+        jwt_refresh_lifetime: 604800,
+        litellm_host: "http://localhost:4000".to_string(),
+        litellm_key: "test-key".to_string(),
+        ollama_host: "http://localhost:11434".to_string(),
+        encryption_key: "12345678901234567890123456789012".to_string(),
+        cors_origins: vec!["*".to_string()],
+        cors_allow_credentials: false,
+        app_base_url: "http://localhost:3000".to_string(),
+        web_search: crate::config::WebSearchConfig::default(),
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use zone_context::adapters::{FilesystemAdapter, GitHubAdapter, TextAdapter};

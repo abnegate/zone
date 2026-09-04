@@ -1,8 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { client } from './client';
 
 describe('Context Search API', () => {
   const testWorkspaceId = 'ws-test-123';
+  // Every test file shares one process, so a global left swapped out here
+  // reaches suites that expect a real WebSocket.
+  const realWebSocket = global.WebSocket;
   let mockFetch: ReturnType<typeof mock>;
   let mockWebSocket: ReturnType<typeof mock>;
 
@@ -15,6 +18,10 @@ describe('Context Search API', () => {
 
   afterEach(() => {
     mock.clearAllMocks();
+  });
+
+  afterAll(() => {
+    global.WebSocket = realWebSocket;
   });
 
   describe('searchContext', () => {
