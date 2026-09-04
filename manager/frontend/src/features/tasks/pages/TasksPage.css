@@ -471,17 +471,18 @@
 }
 
 .priority-selector {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--ui-space-2);
 }
 
 .priority-option {
-  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--ui-space-1);
-  padding: var(--ui-space-4);
+  padding: var(--ui-space-4) var(--ui-space-1);
   background: var(--ui-bg-surface);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-md);

@@ -219,6 +219,30 @@ for (const viewport of [
             await dialog.locator('#knowledge-tags').press('Enter');
             await expect(dialog.locator('.tag-item')).toBeVisible();
           }
+          if (wizard.path === 'tasks') {
+            const priorities = await dialog
+              .locator('.priority-selector')
+              .evaluate((element) => ({
+                content: element.scrollWidth,
+                width: element.clientWidth,
+              }));
+            expect
+              .soft(priorities.content)
+              .toBeLessThanOrEqual(priorities.width);
+            const toggle = await dialog
+              .locator('.toggle-wrapper')
+              .boundingBox();
+            expect.soft(toggle?.width).toBe(44);
+            expect.soft(toggle?.height).toBe(24);
+            const agentic = dialog.locator('.toggle-wrapper input');
+            await dialog
+              .getByText('Enable Agentic Mode', { exact: true })
+              .click();
+            await expect(agentic).toBeChecked();
+            await agentic.focus();
+            await agentic.press('Space');
+            await expect(agentic).not.toBeChecked();
+          }
           const footer = await dialog.locator('footer').boundingBox();
           expect(footer!.y + footer!.height).toBeLessThanOrEqual(
             viewport.height
