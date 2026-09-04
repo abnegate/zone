@@ -905,24 +905,7 @@ impl ModelProvider for Gpt4AllProvider {
         // GPT4All uses a static JSON catalog, so we fetch all and paginate client-side
         let offset = parse_cursor_offset(opts.cursor)?;
 
-        let response = HTTP_CLIENT.get(&self.catalog_url).send().await?;
-
-        if !response.status().is_success() {
-            return Err(ProviderError::Unavailable(format!(
-                "GPT4All API returned status: {}",
-                response.status()
-            )));
-        }
-
-        let body = response.text().await?;
-        let gpt4all_models: Vec<Gpt4AllModel> = serde_json::from_str(&body).map_err(|e| {
-            tracing::error!(
-                "GPT4All JSON parse error: {}. Body preview: {}",
-                e,
-                &body[..body.len().min(500)]
-            );
-            ProviderError::ParseError(format!("{}", e))
-        })?;
+        let gpt4all_models = fetch_gpt4all_catalog(&self.catalog_url).await?;
 
         // Filter by query if provided
         let filtered: Vec<_> = if let Some(q) = opts.query {
@@ -954,6 +937,36 @@ impl ModelProvider for Gpt4AllProvider {
             opts.limit,
         ))
     }
+}
+
+async fn fetch_gpt4all_catalog(url: &str) -> Result<Vec<Gpt4AllModel>, ProviderError> {
+    let mut last_error: Option<ProviderError> = None;
+    for attempt in 1_u32..=3 {
+        match HTTP_CLIENT.get(url).send().await {
+            Ok(response) if response.status().is_success() => {
+                let body = response.text().await?;
+                return serde_json::from_str(&body).map_err(|e| {
+                    tracing::error!(
+                        "GPT4All JSON parse error: {}. Body preview: {}",
+                        e,
+                        &body[..body.len().min(500)]
+                    );
+                    ProviderError::ParseError(format!("{e}"))
+                });
+            }
+            Ok(response) => {
+                last_error = Some(ProviderError::Unavailable(format!(
+                    "GPT4All API returned status: {}",
+                    response.status()
+                )));
+            }
+            Err(error) => last_error = Some(error.into()),
+        }
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt))).await;
+        }
+    }
+    Err(last_error.expect("at least one GPT4All catalog attempt"))
 }
 
 #[derive(Debug, serde::Deserialize)]

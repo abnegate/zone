@@ -15,7 +15,6 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
 // =============================================================================
@@ -230,13 +229,8 @@ async fn start_gpt4all_catalog_server() -> String {
     panic!("GPT4All catalog mock did not become ready at {url}");
 }
 
-static GPT4ALL_MOCK_URL: OnceCell<String> = OnceCell::const_new();
-
 async fn local_gpt4all_catalog_url() -> String {
-    GPT4ALL_MOCK_URL
-        .get_or_init(|| async { start_gpt4all_catalog_server().await })
-        .await
-        .clone()
+    start_gpt4all_catalog_server().await
 }
 
 // =============================================================================
