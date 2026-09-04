@@ -315,11 +315,23 @@ for (const scenario of scenarios) {
     ).toBeVisible();
     await capture(page, information, 'session-confirmation');
     await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-    if (scenario.width < 768) {
+    if (scenario.width <= 768) {
       await page.getByRole('button', { name: /Toggle menu/i }).click();
       await expect
         .poll(async () => (await page.locator('.sidebar').boundingBox())?.x)
         .toBe(0);
+      const header = await page.evaluate(() => {
+        const bounds = (selector: string): DOMRect =>
+          document.querySelector(selector)!.getBoundingClientRect();
+        return {
+          menuRight: bounds('.mobile-menu-btn').right,
+          logoLeft: bounds('.sidebar-header .zone-logo').left,
+          logoRight: bounds('.sidebar-header .zone-logo').right,
+          themeLeft: bounds('.sidebar-header .theme-toggle').left,
+        };
+      });
+      expect(header.logoLeft - header.menuRight).toBeGreaterThanOrEqual(8);
+      expect(header.themeLeft - header.logoRight).toBeGreaterThanOrEqual(8);
     }
     await expect(page.getByRole('navigation')).toBeVisible();
     await expect(page.getByRole('button', { name: /Logout/i })).toBeVisible();

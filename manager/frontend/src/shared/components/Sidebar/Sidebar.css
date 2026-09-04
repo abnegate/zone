@@ -22,7 +22,6 @@
   width: 64px;
 }
 
-/* Header */
 .sidebar-header {
   position: relative;
 
@@ -52,9 +51,8 @@
   gap: var(--ui-space-2);
 }
 
-/* Logo icon */
 .logo::before {
-  content: "";
+  content: '';
   width: 28px;
   height: 28px;
   background: linear-gradient(
@@ -70,14 +68,12 @@
   display: none;
 }
 
-/* Context Switcher Area */
 .sidebar-context {
   position: relative;
   padding: var(--ui-space-3);
   border-bottom: 1px solid var(--ui-border);
 }
 
-/* Navigation */
 .sidebar-nav {
   flex: 1;
   padding: var(--ui-space-3);
@@ -102,7 +98,6 @@
   border-radius: var(--ui-radius-full);
 }
 
-/* Nav Section Label */
 .nav-section-label {
   font-size: var(--ui-text-xs);
   font-weight: 600;
@@ -117,7 +112,6 @@
   display: none;
 }
 
-/* Nav Item */
 .nav-item {
   display: flex;
   align-items: center;
@@ -156,9 +150,8 @@
   background: var(--ui-accent-muted);
 }
 
-/* Active indicator bar */
 .nav-item.active::before {
-  content: "";
+  content: '';
   position: absolute;
   left: 0;
   top: 50%;
@@ -184,7 +177,6 @@
   opacity: 1;
 }
 
-/* Nav Item Badge */
 .nav-item-badge {
   margin-left: auto;
   min-width: var(--ui-icon-size);
@@ -204,7 +196,6 @@
   display: none;
 }
 
-/* Footer */
 .sidebar-footer {
   position: relative;
   padding: var(--ui-space-3);
@@ -214,7 +205,6 @@
   gap: var(--ui-space-1-5);
 }
 
-/* Footer actions row */
 .sidebar-footer-actions {
   display: flex;
   align-items: center;
@@ -225,7 +215,6 @@
   flex-direction: column;
 }
 
-/* Collapse Button */
 .collapse-btn {
   display: flex;
   align-items: center;
@@ -256,7 +245,6 @@
   transform: rotate(180deg);
 }
 
-/* Theme Toggle */
 .theme-toggle {
   display: flex;
   align-items: center;
@@ -283,7 +271,6 @@
   display: block;
 }
 
-/* Logout Button */
 .logout-btn {
   display: flex;
   align-items: center;
@@ -333,7 +320,6 @@ a.change-server-btn:hover {
   background: var(--ui-bg-hover);
 }
 
-/* Mobile Menu Button */
 .mobile-menu-btn {
   display: none;
   position: fixed;
@@ -366,12 +352,10 @@ a.change-server-btn:hover {
   height: 100%;
 }
 
-/* Sidebar Overlay (Mobile) */
 .sidebar-overlay {
   display: none;
 }
 
-/* Mobile Responsive */
 @media (max-width: 768px) {
   .mobile-menu-btn {
     display: flex;
@@ -386,6 +370,13 @@ a.change-server-btn:hover {
 
   .sidebar.open {
     transform: translateX(0);
+  }
+
+  .sidebar.open .sidebar-header {
+    padding-left: calc(
+      var(--ui-gutter) + var(--ui-control-height-lg) + var(--ui-space-2)
+    );
+    gap: var(--ui-space-2);
   }
 
   .sidebar.collapsed {
@@ -403,7 +394,6 @@ a.change-server-btn:hover {
   }
 }
 
-/* User info section (if present) */
 .sidebar-user {
   display: flex;
   align-items: center;
