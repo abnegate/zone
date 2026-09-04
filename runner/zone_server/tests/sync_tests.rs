@@ -188,6 +188,7 @@ async fn test_synced_item_lifecycle() {
         None,
         None,
         false,
+        None,
     )
     .await
     .expect("Failed to create task");

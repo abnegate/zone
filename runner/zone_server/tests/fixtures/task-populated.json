@@ -1,0 +1,35 @@
+{
+  "task": {
+    "id": "00000000-0000-0000-0000-000000000001",
+    "workspace_id": "00000000-0000-0000-0000-000000000002",
+    "project_ids": [
+      "00000000-0000-0000-0000-000000000003"
+    ],
+    "title": "Test task",
+    "description": "Test description",
+    "acceptance_criteria": "Checks pass",
+    "status": "created",
+    "priority": 5,
+    "is_agentic": true,
+    "created_at": "2026-09-04T12:05:28+00:00",
+    "updated_at": "2026-09-04T12:05:28+00:00",
+    "deleted_at": null,
+    "dependencies": [
+      "00000000-0000-0000-0000-000000000004"
+    ],
+    "source_ids": [
+      "00000000-0000-0000-0000-000000000005"
+    ],
+    "model_name": "test-model",
+    "started_at": "2026-09-04T12:05:28+00:00",
+    "completed_at": "2026-09-04T12:05:28+00:00",
+    "github_repo_url": "https://github.com/abnegate/zone",
+    "source_id": "00000000-0000-0000-0000-000000000005",
+    "queued_at": "2026-09-04T12:05:28+00:00",
+    "worker_id": "worker-1",
+    "pr_url": "https://github.com/abnegate/zone/pull/1",
+    "branch_name": "fix/task",
+    "pr_status": "open",
+    "pr_created_at": "2026-09-04T12:05:28+00:00"
+  }
+}

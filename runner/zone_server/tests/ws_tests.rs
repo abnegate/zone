@@ -466,6 +466,7 @@ async fn create_test_task() -> (uuid::Uuid, uuid::Uuid, String) {
         None,
         None,
         false,
+        None,
     )
     .await
     .expect("create task");

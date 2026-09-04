@@ -1,0 +1,298 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, source_id)\n        VALUES ($1, $2, $3, $4, $5, $6, $7)\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "description",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "acceptance_criteria",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "acceptance_criteria"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "model_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "dependencies",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "dependencies"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "is_agentic",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "is_agentic"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "github_repo_url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "github_repo_url"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "source_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "source_ids",
+        "type_info": "UuidArray",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "source_ids"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "workspace_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "workspace_id"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "worker_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "worker_id"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "queued_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "queued_at"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "started_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "completed_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "completed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "created_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "updated_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "pr_url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "pr_url"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "branch_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "branch_name"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "pr_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "pr_status"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "pr_created_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "pr_created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Bool",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "ad85065ce757de215420f8c2bd3a31838cb7e8df0672a921d022b9f4ff78d20a"
+}

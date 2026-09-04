@@ -41,6 +41,7 @@ async fn test_create_task_run() {
         Some("Should complete successfully"),
         Some(1),
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -71,6 +72,7 @@ async fn test_update_task_run_progress() {
         None,
         None,
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -105,6 +107,7 @@ async fn test_complete_task_run_success() {
         None,
         None,
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -151,6 +154,7 @@ async fn test_complete_task_run_failure() {
         None,
         None,
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -195,6 +199,7 @@ async fn test_add_task_run_log() {
         None,
         None,
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -239,6 +244,7 @@ async fn test_get_task_run_logs() {
         None,
         None,
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -289,6 +295,7 @@ async fn test_task_run_lifecycle() {
         Some("Should track all phases"),
         Some(1),
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -382,6 +389,7 @@ async fn test_list_task_runs() {
         None,
         None,
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -420,6 +428,7 @@ async fn test_get_task_run() {
         None,
         None,
         true,
+        None,
     )
     .await
     .expect("Failed to create task");
@@ -455,6 +464,7 @@ async fn test_task_run_with_error() {
         None,
         None,
         true,
+        None,
     )
     .await
     .expect("Failed to create task");

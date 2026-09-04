@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::tasks;
+use crate::db::{sources, tasks};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
@@ -33,6 +33,19 @@ pub struct TaskData {
     status: String,
     priority: Option<i32>,
     is_agentic: bool,
+    model_name: Option<String>,
+    dependencies: serde_json::Value,
+    github_repo_url: Option<String>,
+    source_id: Option<Uuid>,
+    source_ids: Vec<Uuid>,
+    worker_id: Option<String>,
+    queued_at: Option<String>,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    pr_url: Option<String>,
+    branch_name: Option<String>,
+    pr_status: Option<String>,
+    pr_created_at: Option<String>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -55,6 +68,27 @@ impl From<tasks::TaskRow> for TaskData {
             status: row.status,
             priority: row.priority,
             is_agentic: row.is_agentic,
+            model_name: row.model_name,
+            dependencies: row.dependencies.unwrap_or_else(|| serde_json::json!([])),
+            github_repo_url: row.github_repo_url,
+            source_id: row.source_id,
+            source_ids: row.source_ids.unwrap_or_default(),
+            worker_id: row.worker_id,
+            queued_at: row
+                .queued_at
+                .map(|timestamp| timestamp.and_utc().to_rfc3339()),
+            started_at: row
+                .started_at
+                .map(|timestamp| timestamp.and_utc().to_rfc3339()),
+            completed_at: row
+                .completed_at
+                .map(|timestamp| timestamp.and_utc().to_rfc3339()),
+            pr_url: row.pr_url,
+            branch_name: row.branch_name,
+            pr_status: row.pr_status,
+            pr_created_at: row
+                .pr_created_at
+                .map(|timestamp| timestamp.and_utc().to_rfc3339()),
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
@@ -176,6 +210,7 @@ pub struct CreateTaskRequest {
     acceptance_criteria: Option<String>,
     priority: Option<i32>,
     is_agentic: Option<bool>,
+    source_id: Option<Uuid>,
 }
 
 /// Update task request
@@ -224,17 +259,41 @@ pub async fn create(
     State(state): State<AppState>,
     _auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
-    Json(req): Json<CreateTaskRequest>,
+    Json(request): Json<CreateTaskRequest>,
 ) -> impl IntoResponse {
+    if let Some(source_id) = request.source_id {
+        match sources::get_source(state.db(), source_id, workspace_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::new(
+                        "Source is not available in this workspace",
+                    )),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                tracing::error!("Database error: {}", error);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     match tasks::create_task(
         state.db(),
         workspace_id,
-        &req.project_ids,
-        &req.title,
-        &req.description,
-        req.acceptance_criteria.as_deref(),
-        req.priority,
-        req.is_agentic.unwrap_or(false),
+        &request.project_ids,
+        &request.title,
+        &request.description,
+        request.acceptance_criteria.as_deref(),
+        request.priority,
+        request.is_agentic.unwrap_or(false),
+        request.source_id,
     )
     .await
     {
@@ -477,5 +536,74 @@ pub async fn get_run_logs(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDateTime;
+    use serde_json::Value;
+
+    fn row(populated: bool) -> tasks::TaskRow {
+        let timestamp = NaiveDateTime::parse_from_str("2026-09-04 12:05:28", "%Y-%m-%d %H:%M:%S")
+            .expect("valid timestamp");
+        tasks::TaskRow {
+            id: Uuid::from_u128(1),
+            workspace_id: Uuid::from_u128(2),
+            project_ids: if populated {
+                vec![Uuid::from_u128(3)]
+            } else {
+                vec![]
+            },
+            title: "Test task".into(),
+            description: "Test description".into(),
+            acceptance_criteria: populated.then(|| "Checks pass".into()),
+            status: "created".into(),
+            priority: populated.then_some(5),
+            model_name: populated.then(|| "test-model".into()),
+            dependencies: populated.then(|| serde_json::json!([Uuid::from_u128(4)])),
+            is_agentic: true,
+            github_repo_url: populated.then(|| "https://github.com/abnegate/zone".into()),
+            source_id: populated.then_some(Uuid::from_u128(5)),
+            source_ids: populated.then(|| vec![Uuid::from_u128(5)]),
+            worker_id: populated.then(|| "worker-1".into()),
+            queued_at: populated.then_some(timestamp),
+            started_at: populated.then_some(timestamp),
+            completed_at: populated.then_some(timestamp),
+            created_at: Some(timestamp),
+            updated_at: Some(timestamp),
+            pr_url: populated.then(|| "https://github.com/abnegate/zone/pull/1".into()),
+            branch_name: populated.then(|| "fix/task".into()),
+            pr_status: populated.then(|| "open".into()),
+            pr_created_at: populated.then_some(timestamp),
+        }
+    }
+
+    #[test]
+    fn task_response_preserves_nullable_fields() {
+        let expected: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/task-created.json")).unwrap();
+        assert_eq!(
+            serde_json::to_value(TaskResponse::from(row(false))).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn task_response_preserves_populated_fields() {
+        let expected: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/task-populated.json")).unwrap();
+        assert_eq!(
+            serde_json::to_value(TaskResponse::from(row(true))).unwrap(),
+            expected
+        );
+        let list = TasksListResponse {
+            tasks: vec![TaskData::from(row(true))],
+        };
+        assert_eq!(
+            serde_json::to_value(list).unwrap()["tasks"][0],
+            expected["task"]
+        );
     }
 }

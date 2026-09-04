@@ -296,11 +296,12 @@ pub async fn create_task(
     acceptance_criteria: Option<&str>,
     priority: Option<i32>,
     is_agentic: bool,
+    source_id: Option<Uuid>,
 ) -> DbResult<TaskRow> {
     let row = sqlx::query!(
         r#"
-        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, source_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
@@ -311,7 +312,8 @@ pub async fn create_task(
         description,
         acceptance_criteria,
         priority,
-        is_agentic
+        is_agentic,
+        source_id
     )
     .fetch_one(pool)
     .await?;
