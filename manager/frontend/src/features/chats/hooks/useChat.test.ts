@@ -343,6 +343,69 @@ describe('useChat', () => {
     expect(result.current.chat?.messages.at(-1)?.metadata?.citations).toEqual([citation]);
   });
 
+  it('records a workspace write receipt from the live frame and keeps it on reload', async () => {
+    const receipt = {
+      id: 'call_1',
+      action: 'create_task',
+      target_type: 'task' as const,
+      target_id: 'task-1',
+      target_label: 'Ship the billing export',
+      actor_id: 'user-1',
+      actor_name: 'Alice',
+      occurred_at: '2026-09-05T10:47:00.000Z',
+      success: true,
+      outcome: 'Task created',
+      href: '/tasks?id=task-1',
+    };
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'action_receipt',
+      message_id: 'm4',
+      receipt,
+    });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.action_receipts).toEqual([receipt]);
+    });
+
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm4',
+      content: 'Created the task.',
+      metadata: { action_receipts: [receipt] },
+    });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('Created the task.');
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.action_receipts).toEqual([receipt]);
+
+    mockGetChat.mockResolvedValue({
+      ...mockChat,
+      messages: [
+        ...mockMessages,
+        {
+          id: 'm4',
+          chat_id: '1',
+          role: 'assistant',
+          content: 'Created the task.',
+          created_at: '2024-01-01T00:02:00Z',
+          metadata: { action_receipts: [receipt] },
+        },
+      ],
+    });
+    await result.current.refresh();
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.action_receipts).toEqual([receipt]);
+    });
+  });
+
   it('keeps the tool trace when an image arrives on the same message', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

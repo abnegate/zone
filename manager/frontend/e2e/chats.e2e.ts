@@ -773,5 +773,154 @@ test.describe('Chats Page', () => {
         'There are no projects in this workspace.'
       );
     });
+
+    test('shows a durable receipt for a workspace write and keeps it after reload', async ({
+      page,
+    }) => {
+      const receipt = {
+        id: 'call_1',
+        action: 'create_task',
+        target_type: 'task',
+        target_id: 'task-1',
+        target_label: 'Ship the billing export',
+        actor_id: 'user-1',
+        actor_name: 'Alice',
+        occurred_at: '2026-09-05T10:47:00.000Z',
+        success: true,
+        outcome: 'Task created',
+        href: '/tasks?id=task-1',
+      };
+      const agentChat = generateMockChat('chat-1', 'Agent Chat', 'llama3.2', false, {
+        agent_enabled: true,
+      });
+      const saved = [
+        generateMockMessage('msg-user', 'chat-1', 'user', 'Create a task for the billing export'),
+        {
+          ...generateMockMessage('msg-asst', 'chat-1', 'assistant', 'Created the task.'),
+          metadata: {
+            tool_calls: [
+              {
+                id: 'call_1',
+                name: 'create_task',
+                arguments: '{"title":"Ship the billing export"}',
+                success: true,
+                detail: 'Task created',
+                duration_ms: 18,
+              },
+            ],
+            action_receipts: [receipt],
+          },
+        },
+      ];
+
+      await mockChatRoutes(page, agentChat);
+      await page.routeWebSocket(/\/ws\/chats\//, (ws) => {
+        ws.onMessage((message) => {
+          const payload = JSON.parse(typeof message === 'string' ? message : message.toString());
+          if (payload.type === 'auth') {
+            ws.send(JSON.stringify({ type: 'init', chat_id: 'chat-1', status: 'connected' }));
+            return;
+          }
+          if (payload.type !== 'send') {
+            return;
+          }
+          ws.send(
+            JSON.stringify({
+              type: 'message_saved',
+              message_id: 'msg-user',
+              role: 'user',
+              content: payload.content,
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'message_start',
+              message_id: 'msg-asst',
+              role: 'assistant',
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'tool_call',
+              message_id: 'msg-asst',
+              tool_call_id: 'call_1',
+              name: 'create_task',
+              arguments: '{"title":"Ship the billing export"}',
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'tool_result',
+              message_id: 'msg-asst',
+              tool_call_id: 'call_1',
+              name: 'create_task',
+              success: true,
+              detail: 'Task created',
+              duration_ms: 18,
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'action_receipt',
+              message_id: 'msg-asst',
+              receipt,
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'chunk',
+              content: 'Created the task.',
+              index: 0,
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'message_end',
+              message_id: 'msg-asst',
+              content: 'Created the task.',
+              metadata: {
+                tool_calls: [
+                  {
+                    id: 'call_1',
+                    name: 'create_task',
+                    arguments: '{"title":"Ship the billing export"}',
+                    success: true,
+                    detail: 'Task created',
+                    duration_ms: 18,
+                  },
+                ],
+                action_receipts: [receipt],
+              },
+            })
+          );
+        });
+      });
+      await page.reload();
+      await expect(page.locator('.chat-item')).toHaveCount(1);
+      await page.click('.chat-item');
+      await page.fill('.message-form textarea', 'Create a task for the billing export');
+      await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+
+      const card = page.getByTestId('action-receipt');
+      await expect(card).toBeVisible();
+      await expect(card).toContainText('Created task');
+      await expect(card).toContainText('Ship the billing export');
+      await expect(card).toContainText('Alice');
+      await expect(card).toContainText('Task created');
+      await expect(page.getByTestId('action-receipt-link')).toHaveAttribute(
+        'href',
+        '/tasks?id=task-1'
+      );
+
+      await mockChatRoutes(page, agentChat, saved);
+      await page.reload();
+      await expect(page.locator('.chat-item')).toHaveCount(1);
+      await page.click('.chat-item');
+      await expect(page.getByTestId('action-receipt')).toBeVisible();
+      await expect(page.getByTestId('action-receipt-link')).toHaveAttribute(
+        'href',
+        '/tasks?id=task-1'
+      );
+    });
   });
 });

@@ -40,10 +40,29 @@ export interface Citation {
   note?: string | null;
 }
 
+export type ActionTarget = 'task' | 'document' | 'message' | 'reminder';
+
+/// A workspace write the agent completed. Streamed live and stored on the
+/// message so the receipt survives a reload.
+export interface ActionReceipt {
+  id: string;
+  action: string;
+  target_type: ActionTarget;
+  target_id: string;
+  target_label: string;
+  actor_id: string;
+  actor_name: string;
+  occurred_at: string;
+  success: boolean;
+  outcome: string;
+  href: string;
+}
+
 export interface MessageMetadata {
   attachments?: MessageAttachment[];
   tool_calls?: ToolCallRecord[];
   citations?: Citation[];
+  action_receipts?: ActionReceipt[];
   /** Optional API override: force web search on/off for one message. */
   web_search?: boolean;
 }

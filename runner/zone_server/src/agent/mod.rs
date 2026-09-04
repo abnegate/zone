@@ -13,10 +13,12 @@ pub mod actions;
 pub mod citations;
 pub mod documents;
 pub mod integrations;
+pub mod receipts;
 pub mod runner;
 pub mod tools;
 
 pub use citations::{Citation, CitationKind, CitationOutcome};
+pub use receipts::{ActionReceipt, ActionTarget};
 pub use runner::{AgentEvent, AgentRun, MAX_ITERATIONS, MAX_TOOL_CALLS, run};
 pub use tools::{ChatTools, WorkspaceScope};
 
@@ -106,5 +108,30 @@ mod tests {
 
         let parsed: ToolCallRecord = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, record);
+    }
+
+    #[test]
+    fn action_receipt_round_trips_through_metadata() {
+        let receipt = ActionReceipt {
+            id: "call_1".to_string(),
+            action: "create_task".to_string(),
+            target_type: ActionTarget::Task,
+            target_id: "task-1".to_string(),
+            target_label: "Ship the billing export".to_string(),
+            actor_id: "user-1".to_string(),
+            actor_name: "Alice".to_string(),
+            occurred_at: "2026-09-05T10:47:00.000Z".to_string(),
+            success: true,
+            outcome: "Task created".to_string(),
+            href: "/tasks?id=task-1".to_string(),
+        };
+
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(json["action"], "create_task");
+        assert_eq!(json["target_type"], "task");
+        assert_eq!(json["href"], "/tasks?id=task-1");
+
+        let parsed: ActionReceipt = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, receipt);
     }
 }

@@ -1,10 +1,12 @@
 import { Button, Checkbox, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { isProtectedArtifactUrl } from '../api/protectedImages';
 import {
+  ActionReceipts,
   AuthenticatedImage,
   Citations,
   Generation,
@@ -32,8 +34,10 @@ export default function ChatsPage() {
   const { currentWorkspace } = useWorkspace();
   const { models } = useModels();
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showArchived, setShowArchived] = useState(false);
-  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(() => searchParams.get('id'));
+  const linkedMessageId = searchParams.get('message');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatModel, setNewChatModel] = useState('');
   const [newChatAgent, setNewChatAgent] = useState(false);
@@ -118,8 +122,30 @@ export default function ChatsPage() {
     scrollToBottom();
   }, [activeChat?.messages, chatError, chatStatus, streaming, scrollToBottom]);
 
-  const selectChat = (chatId: string) => {
+  useEffect(() => {
+    if (!linkedMessageId || !displayedChat) return;
+    const node = document.getElementById(`chat-message-${linkedMessageId}`);
+    node?.scrollIntoView({ block: 'center' });
+  }, [linkedMessageId, displayedChat]);
+
+  useEffect(() => {
+    const id = searchParams.get('id');
+    setSelectedChatId((current) => (current === id ? current : id));
+  }, [searchParams]);
+
+  const selectChat = (chatId: string, messageId?: string) => {
     setSelectedChatId(chatId);
+    const next = new URLSearchParams();
+    next.set('id', chatId);
+    if (messageId) {
+      next.set('message', messageId);
+    }
+    setSearchParams(next, { replace: true });
+  };
+
+  const clearSelectedChat = () => {
+    setSelectedChatId(null);
+    setSearchParams({}, { replace: true });
   };
 
   const handleCreateChat = async (e: FormEvent) => {
@@ -218,7 +244,7 @@ export default function ChatsPage() {
     try {
       await archiveChatFn(chatId);
       if (selectedChatId === chatId) {
-        setSelectedChatId(null);
+        clearSelectedChat();
       }
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to archive chat');
@@ -241,7 +267,7 @@ export default function ChatsPage() {
     try {
       await deleteChatFn(chatId);
       if (selectedChatId === chatId) {
-        setSelectedChatId(null);
+        clearSelectedChat();
       }
       setDeleteConfirm(null);
     } catch (err) {
@@ -258,7 +284,7 @@ export default function ChatsPage() {
   };
 
   const handleSearchResultClick = async (result: ChatSearchResult) => {
-    selectChat(result.chat_id);
+    selectChat(result.chat_id, result.message_id);
     setShowSearchResults(false);
     setSearchQuery('');
     clearSearch();
@@ -604,8 +630,14 @@ export default function ChatsPage() {
                   const images = imageAttachments(message.metadata);
                   const toolCalls = message.metadata?.tool_calls ?? [];
                   const citations = message.metadata?.citations ?? [];
+                  const receipts = message.metadata?.action_receipts ?? [];
+                  const linked = linkedMessageId === message.id;
                   return (
-                    <div key={message.id} className={`message message-${message.role}`}>
+                    <div
+                      key={message.id}
+                      id={`chat-message-${message.id}`}
+                      className={`message message-${message.role}${linked ? ' message--linked' : ''}`}
+                    >
                       <div className="message-header">
                         <span className="message-role">
                           {message.role === 'user'
@@ -651,6 +683,7 @@ export default function ChatsPage() {
                         </div>
                       )}
                       {toolCalls.length > 0 && <ToolTrace calls={toolCalls} />}
+                      {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                       {message.content.trim() ? (
                         <div className="message-content">
                           <MessageContent content={message.content} />

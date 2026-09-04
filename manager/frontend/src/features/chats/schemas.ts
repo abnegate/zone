@@ -38,11 +38,28 @@ export const CitationSchema = z.object({
   note: z.string().nullish(),
 });
 
+export const ActionTargetSchema = z.enum(['task', 'document', 'message', 'reminder']);
+
+export const ActionReceiptSchema = z.object({
+  id: z.string(),
+  action: z.string(),
+  target_type: ActionTargetSchema,
+  target_id: z.string(),
+  target_label: z.string(),
+  actor_id: z.string(),
+  actor_name: z.string(),
+  occurred_at: z.string(),
+  success: z.boolean(),
+  outcome: z.string(),
+  href: z.string(),
+});
+
 export const MessageMetadataSchema = z
   .object({
     attachments: z.array(MessageAttachmentSchema).optional(),
     tool_calls: z.array(ToolCallRecordSchema).optional(),
     citations: z.array(CitationSchema).optional(),
+    action_receipts: z.array(ActionReceiptSchema).optional(),
     web_search: z.boolean().optional(),
   })
   .passthrough();

@@ -422,6 +422,107 @@
   word-wrap: break-word;
 }
 
+.message--linked {
+  outline: 1px solid color-mix(in srgb, var(--ui-accent) 45%, transparent);
+  outline-offset: 4px;
+  border-radius: var(--ui-radius-sm, 4px);
+}
+
+/* Workspace write receipts.
+   First-class record of a change, shown above the reply. Stronger than the
+   tool trace: this is what the agent did, not how it thought. */
+.action-receipts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  margin: 0 0 var(--ui-space-3);
+}
+
+.action-receipt {
+  display: grid;
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  border-left-width: 3px;
+  border-left-color: var(--ui-text-tertiary, var(--ui-text-secondary));
+  background: var(--ui-bg-surface);
+}
+
+.action-receipt--ok {
+  border-left-color: var(--ui-success, #16a34a);
+}
+
+.action-receipt--failed {
+  border-left-color: var(--ui-danger, #dc2626);
+}
+
+.action-receipt-header {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+}
+
+.action-receipt-status {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ui-text-tertiary, var(--ui-text-secondary));
+}
+
+.action-receipt--ok .action-receipt-status {
+  background: var(--ui-success, #16a34a);
+}
+
+.action-receipt--failed .action-receipt-status {
+  background: var(--ui-danger, #dc2626);
+}
+
+.action-receipt-action {
+  margin: 0;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  color: var(--ui-text-primary);
+}
+
+.action-receipt-target {
+  margin: 0;
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+}
+
+.action-receipt-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: var(--ui-space-2) var(--ui-space-3);
+  margin: 0;
+}
+
+.action-receipt-meta dt {
+  margin: 0 0 2px;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.action-receipt-meta dd {
+  margin: 0;
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-sm);
+}
+
+.action-receipt-link {
+  justify-self: start;
+  color: var(--ui-accent, var(--ui-text-primary));
+  font-size: var(--ui-text-sm);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.action-receipt-link:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
 /* Tool trace.
    The work behind a reply, shown above it. Deliberately quiet: it is context
    for a reader who wants to check the answer, not part of the answer. */

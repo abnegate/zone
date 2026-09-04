@@ -16,7 +16,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
-use crate::db::{knowledge, message_embeddings, projects, sources};
+use super::receipts::{self, ActionReceipt};
+use crate::db::{knowledge, message_embeddings, projects, sources, users};
 use crate::state::AppState;
 
 /// Bound legacy search snippets and inventory summaries; full document reads are preserved.
@@ -181,6 +182,37 @@ impl ChatTools {
                 limit.as_secs()
             )),
         }
+    }
+
+    /// Mint a durable receipt after a workspace write. Read tools and host
+    /// tools return `None` so they stay in the quiet tool trace.
+    pub async fn write_receipt(
+        &self,
+        id: &str,
+        name: &str,
+        arguments: &str,
+        result: &ToolResult,
+    ) -> Option<ActionReceipt> {
+        if !receipts::is_write_tool(name) {
+            return None;
+        }
+        let actor_name =
+            match users::get_user_by_id(self.scope.state.db(), self.scope.user_id).await {
+                Ok(Some(user)) => user
+                    .display_name
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(user.email),
+                _ => self.scope.user_id.to_string(),
+            };
+        receipts::from_write(
+            id,
+            name,
+            arguments,
+            result,
+            self.scope.user_id,
+            &actor_name,
+            chrono::Utc::now(),
+        )
     }
 }
 

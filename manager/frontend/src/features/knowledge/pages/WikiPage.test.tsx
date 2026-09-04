@@ -69,6 +69,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  window.history.pushState({}, '', '/');
 });
 
 const createWrapper = () => {
@@ -85,7 +86,8 @@ const createWrapper = () => {
   );
 };
 
-const renderWikiPage = () => {
+const renderWikiPage = (path = '/wiki') => {
+  window.history.pushState({}, '', path);
   const Wrapper = createWrapper();
   return render(
     <Wrapper>
@@ -651,6 +653,11 @@ describe('WikiPage', () => {
         fireEvent.click(entryCard);
       }
       expect(screen.getAllByText('Text Entry').length).toBeGreaterThan(1);
+    });
+
+    it('opens the linked entry from the page URL', () => {
+      renderWikiPage('/wiki?id=kb-1');
+      expect(screen.getByRole('dialog', { name: 'Text Entry' })).toBeInTheDocument();
     });
 
     it('displays full entry details in modal', () => {

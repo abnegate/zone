@@ -16,6 +16,13 @@ const TOOL_LABELS: Record<string, string> = {
   list_deployments: 'Listed GitHub deployments',
   list_issues: 'Listed GitHub issues',
   read_repository_file: 'Read a repository file',
+  create_task: 'Created a task',
+  update_task: 'Updated a task',
+  create_document: 'Created a document',
+  update_document: 'Updated a document',
+  send_message: 'Sent a message',
+  create_reminder: 'Created a reminder',
+  cancel_reminder: 'Cancelled a reminder',
 };
 
 function toolLabel(name: string): string {

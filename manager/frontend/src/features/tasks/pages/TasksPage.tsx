@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Badge, Button, EmptyState } from '@zone/ui';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { client } from '../../../api/client';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard } from '../components';
@@ -36,8 +37,10 @@ function PrStatusBadge({ status }: { status: 'pending' | 'open' | 'merged' | 'cl
 }
 
 export default function TasksPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [filterProject, setFilterProject] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<string>('');
+  const linkedTaskId = searchParams.get('id');
 
   const {
     tasks,
@@ -59,6 +62,23 @@ export default function TasksPage() {
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!linkedTaskId) return;
+    const found = tasks.find((task) => task.id === linkedTaskId);
+    if (found) {
+      setSelectedTask(found);
+    }
+  }, [linkedTaskId, tasks]);
+
+  const closeSelectedTask = () => {
+    setSelectedTask(null);
+    if (searchParams.get('id')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('id');
+      setSearchParams(next, { replace: true });
+    }
+  };
 
   const handleTaskCreated = async (_task: Task) => {
     // Task is already added to the list by the createTask hook
@@ -240,11 +260,7 @@ export default function TasksPage() {
       />
 
       {selectedTask && (
-        <TaskExecutionView
-          key={selectedTask.id}
-          task={selectedTask}
-          onClose={() => setSelectedTask(null)}
-        />
+        <TaskExecutionView key={selectedTask.id} task={selectedTask} onClose={closeSelectedTask} />
       )}
     </div>
   );

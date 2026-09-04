@@ -15,6 +15,7 @@ use zone_core::llm::{
 
 use super::Citation;
 use super::citations;
+use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
 
 /// Maximum reason/act rounds before we stop and answer with what we have.
@@ -36,7 +37,8 @@ pub enum AgentEvent {
         arguments: String,
     },
     /// A tool finished. `detail` is a short human-readable outcome, not the
-    /// full output, which can run to thousands of characters.
+    /// full output, which can run to thousands of characters. Workspace writes
+    /// also carry a receipt for the console.
     ToolCallCompleted {
         id: String,
         name: String,
@@ -44,6 +46,7 @@ pub enum AgentEvent {
         detail: String,
         duration_ms: u64,
         citations: Vec<Citation>,
+        receipt: Option<ActionReceipt>,
     },
     /// The model produced an image. Carries the raw URL from the provider;
     /// the consumer decides how to store it and whether it is a duplicate.
@@ -233,6 +236,14 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                     .execute(&call.function.name, &call.function.arguments)
                     .await;
                 let duration_ms = started.elapsed().as_millis() as u64;
+                let receipt = tools
+                    .write_receipt(
+                        &call.id,
+                        &call.function.name,
+                        &call.function.arguments,
+                        &result,
+                    )
+                    .await;
 
                 let output = result.to_message();
 
@@ -247,6 +258,7 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                     } else {
                         Vec::new()
                     },
+                    receipt,
                 };
 
                 messages.push(LlmMessage::tool_result(&call.id, output));

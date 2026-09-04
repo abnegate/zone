@@ -1,6 +1,7 @@
-import { afterAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { BrowserRouter } from 'react-router-dom';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
 import type { Task, TaskRun, TaskRunLog } from '../types';
@@ -79,6 +80,10 @@ afterAll(() => {
   mock.restore();
 });
 
+afterEach(() => {
+  window.history.pushState({}, '', '/');
+});
+
 const createQueryClient = () =>
   new QueryClient({
     defaultOptions: {
@@ -87,11 +92,14 @@ const createQueryClient = () =>
     },
   });
 
-const renderTasksPage = () => {
+const renderTasksPage = (path = '/tasks') => {
+  window.history.pushState({}, '', path);
   const queryClient = createQueryClient();
   return render(
     <QueryClientProvider client={queryClient}>
-      <TasksPage />
+      <BrowserRouter>
+        <TasksPage />
+      </BrowserRouter>
     </QueryClientProvider>
   );
 };
@@ -231,6 +239,13 @@ describe('TasksPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
       expect(screen.getByText('Fix button styling')).toBeInTheDocument();
+    });
+  });
+
+  it('opens the linked task from the page URL', async () => {
+    renderTasksPage('/tasks?id=task-1');
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
     });
   });
 

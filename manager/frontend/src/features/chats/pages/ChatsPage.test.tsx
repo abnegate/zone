@@ -278,6 +278,7 @@ afterAll(() => {
 
 describe('ChatsPage', () => {
   beforeEach(() => {
+    window.history.pushState({}, '', '/');
     mockGetChats.mockReset();
     mockGetChat.mockReset();
     mockCreateChat.mockReset();
@@ -1939,6 +1940,57 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(mockClient.getChat).toHaveBeenCalledWith('chat-1');
       });
+    });
+  });
+
+  describe('action receipts', () => {
+    const receiptChat: ChatWithMessages = {
+      ...mockChatWithMessages,
+      messages: [
+        mockChatWithMessages.messages[0],
+        {
+          ...mockChatWithMessages.messages[1],
+          metadata: {
+            action_receipts: [
+              {
+                id: 'call_1',
+                action: 'create_task',
+                target_type: 'task',
+                target_id: 'task-1',
+                target_label: 'Ship the billing export',
+                actor_id: 'user-1',
+                actor_name: 'Alice',
+                occurred_at: '2026-09-05T10:47:00.000Z',
+                success: true,
+                outcome: 'Task created',
+                href: '/tasks?id=task-1',
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    it('renders a stored receipt with a link to the changed item', async () => {
+      mockGetChat.mockResolvedValue(receiptChat);
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      expect(await screen.findByTestId('action-receipt')).toBeInTheDocument();
+      expect(screen.getByText('Created task')).toBeInTheDocument();
+      expect(screen.getByText('Ship the billing export')).toBeInTheDocument();
+      expect(screen.getByText('Alice')).toBeInTheDocument();
+      expect(screen.getByText('Task created')).toBeInTheDocument();
+      expect(screen.getByTestId('action-receipt-link')).toHaveAttribute('href', '/tasks?id=task-1');
+    });
+
+    it('selects a chat from the page URL', async () => {
+      mockGetChat.mockResolvedValue(receiptChat);
+      window.history.pushState({}, '', '/chats?id=chat-1');
+      renderChatsPage();
+
+      expect(await screen.findByText('Hi there!')).toBeInTheDocument();
+      expect(mockGetChat).toHaveBeenCalledWith('chat-1');
     });
   });
 });

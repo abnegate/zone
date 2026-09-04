@@ -1,5 +1,6 @@
 import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { CreateKnowledgeWizard } from '../components';
 import { useKnowledge } from '../hooks';
 import type { KnowledgeEntry } from '../types';
@@ -11,12 +12,31 @@ export default function WikiPage() {
   const { entries, loading, error, refreshing, createEntry, deleteEntry, refreshEntry } =
     useKnowledge();
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<FilterType>('all');
   const [showCreateWizard, setShowCreateWizard] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<KnowledgeEntry | null>(null);
+  const linkedEntryId = searchParams.get('id');
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!linkedEntryId) return;
+    const found = entries.find((entry) => entry.id === linkedEntryId);
+    if (found) {
+      setSelectedEntry(found);
+    }
+  }, [linkedEntryId, entries]);
+
+  const closeSelectedEntry = () => {
+    setSelectedEntry(null);
+    if (searchParams.get('id')) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('id');
+      setSearchParams(next, { replace: true });
+    }
+  };
 
   const handleEntryCreated = (_entry: KnowledgeEntry) => {
     // Entry is already added to the list by the hook
@@ -31,7 +51,7 @@ export default function WikiPage() {
       setDeleteError(null);
       await deleteEntry(id);
       if (selectedEntry?.id === id) {
-        setSelectedEntry(null);
+        closeSelectedEntry();
       }
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : 'Failed to delete knowledge');
@@ -279,10 +299,10 @@ export default function WikiPage() {
       {selectedEntry && !showCreateWizard && (
         <div
           className="wiki-dialog-overlay"
-          onClick={() => setSelectedEntry(null)}
+          onClick={closeSelectedEntry}
           onKeyDown={(e) => {
             if (e.key === 'Escape') {
-              setSelectedEntry(null);
+              closeSelectedEntry();
             }
           }}
           role="button"
@@ -306,7 +326,7 @@ export default function WikiPage() {
               <button
                 type="button"
                 className="wiki-dialog-close"
-                onClick={() => setSelectedEntry(null)}
+                onClick={closeSelectedEntry}
                 aria-label="Close modal"
               >
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -382,7 +402,7 @@ export default function WikiPage() {
                 variant="destructive"
                 onClick={() => {
                   handleDeleteKnowledge(selectedEntry.id);
-                  setSelectedEntry(null);
+                  closeSelectedEntry();
                 }}
               >
                 Delete

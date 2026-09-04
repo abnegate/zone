@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import type {
+  ActionReceipt,
   ChatWithMessages,
   Citation,
   Message,
@@ -43,6 +44,11 @@ type ServerMessage =
       detail: string;
       duration_ms: number;
       citations?: Citation[];
+    }
+  | {
+      type: 'action_receipt';
+      message_id: string;
+      receipt: ActionReceipt;
     }
   | {
       type: 'image';
@@ -235,6 +241,23 @@ export function useChat(
     });
   }, []);
 
+  const appendReceipt = useCallback((messageId: string, receipt: ActionReceipt) => {
+    setChat((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        messages: prev.messages.map((message) => {
+          if (message.id !== messageId) return message;
+          const existing = message.metadata?.action_receipts ?? [];
+          const receipts = existing.some((item) => item.id === receipt.id)
+            ? existing.map((item) => (item.id === receipt.id ? receipt : item))
+            : [...existing, receipt];
+          return { ...message, metadata: { ...message.metadata, action_receipts: receipts } };
+        }),
+      };
+    });
+  }, []);
+
   const applySavedUserMessage = useCallback(
     (id: string, content: string, metadata?: MessageMetadata | null) => {
       // Read and clear refs outside setChat so the updater stays pure.
@@ -354,6 +377,9 @@ export function useChat(
             appendCitations(payload.message_id, payload.citations);
           }
           break;
+        case 'action_receipt':
+          appendReceipt(payload.message_id, payload.receipt);
+          break;
         case 'image':
           if (assistantId === payload.message_id) {
             const attachments = assistantMetadata?.attachments ?? [];
@@ -430,7 +456,15 @@ export function useChat(
       socket.close();
       socketRef.current = null;
     };
-  }, [chatId, upsertMessage, applySavedUserMessage, patchToolCall, appendCitations, applyTitle]);
+  }, [
+    chatId,
+    upsertMessage,
+    applySavedUserMessage,
+    patchToolCall,
+    appendCitations,
+    appendReceipt,
+    applyTitle,
+  ]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     // Numeric readyState values stay valid for test doubles that do not
