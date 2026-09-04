@@ -278,6 +278,23 @@ describe('WorkspaceSettingsPage', () => {
     );
   });
 
+  it('persists explicit default-looking values after changing a native theme', async () => {
+    savedTheme = { ...mockTheme, font_family: null, border_radius: null };
+    render(<WorkspaceSettingsPage />);
+    fireEvent.change(await screen.findByLabelText('Font Family'), { target: { value: 'roboto' } });
+    fireEvent.change(screen.getByLabelText('Font Family'), { target: { value: 'system' } });
+    fireEvent.click(screen.getByLabelText('Large'));
+    fireEvent.click(screen.getByLabelText('Medium'));
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() =>
+      expect(mockClient.updateWorkspaceTheme).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.objectContaining({ font_family: 'system', border_radius: 'medium' })
+      )
+    );
+  });
+
   it('resets form values without creating a preview when saved theme becomes null', async () => {
     const { rerender } = render(<WorkspaceSettingsPage />);
     expect(await screen.findByLabelText('Font Family')).toHaveValue('inter');

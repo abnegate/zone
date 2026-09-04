@@ -86,6 +86,7 @@ export default function WorkspaceSettingsPage() {
   const [aiLoading, setAiLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
   const edited = useRef(false);
+  const touched = useRef(new Set<keyof UpdateWorkspaceThemeRequest>());
   const scope = `${orgId}/${workspaceId}`;
   const currentScope = useRef<string | null>(scope);
   currentScope.current = scope;
@@ -178,6 +179,7 @@ export default function WorkspaceSettingsPage() {
   useEffect(() => {
     applyThemeToForm(workspaceTheme?.workspace_id === workspaceId ? workspaceTheme : null);
     edited.current = false;
+    touched.current.clear();
     setDirty(false);
     previewWorkspaceTheme(null);
   }, [workspaceTheme, workspaceId, previewWorkspaceTheme, applyThemeToForm]);
@@ -223,18 +225,34 @@ export default function WorkspaceSettingsPage() {
   const createThemeRequest = useCallback((): Required<UpdateWorkspaceThemeRequest> => {
     const saved = workspaceTheme?.workspace_id === workspaceId ? workspaceTheme : null;
     const preserve = <T extends string>(
+      field: keyof UpdateWorkspaceThemeRequest,
       value: T,
-      previous: T | null | undefined,
-      fallback: T
-    ): T | null => (value === (previous ?? fallback) ? (previous ?? null) : value);
+      previous: T | null | undefined
+    ): T | null => (touched.current.has(field) ? value : (previous ?? null));
     return {
-      primary_color_light: preserve(primaryColorLight, saved?.primary_color_light, '#3b82f6'),
-      secondary_color_light: preserve(secondaryColorLight, saved?.secondary_color_light, '#6366f1'),
-      primary_color_dark: preserve(primaryColorDark, saved?.primary_color_dark, '#3b82f6'),
-      secondary_color_dark: preserve(secondaryColorDark, saved?.secondary_color_dark, '#6366f1'),
-      font_family: preserve(fontFamily, saved?.font_family, 'system'),
-      font_size_base: preserve(`${fontSize}px`, saved?.font_size_base, '16px'),
-      border_radius: preserve(borderRadius, saved?.border_radius, 'medium'),
+      primary_color_light: preserve(
+        'primary_color_light',
+        primaryColorLight,
+        saved?.primary_color_light
+      ),
+      secondary_color_light: preserve(
+        'secondary_color_light',
+        secondaryColorLight,
+        saved?.secondary_color_light
+      ),
+      primary_color_dark: preserve(
+        'primary_color_dark',
+        primaryColorDark,
+        saved?.primary_color_dark
+      ),
+      secondary_color_dark: preserve(
+        'secondary_color_dark',
+        secondaryColorDark,
+        saved?.secondary_color_dark
+      ),
+      font_family: preserve('font_family', fontFamily, saved?.font_family),
+      font_size_base: preserve('font_size_base', `${fontSize}px`, saved?.font_size_base),
+      border_radius: preserve('border_radius', borderRadius, saved?.border_radius),
     };
   }, [
     workspaceTheme,
@@ -280,6 +298,7 @@ export default function WorkspaceSettingsPage() {
         setWorkspaceTheme(theme);
         applyThemeToForm(theme);
         edited.current = false;
+        touched.current.clear();
         setDirty(false);
         previewWorkspaceTheme(null);
       }
@@ -344,6 +363,7 @@ export default function WorkspaceSettingsPage() {
         setWorkspaceTheme(null);
         applyThemeToForm(null);
         edited.current = false;
+        touched.current.clear();
         setDirty(false);
         previewWorkspaceTheme(null);
       } else if (activeTab === 'ai') {
@@ -442,12 +462,18 @@ export default function WorkspaceSettingsPage() {
                           type="color"
                           id="primary-light"
                           value={primaryColorLight}
-                          onChange={(e) => setPrimaryColorLight(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('primary_color_light');
+                            setPrimaryColorLight(e.target.value);
+                          }}
                         />
                         <input
                           type="text"
                           value={primaryColorLight}
-                          onChange={(e) => setPrimaryColorLight(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('primary_color_light');
+                            setPrimaryColorLight(e.target.value);
+                          }}
                           pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
                           className="color-text-input"
                         />
@@ -460,12 +486,18 @@ export default function WorkspaceSettingsPage() {
                           type="color"
                           id="secondary-light"
                           value={secondaryColorLight}
-                          onChange={(e) => setSecondaryColorLight(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('secondary_color_light');
+                            setSecondaryColorLight(e.target.value);
+                          }}
                         />
                         <input
                           type="text"
                           value={secondaryColorLight}
-                          onChange={(e) => setSecondaryColorLight(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('secondary_color_light');
+                            setSecondaryColorLight(e.target.value);
+                          }}
                           pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
                           className="color-text-input"
                         />
@@ -483,12 +515,18 @@ export default function WorkspaceSettingsPage() {
                           type="color"
                           id="primary-dark"
                           value={primaryColorDark}
-                          onChange={(e) => setPrimaryColorDark(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('primary_color_dark');
+                            setPrimaryColorDark(e.target.value);
+                          }}
                         />
                         <input
                           type="text"
                           value={primaryColorDark}
-                          onChange={(e) => setPrimaryColorDark(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('primary_color_dark');
+                            setPrimaryColorDark(e.target.value);
+                          }}
                           pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
                           className="color-text-input"
                         />
@@ -501,12 +539,18 @@ export default function WorkspaceSettingsPage() {
                           type="color"
                           id="secondary-dark"
                           value={secondaryColorDark}
-                          onChange={(e) => setSecondaryColorDark(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('secondary_color_dark');
+                            setSecondaryColorDark(e.target.value);
+                          }}
                         />
                         <input
                           type="text"
                           value={secondaryColorDark}
-                          onChange={(e) => setSecondaryColorDark(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('secondary_color_dark');
+                            setSecondaryColorDark(e.target.value);
+                          }}
                           pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
                           className="color-text-input"
                         />
@@ -524,7 +568,10 @@ export default function WorkspaceSettingsPage() {
                       <select
                         id="font-family"
                         value={fontFamily}
-                        onChange={(e) => setFontFamily(e.target.value as FontFamily)}
+                        onChange={(e) => {
+                          touched.current.add('font_family');
+                          setFontFamily(e.target.value as FontFamily);
+                        }}
                         className="form-select"
                       >
                         {fontOptions.map((opt) => (
@@ -543,7 +590,10 @@ export default function WorkspaceSettingsPage() {
                           min="12"
                           max="20"
                           value={fontSize}
-                          onChange={(e) => setFontSize(e.target.value)}
+                          onChange={(e) => {
+                            touched.current.add('font_size_base');
+                            setFontSize(e.target.value);
+                          }}
                           className="form-slider"
                         />
                         <span className="slider-value">{fontSize}px</span>
@@ -565,7 +615,10 @@ export default function WorkspaceSettingsPage() {
                             name="border-radius"
                             value={opt.value}
                             checked={borderRadius === opt.value}
-                            onChange={() => setBorderRadius(opt.value)}
+                            onChange={() => {
+                              touched.current.add('border_radius');
+                              setBorderRadius(opt.value);
+                            }}
                           />
                           <span className="radio-label">{opt.label}</span>
                         </label>
