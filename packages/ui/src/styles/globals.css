@@ -1,7 +1,7 @@
 @import 'tailwindcss';
-@plugin "tailwindcss-animate";
-
 @import './variables.css';
+
+@plugin "tailwindcss-animate";
 
 @theme {
   --font-sans: var(--ui-font-body);
@@ -855,23 +855,12 @@
     }
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .ui-dialog-overlay[data-state='open'],
-    .ui-dialog-overlay[data-state='closed'],
-    .ui-dialog-content[data-state='open'],
-    .ui-dialog-content[data-state='closed'],
-    .ui-wizard-overlay,
-    .ui-wizard-dismiss {
-      position: absolute;
-      inset: 0;
-      padding: 0;
-      border: 0;
-      background: transparent;
-    }
-
-    .ui-wizard {
-      animation: none;
-    }
+  .ui-wizard-dismiss {
+    position: absolute;
+    inset: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
   }
 
   /* Wizard overlay is CSS, not Tailwind — the package source is not scanned. */
@@ -1159,5 +1148,16 @@
   .ui-wizard-footer {
     flex-wrap: wrap;
     gap: var(--ui-space-2);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ui-dialog-overlay[data-state='open'],
+    .ui-dialog-overlay[data-state='closed'],
+    .ui-dialog-content[data-state='open'],
+    .ui-dialog-content[data-state='closed'],
+    .ui-wizard-overlay,
+    .ui-wizard {
+      animation: none;
+    }
   }
 }
