@@ -43,6 +43,7 @@ fn test_config() -> Config {
         ollama_host: "http://localhost:11434".to_string(),
         gpt4all_models_url: zone_server::config::DEFAULT_GPT4ALL_MODELS_URL.to_string(),
         huggingface_models_url: zone_server::config::DEFAULT_HUGGINGFACE_MODELS_URL.to_string(),
+        model_search_proxy_url: None,
         encryption_key: "12345678901234567890123456789012".to_string(),
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,

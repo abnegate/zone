@@ -201,8 +201,8 @@ VPN is optional. The system works without it — Open WebUI and Manager chat jus
 To enable VPN-protected search:
 ```bash
 # Add VPN credentials to .env
-# Start with VPN profile
-docker compose --profile vpn up -d
+# Save the model catalog proxy in .env and start the VPN profile
+make up-vpn
 ```
 
 Supported providers: Surfshark, NordVPN, ExpressVPN, ProtonVPN, Mullvad, and more. See [Gluetun Wiki](https://github.com/qdm12/gluetun-wiki).

@@ -17,13 +17,20 @@ use zone_server::{
 
 #[tokio::test]
 async fn creation_preserves_source_and_rejects_other_workspaces() {
+    // Coverage reruns the suite against the same database for each report.
+    for _ in 0..2 {
+        check_creation().await;
+    }
+}
+
+async fn check_creation() {
     let pool = common::create_test_pool().await;
     let (_, workspace_id, user_id) = common::setup_test_data(&pool).await;
     let (_, other_workspace_id, _) = common::setup_test_data(&pool).await;
     let source = sources::create_source(
         &pool,
         workspace_id,
-        "Repository",
+        &format!("Repository {workspace_id}"),
         "github",
         json!({}),
         None,
