@@ -110,7 +110,12 @@ test.describe('Installation Process', () => {
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
     await expect(page.getByRole('heading', { name: 'Installation Complete', exact: true })).toBeVisible({ timeout: 10000 });
 
-    await page.click('button:has-text("Close")');
+    await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+    // handleCloseModal calls window.close(); Chromium ignores it on a
+    // non-script-opened tab, Firefox honors it and tears the page down.
+    if (page.isClosed()) {
+      return;
+    }
     await expect(page.getByRole('dialog')).toHaveCount(0);
   });
 });

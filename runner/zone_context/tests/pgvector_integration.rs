@@ -123,7 +123,18 @@ async fn test_pgvector_store_and_search() {
 
     // Search with the same vector (should return high similarity)
     let query = vec![1.0 / (1536_f32).sqrt(); 1536];
-    let results = store.search(&query, 10, Some(0.5), None).await.unwrap();
+    let results = store
+        .search(
+            &query,
+            10,
+            Some(0.5),
+            Some(SearchFilters {
+                source_ids: Some(vec![source_id]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
 
     assert!(!results.is_empty(), "Should find at least one result");
     assert_eq!(results[0].chunk_id, chunk_id);
@@ -199,9 +210,10 @@ async fn test_pgvector_search_with_filters() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].source_id, source_id_1);
 
-    // Search with category filter
+    // Search with category filter, scoped to this test's source so parallel
+    // suites cannot contribute extra web embeddings.
     let filters = SearchFilters {
-        source_ids: None,
+        source_ids: Some(vec![source_id_2]),
         workspace_id: None,
         categories: Some(vec!["web".to_string()]),
         min_quality: None,
@@ -270,15 +282,37 @@ async fn test_pgvector_delete_operations() {
 
     // Verify all are stored
     let query = vec![1.0 / (1536_f32).sqrt(); 1536];
-    let results = store.search(&query, 10, Some(0.5), None).await.unwrap();
-    assert!(results.len() >= 3, "Should have at least 3 results");
+    let results = store
+        .search(
+            &query,
+            10,
+            Some(0.5),
+            Some(SearchFilters {
+                source_ids: Some(vec![source_id]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 3, "Should have 3 results for this source");
 
     // Delete by content item
     let deleted = store.delete_by_content_item(items[0].id).await.unwrap();
     assert_eq!(deleted, 1, "Should delete 1 embedding");
 
     // Verify deletion
-    let results = store.search(&query, 10, Some(0.5), None).await.unwrap();
+    let results = store
+        .search(
+            &query,
+            10,
+            Some(0.5),
+            Some(SearchFilters {
+                source_ids: Some(vec![source_id]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
     let remaining = results
         .iter()
         .filter(|r| r.content_item_id == items[0].id)
@@ -400,7 +434,18 @@ async fn test_pgvector_upsert_behavior() {
     store.store(&embedding2).await.unwrap();
 
     // Search should return the updated embedding
-    let results = store.search(&vector2, 1, Some(0.5), None).await.unwrap();
+    let results = store
+        .search(
+            &vector2,
+            1,
+            Some(0.5),
+            Some(SearchFilters {
+                source_ids: Some(vec![source_id]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].chunk_id, chunk_id);

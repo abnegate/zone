@@ -231,7 +231,7 @@ impl CommandExecutor {
 
         let max_output = max_output_bytes.unwrap_or(self.config.max_output_bytes);
 
-        if let Some(stdout_reader) = stdout {
+        let stdout_task = stdout.map(|stdout_reader| {
             self.spawn_output_streamer(
                 job_id.clone(),
                 stdout_reader,
@@ -239,10 +239,10 @@ impl CommandExecutor {
                 tx.clone(),
                 cancelled.clone(),
                 max_output,
-            );
-        }
+            )
+        });
 
-        if let Some(stderr_reader) = stderr {
+        let stderr_task = stderr.map(|stderr_reader| {
             self.spawn_output_streamer(
                 job_id.clone(),
                 stderr_reader,
@@ -250,8 +250,8 @@ impl CommandExecutor {
                 tx.clone(),
                 cancelled.clone(),
                 max_output,
-            );
-        }
+            )
+        });
 
         // Spawn timeout/wait task
         let timeout = timeout_ms
@@ -264,9 +264,19 @@ impl CommandExecutor {
         let started_at = Instant::now();
 
         tokio::spawn(async move {
+            let drain_output = async {
+                if let Some(task) = stdout_task {
+                    let _ = task.await;
+                }
+                if let Some(task) = stderr_task {
+                    let _ = task.await;
+                }
+            };
+
             tokio::select! {
                 // Wait for process to exit
                 exit_result = child.wait() => {
+                    drain_output.await;
                     match exit_result {
                         Ok(status) => {
                             let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -346,7 +356,8 @@ impl CommandExecutor {
         tx: mpsc::Sender<OutboundMessage>,
         cancelled: Arc<AtomicBool>,
         max_output_bytes: usize,
-    ) where
+    ) -> tokio::task::JoinHandle<()>
+    where
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
     {
         let buffer_size = self.config.buffer_size;
@@ -418,7 +429,7 @@ impl CommandExecutor {
                     Err(_) => break,
                 }
             }
-        });
+        })
     }
 }
 
@@ -741,20 +752,29 @@ mod tests {
         let handle = executor.spawn(&request, tx).await;
         assert!(handle.is_ok());
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        let mut got_stderr = false;
-        while let Ok(msg) = rx.try_recv() {
-            if let OutboundMessage::RunStderr { data, .. } = msg {
-                let decoded = BASE64_STANDARD.decode(&data).unwrap();
-                let text = String::from_utf8(decoded).unwrap();
-                if text.contains("error") {
-                    got_stderr = true;
+        let got_stderr_before_exit = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut got_stderr = false;
+            while let Some(msg) = rx.recv().await {
+                if let OutboundMessage::RunStderr { data, .. } = &msg {
+                    let decoded = BASE64_STANDARD.decode(data).unwrap();
+                    let text = String::from_utf8(decoded).unwrap();
+                    if text.contains("error") {
+                        got_stderr = true;
+                    }
+                }
+                if matches!(msg, OutboundMessage::RunExit { .. }) {
+                    return got_stderr;
                 }
             }
-        }
+            got_stderr
+        })
+        .await
+        .expect("timed out waiting for RunExit");
 
-        assert!(got_stderr);
+        assert!(
+            got_stderr_before_exit,
+            "stderr must be delivered before RunExit"
+        );
     }
 
     #[tokio::test]

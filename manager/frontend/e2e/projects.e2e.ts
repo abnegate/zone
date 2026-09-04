@@ -725,7 +725,7 @@ test.describe('Projects Page', () => {
 
       const firstCard = page.locator('.projects-page .ui-card').first();
       await firstCard.click();
-      await expect(firstCard).toHaveClass(/border-primary/);
+      await expect(firstCard).toHaveClass(/selected/);
     });
   });
 });
