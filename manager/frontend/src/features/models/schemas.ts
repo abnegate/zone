@@ -1,8 +1,5 @@
 import { z } from 'zod';
-
-// =============================================================================
-// Model Schemas
-// =============================================================================
+import { MODEL_CAPABILITIES } from './types';
 
 export const ModelDetailsSchema = z.object({
   format: z.string().nullable().optional(),
@@ -41,6 +38,7 @@ export const BrowseModelSchema = z.object({
   likes: z.number().nullable().optional(),
   tags: z.array(z.string()).nullable().optional(),
   use_cases: z.array(z.string()).nullable().optional(),
+  capabilities: z.array(z.enum(MODEL_CAPABILITIES)).nullable().optional(),
   sizes: z.array(ModelSizeOptionSchema).nullable().optional(),
   details: ModelDetailsSchema.nullable().optional(),
   source: z.enum(['ollama', 'huggingface', 'gpt4all', 'openrouter']).optional(),

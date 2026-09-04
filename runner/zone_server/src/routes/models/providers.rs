@@ -10,13 +10,9 @@ use std::time::Duration;
 use crate::config::{DEFAULT_GPT4ALL_MODELS_URL, DEFAULT_HUGGINGFACE_MODELS_URL};
 
 use super::types::{
-    BrowseQuery, BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSize,
-    ModelSizeFilter, ModelSort,
+    BrowseQuery, BrowseResponse, ErrorResponse, ModelCapability, ModelDetails, ModelResponse,
+    ModelSize, ModelSizeFilter, ModelSort,
 };
-
-// =============================================================================
-// Constants
-// =============================================================================
 
 pub const DEFAULT_PAGE_SIZE: usize = 20;
 pub const MAX_PAGE_SIZE: usize = 100;
@@ -38,10 +34,6 @@ static BILLION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)(\d+(?:\.\d+)?)\s*billion").expect("billion regex"));
 static PULLS_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)([\d,.]+[KMBkmb]?)\s*Pulls").expect("pulls regex"));
-
-// =============================================================================
-// Shared HTTP Client
-// =============================================================================
 
 static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -115,10 +107,6 @@ pub fn get_provider(name: &str) -> Result<Box<dyn ModelProvider>, ProviderError>
         ))),
     }
 }
-
-// =============================================================================
-// Ollama Library Provider
-// =============================================================================
 
 pub struct OllamaLibraryProvider;
 
@@ -271,6 +259,7 @@ fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
                 &capability_tags.join(" "),
                 &name,
             ]));
+            let capabilities = declared_capabilities(capability_tags.iter().map(String::as_str));
             let tags = nonempty_vec(capability_tags);
             let downloads = extract_pulls(&text);
             let url = Some(format!("https://ollama.com/library/{}", name));
@@ -282,6 +271,7 @@ fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
                 downloads,
                 tags,
                 use_cases,
+                capabilities,
                 sizes,
                 details: Some(ModelDetails {
                     format: Some("gguf".to_string()),
@@ -510,10 +500,6 @@ fn get_popular_ollama_models() -> Vec<ModelResponse> {
         )
         .collect()
 }
-
-// =============================================================================
-// HuggingFace Provider
-// =============================================================================
 
 pub struct HuggingFaceProvider {
     catalog_url: String,
@@ -827,6 +813,12 @@ fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
         .or_else(|| model_id.split_once('/').map(|(owner, _)| owner.to_string()));
     let description = huggingface_description(&m, pipeline.as_deref(), family.as_deref());
     let use_cases = nonempty_vec(use_cases_from_pipeline(pipeline.as_deref(), &tags));
+    let capabilities = declared_capabilities(
+        pipeline
+            .as_deref()
+            .into_iter()
+            .chain(tags.iter().map(String::as_str)),
+    );
     let public_tags = nonempty_vec(
         tags.into_iter()
             .filter(|t| {
@@ -854,6 +846,7 @@ fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
         likes: m.likes,
         tags: public_tags,
         use_cases,
+        capabilities,
         details: Some(ModelDetails {
             format: Some("gguf".to_string()),
             family,
@@ -892,10 +885,6 @@ fn huggingface_description(
     sentence.push('.');
     Some(sentence)
 }
-
-// =============================================================================
-// GPT4All Provider
-// =============================================================================
 
 pub struct Gpt4AllProvider {
     catalog_url: String,
@@ -1116,10 +1105,6 @@ fn extract_quantization(filename: &str) -> Option<String> {
     None
 }
 
-// =============================================================================
-// OpenRouter Provider
-// =============================================================================
-
 pub struct OpenRouterProvider;
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
@@ -1208,6 +1193,8 @@ struct OpenRouterArchitecture {
     modality: Option<String>,
     #[serde(default)]
     input_modalities: Option<Vec<String>>,
+    #[serde(default)]
+    output_modalities: Option<Vec<String>>,
 }
 
 fn openrouter_to_model(m: OpenRouterModel) -> ModelResponse {
@@ -1220,27 +1207,58 @@ fn openrouter_to_model(m: OpenRouterModel) -> ModelResponse {
         .as_deref()
         .map(collapse_whitespace)
         .filter(|s| !s.is_empty());
-    let mut capability_bits = vec![
-        m.name.as_str(),
-        m.id.as_str(),
-        description.as_deref().unwrap_or(""),
-        m.architecture
-            .as_ref()
-            .and_then(|a| a.modality.as_deref())
-            .unwrap_or(""),
-    ];
-    let input_modalities = m
-        .architecture
-        .as_ref()
-        .and_then(|a| a.input_modalities.as_ref())
-        .cloned()
-        .unwrap_or_default();
-    let supported = m.supported_parameters.clone().unwrap_or_default();
-    let joined_inputs = input_modalities.join(" ");
-    let joined_params = supported.join(" ");
-    capability_bits.push(&joined_inputs);
-    capability_bits.push(&joined_params);
-    let use_cases = nonempty_vec(infer_use_cases(&capability_bits));
+    let mut capabilities = Vec::new();
+    if let Some(architecture) = &m.architecture {
+        let legacy = architecture
+            .modality
+            .as_deref()
+            .and_then(|value| value.split_once("->"));
+        for (explicit, fallback, output) in [
+            (
+                &architecture.input_modalities,
+                legacy.map(|(input, _)| input),
+                false,
+            ),
+            (
+                &architecture.output_modalities,
+                legacy.map(|(_, output)| output),
+                true,
+            ),
+        ] {
+            let modalities: Vec<&str> = match explicit {
+                Some(values) => values.iter().map(String::as_str).collect(),
+                None => fallback
+                    .map(|value| value.split('+').collect())
+                    .unwrap_or_default(),
+            };
+            for modality in modalities {
+                let capability = match (modality.trim(), output) {
+                    ("text", _) => Some(ModelCapability::Text),
+                    ("image", false) => Some(ModelCapability::ImageInput),
+                    ("image", true) => Some(ModelCapability::ImageGeneration),
+                    ("audio", false) => Some(ModelCapability::AudioInput),
+                    ("audio", true) => Some(ModelCapability::AudioGeneration),
+                    ("video", false) => Some(ModelCapability::VideoInput),
+                    ("video", true) => Some(ModelCapability::VideoGeneration),
+                    _ => None,
+                };
+                if let Some(capability) = capability {
+                    push_capability(&mut capabilities, capability);
+                }
+            }
+        }
+    }
+    for parameter in m.supported_parameters.iter().flatten() {
+        let capability = match parameter.as_str() {
+            "tools" => Some(ModelCapability::Tools),
+            "reasoning" | "include_reasoning" => Some(ModelCapability::Reasoning),
+            _ => None,
+        };
+        if let Some(capability) = capability {
+            push_capability(&mut capabilities, capability);
+        }
+    }
+    let capabilities = (!capabilities.is_empty()).then_some(capabilities);
     let author = m.id.split_once('/').map(|(owner, _)| owner.to_string());
     let display_name = (m.name != m.id).then_some(m.name.clone());
 
@@ -1250,7 +1268,7 @@ fn openrouter_to_model(m: OpenRouterModel) -> ModelResponse {
         description,
         author,
         url: Some(format!("https://openrouter.ai/{}", m.id)),
-        use_cases,
+        capabilities,
         details: Some(ModelDetails {
             format: Some("api".to_string()),
             family,
@@ -1262,9 +1280,60 @@ fn openrouter_to_model(m: OpenRouterModel) -> ModelResponse {
     }
 }
 
-// =============================================================================
-// Utility functions
-// =============================================================================
+fn push_capability(capabilities: &mut Vec<ModelCapability>, capability: ModelCapability) {
+    if !capabilities.contains(&capability) {
+        capabilities.push(capability);
+    }
+}
+
+fn declared_capabilities<'a>(tags: impl Iterator<Item = &'a str>) -> Option<Vec<ModelCapability>> {
+    use ModelCapability::*;
+
+    let mut capabilities = Vec::new();
+    for tag in tags {
+        let declared: &[ModelCapability] = match tag {
+            "text-generation"
+            | "conversational"
+            | "text2text-generation"
+            | "summarization"
+            | "translation"
+            | "text-classification"
+            | "token-classification"
+            | "question-answering" => &[Text],
+            "image-text-to-text" | "image-to-text" | "visual-question-answering" => {
+                &[ImageInput, Text]
+            }
+            "text-to-image" => &[Text, ImageGeneration],
+            "image-to-image" => &[ImageInput, ImageGeneration],
+            "image-text-to-image" => &[Text, ImageInput, ImageGeneration],
+            "unconditional-image-generation" => &[ImageGeneration],
+            "image-classification"
+            | "object-detection"
+            | "image-segmentation"
+            | "depth-estimation" => &[ImageInput],
+            "text-to-audio" | "text-to-speech" => &[Text, AudioGeneration],
+            "automatic-speech-recognition" => &[AudioInput, Text],
+            "audio-classification" => &[AudioInput],
+            "audio-to-audio" => &[AudioInput, AudioGeneration],
+            "text-to-video" => &[Text, VideoGeneration],
+            "image-to-video" => &[ImageInput, VideoGeneration],
+            "video-text-to-text" => &[VideoInput, Text],
+            "video-classification" => &[VideoInput],
+            "feature-extraction" | "sentence-similarity" | "embedding" | "embeddings" => {
+                &[Embeddings]
+            }
+            "tools" => &[Tools],
+            "thinking" => &[Reasoning],
+            "vision" => &[ImageInput],
+            "audio" => &[Audio],
+            _ => &[],
+        };
+        for &capability in declared {
+            push_capability(&mut capabilities, capability);
+        }
+    }
+    (!capabilities.is_empty()).then_some(capabilities)
+}
 
 fn huggingface_sort_params(sort: ModelSort) -> (&'static str, i8) {
     match sort {
@@ -1726,10 +1795,6 @@ fn infer_use_cases(parts: &[&str]) -> Vec<String> {
     cases.truncate(5);
     cases
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -2500,6 +2565,99 @@ mod tests {
     }
 
     #[test]
+    fn test_openrouter_capabilities_use_exact_metadata_and_direction() {
+        let parsed = serde_json::from_value(serde_json::json!({
+            "id": "tools-vision-reasoning/model", "name": "Image generation",
+            "description": "Tools, vision, audio and reasoning are not supported",
+            "architecture": {
+                "modality": "image+audio->image",
+                "input_modalities": ["text"], "output_modalities": ["text"]
+            }, "supported_parameters": ["temperature"]
+        }))
+        .unwrap();
+        assert_eq!(
+            openrouter_to_model(parsed).capabilities,
+            Some(vec![ModelCapability::Text])
+        );
+
+        let parsed = serde_json::from_value(serde_json::json!({
+            "id": "test/model", "name": "Test", "architecture": {
+                "modality": "text+image+audio+video->text+image+audio+video"
+            }, "supported_parameters": ["tools", "reasoning", "include_reasoning"]
+        }))
+        .unwrap();
+        let capabilities = openrouter_to_model(parsed).capabilities.unwrap();
+        assert_eq!(capabilities.len(), 9);
+        assert!(capabilities.contains(&ModelCapability::ImageInput));
+        assert!(capabilities.contains(&ModelCapability::ImageGeneration));
+        assert!(capabilities.contains(&ModelCapability::Tools));
+
+        let parsed = serde_json::from_value(serde_json::json!({
+            "id": "test/model", "name": "Tools image generation reasoning",
+            "architecture": {"modality": "text+image->image", "input_modalities": [], "output_modalities": []}
+        })).unwrap();
+        assert_eq!(openrouter_to_model(parsed).capabilities, None);
+    }
+
+    #[test]
+    fn test_huggingface_capabilities_are_declared_tasks_only() {
+        let parsed = serde_json::from_value(serde_json::json!({
+            "id": "tools-vision/audio-reasoning", "pipeline_tag": "text-generation",
+            "tags": ["not-tools", "image-generation-guide", "gguf"],
+            "description": "image generation tools audio reasoning"
+        }))
+        .unwrap();
+        assert_eq!(
+            huggingface_to_model(parsed).capabilities,
+            Some(vec![ModelCapability::Text])
+        );
+        assert_eq!(
+            declared_capabilities(["text-to-image", "feature-extraction"].into_iter()),
+            Some(vec![
+                ModelCapability::Text,
+                ModelCapability::ImageGeneration,
+                ModelCapability::Embeddings
+            ])
+        );
+        assert_eq!(declared_capabilities(["unknown-task"].into_iter()), None);
+        assert_eq!(
+            declared_capabilities(["image-to-image"].into_iter()),
+            Some(vec![
+                ModelCapability::ImageInput,
+                ModelCapability::ImageGeneration
+            ])
+        );
+    }
+
+    #[test]
+    fn test_ollama_capabilities_require_exact_chips() {
+        let models = parse_ollama_library_html(
+            r#"<a href="/library/plain"><p>Tools vision image generation audio reasoning</p></a>
+            <a href="/library/declared"><p>A model</p><span>tools</span><span>vision</span><span>thinking</span></a>"#,
+        );
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.name == "plain")
+                .unwrap()
+                .capabilities,
+            None
+        );
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.name == "declared")
+                .unwrap()
+                .capabilities,
+            Some(vec![
+                ModelCapability::Tools,
+                ModelCapability::ImageInput,
+                ModelCapability::Reasoning
+            ])
+        );
+    }
+
+    #[test]
     fn test_openrouter_to_model_keeps_description_and_context() {
         let json = r#"{
             "id":"anthropic/claude-sonnet-4",
@@ -2521,10 +2679,16 @@ mod tests {
             Some("A balanced model for coding and agents.")
         );
         assert_eq!(model.details.as_ref().unwrap().context_length, Some(200000));
-        let cases = model.use_cases.unwrap();
-        assert!(cases.contains(&"Coding".to_string()));
-        assert!(cases.contains(&"Vision".to_string()));
-        assert!(cases.contains(&"Tool use".to_string()));
+        let capabilities = model.capabilities.unwrap();
+        assert_eq!(
+            capabilities,
+            vec![
+                ModelCapability::Text,
+                ModelCapability::ImageInput,
+                ModelCapability::Tools,
+                ModelCapability::Reasoning
+            ]
+        );
     }
 
     #[test]

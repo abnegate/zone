@@ -36,12 +36,19 @@ fn native(id: Option<&str>) -> Vec<Value> {
 }
 
 async fn exercise(rounds: Vec<Vec<Value>>) -> (Vec<AgentEvent>, Vec<Value>) {
+    exercise_responses(rounds.into_iter().map(|round| (200, round)).collect()).await
+}
+
+async fn exercise_responses(rounds: Vec<(u16, Vec<Value>)>) -> (Vec<AgentEvent>, Vec<Value>) {
     let provider = MockServer::start().await;
     let responses = Arc::new(Mutex::new(VecDeque::from(rounds)));
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(move |_request: &Request| {
-            let deltas = responses.lock().unwrap().pop_front().expect("unexpected extra completion");
+            let (status, deltas) = responses.lock().unwrap().pop_front().expect("unexpected extra completion");
+            if status != 200 {
+                return ResponseTemplate::new(status).set_body_json(&deltas[0]);
+            }
             let mut body = String::new();
             for delta in deltas {
                 let chunk = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
@@ -180,7 +187,7 @@ async fn malformed_reply_after_a_tool_does_not_end_the_loop() {
 
 #[tokio::test]
 async fn repeated_malformed_replies_fail_without_rendering_or_executing_them() {
-    let (events, requests) = exercise(vec![text(MALFORMED); MAX_ITERATIONS]).await;
+    let (events, requests) = exercise(vec![text(MALFORMED); MAX_ITERATIONS + 1]).await;
     assert_eq!(answer(&events), "");
     assert!(started(&events).is_empty());
     assert!(
@@ -188,7 +195,7 @@ async fn repeated_malformed_replies_fail_without_rendering_or_executing_them() {
             .iter()
             .any(|event| matches!(event, AgentEvent::Failed(_)))
     );
-    assert!(requests.len() > 1 && requests.len() <= MAX_ITERATIONS);
+    assert!(requests.len() > 1 && requests.len() <= MAX_ITERATIONS + 1);
 }
 
 #[tokio::test]
@@ -196,7 +203,7 @@ async fn repeated_native_and_text_ids_have_unique_replay_pairs() {
     for id in [Some("call_0"), None] {
         let (events, requests) = exercise(vec![
             native(id),
-            text(&call(id)),
+            text(&call(id).replace("{}", "{\"unused\":true}")),
             text("Please provide a path."),
         ])
         .await;
@@ -247,4 +254,192 @@ async fn ordinary_prose_and_json_remain_answers() {
         assert!(started(&events).is_empty());
         assert_eq!(requests.len(), 1);
     }
+}
+
+#[tokio::test]
+async fn repeated_calls_stop_and_synthesize_without_tools() {
+    let (events, requests) = exercise(vec![
+        text(&call(None)),
+        text(&call(None)),
+        text("Please provide a path."),
+    ])
+    .await;
+    assert_eq!(answer(&events), "Please provide a path.");
+    assert_eq!(started(&events).len(), 1);
+    assert!(requests.last().unwrap()["tools"].is_null());
+    assert_replay(requests.last().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn final_synthesis_rejects_tool_calls_and_empty_answers() {
+    for final_round in [text(&call(None)), native(None), text(""), text(MALFORMED)] {
+        let (events, requests) =
+            exercise(vec![text(&call(None)), text(&call(None)), final_round]).await;
+        assert_eq!(started(&events).len(), 1);
+        assert_eq!(answer(&events), "");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Failed(_)))
+        );
+        assert!(requests.last().unwrap()["tools"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn repeated_arguments_ignore_json_object_key_order() {
+    let (events, requests) = exercise(vec![
+        text(r#"{"name":"read_file","arguments":{"unused":{"b":2,"a":1},"other":0}}"#),
+        text(r#"{"name":"read_file","arguments":{"other":0,"unused":{"a":1,"b":2}}}"#),
+        text("Please provide a path."),
+    ])
+    .await;
+    assert_eq!(started(&events).len(), 1);
+    assert_eq!(answer(&events), "Please provide a path.");
+    assert!(requests.last().unwrap()["tools"].is_null());
+}
+
+#[tokio::test]
+async fn exhausted_rounds_get_a_final_answer() {
+    let mut rounds: Vec<_> = (0..MAX_ITERATIONS)
+        .map(|index| text(&json!({"name":"read_file","arguments":{"unused":index}}).to_string()))
+        .collect();
+    rounds.push(text("Please provide a path."));
+    let (events, requests) = exercise(rounds).await;
+    assert_eq!(started(&events).len(), MAX_ITERATIONS);
+    assert_eq!(answer(&events), "Please provide a path.");
+    assert!(requests.last().unwrap()["tools"].is_null());
+    assert_replay(requests.last().unwrap(), MAX_ITERATIONS);
+}
+
+#[tokio::test]
+async fn exhausted_batch_pairs_every_call_before_final_answer() {
+    let calls: Vec<_> = (0..zone_server::agent::MAX_TOOL_CALLS + 2)
+        .map(|index| json!({"name":"read_file","arguments":{"unused":index}}))
+        .collect();
+    let (events, requests) = exercise(vec![
+        text(&json!(calls).to_string()),
+        text("Please provide a path."),
+    ])
+    .await;
+    assert_eq!(started(&events).len(), zone_server::agent::MAX_TOOL_CALLS);
+    assert_eq!(answer(&events), "Please provide a path.");
+    assert!(requests.last().unwrap()["tools"].is_null());
+    assert_replay(requests.last().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn reads_after_a_mutation_execute_again() {
+    let path = std::env::temp_dir().join(format!("zone-loop-{}.txt", Uuid::new_v4()));
+    std::fs::write(&path, "before").unwrap();
+    let read = json!({"name":"read_file","arguments":{"path":path}}).to_string();
+    let write =
+        json!({"name":"write_file","arguments":{"path":path,"content":"after"}}).to_string();
+    let (events, requests) = exercise(vec![
+        text(&read),
+        text(&write),
+        text(&read),
+        text("Updated."),
+    ])
+    .await;
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(started(&events).len(), 3);
+    assert_eq!(answer(&events), "Updated.");
+    assert!(requests.last().unwrap()["tools"].is_array());
+    let results: Vec<_> = requests.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert!(results[0]["content"].as_str().unwrap().contains("before"));
+    assert!(results[2]["content"].as_str().unwrap().contains("after"));
+}
+
+#[tokio::test]
+async fn unsupported_tools_retry_only_as_a_final_answer() {
+    for response in [text("Hello!"), text(&call(None))] {
+        let (events, requests) = exercise_responses(vec![
+            (
+                400,
+                vec![json!({"error":{"message":"model does not support tools"}})],
+            ),
+            (200, response.clone()),
+        ])
+        .await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0]["tools"].is_array());
+        assert!(requests[1]["tools"].is_null());
+        assert!(started(&events).is_empty());
+        if response == text("Hello!") {
+            assert_eq!(answer(&events), "Hello!");
+        } else {
+            assert_eq!(answer(&events), "");
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Failed(_)))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_only_answers_remain_valid() {
+    let image = vec![
+        json!({"images":[{"image_url":{"url":"data:image/png;base64,abc"},"type":"image_url","index":0}]}),
+    ];
+    for rounds in [
+        vec![image.clone()],
+        vec![text(&call(None)), text(&call(None)), image],
+    ] {
+        let (events, _) = exercise(rounds).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Image(_)))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Failed(_)))
+        );
+    }
+}
+
+#[tokio::test]
+async fn empty_first_response_is_an_explicit_failure() {
+    let (events, _) = exercise(vec![text("  ")]).await;
+    assert_eq!(answer(&events), "");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Failed(_)))
+    );
+}
+
+#[tokio::test]
+async fn reads_after_a_mutation_in_the_same_batch_execute_again() {
+    let path = std::env::temp_dir().join(format!("zone-loop-{}.txt", Uuid::new_v4()));
+    std::fs::write(&path, "before").unwrap();
+    let read = json!({"name":"read_file","arguments":{"path":path}});
+    let write = json!({"name":"write_file","arguments":{"path":path,"content":"after"}});
+    let (events, requests) = exercise(vec![
+        text(&json!([read, write]).to_string()),
+        text(&read.to_string()),
+        text("Updated."),
+    ])
+    .await;
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(started(&events).len(), 3);
+    assert_eq!(answer(&events), "Updated.");
+    assert!(requests.last().unwrap()["tools"].is_array());
+    let results: Vec<_> = requests.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert!(results[0]["content"].as_str().unwrap().contains("before"));
+    assert!(results[2]["content"].as_str().unwrap().contains("after"));
 }

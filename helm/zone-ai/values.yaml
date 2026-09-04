@@ -67,7 +67,7 @@ litellm:
 
   models:
     - name: "llama3.1:8b"
-      provider: ollama
+      provider: ollama_chat
       timeout: 60
     - name: "nomic-embed-text"
       provider: ollama

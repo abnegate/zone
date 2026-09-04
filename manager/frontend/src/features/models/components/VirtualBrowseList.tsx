@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef } from 'react';
-import { List, type RowComponentProps } from 'react-window';
+import { List, type RowComponentProps, useDynamicRowHeight } from 'react-window';
 import type { BrowseModel } from '../types';
 import { formatBytes, formatContextLength, formatNumber } from '../utils';
+import Capabilities from './Capabilities';
 import './VirtualBrowseList.css';
 
 interface VirtualBrowseListProps {
@@ -18,19 +19,6 @@ type BrowseRowProps = {
   onItemClick: (model: BrowseModel) => void;
   onInstall: (model: BrowseModel) => void;
 };
-
-const LOADING_ROW_HEIGHT = 56;
-
-function browseItemHeight(model: BrowseModel): number {
-  let height = 76;
-  if (model.description) height += 40;
-  if (hasUseCases(model) || model.downloads != null) height += 28;
-  return height;
-}
-
-function hasUseCases(model: BrowseModel): boolean {
-  return Boolean(model.use_cases && model.use_cases.length > 0);
-}
 
 function specParts(model: BrowseModel): string[] {
   const parts: string[] = [];
@@ -61,7 +49,6 @@ function BrowseRow({
 
   const model = models[index];
   const specs = specParts(model);
-  const useCases = model.use_cases ?? [];
   const title = model.display_name || model.name;
 
   return (
@@ -90,21 +77,13 @@ function BrowseRow({
             </div>
           )}
           {model.description && <p className="browse-description">{model.description}</p>}
-          {(useCases.length > 0 || model.downloads != null) && (
-            <div className="browse-tags">
-              {useCases.slice(0, 4).map((useCase) => (
-                <span key={useCase} className="tag">
-                  {useCase}
-                </span>
-              ))}
-              {model.downloads != null ? (
-                <span className="browse-downloads">
-                  {formatNumber(model.downloads)}
-                  {model.source === 'ollama' ? ' pulls' : ' downloads'}
-                </span>
-              ) : null}
-            </div>
-          )}
+          <Capabilities capabilities={model.capabilities} />
+          {model.downloads != null ? (
+            <span className="browse-downloads">
+              {formatNumber(model.downloads)}
+              {model.source === 'ollama' ? ' pulls' : ' downloads'}
+            </span>
+          ) : null}
         </div>
         <button
           className="btn btn-primary btn-small"
@@ -142,13 +121,7 @@ export default function VirtualBrowseList({
 
   const itemCount = models.length + (hasMore ? 1 : 0);
 
-  const rowHeight = useCallback(
-    (index: number) => {
-      if (index >= models.length) return LOADING_ROW_HEIGHT;
-      return browseItemHeight(models[index]);
-    },
-    [models]
-  );
+  const rowHeight = useDynamicRowHeight({ defaultRowHeight: 160 });
 
   const rowProps = React.useMemo<BrowseRowProps>(
     () => ({
