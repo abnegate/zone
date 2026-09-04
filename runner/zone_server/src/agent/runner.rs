@@ -66,7 +66,7 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
         let mut tool_calls_used = 0usize;
         let names = tools.names();
         let mut identifiers = BTreeSet::new();
-        let mut previous = BTreeSet::new();
+        let mut previous = Vec::new();
         let mut finalizing = false;
 
         for iteration in 0..=MAX_ITERATIONS {
@@ -199,10 +199,10 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 generated_images: Vec::new(),
             });
 
-            // Compare adjacent rounds only: a read after an intervening write
-            // must run again to observe the changed state.
-            let signatures: BTreeSet<_> = requested.iter().map(signature).collect();
-            let repeated = signatures.is_subset(&previous);
+            // Only an identical ordered batch is a repetition. A subset may
+            // reread state changed by a later write in the previous batch.
+            let signatures: Vec<_> = requested.iter().map(signature).collect();
+            let repeated = signatures == previous;
             previous = signatures;
             finalizing = repeated;
 

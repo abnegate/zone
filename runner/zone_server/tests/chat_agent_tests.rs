@@ -417,3 +417,29 @@ async fn empty_first_response_is_an_explicit_failure() {
             .any(|event| matches!(event, AgentEvent::Failed(_)))
     );
 }
+
+#[tokio::test]
+async fn reads_after_a_mutation_in_the_same_batch_execute_again() {
+    let path = std::env::temp_dir().join(format!("zone-loop-{}.txt", Uuid::new_v4()));
+    std::fs::write(&path, "before").unwrap();
+    let read = json!({"name":"read_file","arguments":{"path":path}});
+    let write = json!({"name":"write_file","arguments":{"path":path,"content":"after"}});
+    let (events, requests) = exercise(vec![
+        text(&json!([read, write]).to_string()),
+        text(&read.to_string()),
+        text("Updated."),
+    ])
+    .await;
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(started(&events).len(), 3);
+    assert_eq!(answer(&events), "Updated.");
+    assert!(requests.last().unwrap()["tools"].is_array());
+    let results: Vec<_> = requests.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect();
+    assert!(results[0]["content"].as_str().unwrap().contains("before"));
+    assert!(results[2]["content"].as_str().unwrap().contains("after"));
+}
