@@ -557,4 +557,417 @@ mod tests {
             .expect("Failed to list knowledge");
         assert_eq!(all.len(), 0);
     }
+
+    #[tokio::test]
+    #[ignore = "requires migrated PostgreSQL DATABASE_URL"]
+    async fn document_storage_is_complete_searchable_and_scoped() {
+        let pool = create_test_pool().await;
+        let (organization, workspace, user) = setup_test_data(&pool).await;
+        let (foreign_organization, foreign_workspace, foreign_user) = setup_test_data(&pool).await;
+        workspace_members::add_member(
+            &pool,
+            workspace,
+            user,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            foreign_workspace,
+            foreign_user,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let content = format!(
+            "  quasarneedle\n{}\n  ",
+            "世界 🦀 complete document\n".repeat(2000)
+        );
+        let id = create_document(&pool, workspace, user, "Long note", &content)
+            .await
+            .unwrap()
+            .unwrap();
+        let document = read_document(&pool, workspace, user, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(document.content.as_deref(), Some(content.as_str()));
+        assert!(document.editable);
+        assert!(document.updated_at.is_some());
+        assert!(
+            list_knowledge(&pool, workspace, None, 25, 0)
+                .await
+                .unwrap()
+                .iter()
+                .any(|entry| entry.id == id)
+        );
+        let matches = list_documents(&pool, workspace, user, Some("quasarneedle"), 25, 0)
+            .await
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, id);
+        assert!(matches[0].content.is_none());
+        assert!(
+            read_document(&pool, foreign_workspace, foreign_user, id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !update_document(
+                &pool,
+                foreign_workspace,
+                foreign_user,
+                id,
+                DocumentUpdate {
+                    title: Some("foreign"),
+                    content: None
+                }
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            list_documents(
+                &pool,
+                foreign_workspace,
+                foreign_user,
+                Some("quasarneedle"),
+                25,
+                0
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            create_document(&pool, foreign_workspace, user, "Denied", "Denied")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            update_document(
+                &pool,
+                workspace,
+                user,
+                id,
+                DocumentUpdate {
+                    title: None,
+                    content: Some("  replacementneedle 世界\n")
+                }
+            )
+            .await
+            .unwrap()
+        );
+        let updated = read_document(&pool, workspace, user, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.title, "Long note");
+        assert_eq!(
+            updated.content.as_deref(),
+            Some("  replacementneedle 世界\n")
+        );
+        assert!(
+            list_documents(&pool, workspace, user, Some("quasarneedle"), 25, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            list_documents(&pool, workspace, user, Some("replacementneedle"), 25, 0)
+                .await
+                .unwrap()[0]
+                .id,
+            id
+        );
+        sqlx::query(
+            "UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = $1 AND user_id = $2",
+        )
+        .bind(workspace)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            read_document(&pool, workspace, user, id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !update_document(
+                &pool,
+                workspace,
+                user,
+                id,
+                DocumentUpdate {
+                    title: Some("Denied"),
+                    content: None
+                }
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            create_document(&pool, workspace, user, "Denied", "Denied")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        workspace_members::remove_member(&pool, workspace, user)
+            .await
+            .unwrap();
+        assert!(
+            read_document(&pool, workspace, user, id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            list_documents(&pool, workspace, user, None, 25, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for organization in [organization, foreign_organization] {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(organization)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for user in [user, foreign_user] {
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(user)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated PostgreSQL DATABASE_URL"]
+    async fn document_sources_enforce_workspace_and_metadata_only_state() {
+        let pool = create_test_pool().await;
+        let (organization, workspace, user) = setup_test_data(&pool).await;
+        workspace_members::add_member(
+            &pool,
+            workspace,
+            user,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let source: Uuid = sqlx::query_scalar("INSERT INTO sources (workspace_id, name, source_type, config) VALUES ($1, 'Repository', 'github', '{}') RETURNING id").bind(workspace).fetch_one(&pool).await.unwrap();
+        let content = "full indexed 文件\n".repeat(2000);
+        let id: Uuid = sqlx::query_scalar("INSERT INTO content_items (source_id, category, uri, title, content, content_hash) VALUES ($1, 'code', 'src/guide.md', 'Guide', $2, 'hash') RETURNING id").bind(source).bind(&content).fetch_one(&pool).await.unwrap();
+        let document = read_document(&pool, workspace, user, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(document.content.as_deref(), Some(content.as_str()));
+        assert_eq!(document.source_id, Some(source));
+        assert_eq!(document.uri, "src/guide.md");
+        assert!(document.fetched_at.is_some());
+        assert!(!document.editable);
+        assert!(
+            !update_document(
+                &pool,
+                workspace,
+                user,
+                id,
+                DocumentUpdate {
+                    title: Some("Denied"),
+                    content: None
+                }
+            )
+            .await
+            .unwrap()
+        );
+        sqlx::query("UPDATE content_items SET metadata_only = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            read_document(&pool, workspace, user, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content
+                .is_none()
+        );
+        sqlx::query("UPDATE sources SET is_active = FALSE WHERE id = $1")
+            .bind(source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            read_document(&pool, workspace, user, id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// A complete stored document, with provenance and freshness for citations.
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct Document {
+    pub id: Uuid,
+    pub title: String,
+    pub content: Option<String>,
+    pub source: String,
+    pub source_id: Option<Uuid>,
+    pub uri: String,
+    pub updated_at: Option<NaiveDateTime>,
+    pub fetched_at: Option<NaiveDateTime>,
+    pub editable: bool,
+}
+
+macro_rules! documents {
+    () => { r#"
+    SELECT id, title, content, 'knowledge'::text AS source, NULL::uuid AS source_id,
+           COALESCE(source_url, 'knowledge://' || id::text) AS uri,
+           updated_at, last_fetched_at AS fetched_at, source_url IS NULL AS editable
+    FROM knowledge_entries
+    WHERE workspace_id = $1 AND is_active = TRUE
+    UNION ALL
+    SELECT item.id, item.title, CASE WHEN item.metadata_only THEN NULL ELSE item.content END AS content, source.name AS source, source.id AS source_id,
+           item.uri, item.modified_at AS updated_at, item.fetched_at,
+           FALSE AS editable
+    FROM content_items item
+    JOIN sources source ON source.id = item.source_id
+    WHERE source.workspace_id = $1 AND source.is_active = TRUE
+      AND (item.workspace_id IS NULL OR item.workspace_id = $1)
+"# };
+}
+
+/// List stored documents or find documents by full-text query.
+/// Membership is checked in the same database statement as the read.
+pub async fn list_documents(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    query: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> DbResult<Vec<Document>> {
+    sqlx::query_as::<_, Document>(concat!(
+        "SELECT id, title, NULL::text AS content, source, source_id, uri, updated_at, fetched_at, editable FROM (", documents!(), ") document
+         WHERE check_workspace_membership($2, $1)
+           AND ($3::text IS NULL OR to_tsvector('english', title || ' ' || COALESCE(content, ''))
+                @@ plainto_tsquery('english', $3))
+         ORDER BY updated_at DESC NULLS LAST, id LIMIT $4 OFFSET $5"
+    ))
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(query)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+}
+
+/// Read exact stored content without snippet or character limits.
+pub async fn read_document(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+) -> DbResult<Option<Document>> {
+    sqlx::query_as::<_, Document>(concat!(
+        "SELECT * FROM (",
+        documents!(),
+        ") document WHERE id = $3 AND check_workspace_membership($2, $1)"
+    ))
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Persist a workspace note; its full-text index updates atomically with the row.
+pub async fn create_document(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    title: &str,
+    content: &str,
+) -> DbResult<Option<Uuid>> {
+    sqlx::query_scalar(
+        "INSERT INTO knowledge_entries (workspace_id, title, content, token_count, created_by)
+         SELECT $1, $3, $4, ceil(length($4::text)::numeric / 4)::integer, $2
+         WHERE get_workspace_role($2, $1) IN ('member', 'admin', 'owner') RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(title)
+    .bind(content)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Sparse edits to local notes; imported documents must be edited at their source.
+#[derive(Debug, Default)]
+pub struct DocumentUpdate<'a> {
+    pub title: Option<&'a str>,
+    pub content: Option<&'a str>,
+}
+
+pub async fn update_document(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    update: DocumentUpdate<'_>,
+) -> DbResult<bool> {
+    let mut transaction = pool.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE knowledge_entries
+         SET title = COALESCE($4, title), content = COALESCE($5, content),
+             token_count = CASE WHEN $5::text IS NULL THEN token_count
+                                ELSE ceil(length($5::text)::numeric / 4)::integer END,
+             content_hash = CASE WHEN $5::text IS NULL THEN content_hash ELSE NULL END,
+             updated_at = NOW()
+         WHERE id = $3 AND workspace_id = $1 AND is_active = TRUE AND source_url IS NULL
+           AND get_workspace_role($2, $1) IN ('member', 'admin', 'owner')",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .bind(id)
+    .bind(update.title)
+    .bind(update.content)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected()
+        > 0;
+    if changed && update.content.is_some() {
+        sqlx::query(
+            "DELETE FROM knowledge_embeddings WHERE knowledge_entry_id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(changed)
 }
