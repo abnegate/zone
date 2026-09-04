@@ -15,6 +15,7 @@ use crate::auth::validate_token;
 use crate::state::AppState;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const MISSING_MANIFEST: &str = "pull model manifest: file does not exist";
 
 type Sender = SplitSink<WebSocket, Message>;
 
@@ -119,7 +120,7 @@ async fn handle(socket: WebSocket, state: AppState) {
     };
 
     let result = {
-        let download = download(&mut sender, &state.config().ollama_host, request);
+        let download = download(&mut sender, &state.config().ollama_host, &request);
         tokio::pin!(download);
         loop {
             tokio::select! {
@@ -135,12 +136,20 @@ async fn handle(socket: WebSocket, state: AppState) {
         }
     };
     if let Err(message) = result {
+        let message = if message == MISSING_MANIFEST {
+            format!(
+                "{message}. Ollama could not find \"{}\". Use an Ollama model:tag or hf.co/owner/GGUF-repository reference.",
+                request.model
+            )
+        } else {
+            message
+        };
         let _ = send(&mut sender, Event::Error { message }).await;
     }
     let _ = sender.close().await;
 }
 
-async fn download(sender: &mut Sender, host: &str, request: Pull) -> Result<(), String> {
+async fn download(sender: &mut Sender, host: &str, request: &Pull) -> Result<(), String> {
     // Large models can take hours; only connection establishment has a timeout.
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))

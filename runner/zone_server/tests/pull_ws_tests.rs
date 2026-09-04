@@ -16,7 +16,10 @@ use zone_server::auth::{create_access_token, create_refresh_token};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+const MODEL: &str = "qwen3.8:27b";
+
 struct Fixture {
+    model: &'static str,
     url: String,
     token: String,
     refresh: String,
@@ -33,7 +36,7 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-    async fn new(status: StatusCode, chunks: Vec<&'static str>) -> Self {
+    async fn new(model: &'static str, status: StatusCode, chunks: Vec<&'static str>) -> Self {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
         let provider = Router::new().route(
@@ -43,10 +46,7 @@ impl Fixture {
                 let chunks = chunks.clone();
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(
-                        payload,
-                        json!({"model": "qwen/qwen3.8-27b", "stream": true})
-                    );
+                    assert_eq!(payload, json!({"model": model, "stream": true}));
                     let stream = async_stream::stream! {
                         for chunk in chunks {
                             yield Ok::<_, std::io::Error>(chunk);
@@ -57,10 +57,10 @@ impl Fixture {
                 }
             }),
         );
-        Self::start(provider, calls).await
+        Self::start(model, provider, calls).await
     }
 
-    async fn start(provider: Router, calls: Arc<AtomicUsize>) -> Self {
+    async fn start(model: &'static str, provider: Router, calls: Arc<AtomicUsize>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let provider = tokio::spawn(async move {
@@ -93,6 +93,7 @@ impl Fixture {
             axum::serve(listener, router).await.unwrap();
         });
         Self {
+            model,
             url: format!("ws://{address}/ws/pull"),
             token,
             refresh,
@@ -113,7 +114,7 @@ impl Fixture {
         send(&mut socket, json!({"type": "auth", "token": self.token})).await;
         assert_eq!(receive(&mut socket).await, json!({"type": "authenticated"}));
         assert_eq!(self.calls.load(Ordering::SeqCst), 0);
-        send(&mut socket, json!({"model": "qwen/qwen3.8-27b"})).await;
+        send(&mut socket, json!({"model": self.model})).await;
         socket
     }
 }
@@ -136,9 +137,9 @@ async fn receive(socket: &mut Socket) -> Value {
 
 #[tokio::test]
 async fn rejects_missing_invalid_and_refresh_authentication_without_contacting_provider() {
-    let fixture = Fixture::new(StatusCode::OK, vec![]).await;
+    let fixture = Fixture::new(MODEL, StatusCode::OK, vec![]).await;
     for message in [
-        json!({"model": "qwen/qwen3.8-27b"}),
+        json!({"model": MODEL}),
         json!({"type": "auth", "token": "invalid"}),
         json!({"type": "auth", "token": fixture.refresh}),
     ] {
@@ -155,6 +156,7 @@ async fn rejects_missing_invalid_and_refresh_authentication_without_contacting_p
 #[tokio::test]
 async fn authenticates_and_streams_chunked_progress_until_success() {
     let fixture = Fixture::new(
+        MODEL,
         StatusCode::OK,
         vec![
             "{\"sta",
@@ -176,18 +178,72 @@ async fn authenticates_and_streams_chunked_progress_until_success() {
 }
 
 #[tokio::test]
-async fn preserves_http_and_stream_provider_errors() {
-    for status in [StatusCode::NOT_FOUND, StatusCode::OK] {
-        let fixture = Fixture::new(
-            status,
-            vec!["{\"error\":\"pull model manifest: file does not exist\"}\n"],
-        )
-        .await;
-        let mut socket = fixture.pull().await;
-        assert_eq!(
-            receive(&mut socket).await,
-            json!({"type": "error", "message": "pull model manifest: file does not exist"})
-        );
+async fn missing_manifest_errors_identify_the_unchanged_reference_and_supported_formats() {
+    for model in [
+        "qwen/qwen3.8-27b",
+        "custom/model:revision",
+        "hf.co/owner/GGUF-repository:Q4_K_M",
+    ] {
+        for (status, chunks) in [
+            (
+                StatusCode::NOT_FOUND,
+                vec![
+                    "{\"error\":\"pull model manifest: ",
+                    "file does not exist\"}",
+                ],
+            ),
+            (
+                StatusCode::OK,
+                vec![
+                    "{\"error\":\"pull model manifest: ",
+                    "file does not exist\"}\n",
+                ],
+            ),
+            (
+                StatusCode::OK,
+                vec![
+                    "{\"error\":\"pull model manifest: ",
+                    "file does not exist\"}",
+                ],
+            ),
+        ] {
+            let fixture = Fixture::new(model, status, chunks).await;
+            let mut socket = fixture.pull().await;
+            assert_eq!(
+                receive(&mut socket).await,
+                json!({
+                    "type": "error",
+                    "message": format!(
+                        "pull model manifest: file does not exist. Ollama could not find \"{model}\". Use an Ollama model:tag or hf.co/owner/GGUF-repository reference."
+                    )
+                })
+            );
+            assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn preserves_unrelated_http_and_stream_provider_errors() {
+    for (body, message) in [
+        ("{\"error\":\"file does not exist\"}", "file does not exist"),
+        (
+            "{\"error\":\"pull model manifest: unauthorized\"}",
+            "pull model manifest: unauthorized",
+        ),
+        (
+            "{\"error\":\"pull model manifest: file does not exist: permission denied\"}",
+            "pull model manifest: file does not exist: permission denied",
+        ),
+    ] {
+        for status in [StatusCode::NOT_FOUND, StatusCode::OK] {
+            let fixture = Fixture::new(MODEL, status, vec![body]).await;
+            let mut socket = fixture.pull().await;
+            assert_eq!(
+                receive(&mut socket).await,
+                json!({"type": "error", "message": message})
+            );
+        }
     }
 }
 
@@ -197,7 +253,7 @@ async fn incomplete_or_malformed_stream_never_reports_success() {
         vec!["{\"status\":\"pulling manifest\"}\n"],
         vec!["not json\n"],
     ] {
-        let fixture = Fixture::new(StatusCode::OK, chunks).await;
+        let fixture = Fixture::new(MODEL, StatusCode::OK, chunks).await;
         let mut socket = fixture.pull().await;
         loop {
             let event = receive(&mut socket).await;
@@ -235,7 +291,7 @@ async fn client_disconnect_drops_the_upstream_download() {
             }
         }),
     );
-    let fixture = Fixture::start(provider, Arc::new(AtomicUsize::new(0))).await;
+    let fixture = Fixture::start(MODEL, provider, Arc::new(AtomicUsize::new(0))).await;
     let mut socket = fixture.pull().await;
     assert_eq!(receive(&mut socket).await["type"], "step");
     socket.close(None).await.unwrap();
