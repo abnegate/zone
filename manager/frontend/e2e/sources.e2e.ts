@@ -211,7 +211,7 @@ test.describe('Sources Page', () => {
 
       const firstCard = page.locator('.source-card').first();
       await expect(firstCard.locator('h3')).toContainText('acme/frontend');
-      await expect(firstCard.locator('.source-badges')).toContainText('GitHub');
+      await expect(firstCard.locator('.source-provider')).toContainText('GitHub');
     });
 
     test('shows verified status for verified sources', async ({ page }) => {
@@ -235,7 +235,7 @@ test.describe('Sources Page', () => {
       await page.click('a[href="/sources"]');
 
       await expect(
-        page.locator('.source-card').first().locator('.source-badges')
+        page.locator('.source-card').first().locator('.source-status')
       ).toContainText('Verified');
     });
 
@@ -260,7 +260,7 @@ test.describe('Sources Page', () => {
       await page.click('a[href="/sources"]');
 
       await expect(
-        page.locator('.source-card').nth(1).locator('.source-badges')
+        page.locator('.source-card').nth(1).locator('.source-status')
       ).toContainText('Inactive');
     });
 
@@ -285,7 +285,7 @@ test.describe('Sources Page', () => {
       await page.click('a[href="/sources"]');
 
       await expect(
-        page.locator('.source-card').nth(2).locator('.source-badges')
+        page.locator('.source-card').nth(2).locator('.source-status')
       ).toContainText('Error');
       await expect(page.locator('.source-error')).toContainText('Connection timed out');
     });
@@ -528,39 +528,57 @@ test.describe('Sources Page', () => {
       await expect(page.locator('.source-card')).toHaveCount(3);
     });
 
-    test('verify button triggers verification', async ({ page }) => {
-      await routeApi(page, sourceVerifyPattern, async (route) => {
-        if (route.request().method() === 'POST') {
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ success: true, message: 'Source verified' }),
-          });
-        } else {
-          route.continue();
+    for (const verified of [true, false]) {
+      test(`verification refreshes the source when verified=${verified}`, async ({ page }) => {
+        const message = verified
+          ? 'Source verified successfully'
+          : 'Authentication failed - check your credentials';
+        let refreshed = false;
+        await routeApi(page, sourceVerifyPattern, async (route) => {
+          if (route.request().method() === 'POST') {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            await route.fulfill({
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify({ verified, message }),
+            });
+          } else {
+            await route.continue();
+          }
+        });
+
+        await routeApi(page, sourceDetailPattern, async (route) => {
+          if (route.request().method() === 'GET') {
+            refreshed = true;
+            await route.fulfill({
+              status: 200,
+              contentType: 'application/json',
+              body: JSON.stringify({
+                source: {
+                  ...mockSources[0],
+                  last_verified_at: verified ? new Date().toISOString() : null,
+                  last_error: verified ? null : message,
+                },
+              }),
+            });
+          } else {
+            await route.continue();
+          }
+        });
+
+        const card = page.locator('.source-card').first();
+        const button = card.getByRole('button', { name: 'Verify', exact: true });
+        await button.click();
+        await expect(card.getByRole('button', { name: 'Verifying...' })).toBeVisible();
+        await expect(button).toBeEnabled();
+        await expect.poll(() => refreshed).toBe(true);
+        await expect(card.locator('.source-status')).toContainText(verified ? 'Verified' : 'Error');
+        await expect(page.getByText('Validation failed:', { exact: false })).toHaveCount(0);
+        if (!verified) {
+          await expect(card.locator('.source-error')).toContainText(message);
         }
       });
-
-      await routeApi(page, sourceDetailPattern, (route) => {
-        if (route.request().method() === 'GET') {
-          route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({
-              source: { ...mockSources[0], last_verified_at: new Date().toISOString() },
-            }),
-          });
-        } else {
-          route.continue();
-        }
-      });
-
-      const verifyBtn = page.locator('.source-card').first().locator('button:has-text("Verify")');
-      await verifyBtn.click();
-
-      await expect(verifyBtn).toContainText('Verifying...');
-    });
+    }
 
     test('enable/disable button toggles source status', async ({ page }) => {
       await routeApi(page, sourceDetailPattern, (route) => {

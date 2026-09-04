@@ -231,7 +231,7 @@ describe('useSources', () => {
     };
     mockGetSources.mockResolvedValue(mockSources);
     mockVerifySource.mockResolvedValue({
-      success: true,
+      verified: true,
       message: 'Verified successfully',
     });
     mockGetSource.mockResolvedValue(verifiedSource);
@@ -242,15 +242,35 @@ describe('useSources', () => {
       expect(result.current.loading).toBe(false);
     });
 
-    let verifyResult: { success: boolean; message: string } | undefined;
+    let verifyResult: { verified: boolean; message: string } | undefined;
     await act(async () => {
       verifyResult = await result.current.verifySource('1');
     });
 
-    expect(verifyResult).toEqual({ success: true, message: 'Verified successfully' });
+    expect(verifyResult).toEqual({ verified: true, message: 'Verified successfully' });
     expect(result.current.sources.find((s) => s.id === '1')?.last_verified_at).toBe(
       '2024-01-02T00:00:00Z'
     );
+  });
+
+  it('refreshes the source error after unsuccessful verification', async () => {
+    const message = 'Authentication failed - check your credentials';
+    const failedSource: Source = { ...mockSources[0], last_error: message };
+    mockGetSources.mockResolvedValue(mockSources);
+    mockVerifySource.mockResolvedValue({ verified: false, message });
+    mockGetSource.mockResolvedValue(failedSource);
+
+    const { result } = renderHook(() => useSources(), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await act(async () => {
+      expect(await result.current.verifySource('1')).toEqual({ verified: false, message });
+    });
+
+    expect(result.current.sources.find((source) => source.id === '1')?.last_error).toBe(message);
+    expect(mockGetSource).toHaveBeenCalledWith('test-workspace-id', '1');
   });
 
   it('should refresh sources', async () => {

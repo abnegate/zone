@@ -5,10 +5,6 @@
 
 import { z } from 'zod';
 
-// =============================================================================
-// Source Type Schemas
-// =============================================================================
-
 export const SourceCategorySchema = z.enum(['file', 'calendar', 'mail', 'chat', 'web', 'text']);
 export const SourceTypeSchema = z.enum([
   'github',
@@ -21,10 +17,6 @@ export const SourceTypeSchema = z.enum([
   'web',
   'text',
 ]);
-
-// =============================================================================
-// Source Config Schemas
-// =============================================================================
 
 export const GitHubConfigSchema = z.object({
   owner: z.string().min(1, 'Owner is required'),
@@ -133,10 +125,6 @@ function deriveSourceUrl(
   return '';
 }
 
-// =============================================================================
-// Main Source Schema
-// =============================================================================
-
 // Backend create/get responses omit `category` and may send `url: null`.
 // Normalize those so the UI always has a category and a display URL.
 export const SourceSchema = z
@@ -163,10 +151,6 @@ export const SourceSchema = z
     last_verified_at: source.last_verified_at ?? null,
     last_error: source.last_error ?? null,
   }));
-
-// =============================================================================
-// Request/Response Schemas
-// =============================================================================
 
 export const CreateSourceRequestSchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -204,7 +188,7 @@ export const SourceResponseSchema = z.union([
 ]);
 
 export const SourceVerifyResponseSchema = z.object({
-  success: z.boolean(),
+  verified: z.boolean(),
   message: z.string(),
   item_count: z.number().optional(),
 });
@@ -221,10 +205,6 @@ export const SourceTypesResponseSchema = z.object({
   error: z.string().optional(),
   types: z.array(SourceTypeInfoSchema),
 });
-
-// =============================================================================
-// Content Metadata Schemas
-// =============================================================================
 
 export const FileMetadataSchema = z.object({
   type: z.literal('file'),
@@ -305,10 +285,6 @@ export const ContentResponseSchema = z.object({
   total: z.number(),
   has_more: z.boolean(),
 });
-
-// =============================================================================
-// Type Exports (inferred from schemas)
-// =============================================================================
 
 export type SourceZ = z.infer<typeof SourceSchema>;
 export type SourceCategoryZ = z.infer<typeof SourceCategorySchema>;
