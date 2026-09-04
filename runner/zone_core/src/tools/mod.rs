@@ -11,7 +11,7 @@ pub use file::*;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -138,6 +138,8 @@ pub trait Tool: Send + Sync {
 /// Registry of available tools
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    /// MCP server names whose tools are in this registry (for prompt guidance).
+    mcp_servers: Vec<String>,
 }
 
 impl ToolRegistry {
@@ -145,6 +147,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            mcp_servers: Vec::new(),
         }
     }
 
@@ -213,6 +216,59 @@ impl ToolRegistry {
     pub fn into_tools(self) -> Vec<Arc<dyn Tool>> {
         self.tools.into_values().collect()
     }
+
+    /// Attach every tool from a connected MCP hub.
+    ///
+    /// Names are prefixed with the server name (`magents_spawn_session`).
+    /// Collisions after sanitizing are given a numeric suffix so one tool
+    /// cannot hide another. The hub can be dropped afterwards: each tool
+    /// holds its own session handle.
+    pub fn register_mcp(&mut self, hub: &crate::mcp::McpHub) -> usize {
+        let mut added = 0;
+        for name in hub.server_names() {
+            if !self.mcp_servers.contains(&name) {
+                self.mcp_servers.push(name);
+            }
+        }
+        let mut used: HashSet<String> = self.tools.keys().cloned().collect();
+        for tool in hub.tools_avoiding(&mut used) {
+            self.register(tool);
+            added += 1;
+        }
+        added
+    }
+
+    /// Whether any MCP server tools are registered.
+    pub fn has_mcp(&self) -> bool {
+        !self.mcp_servers.is_empty()
+    }
+
+    /// Extra system-prompt text for attached MCP tools, if any.
+    pub fn mcp_guidance(&self) -> Option<String> {
+        if !self.has_mcp() {
+            return None;
+        }
+        let names: Vec<&str> = self.names();
+        crate::mcp::guidance_for_tools(&names)
+    }
+}
+
+/// Default file/shell tools plus any MCP servers configured in the environment.
+///
+/// Magents is attached automatically when it is on `PATH` and no other MCP
+/// config is required. Failures to start a server are logged and skipped.
+pub async fn with_defaults_and_mcp() -> ToolRegistry {
+    let mut registry = ToolRegistry::with_defaults();
+    let hub = crate::mcp::McpHub::connect_from_env().await;
+    let added = registry.register_mcp(&hub);
+    if added > 0 {
+        tracing::info!(
+            tools = added,
+            servers = hub.server_count(),
+            "Attached MCP tools"
+        );
+    }
+    registry
 }
 
 impl Default for ToolRegistry {
@@ -302,6 +358,15 @@ mod tests {
             .execute("nonexistent", serde_json::json!({}), &context)
             .await;
         assert!(matches!(result, Err(ToolError::NotFound(_))));
+    }
+
+    #[test]
+    fn register_mcp_on_empty_hub_is_noop() {
+        let mut registry = ToolRegistry::new();
+        let hub = crate::mcp::McpHub::new();
+        assert_eq!(registry.register_mcp(&hub), 0);
+        assert!(!registry.has_mcp());
+        assert!(registry.mcp_guidance().is_none());
     }
 
     #[test]

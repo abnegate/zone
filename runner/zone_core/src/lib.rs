@@ -6,12 +6,14 @@
 //! - Agent loop (ReAct pattern)
 //! - LLM client (OpenAI-compatible API)
 //! - Tool registry and implementations
+//! - MCP client (stdio servers such as magents)
 //! - File source adapters (local, GitHub)
 //! - Session management
 
 pub mod agent;
 pub mod error;
 pub mod llm;
+pub mod mcp;
 pub mod session;
 pub mod tools;
 pub mod types;
@@ -22,6 +24,7 @@ pub use agent::{
 };
 pub use error::CoreError;
 pub use llm::{LlmClient, LlmConfig, LlmError};
+pub use mcp::{McpConfig, McpHub, McpServerSpec};
 pub use session::{FileSessionStore, Session, SessionStore, SessionSummary};
 pub use tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 pub use types::*;

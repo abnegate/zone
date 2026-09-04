@@ -254,6 +254,48 @@ Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases
 
 ---
 
+## 🧩 MCP servers (magents and others)
+
+Zone's agent loop can attach [Model Context Protocol](https://modelcontextprotocol.io) servers as extra tools. That is how tasks and the CLI run [magents](https://github.com/abnegate/magents) — spawn or message Claude, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode sessions from an agentic run.
+
+Config uses the same JSON shape as Cursor (`mcpServers`). Tool names are prefixed with the server name, so magents' `spawn_session` becomes `magents_spawn_session`.
+
+Stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat configured servers as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
+
+### `ZONE_MCP_ENABLED`
+- **Default**: `true`
+- **Description**: Master switch. `false` / `0` / `off` skips every MCP server.
+
+### `ZONE_MCP_AUTO_MAGENTS`
+- **Default**: `true`
+- **Description**: When no servers are configured and `magents` is on `PATH`, attach `magents mcp` automatically.
+
+### `ZONE_MCP_CONFIG`
+- **Default**: *empty* (falls back to `~/.zone/mcp.json` if that file exists)
+- **Description**: Path to a JSON file of MCP servers.
+- **Example**:
+
+```json
+{
+  "mcpServers": {
+    "magents": {
+      "command": "magents",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### `ZONE_MCP_SERVERS`
+- **Default**: *empty*
+- **Description**: Inline JSON of the same shape as `ZONE_MCP_CONFIG`. Useful in Compose. Takes precedence over the config file.
+
+A server entry with only a `url` (HTTP transport) is skipped — Zone speaks stdio today.
+
+Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
+
+---
+
 ## 🔒 VPN Configuration - Optional
 
 **VPN is completely optional!** Only needed if you want private web search.
@@ -409,6 +451,7 @@ Regenerate secrets for production:
 | VPN (optional) | No | ✅ Yes (empty OK) |
 | Docker Versions | No | ✅ Yes |
 | Advanced | No | ✅ Yes |
+| MCP / magents | No | ✅ Yes (auto if `magents` is on PATH) |
 
 *Security variables have insecure defaults. Change for production.
 
@@ -449,6 +492,7 @@ Need to find a specific config? Quick lookup:
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
+- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ
 - **VPN**: VPN_*, OPENVPN_*

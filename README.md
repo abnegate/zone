@@ -14,6 +14,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 - **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration
 - **Role-Based Access Control**: Fine-grained permissions with users, roles, and policies
 - **Project & Task Management**: Organize work with agentic task execution
+- **MCP tools**: Attach stdio MCP servers (magents by default) so tasks can spawn or message other coding agents
 - **Source Integration**: Connect and manage various data sources
 - **Wiki & Documentation**: Built-in knowledge base per workspace
 - **Theme Customization**: Workspace-specific theming

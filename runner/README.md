@@ -24,6 +24,7 @@ Zone is a comprehensive AI development assistant that combines:
 - Real-time task progress via WebSocket
 - Automatic PR creation on task completion
 - Tool execution through sandboxed runner
+- MCP servers (magents by default) so a task can spawn or message other coding agents
 
 ### 4. Sources
 - External data source connections for context gathering
@@ -68,7 +69,7 @@ zone_server (REST/WebSocket)
 zone_core (Agent Loop)
     ↓
 ├── LLM Client (Claude, GPT, etc.)
-├── Tool Execution (via tool_runner)
+├── Tool Execution (via tool_runner + MCP servers such as magents)
 └── Context Injection (via zone_context)
     ↓
 zone_context
