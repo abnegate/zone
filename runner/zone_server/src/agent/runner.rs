@@ -110,8 +110,10 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 if let Some(content) = &choice.delta.content
                     && !content.is_empty()
                 {
+                    // Held until the stream ends: LiteLLM+Ollama often writes a
+                    // tool call as JSON in `content` instead of `delta.tool_calls`,
+                    // and that JSON must not become the visible reply.
                     text.push_str(content);
-                    yield AgentEvent::Chunk(content.clone());
                 }
 
                 for image in &choice.delta.generated_images {
@@ -127,17 +129,30 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 }
             }
 
-            let requested = pending.finish();
+            let mut requested = pending.finish();
             if requested.is_empty() {
-                // No tools wanted: this was the final answer.
+                requested = parse_text_tool_calls(&text);
+            }
+            if requested.is_empty() {
+                if !text.is_empty() {
+                    yield AgentEvent::Chunk(text);
+                }
                 return;
             }
+
+            // Text-shaped tool calls are not prose. Keep them off the replay
+            // so the next round does not treat the JSON as the model's answer.
+            let replay_content = if text.trim_start().starts_with('{') {
+                None
+            } else {
+                (!text.is_empty()).then(|| text.clone())
+            };
 
             // Replay the model's own turn so the tool results it gets back are
             // attached to the calls it made.
             messages.push(LlmMessage {
                 role: LlmRole::Assistant,
-                content: (!text.is_empty()).then(|| text.clone()),
+                content: replay_content,
                 name: None,
                 tool_calls: Some(requested.clone()),
                 tool_call_id: None,
@@ -207,6 +222,68 @@ fn summarize(result: &zone_core::tools::ToolResult, output: &str) -> String {
         Some((byte_idx, _)) => format!("{}…", &summary[..byte_idx]),
         None => summary,
     }
+}
+
+/// Recover tool calls that a streaming proxy wrote as assistant text.
+///
+/// LiteLLM in front of Ollama answers a non-streaming tools request with
+/// `message.tool_calls`, but the same request streamed arrives as JSON in
+/// `delta.content` (`{"name":"...","arguments":{...}}`). Without this, the
+/// loop treats that JSON as the final answer and never runs a tool.
+fn parse_text_tool_calls(text: &str) -> Vec<LlmToolCall> {
+    let trimmed = strip_code_fence(text.trim());
+    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        object if object.is_object() => vec![object],
+        _ => return Vec::new(),
+    };
+
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| text_tool_call(item, index))
+        .collect()
+}
+
+fn strip_code_fence(text: &str) -> &str {
+    let text = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```"))
+        .map(str::trim_start)
+        .unwrap_or(text);
+    text.strip_suffix("```").map(str::trim_end).unwrap_or(text)
+}
+
+fn text_tool_call(value: &serde_json::Value, index: usize) -> Option<LlmToolCall> {
+    let function = value.get("function").unwrap_or(value);
+    let name = function.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let arguments = match function.get("arguments") {
+        Some(serde_json::Value::String(raw)) => raw.clone(),
+        Some(other) => other.to_string(),
+        None => "{}".to_string(),
+    };
+
+    Some(LlmToolCall {
+        id: value
+            .get("id")
+            .and_then(|id| id.as_str())
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("call_{}", index)),
+        call_type: "function".to_string(),
+        function: zone_core::llm::FunctionCall {
+            name: name.to_string(),
+            arguments,
+        },
+    })
 }
 
 /// Reassembles tool calls that arrive split across streaming deltas.
@@ -385,6 +462,30 @@ mod tests {
     #[test]
     fn no_deltas_means_no_calls() {
         assert!(ToolCallAccumulator::default().finish().is_empty());
+    }
+
+    #[test]
+    fn parses_ollama_shaped_text_tool_calls() {
+        let calls =
+            parse_text_tool_calls(r#"{"name": "run_shell", "arguments":{"command": "uname -s"}}"#);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "run_shell");
+        assert!(calls[0].function.arguments.contains("uname -s"));
+    }
+
+    #[test]
+    fn parses_fenced_and_openai_shaped_text_tool_calls() {
+        let calls = parse_text_tool_calls(
+            "```json\n{\"id\":\"abc\",\"function\":{\"name\":\"list_projects\",\"arguments\":\"{}\"}}\n```",
+        );
+        assert_eq!(calls[0].id, "abc");
+        assert_eq!(calls[0].function.name, "list_projects");
+        assert_eq!(calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn ignores_ordinary_prose() {
+        assert!(parse_text_tool_calls("There are no projects yet.").is_empty());
     }
 
     #[test]
