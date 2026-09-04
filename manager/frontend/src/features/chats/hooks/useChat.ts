@@ -74,12 +74,23 @@ export function useChat(
   const titleCallback = useRef(onTitleUpdated);
   titleCallback.current = onTitleUpdated;
   const titles = useRef(new Map<string, { title: string; revision: number }>());
+  // A committed automatic title can arrive over the socket after a newer
+  // manual PUT finishes. Keep that decision across conversation switches.
+  const renamed = useRef(new Set<string>());
   const revision = useRef(0);
 
-  const updateTitle = useCallback((id: string, title: string): void => {
+  const applyTitle = useCallback((id: string, title: string): void => {
     titles.current.set(id, { title, revision: ++revision.current });
     setChat((previous) => (previous?.id === id ? { ...previous, title } : previous));
   }, []);
+
+  const updateTitle = useCallback(
+    (id: string, title: string): void => {
+      renamed.current.add(id);
+      applyTitle(id, title);
+    },
+    [applyTitle]
+  );
 
   const fetchChat = useCallback(
     async (opts?: { silent?: boolean }) => {
@@ -100,7 +111,12 @@ export function useChat(
         const data = await chatsApi.getChat(chatId);
         if (requestId !== requestIdRef.current) return;
         const title = titles.current.get(data.id);
-        setChat(title && title.revision > currentRevision ? { ...data, title: title.title } : data);
+        const updated =
+          title && title.revision > currentRevision ? { ...data, title: title.title } : data;
+        setChat(updated);
+        // Only the selected chat has a socket, so returning to a conversation
+        // must also reconcile any title generated while it was unselected.
+        titleCallback.current?.(updated.id, updated.title);
       } catch (err) {
         if (requestId !== requestIdRef.current) return;
         setError(err instanceof Error ? err.message : 'Failed to fetch chat');
@@ -266,8 +282,8 @@ export function useChat(
 
       switch (payload.type) {
         case 'title_updated':
-          if (payload.chat_id === chatId) {
-            updateTitle(payload.chat_id, payload.title);
+          if (payload.chat_id === chatId && !renamed.current.has(payload.chat_id)) {
+            applyTitle(payload.chat_id, payload.title);
             titleCallback.current?.(payload.chat_id, payload.title);
           }
           break;
@@ -383,7 +399,7 @@ export function useChat(
       socket.close();
       socketRef.current = null;
     };
-  }, [chatId, upsertMessage, applySavedUserMessage, patchToolCall, updateTitle]);
+  }, [chatId, upsertMessage, applySavedUserMessage, patchToolCall, applyTitle]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     // Numeric readyState values stay valid for test doubles that do not

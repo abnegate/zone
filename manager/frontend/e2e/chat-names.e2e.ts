@@ -51,6 +51,16 @@ for (const width of [390, 1280]) {
     await expect(row.getByTitle('Delete', { exact: true })).toBeVisible();
     await expect(page.getByTestId('agent-toggle')).toBeVisible();
     await expect(page.getByTestId('sandbox-toggle')).toBeVisible();
+    const input = page.getByPlaceholder('Type a message, or drop a file...');
+    await input.fill('What should I plant?');
+    await input.press('Enter');
+    await expect(page.getByRole('heading', { name: 'Garden ideas' })).toBeVisible();
+    await expect(row.locator('.chat-title')).toHaveText('Garden ideas');
+    await expect(page.getByText('Choose a sunny spot.')).toBeVisible();
+    await page.screenshot({
+      path: test.info().outputPath(`automatic-${width}.png`),
+      fullPage: true,
+    });
     await row.getByRole('button', { name: `Rename ${chat.title}` }).click();
     const name = page.getByLabel('Chat name');
     await expect(name).toHaveValue(chat.title);
@@ -64,15 +74,5 @@ for (const width of [390, 1280]) {
     await expect(page.getByRole('heading', { name: 'Planning a garden' })).toBeVisible();
     await expect(row.locator('.chat-title')).toHaveText('Planning a garden');
     await page.screenshot({ path: test.info().outputPath(`renamed-${width}.png`), fullPage: true });
-    const input = page.getByPlaceholder('Type a message, or drop a file...');
-    await input.fill('What should I plant?');
-    await input.press('Enter');
-    await expect(page.getByRole('heading', { name: 'Garden ideas' })).toBeVisible();
-    await expect(row.locator('.chat-title')).toHaveText('Garden ideas');
-    await expect(page.getByText('Choose a sunny spot.')).toBeVisible();
-    await page.screenshot({
-      path: test.info().outputPath(`automatic-${width}.png`),
-      fullPage: true,
-    });
   });
 }

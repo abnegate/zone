@@ -137,6 +137,7 @@ describe('useChat', () => {
     mockGetChat.mockResolvedValue({ ...mockChat, id: '2', title: 'Second chat' });
     rerender({ id: '2' });
     await waitFor(() => expect(result.current.chat?.id).toBe('2'));
+    updated.mockClear();
     act(() =>
       stale({ data: JSON.stringify({ type: 'title_updated', chat_id: '1', title: 'Old title' }) })
     );

@@ -381,6 +381,49 @@ describe('ChatsPage', () => {
     expect(screen.getByText('Renamed first')).toBeInTheDocument();
   });
 
+  it('ignores delayed automatic names after manually renaming active or nonactive chats', async () => {
+    mockUpdateChat.mockImplementation(async (id: string, request: { title: string }) => ({
+      ...mockChats.find((chat) => chat.id === id),
+      title: request.title,
+    }));
+    renderChatsPage();
+    fireEvent.click(await screen.findByText('Chat 1'));
+    await screen.findByText('Hi there!');
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 1' }));
+    fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: 'My first name' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    await screen.findByRole('heading', { name: 'My first name' });
+    act(() => socket.emit({ type: 'title_updated', chat_id: 'chat-1', title: 'Late summary' }));
+    expect(screen.getAllByText('My first name')).toHaveLength(2);
+    expect(screen.queryByText('Late summary')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 2' }));
+    fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: 'My second name' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    mockGetChat.mockResolvedValue({ ...mockChatEmpty, title: 'My second name' });
+    fireEvent.click(screen.getByText('My second name'));
+    await screen.findByRole('heading', { name: 'My second name' });
+    act(() =>
+      socket.emit({ type: 'title_updated', chat_id: 'chat-2', title: 'Another late summary' })
+    );
+    expect(screen.getAllByText('My second name')).toHaveLength(2);
+    expect(screen.queryByText('Another late summary')).not.toBeInTheDocument();
+  });
+
+  it('reconciles the sidebar when returning to a chat named while it was unselected', async () => {
+    renderChatsPage();
+    fireEvent.click(await screen.findByText('Chat 1'));
+    await screen.findByText('Hi there!');
+    mockGetChat.mockResolvedValue(mockChatEmpty);
+    fireEvent.click(screen.getByText('Chat 2'));
+    await screen.findByRole('heading', { name: 'Empty Chat' });
+    mockGetChat.mockResolvedValue({ ...mockChatWithMessages, title: 'Summary while away' });
+    fireEvent.click(screen.getByText(mockChatWithMessages.title));
+    await screen.findByRole('heading', { name: 'Summary while away' });
+    expect(screen.getAllByText('Summary while away')).toHaveLength(2);
+  });
+
   describe('rendering', () => {
     it('renders sidebar with chats heading', async () => {
       renderChatsPage();
