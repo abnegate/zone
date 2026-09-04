@@ -87,6 +87,11 @@ validate: ## Validate configuration
 
 ##@ Docker Operations
 
+build: ## Build all services
+	@echo "$(BLUE)Building services...$(NC)"
+	$(DOCKER_COMPOSE) build
+	@echo "$(GREEN)Services built!$(NC)"
+
 up: ## Start all services (without VPN or monitoring)
 	@echo "$(GREEN)Starting services...$(NC)"
 	$(DOCKER_COMPOSE) up -d
