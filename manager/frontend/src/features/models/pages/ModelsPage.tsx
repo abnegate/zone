@@ -16,6 +16,7 @@ import {
   formatDate,
   formatDownloadSizeLabel,
   formatNumber,
+  modelDownload,
   modelDownloadSizes,
 } from '../utils';
 import './ModelsPage.css';
@@ -59,8 +60,11 @@ export default function ModelsPage() {
   };
 
   const isInstalledModel = (model: InstalledModel | BrowseModel): model is InstalledModel => {
-    // InstalledModel has required modified_at, BrowseModel has optional
-    return typeof model.modified_at === 'string' && model.modified_at.length > 0;
+    return (
+      !('source' in model && model.source) &&
+      typeof model.modified_at === 'string' &&
+      model.modified_at.length > 0
+    );
   };
 
   const handleDelete = async (name: string) => {
@@ -74,12 +78,18 @@ export default function ModelsPage() {
   };
 
   const handleInstall = async (model: BrowseModel, pullName?: string) => {
+    const download = modelDownload(model, pullName, browse.source);
+    if (download.name === null) {
+      void handleShowDetails(model);
+      return;
+    }
+    if (pull.pulling) return;
     const sizes = modelDownloadSizes(model);
     if (sizes.length > 1 && !pullName) {
       void handleShowDetails(model);
       return;
     }
-    const name = pullName || defaultDownloadName(model);
+    const name = download.name;
     setModelInput(name);
     setDetailsModel(null);
     const success = await pull.pull(name);
@@ -119,6 +129,11 @@ export default function ModelsPage() {
     e.preventDefault();
     browse.search();
   };
+
+  const download =
+    detailsModel && !isInstalledModel(detailsModel)
+      ? modelDownload(detailsModel, selectedSize || undefined, browse.source)
+      : null;
 
   return (
     <div className="page page--workspace models-page">
@@ -692,7 +707,7 @@ export default function ModelsPage() {
                   </div>
                 )}
 
-                {modelDownloadSizes(detailsModel).length > 1 && (
+                {download?.name && modelDownloadSizes(detailsModel).length > 1 && (
                   <div className="details-size-picker">
                     <Select
                       label="Size"
@@ -707,10 +722,13 @@ export default function ModelsPage() {
                   </div>
                 )}
 
-                <div className="details-install">
-                  <span className="details-label">Install command</span>
-                  <code>{selectedSize || detailsModel.name}</code>
-                </div>
+                {download?.name && (
+                  <div className="details-install">
+                    <span className="details-label">Install command</span>
+                    <code>{download.name}</code>
+                  </div>
+                )}
+                {download?.reason && <p className="help-text">{download.reason}</p>}
 
                 {modelCard !== null && (
                   <div className="details-card">
@@ -753,11 +771,12 @@ export default function ModelsPage() {
 
                 <div className="modal-actions">
                   <Button
+                    disabled={!download?.name || pull.pulling}
                     onClick={() =>
                       handleInstall(detailsModel, selectedSize || defaultDownloadName(detailsModel))
                     }
                   >
-                    Install Model
+                    {download?.name ? 'Install Model' : download?.label}
                   </Button>
                 </div>
               </>

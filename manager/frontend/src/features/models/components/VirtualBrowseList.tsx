@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef } from 'react';
 import { List, type RowComponentProps, useDynamicRowHeight } from 'react-window';
 import type { BrowseModel } from '../types';
-import { formatBytes, formatContextLength, formatNumber } from '../utils';
+import { formatBytes, formatContextLength, formatNumber, modelDownload } from '../utils';
 import Capabilities from './Capabilities';
 import './VirtualBrowseList.css';
 
@@ -50,6 +50,7 @@ function BrowseRow({
   const model = models[index];
   const specs = specParts(model);
   const title = model.display_name || model.name;
+  const download = modelDownload(model);
 
   return (
     <div style={style} className="virtual-browse-item-wrapper">
@@ -77,6 +78,7 @@ function BrowseRow({
             </div>
           )}
           {model.description && <p className="browse-description">{model.description}</p>}
+          {download.reason && <p className="browse-description">{download.reason}</p>}
           <Capabilities capabilities={model.capabilities} />
           {model.downloads != null ? (
             <span className="browse-downloads">
@@ -87,13 +89,14 @@ function BrowseRow({
         </div>
         <button
           className="btn btn-primary btn-small"
+          disabled={download.name === null}
           onClick={(e) => {
             e.stopPropagation();
-            onInstall(model);
+            if (download.name !== null) onInstall(model);
           }}
           type="button"
         >
-          Install
+          {download.label}
         </button>
       </div>
     </div>
