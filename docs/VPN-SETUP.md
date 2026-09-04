@@ -35,13 +35,14 @@ OPENVPN_PASSWORD=your_surfshark_password
 ### Step 2: Start with VPN Profile
 
 ```bash
-MODEL_SEARCH_PROXY_URL=http://gluetun:8888 docker compose --profile vpn up -d
-# or
 make up-vpn
 ```
 
 The VPN launch enables Gluetun's HTTP proxy and routes remote model catalog
-searches through it.
+searches through it. The target saves `MODEL_SEARCH_PROXY_URL=http://gluetun:8888`
+in `.env` so rebuilds preserve the proxy. For direct Compose usage, save that
+setting in `.env` before running `docker compose --profile vpn up -d`.
+When disabling the VPN, clear `MODEL_SEARCH_PROXY_URL` in `.env` and recreate Manager.
 
 **What works**: Everything including web search
 - ✅ Chat with local models
