@@ -43,7 +43,7 @@ struct DesktopState {
 async fn setup_desktop(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let manager_dir = manager_dir(&app);
     let proxy_target = frontend::proxy_target();
-    let state = AppState::desktop(manager_dir.clone(), proxy_target.clone());
+    let state = AppState::desktop(manager_dir.clone(), proxy_target.clone())?;
     if !frontend::is_configured() {
         state.set_mode(AppMode::Setup);
     }

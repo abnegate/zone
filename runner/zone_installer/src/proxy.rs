@@ -181,13 +181,12 @@ async fn bridge_ws(client: WebSocket, upstream_url: String) {
     }
 }
 
-pub fn http_client() -> Client {
+pub fn http_client() -> Result<Client, reqwest::Error> {
     Client::builder()
         .danger_accept_invalid_certs(false)
         .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("HTTP client")
 }
 
 #[cfg(test)]
@@ -201,6 +200,11 @@ mod tests {
             upstream_url("https://zone.example.com/", &uri),
             "https://zone.example.com/api/auth/login?x=1"
         );
+    }
+
+    #[test]
+    fn builds_http_client() {
+        assert!(http_client().is_ok());
     }
 
     #[test]

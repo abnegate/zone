@@ -30,26 +30,30 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(mode: AppMode, frontend_dir: PathBuf, proxy_target: String) -> Self {
-        Self {
+    pub fn new(
+        mode: AppMode,
+        frontend_dir: PathBuf,
+        proxy_target: String,
+    ) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             installer_dir: frontend_dir.clone(),
             manager_dir: frontend_dir.clone(),
             frontend_dir,
             mode: Arc::new(RwLock::new(mode)),
             proxy_target: Arc::new(RwLock::new(proxy_target)),
-            http: proxy::http_client(),
-        }
+            http: proxy::http_client()?,
+        })
     }
 
-    pub fn desktop(manager_dir: PathBuf, proxy_target: String) -> Self {
-        Self {
+    pub fn desktop(manager_dir: PathBuf, proxy_target: String) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             frontend_dir: manager_dir.clone(),
             manager_dir,
             installer_dir: PathBuf::new(),
             mode: Arc::new(RwLock::new(AppMode::Console)),
             proxy_target: Arc::new(RwLock::new(proxy_target)),
-            http: proxy::http_client(),
-        }
+            http: proxy::http_client()?,
+        })
     }
 
     pub fn mode(&self) -> AppMode {
@@ -120,45 +124,55 @@ pub fn router(kind: ServeKind, state: AppState) -> Router {
 }
 
 async fn serve_index(State(state): State<AppState>) -> impl IntoResponse {
-    serve_file(state.active_frontend().join("index.html")).await
+    serve_under_root(&state.active_frontend(), "index.html").await
 }
 
 async fn serve_spa(State(state): State<AppState>, uri: Uri) -> Response {
     if state.mode() == AppMode::Setup {
         return setup::page();
     }
-    let root = state.active_frontend();
-    let path = uri.path().trim_start_matches('/');
-    let candidate = if path.is_empty() {
-        Some(root.join("index.html"))
-    } else {
-        safe_join(&root, path)
-    };
-    if let Some(candidate) = candidate
-        && candidate.is_file()
-    {
-        return serve_file(candidate).await;
-    }
-    serve_file(root.join("index.html")).await
+    serve_under_root(&state.active_frontend(), uri.path()).await
 }
 
+/// Join `request_path` onto `root` only when every component is a normal
+/// relative segment (`foo/bar`, not `..` or `/etc`).
 fn safe_join(root: &Path, request_path: &str) -> Option<PathBuf> {
     let mut relative = PathBuf::new();
-    for component in Path::new(request_path).components() {
+    for component in Path::new(request_path.trim_start_matches('/')).components() {
         match component {
             Component::Normal(part) => relative.push(part),
             Component::CurDir => {}
             _ => return None,
         }
     }
+    if relative.as_os_str().is_empty() {
+        relative.push("index.html");
+    }
     let candidate = root.join(relative);
     candidate.starts_with(root).then_some(candidate)
 }
 
-async fn serve_file(path: PathBuf) -> Response {
-    match tokio::fs::read(&path).await {
+async fn serve_under_root(root: &Path, request_path: &str) -> Response {
+    let Ok(public_path) = root.canonicalize() else {
+        return frontend_missing();
+    };
+    let joined =
+        safe_join(&public_path, request_path).unwrap_or_else(|| public_path.join("index.html"));
+    let file_path = match joined.canonicalize() {
+        Ok(path) if path.is_file() => path,
+        _ => match public_path.join("index.html").canonicalize() {
+            Ok(path) => path,
+            Err(_) => return frontend_missing(),
+        },
+    };
+    // CodeQL rust/path-injection: canonicalize, then confirm the resolved
+    // path stays inside the frontend root before any filesystem read.
+    if !file_path.starts_with(&public_path) {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    match tokio::fs::read(&file_path).await {
         Ok(bytes) => {
-            let mime = mime_for(&path);
+            let mime = mime_for(&file_path);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, mime)
@@ -166,14 +180,18 @@ async fn serve_file(path: PathBuf) -> Response {
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Err(err) => {
-            tracing::error!(error = ?err, path = %path.display(), "Failed to read frontend file");
-            if path.file_name().and_then(|n| n.to_str()) == Some("index.html") {
-                (StatusCode::NOT_FOUND, "Frontend not found").into_response()
+            tracing::error!(error = ?err, path = %file_path.display(), "Failed to read frontend file");
+            if file_path.file_name().and_then(|n| n.to_str()) == Some("index.html") {
+                frontend_missing()
             } else {
                 (StatusCode::NOT_FOUND, "Not found").into_response()
             }
         }
     }
+}
+
+fn frontend_missing() -> Response {
+    (StatusCode::NOT_FOUND, "Frontend not found").into_response()
 }
 
 fn mime_for(path: &std::path::Path) -> &'static str {
@@ -210,7 +228,8 @@ mod tests {
         let state = AppState::desktop(
             PathBuf::from("/tmp/manager"),
             "https://zone.example.com".into(),
-        );
+        )
+        .expect("http client");
         assert_eq!(state.active_frontend(), PathBuf::from("/tmp/manager"));
         assert_eq!(state.mode(), AppMode::Console);
         state.set_mode(AppMode::Setup);
@@ -226,13 +245,33 @@ mod tests {
             safe_join(&root, "assets/app.js").unwrap(),
             root.join("assets/app.js")
         );
+        assert_eq!(safe_join(&root, "/").unwrap(), root.join("index.html"));
     }
 
     #[test]
     fn safe_join_rejects_parent_and_absolute_paths() {
         let root = PathBuf::from("/tmp/zone-manager");
         assert_eq!(safe_join(&root, "../etc/passwd"), None);
-        assert_eq!(safe_join(&root, "/etc/passwd"), None);
         assert_eq!(safe_join(&root, "assets/../../etc/passwd"), None);
+        // HTTP paths always start with `/`; that is relative to the frontend root.
+        assert_eq!(
+            safe_join(&root, "/etc/passwd").unwrap(),
+            root.join("etc/passwd")
+        );
+    }
+
+    #[test]
+    fn contained_file_stays_inside_canonical_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("frontend");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("index.html"), b"ok").unwrap();
+        std::fs::write(tmp.path().join("secret"), b"no").unwrap();
+        let public = root.canonicalize().unwrap();
+        let index = safe_join(&public, "index.html")
+            .and_then(|p| p.canonicalize().ok())
+            .expect("index");
+        assert!(index.starts_with(&public));
+        assert!(safe_join(&public, "../secret").is_none());
     }
 }

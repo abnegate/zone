@@ -36,7 +36,13 @@ async fn main() {
         "Starting Zone installer"
     );
 
-    let state = serve_mod::AppState::new(mode, frontend_dir, proxy_target);
+    let state = match serve_mod::AppState::new(mode, frontend_dir, proxy_target) {
+        Ok(state) => state,
+        Err(err) => {
+            tracing::error!(error = %err, "Failed to build HTTP client");
+            std::process::exit(1);
+        }
+    };
     let app = router(serve_kind, state);
     let (listener, bound) = bind(&bind_addr)
         .await
