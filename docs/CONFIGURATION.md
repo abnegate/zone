@@ -260,6 +260,8 @@ Zone's agent loop can attach [Model Context Protocol](https://modelcontextprotoc
 
 Config uses the same JSON shape as Cursor (`mcpServers`). Tool names are prefixed with the server name, so magents' `spawn_session` becomes `magents_spawn_session`.
 
+Stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat configured servers as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
+
 ### `ZONE_MCP_ENABLED`
 - **Default**: `true`
 - **Description**: Master switch. `false` / `0` / `off` skips every MCP server.

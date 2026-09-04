@@ -17,7 +17,10 @@ pub struct McpServerSpec {
     /// Arguments after the executable (`["mcp"]` for magents).
     #[serde(default)]
     pub args: Vec<String>,
-    /// Extra environment variables for the child (merged over the current env).
+    /// Extra environment variables overlaid on the inherited runner environment.
+    ///
+    /// Stdio MCP children are trusted local processes: they see `PATH`, `HOME`,
+    /// and any credentials already in the Zone process.
     #[serde(default)]
     pub env: HashMap<String, String>,
     /// Working directory for the child. Inherits the process cwd when omitted.

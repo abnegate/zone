@@ -11,6 +11,9 @@
 //! - `ZONE_MCP_CONFIG` — path to a JSON file of the same shape
 //! - `ZONE_MCP_AUTO_MAGENTS` — if no servers are configured and `magents` is on
 //!   `PATH`, attach `magents mcp` (default `true`)
+//!
+//! Children inherit the runner environment and overlay `McpServerSpec.env`.
+//! Configure only trusted executables.
 
 mod client;
 mod config;

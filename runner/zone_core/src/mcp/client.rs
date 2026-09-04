@@ -143,6 +143,8 @@ impl McpSession {
     async fn handshake(spec: &McpServerSpec) -> Result<Self, McpError> {
         let mut command = Command::new(&spec.command);
         command.kill_on_drop(true);
+        // Inherit the runner environment (PATH, HOME, credentials) and overlay
+        // spec.env. Configured MCP servers are trusted local processes.
         let transport = TokioChildProcess::new(command.configure(|cmd| {
             cmd.args(&spec.args);
             for (key, value) in &spec.env {
