@@ -141,7 +141,9 @@ test.describe('Workspace Settings Page', () => {
 
     test('displays font family dropdown', async ({ page }) => {
       await expect(page.locator('#font-family')).toBeVisible();
-      await expect(page.locator('#font-family option')).toHaveCount(6);
+      await expect(page.locator('#font-family option')).toHaveText([
+        'App Default', 'System Default', 'Inter', 'Roboto', 'Open Sans', 'Lato', 'Nunito',
+      ]);
     });
 
     test('displays font size slider', async ({ page }) => {

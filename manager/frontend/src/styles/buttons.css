@@ -23,7 +23,9 @@
 
 .btn:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 1px var(--ui-bg-base), 0 0 0 3px var(--ui-accent);
+  box-shadow:
+    0 0 0 1px var(--ui-bg-base),
+    0 0 0 3px var(--ui-accent);
 }
 
 .btn:disabled {
@@ -33,7 +35,7 @@
 }
 
 .btn-primary,
-.ui-btn-primary {
+.ui-btn.ui-btn-primary {
   background-color: var(--ui-accent);
   color: var(--ui-accent-foreground, var(--ui-text-inverse));
 }
@@ -43,13 +45,13 @@
 }
 
 .btn-secondary,
-.ui-btn-secondary {
+.ui-btn.ui-btn-secondary {
   background-color: var(--ui-secondary, var(--ui-bg-surface));
   color: var(--ui-secondary-foreground, var(--ui-text-primary));
 }
 
 .btn-secondary:hover:not(:disabled),
-.ui-btn-secondary:hover:not(:disabled) {
+.ui-btn.ui-btn-secondary:hover:not(:disabled) {
   background-color: var(--ui-secondary-hover, var(--ui-bg-hover));
 }
 
@@ -167,7 +169,9 @@
 .btn-icon:focus-visible,
 .btn-danger-icon:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 1px var(--ui-bg-base), 0 0 0 3px var(--ui-accent);
+  box-shadow:
+    0 0 0 1px var(--ui-bg-base),
+    0 0 0 3px var(--ui-accent);
 }
 
 .btn-icon:disabled,
