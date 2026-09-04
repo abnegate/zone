@@ -36,6 +36,8 @@ pub struct Config {
     pub gpt4all_models_url: String,
     /// HuggingFace browse API. Override in tests so CI does not hit huggingface.co.
     pub huggingface_models_url: String,
+    /// Optional HTTP proxy for remote model catalog searches.
+    pub model_search_proxy_url: Option<String>,
     /// Encryption key for source credentials (must be at least 32 characters)
     pub encryption_key: String,
     /// CORS allowed origins (comma-separated, default: *)
@@ -283,6 +285,10 @@ impl Config {
                 .unwrap_or_else(|_| DEFAULT_GPT4ALL_MODELS_URL.to_string()),
             huggingface_models_url: env::var("HUGGINGFACE_MODELS_URL")
                 .unwrap_or_else(|_| DEFAULT_HUGGINGFACE_MODELS_URL.to_string()),
+            model_search_proxy_url: env::var("MODEL_SEARCH_PROXY_URL")
+                .ok()
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty()),
             encryption_key,
             cors_origins,
             cors_allow_credentials,
@@ -309,6 +315,10 @@ impl std::fmt::Debug for Config {
             .field("ollama_host", &self.ollama_host)
             .field("gpt4all_models_url", &self.gpt4all_models_url)
             .field("huggingface_models_url", &self.huggingface_models_url)
+            .field(
+                "model_search_proxy_url",
+                &self.model_search_proxy_url.as_ref().map(|_| "[configured]"),
+            )
             .field("encryption_key", &"[REDACTED]")
             .field("cors_origins", &self.cors_origins)
             .field("cors_allow_credentials", &self.cors_allow_credentials)
@@ -350,6 +360,7 @@ mod tests {
             ollama_host: "http://localhost:11434".to_string(),
             gpt4all_models_url: DEFAULT_GPT4ALL_MODELS_URL.to_string(),
             huggingface_models_url: DEFAULT_HUGGINGFACE_MODELS_URL.to_string(),
+            model_search_proxy_url: None,
             encryption_key: "12345678901234567890123456789012".to_string(),
             cors_origins: vec!["*".to_string()],
             cors_allow_credentials: false,
@@ -416,6 +427,8 @@ mod tests {
         config.redis_url = "redis://:secret@localhost:6379".to_string();
         config.jwt_secret = "my-super-secret-key".to_string();
         config.litellm_key = "sk-secret-api-key".to_string();
+        config.model_search_proxy_url =
+            Some("http://proxy-user:proxy-password@proxy.example:8888".to_string());
 
         let debug_str = format!("{:?}", config);
 
@@ -429,9 +442,11 @@ mod tests {
         assert!(!debug_str.contains("my-super-secret-key"));
         assert!(!debug_str.contains("sk-secret-api-key"));
         assert!(!debug_str.contains("user:password"));
+        assert!(!debug_str.contains("proxy-password"));
 
         // Should contain [REDACTED] placeholders
         assert!(debug_str.contains("[REDACTED]"));
+        assert!(debug_str.contains("model_search_proxy_url: Some(\"[configured]\")"));
     }
 
     #[test]

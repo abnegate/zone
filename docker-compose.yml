@@ -303,6 +303,8 @@ services:
       - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
       - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
       - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
+      # Set by the VPN launch targets so remote model catalogs use Gluetun.
+      - MODEL_SEARCH_PROXY_URL=${MODEL_SEARCH_PROXY_URL:-}
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://host.docker.internal:8188}
       - COMFYUI_API_TOKEN=${COMFYUI_API_TOKEN:-}
@@ -468,6 +470,8 @@ services:
       # Do not include 10.0.0.0/8 — overlaps Surfshark WG (10.14.0.2/16)
       - FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12,192.168.0.0/16
       - FIREWALL_INPUT_PORTS=8080,8001
+      # Expose Gluetun's HTTP proxy for remote model catalog requests.
+      - HTTPPROXY=on
       - UPDATER_PERIOD=24h
     networks:
       - internal

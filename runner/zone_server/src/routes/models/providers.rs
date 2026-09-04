@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use reqwest::Client;
 use scraper::{Html, Selector};
 use std::time::Duration;
 
@@ -35,16 +36,20 @@ static BILLION_RE: Lazy<Regex> =
 static PULLS_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)([\d,.]+[KMBkmb]?)\s*Pulls").expect("pulls regex"));
 
-static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
+fn build_http_client(proxy_url: Option<&str>) -> Result<Client, ProviderError> {
+    let mut builder = Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
         .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
-        .user_agent("ZoneManager/1.0")
-        .build()
-        .expect("Failed to build HTTP client")
-});
+        .user_agent("ZoneManager/1.0");
+
+    if let Some(proxy_url) = proxy_url {
+        builder = builder.proxy(reqwest::Proxy::all(proxy_url)?);
+    }
+
+    Ok(builder.build()?)
+}
 
 /// Error type for provider operations
 #[derive(Debug, thiserror::Error)]
@@ -96,11 +101,26 @@ pub trait ModelProvider: Send + Sync {
 
 /// Get a provider by name
 pub fn get_provider(name: &str) -> Result<Box<dyn ModelProvider>, ProviderError> {
+    get_provider_with_proxy(name, None)
+}
+
+/// Get a provider by name, routing remote catalog requests through the given
+/// HTTP proxy when configured.
+pub fn get_provider_with_proxy(
+    name: &str,
+    proxy_url: Option<&str>,
+) -> Result<Box<dyn ModelProvider>, ProviderError> {
     match name {
-        "ollama" => Ok(Box::new(OllamaLibraryProvider)),
-        "huggingface" => Ok(Box::new(HuggingFaceProvider::default())),
-        "gpt4all" => Ok(Box::new(Gpt4AllProvider::default())),
-        "openrouter" => Ok(Box::new(OpenRouterProvider)),
+        "ollama" => Ok(Box::new(OllamaLibraryProvider::with_proxy(proxy_url)?)),
+        "huggingface" => Ok(Box::new(HuggingFaceProvider::with_proxy(
+            DEFAULT_HUGGINGFACE_MODELS_URL,
+            proxy_url,
+        )?)),
+        "gpt4all" => Ok(Box::new(Gpt4AllProvider::with_proxy(
+            DEFAULT_GPT4ALL_MODELS_URL,
+            proxy_url,
+        )?)),
+        "openrouter" => Ok(Box::new(OpenRouterProvider::with_proxy(proxy_url)?)),
         _ => Err(ProviderError::Unavailable(format!(
             "Unknown provider: {}",
             name
@@ -108,7 +128,27 @@ pub fn get_provider(name: &str) -> Result<Box<dyn ModelProvider>, ProviderError>
     }
 }
 
-pub struct OllamaLibraryProvider;
+pub struct OllamaLibraryProvider {
+    client: Client,
+}
+
+impl OllamaLibraryProvider {
+    pub fn new() -> Self {
+        Self::with_proxy(None).expect("Failed to build Ollama model catalog client")
+    }
+
+    pub fn with_proxy(proxy_url: Option<&str>) -> Result<Self, ProviderError> {
+        Ok(Self {
+            client: build_http_client(proxy_url)?,
+        })
+    }
+}
+
+impl Default for OllamaLibraryProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl ModelProvider for OllamaLibraryProvider {
@@ -129,7 +169,7 @@ impl ModelProvider for OllamaLibraryProvider {
             )
         };
 
-        let response = HTTP_CLIENT.get(&url).send().await?;
+        let response = self.client.get(&url).send().await?;
 
         if !response.status().is_success() {
             return Err(ProviderError::Unavailable(format!(
@@ -141,14 +181,14 @@ impl ModelProvider for OllamaLibraryProvider {
         let html = response.text().await?;
         let mut models = parse_ollama_library_html(&html);
         if matches!(opts.sort, ModelSort::SizeAsc | ModelSort::SizeDesc) {
-            models = attach_ollama_download_sizes(models).await;
+            models = attach_ollama_download_sizes(models, &self.client).await;
             models = refine_models(models, &opts);
             return Ok(paginate_models(models, offset, opts.limit));
         }
 
         models = refine_models(models, &opts);
         let mut page = paginate_models(models, offset, opts.limit);
-        page.models = attach_ollama_download_sizes(page.models).await;
+        page.models = attach_ollama_download_sizes(page.models, &self.client).await;
         Ok(page)
     }
 }
@@ -157,18 +197,24 @@ impl ModelProvider for OllamaLibraryProvider {
 ///
 /// A model whose manifest cannot be fetched keeps `size: None` rather than
 /// failing the whole listing.
-async fn attach_ollama_download_sizes(models: Vec<ModelResponse>) -> Vec<ModelResponse> {
+async fn attach_ollama_download_sizes(
+    models: Vec<ModelResponse>,
+    client: &Client,
+) -> Vec<ModelResponse> {
     use futures::stream::{self, StreamExt};
 
     stream::iter(models)
-        .map(|mut model| async move {
-            model.size = fetch_ollama_manifest_size(&model.name).await;
-            if let Some(sizes) = model.sizes.as_mut() {
-                for variant in sizes.iter_mut() {
-                    variant.size = fetch_ollama_manifest_size(&variant.name).await;
+        .map(|mut model| {
+            let client = client.clone();
+            async move {
+                model.size = fetch_ollama_manifest_size(&model.name, &client).await;
+                if let Some(sizes) = model.sizes.as_mut() {
+                    for variant in sizes.iter_mut() {
+                        variant.size = fetch_ollama_manifest_size(&variant.name, &client).await;
+                    }
                 }
+                model
             }
-            model
         })
         .buffered(OLLAMA_SIZE_LOOKUP_CONCURRENCY)
         .collect()
@@ -184,11 +230,11 @@ fn ollama_manifest_ref(name: &str) -> (&str, &str) {
 }
 
 /// Sum the layer sizes in a model's manifest to get its download size.
-async fn fetch_ollama_manifest_size(name: &str) -> Option<u64> {
+async fn fetch_ollama_manifest_size(name: &str, client: &Client) -> Option<u64> {
     let (repo, tag) = ollama_manifest_ref(name);
     let url = format!("{}/{}/manifests/{}", OLLAMA_REGISTRY_URL, repo, tag);
 
-    let response = HTTP_CLIENT
+    let response = client
         .get(&url)
         .header(
             "Accept",
@@ -503,6 +549,7 @@ fn get_popular_ollama_models() -> Vec<ModelResponse> {
 
 pub struct HuggingFaceProvider {
     catalog_url: String,
+    client: Client,
 }
 
 impl Default for HuggingFaceProvider {
@@ -513,9 +560,18 @@ impl Default for HuggingFaceProvider {
 
 impl HuggingFaceProvider {
     pub fn new(catalog_url: impl Into<String>) -> Self {
-        Self {
+        Self::with_proxy(catalog_url, None)
+            .expect("Failed to build HuggingFace model catalog client")
+    }
+
+    pub fn with_proxy(
+        catalog_url: impl Into<String>,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
             catalog_url: catalog_url.into(),
-        }
+            client: build_http_client(proxy_url)?,
+        })
     }
 }
 
@@ -527,8 +583,14 @@ impl ModelProvider for HuggingFaceProvider {
 
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
         if !huggingface_uses_local_window(&opts) {
-            let (models, next_cursor) =
-                fetch_huggingface_page(&self.catalog_url, &opts, opts.cursor, opts.limit).await?;
+            let (models, next_cursor) = fetch_huggingface_page(
+                &self.catalog_url,
+                &self.client,
+                &opts,
+                opts.cursor,
+                opts.limit,
+            )
+            .await?;
             return Ok(BrowseResponse {
                 models: refine_models(models, &opts),
                 next_cursor,
@@ -548,6 +610,7 @@ impl ModelProvider for HuggingFaceProvider {
         loop {
             let (page, next) = fetch_huggingface_page(
                 &self.catalog_url,
+                &self.client,
                 &opts,
                 hf_cursor.as_deref(),
                 MAX_PAGE_SIZE,
@@ -634,6 +697,7 @@ fn huggingface_uses_local_window(opts: &BrowseQuery<'_>) -> bool {
 
 async fn fetch_huggingface_page(
     catalog_url: &str,
+    client: &Client,
     opts: &BrowseQuery<'_>,
     cursor: Option<&str>,
     limit: usize,
@@ -670,7 +734,7 @@ async fn fetch_huggingface_page(
         url.push_str(&format!("&filter={}", urlencoding::encode(family)));
     }
 
-    let response = HTTP_CLIENT.get(&url).send().await?;
+    let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
         return Err(ProviderError::Unavailable(format!(
@@ -888,6 +952,7 @@ fn huggingface_description(
 
 pub struct Gpt4AllProvider {
     catalog_url: String,
+    client: Client,
 }
 
 impl Default for Gpt4AllProvider {
@@ -898,9 +963,17 @@ impl Default for Gpt4AllProvider {
 
 impl Gpt4AllProvider {
     pub fn new(catalog_url: impl Into<String>) -> Self {
-        Self {
+        Self::with_proxy(catalog_url, None).expect("Failed to build GPT4All model catalog client")
+    }
+
+    pub fn with_proxy(
+        catalog_url: impl Into<String>,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
             catalog_url: catalog_url.into(),
-        }
+            client: build_http_client(proxy_url)?,
+        })
     }
 }
 
@@ -914,7 +987,7 @@ impl ModelProvider for Gpt4AllProvider {
         // GPT4All uses a static JSON catalog, so we fetch all and paginate client-side
         let offset = parse_cursor_offset(opts.cursor)?;
 
-        let gpt4all_models = fetch_gpt4all_catalog(&self.catalog_url).await?;
+        let gpt4all_models = fetch_gpt4all_catalog(&self.catalog_url, &self.client).await?;
 
         // Filter by query if provided
         let filtered: Vec<_> = if let Some(q) = opts.query {
@@ -948,10 +1021,13 @@ impl ModelProvider for Gpt4AllProvider {
     }
 }
 
-async fn fetch_gpt4all_catalog(url: &str) -> Result<Vec<Gpt4AllModel>, ProviderError> {
+async fn fetch_gpt4all_catalog(
+    url: &str,
+    client: &Client,
+) -> Result<Vec<Gpt4AllModel>, ProviderError> {
     let mut last_error: Option<ProviderError> = None;
     for attempt in 1_u32..=3 {
-        match HTTP_CLIENT.get(url).send().await {
+        match client.get(url).send().await {
             Ok(response) if response.status().is_success() => {
                 let body = response.text().await?;
                 return serde_json::from_str(&body).map_err(|e| {
@@ -1105,9 +1181,29 @@ fn extract_quantization(filename: &str) -> Option<String> {
     None
 }
 
-pub struct OpenRouterProvider;
+pub struct OpenRouterProvider {
+    client: Client,
+}
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+
+impl OpenRouterProvider {
+    pub fn new() -> Self {
+        Self::with_proxy(None).expect("Failed to build OpenRouter model catalog client")
+    }
+
+    pub fn with_proxy(proxy_url: Option<&str>) -> Result<Self, ProviderError> {
+        Ok(Self {
+            client: build_http_client(proxy_url)?,
+        })
+    }
+}
+
+impl Default for OpenRouterProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl ModelProvider for OpenRouterProvider {
@@ -1118,7 +1214,7 @@ impl ModelProvider for OpenRouterProvider {
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
         let offset = parse_cursor_offset(opts.cursor)?;
 
-        let response = HTTP_CLIENT.get(OPENROUTER_MODELS_URL).send().await?;
+        let response = self.client.get(OPENROUTER_MODELS_URL).send().await?;
 
         if !response.status().is_success() {
             return Err(ProviderError::Unavailable(format!(
@@ -1803,7 +1899,7 @@ mod tests {
     // Test the trait interface
     #[tokio::test]
     async fn test_provider_trait_interface() {
-        let provider: Box<dyn ModelProvider> = Box::new(OllamaLibraryProvider);
+        let provider: Box<dyn ModelProvider> = Box::new(OllamaLibraryProvider::new());
         assert_eq!(provider.name(), "ollama");
     }
 
@@ -2403,6 +2499,42 @@ mod tests {
             .unwrap();
         assert_eq!(result.models.len(), 1);
         assert_eq!(result.models[0].name, "Llama 3 Instruct");
+    }
+
+    #[tokio::test]
+    async fn test_gpt4all_search_uses_configured_proxy() {
+        let proxy_router = axum::Router::new().fallback(|| async {
+            axum::Json(serde_json::json!([{
+                "name": "Proxied Model",
+                "filename": "proxied-model.Q4_0.gguf",
+                "filesize": "12345"
+            }]))
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, proxy_router).await.unwrap();
+        });
+
+        let provider = Gpt4AllProvider::with_proxy(
+            "http://model-catalog.invalid/models3.json",
+            Some(&format!("http://{proxy_addr}")),
+        )
+        .unwrap();
+        let result = provider
+            .search(BrowseQuery {
+                query: None,
+                cursor: None,
+                limit: DEFAULT_PAGE_SIZE,
+                sort: ModelSort::default(),
+                family: None,
+                size: ModelSizeFilter::default(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].name, "Proxied Model");
     }
 
     #[test]
