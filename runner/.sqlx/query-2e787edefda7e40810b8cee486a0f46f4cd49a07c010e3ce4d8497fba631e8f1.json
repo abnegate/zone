@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT p.name\n        FROM user_roles ur\n        JOIN role_permissions rp ON ur.role_id = rp.role_id\n        JOIN permissions p ON rp.permission_id = p.id\n        WHERE ur.user_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2e787edefda7e40810b8cee486a0f46f4cd49a07c010e3ce4d8497fba631e8f1"
+}

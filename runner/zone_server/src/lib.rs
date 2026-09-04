@@ -5,6 +5,7 @@
 // Allow dead code in this crate - many components are defined but not yet wired up
 #![allow(dead_code)]
 
+pub mod agent;
 pub mod auth;
 pub mod cache;
 pub mod config;

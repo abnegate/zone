@@ -1,9 +1,9 @@
-import { Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
+import { Button, Checkbox, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
-import { AuthenticatedImage, MessageContent } from '../components';
+import { AuthenticatedImage, MessageContent, ToolTrace } from '../components';
 import { useChat, useChatSearch, useChats } from '../hooks';
 import type { ChatSearchResult } from '../types';
 import {
@@ -27,6 +27,8 @@ export default function ChatsPage() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatModel, setNewChatModel] = useState('');
+  const [newChatAgent, setNewChatAgent] = useState(false);
+  const [newChatSandboxed, setNewChatSandboxed] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchResults, setShowSearchResults] = useState(false);
@@ -67,6 +69,8 @@ export default function ChatsPage() {
     error: chatError,
     status: chatStatus,
     sendMessage: sendMessageFn,
+    setAgentEnabled: setAgentEnabledFn,
+    setAgentSandboxed: setAgentSandboxedFn,
   } = useChat(selectedChatId);
 
   const {
@@ -117,12 +121,36 @@ export default function ChatsPage() {
         workspace_id: currentWorkspace.id,
         title: `Chat with ${newChatModel}`,
         model_name: newChatModel,
+        agent_enabled: newChatAgent,
+        agent_sandboxed: newChatSandboxed,
       });
       setShowNewChatModal(false);
       setNewChatModel('');
+      setNewChatAgent(false);
+      setNewChatSandboxed(true);
       selectChat(chat.id);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
+    }
+  };
+
+  const handleToggleAgent = async () => {
+    if (!isAuthenticated || !displayedChat) return;
+    setOperationError(null);
+    try {
+      await setAgentEnabledFn(!displayedChat.agent_enabled);
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to change agent mode');
+    }
+  };
+
+  const handleToggleSandbox = async () => {
+    if (!isAuthenticated || !displayedChat) return;
+    setOperationError(null);
+    try {
+      await setAgentSandboxedFn(!displayedChat.agent_sandboxed);
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to change sandbox mode');
     }
   };
 
@@ -460,6 +488,73 @@ export default function ChatsPage() {
                 <h3>{displayedChat.title}</h3>
                 <span className="chat-model">{displayedChat.model_name}</span>
               </div>
+              <button
+                type="button"
+                className="agent-toggle"
+                onClick={handleToggleAgent}
+                aria-pressed={displayedChat.agent_enabled}
+                title={
+                  displayedChat.agent_enabled
+                    ? 'Agent mode on: replies can search this workspace before answering'
+                    : 'Agent mode off: replies come straight from the model'
+                }
+                data-testid="agent-toggle"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  width="14"
+                  height="14"
+                  aria-hidden="true"
+                >
+                  <path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4L7 17M17 7l1.4-1.4" />
+                  <circle cx="12" cy="12" r="3.5" />
+                </svg>
+                Agent
+              </button>
+              {displayedChat.agent_enabled && (
+                <button
+                  type="button"
+                  className={
+                    displayedChat.agent_sandboxed
+                      ? 'agent-toggle'
+                      : 'agent-toggle agent-toggle-unsandboxed'
+                  }
+                  onClick={handleToggleSandbox}
+                  aria-pressed={!displayedChat.agent_sandboxed}
+                  title={
+                    displayedChat.agent_sandboxed
+                      ? 'Sandboxed: the agent can only read this workspace'
+                      : 'Unsandboxed: the agent can run shell commands and write files on the server'
+                  }
+                  data-testid="sandbox-toggle"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    width="14"
+                    height="14"
+                    aria-hidden="true"
+                  >
+                    {displayedChat.agent_sandboxed ? (
+                      <>
+                        <rect x="4" y="10.5" width="16" height="10" rx="2" />
+                        <path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" />
+                      </>
+                    ) : (
+                      <>
+                        <rect x="4" y="10.5" width="16" height="10" rx="2" />
+                        <path d="M8 10.5V7a4 4 0 0 1 7.5-2" />
+                      </>
+                    )}
+                  </svg>
+                  {displayedChat.agent_sandboxed ? 'Sandboxed' : 'Host access'}
+                </button>
+              )}
             </div>
 
             <div className="messages-container">
@@ -470,6 +565,7 @@ export default function ChatsPage() {
               ) : (
                 displayedChat.messages.map((message) => {
                   const images = imageAttachments(message.metadata);
+                  const toolCalls = message.metadata?.tool_calls ?? [];
                   return (
                     <div key={message.id} className={`message message-${message.role}`}>
                       <div className="message-header">
@@ -502,6 +598,7 @@ export default function ChatsPage() {
                           ))}
                         </div>
                       )}
+                      {toolCalls.length > 0 && <ToolTrace calls={toolCalls} />}
                       {message.content.trim() ? (
                         <div className="message-content">
                           <MessageContent content={message.content} />
@@ -678,6 +775,20 @@ export default function ChatsPage() {
             placeholder="Choose a model..."
             options={models.map((model) => ({ value: model.name, label: model.name }))}
           />
+          <Checkbox
+            label="Agent mode"
+            helpText="Let replies search this workspace's knowledge, sources, projects and tasks before answering. Requires a model that supports tool calling."
+            checked={newChatAgent}
+            onCheckedChange={setNewChatAgent}
+          />
+          {newChatAgent && (
+            <Checkbox
+              label="Sandboxed"
+              helpText="Sandboxed, the agent can only read this workspace. Unsandboxed, it can also run shell commands and read and write files on the machine running the server, as the user that runs it. Those changes are real and are not undone when the chat ends."
+              checked={newChatSandboxed}
+              onCheckedChange={setNewChatSandboxed}
+            />
+          )}
           <div className="modal-actions">
             <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>
               Cancel

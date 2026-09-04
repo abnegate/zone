@@ -33,6 +33,8 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
+# Stream adapters (LLM chunks -> AgentEvent)
+async-stream = "0.3"
 
 # HTTP framework
 axum = { workspace = true }

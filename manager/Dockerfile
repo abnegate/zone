@@ -44,6 +44,7 @@ COPY runner/zone_context ./zone_context/
 COPY runner/zone_server ./zone_server/
 COPY runner/zone_cli ./zone_cli/
 COPY runner/zone_installer ./zone_installer/
+COPY runner/.sqlx ./.sqlx
 
 COPY runner/zone_server/migrations ./zone_server/migrations/
 # Packaged workflow is compiled into zone_server via include_str! from repo root.
