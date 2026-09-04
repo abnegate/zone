@@ -18,7 +18,7 @@ pub struct ChatRow {
     /// Whether this chat runs the tool-calling agent loop instead of a plain
     /// completion.
     pub agent_enabled: bool,
-    /// Whether the agent is restricted to read-only workspace tools. When
+    /// Whether the agent is restricted to authorized workspace tools. When
     /// false it also gets the host tools that read, write and run commands.
     pub agent_sandboxed: bool,
     pub created_at: Option<NaiveDateTime>,

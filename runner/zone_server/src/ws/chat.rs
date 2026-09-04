@@ -249,6 +249,18 @@ pub enum ServerMessage {
     Status { message: String },
 }
 
+fn saved_action(value: &serde_json::Value) -> Option<ServerMessage> {
+    Some(ServerMessage::MessageSaved {
+        message_id: serde_json::from_value(value.get("id")?.clone()).ok()?,
+        role: value.get("role")?.as_str()?.to_string(),
+        content: value.get("content")?.as_str()?.to_string(),
+        metadata: value
+            .get("metadata")
+            .filter(|value| !value.is_null())
+            .cloned(),
+    })
+}
+
 impl ServerMessage {
     /// Convert to WebSocket message with fallback for serialization errors
     fn to_ws_message(&self) -> Message {
@@ -557,6 +569,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     }
     let sender = Arc::new(Mutex::new(sender));
     let mut titles = crate::workers::titles::subscribe();
+    let mut actions = crate::db::actions::subscribe();
 
     // Setup state for message loop
     let mut auth_check_counter = 0;
@@ -569,6 +582,21 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     // Main message loop
     loop {
         tokio::select! {
+            update = actions.recv() => {
+                if let Ok((destination, message)) = update
+                    && destination == chat_id
+                {
+                    if !workspace_members::is_member(state.db(), user_id, workspace_id).await.unwrap_or(false) {
+                        let _ = sender.lock().await.close().await;
+                        return;
+                    }
+                    if let Some(message) = saved_action(&message)
+                        && !send_server(&sender, message).await
+                    {
+                        break;
+                    }
+                }
+            }
             update = titles.recv() => {
                 if let Ok((updated_chat_id, title)) = update
                     && updated_chat_id == chat_id
@@ -621,6 +649,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         &task_sender,
                                         chat_id,
                                         workspace_id,
+                                        user_id,
                                         &task_content,
                                         metadata,
                                         generation,
@@ -977,6 +1006,7 @@ async fn handle_send_message(
     sender: &SharedSender,
     chat_id: Uuid,
     workspace_id: Uuid,
+    user_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
     mut request: Generation,
@@ -994,6 +1024,19 @@ async fn handle_send_message(
         permit = generation.acquire() => permit.expect("chat semaphore is never closed"),
     };
 
+    if !workspace_members::can_write(state.db(), workspace_id, user_id)
+        .await
+        .unwrap_or(false)
+    {
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Workspace access denied".to_string(),
+            },
+        )
+        .await;
+        return;
+    }
     let preparation = tokio::select! {
         biased;
         _ = request.cancel.recv() => {
@@ -1031,7 +1074,7 @@ async fn handle_send_message(
                         request.cancelled(sender).await;
                         return Ok(());
                     }
-                    result = prepare_chat(state, sender, chat_id, workspace_id, content, chat, web_search_requested) => result,
+                    result = prepare_chat(state, sender, chat_id, workspace_id, user_id, content, chat, web_search_requested) => result,
                 };
                 handle_chat_generation(state, sender, chat_id, preparation, &mut request).await
             }
@@ -1098,6 +1141,9 @@ async fn prepare_message(
             return Ok(None);
         }
     };
+    if chat.workspace_id != Some(workspace_id) {
+        return Err("Chat does not belong to the authenticated workspace".into());
+    }
     let mut image_config = state.config().comfyui.clone();
     if let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
         && let Ok(settings) = ai_settings::get_effective_ai_settings(
@@ -1143,6 +1189,7 @@ async fn prepare_chat(
     sender: &SharedSender,
     chat_id: Uuid,
     workspace_id: Uuid,
+    user_id: Uuid,
     content: &str,
     chat: chats::ChatRow,
     web_search_requested: bool,
@@ -1193,6 +1240,7 @@ async fn prepare_chat(
             state: state.clone(),
             workspace_id,
             chat_id,
+            user_id,
         },
         // A deployment can refuse host tools outright, in which case the
         // chat's preference does not get a say.
@@ -1979,5 +2027,18 @@ mod tests {
             // Just verify it can be serialized without panicking
             assert!(!json.is_empty());
         }
+    }
+
+    #[test]
+    fn workspace_saved_messages_preserve_role_and_metadata() {
+        let id = Uuid::new_v4();
+        let metadata = serde_json::json!({"source":"reminder","actor_id":Uuid::new_v4()});
+        let saved = saved_action(&serde_json::json!({"id":id,"role":"assistant","content":"Follow up","metadata":metadata})).unwrap();
+        let value = serde_json::to_value(saved).unwrap();
+        assert_eq!(value["type"], "message_saved");
+        assert_eq!(value["message_id"], id.to_string());
+        assert_eq!(value["role"], "assistant");
+        assert_eq!(value["metadata"], metadata);
+        assert!(saved_action(&serde_json::json!({"id":"invalid"})).is_none());
     }
 }

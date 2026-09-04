@@ -163,6 +163,7 @@ async fn main() {
 
     // Start background workers
     zone_server::workers::knowledge_refresh::start_refresh_worker(state.clone());
+    zone_server::workers::reminders::spawn(state.clone());
     tracing::info!("Started knowledge refresh worker");
 
     // Configure CORS based on environment

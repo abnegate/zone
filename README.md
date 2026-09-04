@@ -564,3 +564,17 @@ receive free [CodeRabbit](https://coderabbit.ai) AI reviews.
 ---
 
 **Built with privacy and performance in mind.**
+
+
+## Workspace assistant tools
+
+Agent mode provides workspace-scoped tools in both sandbox modes. The sandbox controls access to the server filesystem and shell; workspace writes require the authenticated member's current permissions and a user request.
+
+- Tasks and people: `list_tasks`, `create_task`, `update_task`, `list_members`. Tasks support assignment and completion; operational task-run transitions remain separate.
+- Documents: `list_documents` (optional full-text `query`), `read_document`, `create_document`, `update_document`. Local notes are immediately searchable without an embedding service and appear in the knowledge base. Imported documents include snapshot freshness; only local notes can be edited.
+- Chat actions: `list_chats`, `send_message`, including workspace member mentions. Messages persist in the destination chat and appear live on connected clients on the delivering server. Mentions label recipients in the chat; they do not send external notifications.
+- Reminders: `create_reminder`, `list_reminders`, `cancel_reminder`. Supply a future RFC 3339 timestamp with timezone. The server checks due reminders every ten seconds and persists an assistant message in the selected workspace chat, including after a restart. Delivery is cancelled if the creator loses write access or the chat becomes unavailable. There is no email or push delivery.
+- Live GitHub: `get_build_status`, `list_deployments`, `list_issues`, `read_repository_file`. Configure an active GitHub source in the workspace with `owner` and `repo`, optional `branch` and `path`, and an access token for private repositories. Stored encrypted source credentials take precedence over a configured token. Requests use GitHub's API and resolve file/build/deployment references to immutable commit IDs. Missing or incomplete check evidence never counts as green; deployment records do not establish service health. Other CI providers and ticket systems are not supported by these tools.
+- Existing inventory and search: `list_sources`, `list_projects`, `search_knowledge` when a context service is configured, and `search_chat_history` when an embedding service is configured.
+
+Database migrations run automatically at server startup, including workspace action storage and document search indexes. Keep the server running for scheduled delivery. Sandbox escape remains controlled by the chat setting and `ZONE_CHAT_AGENT_ALLOW_HOST`; disable host access on shared deployments that should only expose workspace tools.

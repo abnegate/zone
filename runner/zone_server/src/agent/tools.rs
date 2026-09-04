@@ -7,8 +7,8 @@
 //! tenant's data no matter what the model puts in the arguments.
 //!
 //! A chat gets one of two tool sets, chosen by its `agent_sandboxed` setting.
-//! Sandboxed, the default, is these workspace tools alone: all read-only, all
-//! backed by Postgres. Unsandboxed adds `zone_core`'s file and shell tools
+//! Sandboxed, the default, is these workspace tools alone: authorized, all
+//! backed by workspace services. Unsandboxed adds `zone_core`'s file and shell tools
 //! with containment switched off, which is a real shell on the real host.
 
 use async_trait::async_trait;
@@ -17,10 +17,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
-use crate::db::{message_embeddings, projects, sources, tasks};
+use crate::db::{message_embeddings, projects, sources};
 use crate::state::AppState;
 
-/// Hard cap on how much text one workspace tool may feed back into the prompt.
+/// Bound legacy search snippets and inventory summaries; full document reads are preserved.
 const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
 
 /// Cap on rows any listing tool returns.
@@ -46,6 +46,7 @@ pub struct WorkspaceScope {
     pub state: AppState,
     pub workspace_id: Uuid,
     pub chat_id: Uuid,
+    pub user_id: Uuid,
 }
 
 /// Whether this deployment permits leaving the sandbox at all.
@@ -81,6 +82,8 @@ pub struct ChatTools {
     registry: ToolRegistry,
     context: ToolContext,
     sandboxed: bool,
+    scope: WorkspaceScope,
+    workspace: Vec<String>,
 }
 
 impl ChatTools {
@@ -103,7 +106,14 @@ impl ChatTools {
         }
         registry.register(Arc::new(ListSourcesTool(scope.clone())));
         registry.register(Arc::new(ListProjectsTool(scope.clone())));
-        registry.register(Arc::new(ListTasksTool(scope)));
+        super::actions::register(&mut registry, &scope);
+        super::documents::register(&mut registry, &scope);
+        super::integrations::register(&mut registry, &scope);
+        let workspace = registry
+            .names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
 
         // The workspace tools stay available outside the sandbox: knowing what
         // the workspace holds is still the fastest way to answer many
@@ -138,10 +148,12 @@ impl ChatTools {
             registry,
             context,
             sandboxed,
+            scope,
+            workspace,
         }
     }
 
-    /// Whether this turn is confined to the read-only workspace tools.
+    /// Whether this turn is confined to the workspace tools.
     pub fn is_sandboxed(&self) -> bool {
         self.sandboxed
     }
@@ -195,6 +207,19 @@ impl ChatTools {
             }
         };
 
+        if self.workspace.iter().any(|registered| registered == name) {
+            match sqlx::query_scalar::<_, bool>(
+                "SELECT check_workspace_membership($1, $2) AND EXISTS(SELECT 1 FROM chats WHERE id = $3 AND workspace_id = $2)"
+            ).bind(self.scope.user_id).bind(self.scope.workspace_id).bind(self.scope.chat_id).fetch_one(self.scope.state.db()).await
+            {
+                Ok(true) => {}
+                Ok(false) => return ToolResult::error("Workspace access denied."),
+                Err(error) => {
+                    tracing::warn!(%error, "Workspace authorization failed");
+                    return ToolResult::error("Could not verify workspace access.");
+                }
+            }
+        }
         let limit = tool.timeout(&self.context);
         match tokio::time::timeout(limit, tool.execute(params, &self.context)).await {
             Ok(Ok(result)) => result,
@@ -258,9 +283,7 @@ fn render(lines: Vec<String>, empty_message: &str) -> ToolResult {
     ToolResult::success(truncate(&lines.join("\n"), MAX_TOOL_OUTPUT_CHARS))
 }
 
-// =============================================================================
 // Knowledge base search
-// =============================================================================
 
 struct SearchKnowledgeTool(WorkspaceScope);
 
@@ -346,10 +369,11 @@ impl SearchKnowledgeTool {
             .iter()
             .map(|r| {
                 format!(
-                    "[{:.0}% match] {} ({})\n{}",
+                    "[{:.0}% match] {} ({}) [document_id: {}]\n{}",
                     r.similarity * 100.0,
                     r.item_title,
                     r.item_uri,
+                    r.content_item_id,
                     truncate(&one_line(&r.chunk_text), SNIPPET_CHARS)
                 )
             })
@@ -362,9 +386,7 @@ impl SearchKnowledgeTool {
     }
 }
 
-// =============================================================================
 // Chat history search
-// =============================================================================
 
 struct SearchChatHistoryTool(WorkspaceScope);
 
@@ -473,9 +495,7 @@ impl SearchChatHistoryTool {
     }
 }
 
-// =============================================================================
 // Workspace inventory
-// =============================================================================
 
 struct ListSourcesTool(WorkspaceScope);
 
@@ -545,7 +565,10 @@ impl ListSourcesTool {
                 } else {
                     "inactive"
                 };
-                let mut line = format!("{} [{}, {}]", s.name, s.source_type, state);
+                let mut line = format!(
+                    "{} [{}, {}] [source_id: {}]",
+                    s.name, s.source_type, state, s.id
+                );
                 if let Some(url) = &s.url {
                     line.push_str(&format!(" {}", url));
                 }
@@ -634,81 +657,6 @@ impl ListProjectsTool {
     }
 }
 
-struct ListTasksTool(WorkspaceScope);
-
-#[async_trait]
-impl Tool for ListTasksTool {
-    fn name(&self) -> &str {
-        "list_tasks"
-    }
-
-    fn description(&self) -> &str {
-        "List the tasks in this workspace, optionally filtered by status. Use this to report on \
-         what work is queued, running or finished."
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "description": "Only return tasks with this status (for example 'pending', 'running', 'completed')."
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "How many tasks to return (1-25, default 5).",
-                    "minimum": 1,
-                    "maximum": MAX_TOOL_RESULTS
-                }
-            }
-        })
-    }
-
-    async fn execute(
-        &self,
-        params: Value,
-        _context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        Ok(self.run(params).await)
-    }
-}
-
-impl ListTasksTool {
-    /// The body is written to return a `ToolResult` rather than an error,
-    /// because a tool that fails is an observation the model can act on.
-    async fn run(&self, params: Value) -> ToolResult {
-        let ctx = &self.0;
-        let limit = limit_arg(&params);
-        let status = optional_string_arg(&params, "status");
-
-        let rows = match tasks::list_tasks(ctx.state.db(), ctx.workspace_id, None, status).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!("list_tasks failed: {}", e);
-                return ToolResult::error("Could not list the workspace's tasks.");
-            }
-        };
-
-        let lines = rows
-            .iter()
-            .take(limit)
-            .map(|t| {
-                let mut line = format!("{} [{}]", t.title, t.status);
-                if let Some(url) = &t.pr_url {
-                    line.push_str(&format!(" {}", url));
-                }
-                if !t.description.trim().is_empty() {
-                    line.push_str(&format!(" — {}", truncate(&one_line(&t.description), 200)));
-                }
-                line
-            })
-            .collect();
-
-        render(lines, "This workspace has no tasks.")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,6 +726,7 @@ mod tests {
     fn scope() -> WorkspaceScope {
         WorkspaceScope {
             state: AppState::for_tests(),
+            user_id: Uuid::new_v4(),
             workspace_id: Uuid::new_v4(),
             chat_id: Uuid::new_v4(),
         }
@@ -791,7 +740,6 @@ mod tests {
             Arc::new(SearchChatHistoryTool(scope.clone())),
             Arc::new(ListSourcesTool(scope.clone())),
             Arc::new(ListProjectsTool(scope.clone())),
-            Arc::new(ListTasksTool(scope)),
         ];
 
         for tool in tools {
@@ -876,5 +824,107 @@ mod tests {
 
         assert!(result.success, "{:?}", result.error);
         assert!(result.output.unwrap().contains("agentic"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated PostgreSQL DATABASE_URL"]
+    async fn workspace_tools_recheck_actor_and_chat_scope() {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use crate::state::test_config;
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "hash",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Scope tests",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Scope tests",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Viewer,
+            None,
+        )
+        .await
+        .unwrap();
+        let chat: Uuid = sqlx::query_scalar("INSERT INTO chats (workspace_id, title, model_name) VALUES ($1, 'Scope tests', 'test') RETURNING id").bind(workspace.id).fetch_one(&pool).await.unwrap();
+        let scope = WorkspaceScope {
+            state: AppState::new(test_config(), pool.clone(), None),
+            workspace_id: workspace.id,
+            chat_id: chat,
+            user_id: user.id,
+        };
+        let tools = ChatTools::build(scope.clone(), true);
+        for name in [
+            "list_projects",
+            "list_sources",
+            "list_tasks",
+            "list_documents",
+            "list_members",
+            "list_chats",
+            "list_reminders",
+        ] {
+            let result = tools.execute(name, "{}").await;
+            assert!(result.success, "{name}: {:?}", result.error);
+        }
+        let denied = tools.execute("create_document", &json!({"title":"Denied", "content":"Denied", "user_id":Uuid::new_v4(), "workspace_id":workspace.id}).to_string()).await;
+        assert!(!denied.success);
+        let invalid = ChatTools::build(
+            WorkspaceScope {
+                chat_id: Uuid::new_v4(),
+                ..scope
+            },
+            true,
+        );
+        assert!(!invalid.execute("list_sources", "{}").await.success);
+        workspace_members::remove_member(&pool, workspace.id, user.id)
+            .await
+            .unwrap();
+        for name in [
+            "list_projects",
+            "list_sources",
+            "list_tasks",
+            "list_documents",
+            "list_members",
+            "list_chats",
+            "list_reminders",
+            "get_build_status",
+        ] {
+            let result = tools.execute(name, "{}").await;
+            assert!(!result.success, "{name} must deny revoked membership");
+            assert_eq!(result.error.as_deref(), Some("Workspace access denied."));
+        }
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

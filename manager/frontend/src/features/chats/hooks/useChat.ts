@@ -288,7 +288,11 @@ export function useChat(
           }
           break;
         case 'message_saved':
-          applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
+          if (payload.role === 'user') {
+            applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
+          } else {
+            upsertMessage(payload.message_id, payload.role, payload.content, payload.metadata);
+          }
           break;
         case 'status':
           setStatus(payload.message);

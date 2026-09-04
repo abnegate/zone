@@ -586,7 +586,7 @@ export default function ChatsPage() {
                   aria-pressed={!displayedChat.agent_sandboxed}
                   title={
                     displayedChat.agent_sandboxed
-                      ? 'Sandboxed: the agent can only read this workspace'
+                      ? 'Sandboxed: workspace tools can read and make authorized changes'
                       : 'Unsandboxed: the agent can run shell commands and write files on the server'
                   }
                   data-testid="sandbox-toggle"
@@ -851,14 +851,14 @@ export default function ChatsPage() {
           />
           <Checkbox
             label="Agent mode"
-            helpText="Let replies search this workspace's knowledge, sources, projects and tasks before answering. Requires a model that supports tool calling."
+            helpText="Let replies search workspace content, check connected GitHub data and manage workspace work when requested. Requires a model that supports tool calling."
             checked={newChatAgent}
             onCheckedChange={setNewChatAgent}
           />
           {newChatAgent && (
             <Checkbox
               label="Sandboxed"
-              helpText="Sandboxed, the agent can only read this workspace. Unsandboxed, it can also run shell commands and read and write files on the machine running the server, as the user that runs it. Those changes are real and are not undone when the chat ends."
+              helpText="Sandboxed, the agent can read workspace content and manage tasks, documents, messages and reminders when requested. Unsandboxed, it can also run shell commands and read and write files on the machine running the server, as the user that runs it. Those changes are real and are not undone when the chat ends."
               checked={newChatSandboxed}
               onCheckedChange={setNewChatSandboxed}
             />

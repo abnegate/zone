@@ -68,6 +68,7 @@ async fn exercise_responses(rounds: Vec<(u16, Vec<Value>)>) -> (Vec<AgentEvent>,
     let state = common::create_test_state(common::test_config(), pool);
     let tools = ChatTools::build(
         WorkspaceScope {
+            user_id: Uuid::new_v4(),
             state,
             workspace_id: Uuid::new_v4(),
             chat_id: Uuid::new_v4(),

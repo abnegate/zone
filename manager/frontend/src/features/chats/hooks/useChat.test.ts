@@ -466,6 +466,35 @@ describe('useChat', () => {
     });
   });
 
+  it('keeps reminder messages separate from a pending user message and streaming reply', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Pending request' });
+    });
+    lastSocket?.emit({ type: 'message_start', message_id: 'streaming', role: 'assistant' });
+    lastSocket?.emit({ type: 'chunk', content: 'Partial', index: 0 });
+    const reminder = {
+      type: 'message_saved',
+      message_id: 'reminder',
+      role: 'assistant',
+      content: 'Follow up Friday',
+      metadata: { source: 'reminder' },
+    };
+    lastSocket?.emit(reminder);
+    lastSocket?.emit(reminder);
+    lastSocket?.emit({ type: 'chunk', content: ' reply', index: 1 });
+    await waitFor(() => {
+      const messages = result.current.chat?.messages ?? [];
+      expect(messages.filter((message) => message.id === 'reminder')).toHaveLength(1);
+      expect(messages.find((message) => message.id === 'reminder')?.role).toBe('assistant');
+      expect(messages.find((message) => message.id === 'streaming')?.content).toBe('Partial reply');
+      expect(messages.some((message) => message.content === 'Pending request')).toBe(true);
+    });
+  });
+
   it('keeps a single user message when message_saved arrives under Strict Mode', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     const QueryWrapper = createWrapper();

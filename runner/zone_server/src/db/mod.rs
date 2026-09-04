@@ -3,6 +3,7 @@
 //! This module provides database access using sqlx with PostgreSQL.
 //! Queries use compile-time checked SQL via sqlx macros.
 
+pub mod actions;
 pub mod ai_settings;
 pub mod audit;
 pub mod chats;
@@ -18,6 +19,7 @@ pub mod password_reset;
 pub mod plans;
 pub mod projects;
 pub mod refresh_tokens;
+pub mod reminders;
 pub mod sessions;
 pub mod sources;
 pub mod subscriptions;

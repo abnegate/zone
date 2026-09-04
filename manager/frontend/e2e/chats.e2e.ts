@@ -724,7 +724,7 @@ test.describe('Chats Page', () => {
       });
     };
 
-    test('turns on agent mode and shows the sandbox toggle', async ({ page }) => {
+    test('turns on agent mode and shows the sandbox toggle', async ({ page }, testInfo) => {
       await mockChatRoutes(page, mockChat);
       await mockChatSocket(page);
       await page.reload();
@@ -740,6 +740,12 @@ test.describe('Chats Page', () => {
       await expect(agentToggle).toHaveAttribute('aria-pressed', 'true');
       await expect(page.getByTestId('sandbox-toggle')).toBeVisible();
       await expect(page.getByTestId('sandbox-toggle')).toHaveText(/Sandboxed/);
+      await expect(page.getByTestId('sandbox-toggle')).toHaveAttribute('title', 'Sandboxed: workspace tools can read and make authorized changes');
+      await page.screenshot({ path: testInfo.outputPath('workspace-tools-sandbox.png'), fullPage: true, animations: 'disabled' });
+      await openNewChatFromSidebar(page);
+      await page.getByRole('checkbox', { name: 'Agent mode', exact: true }).check();
+      await expect(page.getByText('Sandboxed, the agent can read workspace content', { exact: false })).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath('workspace-tools-help.png'), fullPage: true, animations: 'disabled' });
     });
 
     test('sends a message and renders the tool the agent ran', async ({ page }) => {
