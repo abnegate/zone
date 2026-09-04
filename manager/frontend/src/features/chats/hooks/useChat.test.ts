@@ -477,6 +477,123 @@ describe('useChat', () => {
     await expect(result.current.sendMessage({ content: 'second' })).resolves.toBeUndefined();
   });
 
+  it('removes an unsaved user message when generation is cancelled', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.chat).toEqual(mockChat));
+
+    await act(() => result.current.sendMessage({ content: 'Cancelled prompt' }));
+    expect(result.current.chat?.messages).toHaveLength(3);
+    act(() => lastSocket?.emit({ type: 'cancelled', message_id: 'cancelled-response' }));
+
+    expect(result.current.chat?.messages).toEqual(mockMessages);
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.status).toBeNull();
+  });
+
+  it('saves only the immediate retry when cancellation precedes message_saved under Strict Mode', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const QueryWrapper = createWrapper();
+    const { result } = renderHook(() => useChat('1'), {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        createElement(StrictMode, null, createElement(QueryWrapper, null, children)),
+    });
+    await waitFor(() => expect(result.current.chat).toEqual(mockChat));
+
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Cancelled prompt' });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'cancelled-response' });
+      await result.current.sendMessage({ content: 'Retry prompt' });
+      lastSocket?.emit({
+        type: 'message_saved',
+        message_id: 'saved-retry',
+        role: 'user',
+        content: 'Retry prompt',
+      });
+    });
+
+    expect(result.current.chat?.messages).toHaveLength(3);
+    expect(result.current.chat?.messages.at(-1)?.id).toBe('saved-retry');
+    expect(result.current.chat?.messages.at(-1)?.content).toBe('Retry prompt');
+    expect(result.current.chat?.messages.some((message) => message.id.startsWith('pending-'))).toBe(
+      false
+    );
+    expect(result.current.streaming).toBe(true);
+  });
+
+  it('retains a saved user message when cancellation follows message_saved', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.chat).toEqual(mockChat));
+
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Saved prompt' });
+      lastSocket?.emit({
+        type: 'message_saved',
+        message_id: 'saved-user',
+        role: 'user',
+        content: 'Saved prompt',
+      });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'cancelled-response' });
+    });
+
+    expect(result.current.chat?.messages).toHaveLength(3);
+    expect(result.current.chat?.messages.at(-1)?.id).toBe('saved-user');
+    expect(result.current.chat?.messages.at(-1)?.content).toBe('Saved prompt');
+    expect(result.current.streaming).toBe(false);
+  });
+
+  it('applies a failed terminal snapshot and preserves the interruption after retry', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.chat).toEqual(mockChat));
+    const attachment = {
+      name: 'generated.webp',
+      mime: 'image/webp',
+      url: 'data:image/webp;base64,generated',
+    };
+    const content = 'Partial response\n\n[Response interrupted]';
+
+    await act(async () => {
+      await result.current.sendMessage({ content: 'First prompt' });
+      lastSocket?.emit({
+        type: 'message_saved',
+        message_id: 'saved-first',
+        role: 'user',
+        content: 'First prompt',
+      });
+      lastSocket?.emit({ type: 'message_start', message_id: 'partial', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Partial response', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'partial',
+        tool_call_id: 'tool-first',
+        name: 'search_knowledge',
+        arguments: '{}',
+      });
+      lastSocket?.emit({
+        type: 'message_end',
+        message_id: 'partial',
+        content,
+        metadata: { attachments: [attachment] },
+        error: 'The model connection was interrupted',
+      });
+    });
+
+    expect(result.current.error).toBe('The model connection was interrupted');
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.chat?.messages.at(-1)?.content).toBe(content);
+    expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.id).toBe('tool-first');
+
+    await act(() => result.current.sendMessage({ content: 'Retry prompt' }));
+    expect(result.current.error).toBeNull();
+    expect(result.current.streaming).toBe(true);
+    expect(result.current.chat?.messages.find((message) => message.id === 'partial')?.content).toBe(
+      content
+    );
+  });
+
   it('adds streamed assistant images and keeps final metadata', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

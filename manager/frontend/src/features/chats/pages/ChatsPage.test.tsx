@@ -721,12 +721,36 @@ describe('ChatsPage', () => {
       expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
     });
 
+    it('shows a terminal stream failure and keeps the interrupted reply visible after retry', async () => {
+      const input = await sendPrompt();
+      act(() => {
+        socket.emit({ type: 'message_start', message_id: 'partial', role: 'assistant' });
+        socket.emit({ type: 'chunk', content: 'Partial reply', index: 0 });
+        socket.emit({
+          type: 'message_end',
+          message_id: 'partial',
+          content: 'Partial reply\n\n[Response interrupted]',
+          error: 'The model connection was interrupted',
+        });
+      });
+      expect(screen.getByRole('alert')).toHaveTextContent('The model connection was interrupted');
+      expect(screen.getByText('[Response interrupted]')).toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+      fireEvent.change(input, { target: { value: 'Retry prompt' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(mockWsSend).toHaveBeenCalledTimes(2));
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByText('[Response interrupted]')).toBeInTheDocument();
+    });
+
     it('keeps the response pending until Stop is acknowledged', async () => {
       await sendPrompt();
       fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
       expect(mockWsSend).toHaveBeenLastCalledWith(JSON.stringify({ type: 'cancel' }));
       expect(screen.getByRole('status')).toBeInTheDocument();
       act(() => socket.emit({ type: 'cancelled', message_id: null }));
+      expect(screen.queryByText('Generate an image of a rooster')).not.toBeInTheDocument();
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();

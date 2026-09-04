@@ -50,6 +50,7 @@ type ServerMessage =
       message_id: string;
       content: string;
       metadata?: MessageMetadata | null;
+      error?: string;
     }
   | { type: 'cancelled'; message_id: string | null }
   | { type: 'error'; message: string }
@@ -299,6 +300,7 @@ export function useChat(chatId: string | null) {
           break;
         case 'message_end':
           setStatus(null);
+          setError(payload.error ?? null);
           upsertMessage(
             payload.message_id,
             'assistant',
@@ -311,11 +313,22 @@ export function useChat(chatId: string | null) {
           activeGenerationRef.current = false;
           setStreaming(false);
           break;
-        case 'cancelled':
+        case 'cancelled': {
+          const pendingId = pendingUserIdRef.current;
+          pendingUserIdRef.current = null;
+          if (pendingId) {
+            supersededPendingIdsRef.current.add(pendingId);
+            setChat((prev) =>
+              prev
+                ? { ...prev, messages: prev.messages.filter((message) => message.id !== pendingId) }
+                : prev
+            );
+          }
           setStatus(null);
           activeGenerationRef.current = false;
           setStreaming(false);
           break;
+        }
         case 'error':
           setStatus(null);
           setError(payload.message);
