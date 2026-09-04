@@ -31,6 +31,46 @@ async fn create_test_pool() -> sqlx::PgPool {
         .expect("Failed to connect to test database. Set DATABASE_URL environment variable.")
 }
 
+/// Insert org + workspace + source so content_items satisfy the FK.
+async fn insert_test_source(pool: &sqlx::PgPool) -> Uuid {
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3)")
+        .bind(org_id)
+        .bind("Test Org")
+        .bind(format!("test-org-{}", org_id.as_simple()))
+        .execute(pool)
+        .await
+        .expect("insert test organization");
+
+    let workspace_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, $3, $4)")
+        .bind(workspace_id)
+        .bind(org_id)
+        .bind("Test Workspace")
+        .bind(format!("test-ws-{}", workspace_id.as_simple()))
+        .execute(pool)
+        .await
+        .expect("insert test workspace");
+
+    let source_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO sources (id, workspace_id, name, source_type, config)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(source_id)
+    .bind(workspace_id)
+    .bind(format!("Test Source {}", source_id.as_simple()))
+    .bind("text")
+    .bind(serde_json::json!({}))
+    .execute(pool)
+    .await
+    .expect("insert test source");
+
+    source_id
+}
+
 /// Create a test content item
 fn create_test_item(source_id: Uuid) -> ContentItem {
     ContentItem::new(
@@ -65,7 +105,7 @@ async fn test_pgvector_store_and_search() {
     let store = PgVectorStore::new(pool.clone());
 
     // Create test data
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
     let mut item = create_test_item(source_id);
 
     // Store content item
@@ -106,8 +146,8 @@ async fn test_pgvector_search_with_filters() {
     let store = PgVectorStore::new(pool.clone());
 
     // Create two different sources
-    let source_id_1 = Uuid::new_v4();
-    let source_id_2 = Uuid::new_v4();
+    let source_id_1 = insert_test_source(&pool).await;
+    let source_id_2 = insert_test_source(&pool).await;
 
     // Create items for both sources
     let mut item1 = create_test_item(source_id_1);
@@ -191,7 +231,7 @@ async fn test_pgvector_delete_operations() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
 
     // Create multiple items and embeddings
     let mut items = vec![];
@@ -273,7 +313,7 @@ async fn test_pgvector_dimension_validation() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
     let item = create_test_item(source_id);
     let item_id = store.store_content_item(&item).await.unwrap();
 
@@ -301,7 +341,7 @@ async fn test_pgvector_get_content_item() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
     let item = create_test_item(source_id);
     let item_id = store.store_content_item(&item).await.unwrap();
 
@@ -335,7 +375,7 @@ async fn test_pgvector_upsert_behavior() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
     let item = create_test_item(source_id);
     let item_id = store.store_content_item(&item).await.unwrap();
 
@@ -379,7 +419,7 @@ async fn test_pgvector_batch_operations() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
 
     // Create batch of items
     let mut embeddings = vec![];
