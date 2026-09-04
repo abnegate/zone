@@ -2,71 +2,6 @@
   padding: 0;
 }
 
-.section-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: var(--ui-space-4);
-  margin-bottom: var(--ui-space-4);
-}
-
-.section-title {
-  font-size: var(--ui-text-lg);
-  font-weight: 600;
-  margin: 0 0 4px 0;
-  color: var(--ui-text-primary);
-}
-
-.section-description {
-  font-size: var(--ui-text-sm);
-  color: var(--ui-text-secondary);
-  margin: 0;
-}
-
-.loading-state {
-  text-align: center;
-  padding: 48px;
-  color: var(--color-text-secondary);
-}
-
-.empty-state {
-  text-align: center;
-  padding: var(--ui-space-8) var(--ui-space-4);
-  color: var(--ui-text-secondary);
-  background: var(--ui-bg-surface);
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
-}
-
-.alert {
-  padding: var(--ui-space-3) var(--ui-space-4);
-  border-radius: var(--ui-radius-md);
-  margin-bottom: var(--ui-space-4);
-  font-size: var(--ui-text-sm);
-}
-
-.alert-error {
-  background: color-mix(in srgb, var(--ui-error) 12%, transparent);
-  color: var(--ui-error);
-  border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
-}
-
-.alert-success {
-  background: var(--color-success-bg, #efe);
-  color: var(--color-success-text, #060);
-  border: 1px solid var(--color-success-border, #cfc);
-}
-
-.alert-warning {
-  background: var(--color-warning-bg, #fffbeb);
-  color: var(--color-warning-text, #92400e);
-  border: 1px solid var(--color-warning-border, #fde68a);
-  padding: 12px 16px;
-  border-radius: 6px;
-  margin-top: 16px;
-  font-size: 14px;
-}
-
 /* Members Table */
 .members-table-container {
   overflow-x: auto;
@@ -86,10 +21,10 @@
 }
 
 .members-table th {
-  padding: 12px 16px;
+  padding: var(--ui-space-3) var(--ui-space-4);
   text-align: left;
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--ui-text-sm);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--color-text-secondary);
@@ -109,7 +44,7 @@
 }
 
 .members-table td {
-  padding: 16px;
+  padding: var(--ui-space-4);
   vertical-align: middle;
 }
 
@@ -117,7 +52,7 @@
 .member-info {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--ui-space-3);
 }
 
 .member-avatar {
@@ -130,7 +65,7 @@
   align-items: center;
   justify-content: center;
   font-weight: 600;
-  font-size: 16px;
+  font-size: var(--ui-text-base);
   flex-shrink: 0;
 }
 
@@ -142,9 +77,9 @@
 /* Role Badge */
 .role-badge {
   display: inline-block;
-  padding: 4px 12px;
+  padding: var(--ui-space-1) var(--ui-space-3);
   border-radius: 12px;
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -169,19 +104,22 @@
 .member-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ui-space-2);
 }
 
 .role-select {
   min-width: 120px;
-  padding: 6px 12px;
+
+  padding: 0 var(--ui-space-8) 0 var(--ui-space-3);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+
+  border-radius: var(--ui-radius-md);
   background: var(--color-background-secondary);
   color: var(--color-text-primary);
-  font-size: 14px;
+  font-size: var(--ui-text-sm);
   cursor: pointer;
   transition: border-color 0.2s;
+  height: var(--ui-control-height);
 }
 
 .role-select:hover:not(:disabled) {
@@ -194,7 +132,7 @@
 }
 
 .loading-spinner {
-  font-size: 12px;
+  font-size: var(--ui-text-xs);
   color: var(--color-text-secondary);
   font-style: italic;
 }
@@ -203,32 +141,25 @@
 .add-member-form {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--ui-space-4);
 }
 
 .remove-member-modal {
-  padding: 16px 0;
+  padding: var(--ui-space-4) 0;
 }
 
 .remove-member-modal p {
-  margin: 0 0 24px 0;
+  margin: 0 0 var(--ui-space-6) 0;
   color: var(--color-text-primary);
 }
 
 .role-confirm-modal {
-  padding: 16px 0;
+  padding: var(--ui-space-4) 0;
 }
 
 .role-confirm-modal p {
-  margin: 0 0 16px 0;
+  margin: 0 0 var(--ui-space-4) 0;
   color: var(--color-text-primary);
-}
-
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 24px;
 }
 
 /* Dark mode adjustments */
@@ -259,7 +190,7 @@
 @media (max-width: 768px) {
   .section-header {
     flex-direction: column;
-    gap: 16px;
+    gap: var(--ui-space-4);
   }
 
   .members-table-container {

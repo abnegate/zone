@@ -3,12 +3,12 @@
   align-items: center;
   justify-content: center;
   gap: var(--ui-space-2);
-  height: 2.25rem;
+  height: var(--ui-control-height);
   padding: 0 var(--ui-space-4);
   font-family: var(--ui-font-body);
   font-size: var(--ui-text-sm);
   font-weight: 500;
-  line-height: 1.25rem;
+  line-height: var(--ui-leading-normal);
   white-space: nowrap;
   border: 1px solid transparent;
   border-radius: var(--ui-radius-md);
@@ -116,21 +116,21 @@
 }
 
 .btn-xs {
-  height: 1.75rem;
+  height: var(--ui-control-height-sm);
   padding: 0 var(--ui-space-2);
   font-size: var(--ui-text-xs);
 }
 
 .btn-sm,
 .btn-small {
-  height: 2rem;
+  height: var(--ui-control-height-sm);
   padding: 0 var(--ui-space-3);
   font-size: var(--ui-text-xs);
 }
 
 .btn-lg,
 .btn-large {
-  height: 2.5rem;
+  height: var(--ui-control-height-lg);
   padding: 0 var(--ui-space-6);
 }
 
@@ -143,8 +143,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.25rem;
-  height: 2.25rem;
+  width: var(--ui-control-height);
+  height: var(--ui-control-height);
   padding: 0;
   background-color: transparent;
   border: 1px solid transparent;

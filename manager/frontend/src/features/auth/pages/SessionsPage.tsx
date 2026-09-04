@@ -125,7 +125,7 @@ export default function SessionsPage() {
 
   if (isLoading) {
     return (
-      <div className="page-container">
+      <div className="sessions-page page--workspace">
         <div className="page-header">
           <h1 className="page-title">Active Sessions</h1>
         </div>
@@ -135,7 +135,7 @@ export default function SessionsPage() {
   }
 
   return (
-    <div className="page-container">
+    <div className="sessions-page page--workspace">
       <div className="page-header">
         <h1 className="page-title">Active Sessions</h1>
         <p className="page-description">

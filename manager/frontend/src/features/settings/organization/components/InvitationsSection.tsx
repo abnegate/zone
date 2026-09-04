@@ -176,7 +176,7 @@ export function InvitationsSection({ orgId, workspaces }: InvitationsSectionProp
 
       {showModal && (
         <div
-          className="modal-overlay"
+          className="modal-overlay invitation-dialog"
           onClick={() => setShowModal(false)}
           onKeyDown={(e) => {
             if (e.key === 'Escape') {

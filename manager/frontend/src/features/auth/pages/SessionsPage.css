@@ -1,9 +1,9 @@
-/* =============================================================================
-   Sessions Page
-   ============================================================================= */
-
 .sessions-container {
-  margin-top: var(--spacing-lg);
+  margin-top: 0;
+  padding: var(--ui-section-gap) var(--ui-gutter);
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
 }
 
 .sessions-table-wrapper {
@@ -11,7 +11,8 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  margin-bottom: var(--spacing-lg);
+  margin-bottom: var(--ui-space-6);
+  overflow-x: auto;
 }
 
 .sessions-table {
@@ -25,9 +26,9 @@
 }
 
 .sessions-table th {
-  padding: var(--spacing-md) var(--spacing-lg);
+  padding: var(--ui-space-3) var(--ui-space-4);
   text-align: left;
-  font-size: 0.75rem;
+  font-size: var(--ui-text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -52,23 +53,24 @@
 }
 
 .sessions-table td {
-  padding: var(--spacing-md) var(--spacing-lg);
-  font-size: 0.875rem;
+  padding: var(--ui-space-3) var(--ui-space-4);
+  font-size: var(--ui-text-sm);
   color: var(--color-text);
 }
 
 .device-info {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-xs);
+  gap: var(--ui-space-1);
 }
 
 .current-badge {
   display: inline-block;
-  padding: 2px 8px;
+  padding: var(--ui-space-0-5) var(--ui-space-2);
   background: var(--color-success);
   color: var(--color-text-inverse, white);
-  font-size: 0.625rem;
+
+  font-size: var(--ui-text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -77,8 +79,8 @@
 }
 
 .ip-address {
-  font-family: monospace;
-  font-size: 0.8125rem;
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
   color: var(--color-text-muted);
 }
 
@@ -89,21 +91,8 @@
 .sessions-actions {
   display: flex;
   justify-content: flex-end;
-  padding-top: var(--spacing-lg);
+  padding-top: var(--ui-space-6);
   border-top: 1px solid var(--color-border);
-}
-
-.empty-state {
-  text-align: center;
-  padding: var(--spacing-xl);
-  color: var(--color-text-muted);
-}
-
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--spacing-md);
-  margin-top: var(--spacing-lg);
 }
 
 /* Responsive Design */
@@ -123,4 +112,30 @@
   .sessions-actions button {
     width: 100%;
   }
+}
+
+.sessions-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.sessions-page .page-header {
+  padding: var(--ui-space-1) var(--ui-gutter);
+  min-height: var(--ui-header-height);
+  flex-shrink: 0;
+  margin: 0;
+}
+.sessions-page .page-description {
+  font-size: var(--ui-text-xs);
+  margin-top: var(--ui-space-1);
+}
+.sessions-page .page-title {
+  font-size: var(--ui-title-size);
+}
+.sessions-page > .alert {
+  margin: var(--ui-space-4) var(--ui-gutter) 0;
+}
+
+.sessions-page .page-header h1 {
+  margin: 0;
 }

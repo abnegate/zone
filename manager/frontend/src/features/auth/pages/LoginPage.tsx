@@ -1,3 +1,4 @@
+import './AuthPage.css';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Button, Card, CardContent, CardDescription, CardHeader, Input } from '@zone/ui';
 import { useEffect } from 'react';
@@ -49,7 +50,7 @@ export default function LoginPage() {
 
   if (authLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background p-4">
+      <div className="auth-page">
         <div className="flex flex-col items-center gap-3 text-muted-foreground">
           <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent" />
           <span>Loading...</span>
@@ -59,8 +60,8 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-md">
+    <div className="auth-page">
+      <Card className="auth-card">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-2">
             <ZoneLogo size="xl" />

@@ -47,7 +47,7 @@
       body {
         font-family: var(
           --ui-font-body,
-          'Source Sans 3',
+          "Source Sans 3",
           ui-sans-serif,
           system-ui,
           sans-serif
@@ -66,8 +66,8 @@
       }
       .loader-spinner {
         display: block;
-        width: 40px;
-        height: 40px;
+        width: var(--ui-space-10, 2.5rem);
+        height: var(--ui-space-10, 2.5rem);
         border: 3px solid #d4cbb8;
         border-top-color: #a3481d;
         border-radius: 50%;
@@ -79,16 +79,16 @@
         }
       }
       .loader-title {
-        font-family: 'Newsreader', Georgia, serif;
-        font-size: 48px;
+        font-family: "Newsreader", Georgia, serif;
+        font-size: var(--ui-auth-title-size, 1.875rem);
         font-weight: 600;
         margin: 0 0 24px 0;
         color: var(--ui-text-primary, #1a1612);
-        letter-spacing: -0.02em;
+        letter-spacing: var(--ui-tracking-tight, -0.025em);
       }
       .loader-text {
         margin-top: 16px;
-        font-size: 14px;
+        font-size: var(--ui-text-sm, 0.875rem);
         color: #534b42;
       }
     </style>

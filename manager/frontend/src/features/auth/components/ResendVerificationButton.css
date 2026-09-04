@@ -1,5 +1,5 @@
 .resend-verification-error {
-  margin-top: 0.5rem;
-  font-size: 0.875rem;
+  margin-top: var(--ui-space-2);
+  font-size: var(--ui-text-sm);
   color: var(--color-error, #dc2626);
 }

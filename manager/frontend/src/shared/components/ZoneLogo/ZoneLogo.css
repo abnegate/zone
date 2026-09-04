@@ -1,7 +1,7 @@
 .zone-logo {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--ui-space-2);
 }
 
 .zone-logo__icon {
@@ -13,16 +13,17 @@
   font-family: var(--ui-font-display);
   font-weight: 600;
   color: var(--ui-text-primary);
-  letter-spacing: -0.03em;
+  letter-spacing: var(--ui-tracking-tight);
+  line-height: var(--ui-leading-tight);
 }
 
 /* Size variants */
 .zone-logo--sm .zone-logo__text {
-  font-size: 1rem;
+  font-size: var(--ui-text-base);
 }
 
 .zone-logo--md .zone-logo__text {
-  font-size: 1.25rem;
+  font-size: var(--ui-text-xl);
 }
 
 .zone-logo--lg .zone-logo__text {
@@ -30,5 +31,10 @@
 }
 
 .zone-logo--xl .zone-logo__text {
-  font-size: 2.5rem;
+  font-size: var(--ui-auth-title-size);
+}
+
+.zone-logo--xl .zone-logo__icon {
+  width: var(--ui-space-12);
+  height: var(--ui-space-12);
 }

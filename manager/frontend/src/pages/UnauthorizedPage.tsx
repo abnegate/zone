@@ -18,7 +18,7 @@ export default function UnauthorizedPage() {
           <p>You don't have permission to access this page</p>
         </div>
 
-        <div className="auth-footer" style={{ borderTop: 'none', marginTop: 0, paddingTop: 0 }}>
+        <div className="auth-footer auth-footer--plain">
           <Link to="/" className="btn btn-primary btn-block">
             Go to Home
           </Link>

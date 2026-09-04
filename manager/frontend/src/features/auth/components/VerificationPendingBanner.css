@@ -1,7 +1,7 @@
 .verification-banner {
-  padding: 1rem;
+  padding: var(--ui-space-4);
   border-radius: var(--radius-md, 0.5rem);
-  margin-bottom: 1rem;
+  margin-bottom: var(--ui-space-4);
 }
 
 .verification-banner--warning {
@@ -13,7 +13,7 @@
 .verification-banner__content {
   display: flex;
   align-items: flex-start;
-  gap: 0.75rem;
+  gap: var(--ui-space-3);
 }
 
 .verification-banner__icon {
@@ -25,7 +25,7 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--ui-space-1);
 }
 
 .verification-banner__text strong {
@@ -33,22 +33,22 @@
 }
 
 .verification-banner__text span {
-  font-size: 0.875rem;
+  font-size: var(--ui-text-sm);
   opacity: 0.9;
 }
 
 .verification-banner__actions {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--ui-space-2);
   flex-shrink: 0;
 }
 
 .verification-banner__success {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  font-size: 0.875rem;
+  gap: var(--ui-space-2);
+  font-size: var(--ui-text-sm);
   font-weight: 500;
   color: var(--color-success, #15803d);
 }
@@ -61,7 +61,7 @@
   background: none;
   border: none;
   cursor: pointer;
-  padding: 0.25rem;
+  padding: var(--ui-space-1);
   color: inherit;
   opacity: 0.6;
   transition: opacity var(--transition-fast, 0.2s);
@@ -72,13 +72,13 @@
 }
 
 .verification-banner__error {
-  margin-top: 0.5rem;
-  padding: 0.5rem;
+  margin-top: var(--ui-space-2);
+  padding: var(--ui-space-2);
   background-color: var(--color-error-light, #fee2e2);
   border: 1px solid var(--color-error, #ef4444);
   border-radius: var(--radius-sm, 0.25rem);
   color: var(--color-error-dark, #991b1b);
-  font-size: 0.875rem;
+  font-size: var(--ui-text-sm);
 }
 
 @media (max-width: 768px) {

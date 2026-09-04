@@ -1,8 +1,3 @@
-/* =============================================================================
-   CSS Variables (Theme)
-   Maps to @zone/ui Obsidian design system for consistency
-   ============================================================================= */
-
 :root {
   /* Map legacy variable names to UI variables for backwards compatibility */
 
@@ -51,7 +46,7 @@
 
 /* Dark theme (default) - Map to UI variables */
 :root,
-:root[data-theme='dark'] {
+:root[data-theme="dark"] {
   --color-bg: var(--ui-bg-base);
   --color-bg-card: var(--ui-bg-elevated);
   --color-bg-input: var(--ui-bg-surface);
@@ -133,7 +128,7 @@
 }
 
 /* Light theme - Map to UI variables */
-:root[data-theme='light'] {
+:root[data-theme="light"] {
   --color-bg: var(--ui-bg-base);
   --color-bg-card: var(--ui-bg-elevated);
   --color-bg-input: var(--ui-bg-surface);
@@ -214,14 +209,6 @@
   --purple-700: #7c3aed;
 }
 
-/* =============================================================================
-   shadcn token aliases
-   These names are referenced across the manager but were never declared, so the
-   properties using them resolved to nothing and the elements rendered
-   uncoloured. They resolve to the @zone/ui shadcn tokens, which are themselves
-   theme-scoped, so one declaration covers light and dark.
-   ============================================================================= */
-
 :root {
   /* Surfaces */
   --background: var(--ui-bg-base);
@@ -250,13 +237,21 @@
 
   --color-success-text: var(--ui-success);
   --color-success-bg: color-mix(in srgb, var(--ui-success) 12%, transparent);
-  --color-success-border: color-mix(in srgb, var(--ui-success) 35%, transparent);
+  --color-success-border: color-mix(
+    in srgb,
+    var(--ui-success) 35%,
+    transparent
+  );
 
   --color-warning-text: var(--ui-warning);
   --color-warning-dark: var(--ui-warning);
   --color-warning-light: color-mix(in srgb, var(--ui-warning) 20%, transparent);
   --color-warning-bg: color-mix(in srgb, var(--ui-warning) 12%, transparent);
-  --color-warning-border: color-mix(in srgb, var(--ui-warning) 35%, transparent);
+  --color-warning-border: color-mix(
+    in srgb,
+    var(--ui-warning) 35%,
+    transparent
+  );
 
   /* Badge pairs: a tinted ground with the same hue for the label. */
   --color-gray-100: var(--ui-bg-muted);

@@ -1,11 +1,6 @@
-/* =============================================================================
-   Layout - Obsidian Design
-   Main content layout structure
-   ============================================================================= */
-
 .layout {
   display: flex;
-  min-height: 100vh;
+  min-height: 100dvh;
   background: var(--ui-bg-base);
 }
 
@@ -13,17 +8,19 @@
 .main-content {
   flex: 1;
   margin-left: 240px;
-  padding: var(--ui-space-6) var(--ui-space-8);
+
+  padding: var(--ui-gutter);
   transition: margin-left var(--ui-duration-normal) var(--ui-ease-out);
-  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .main-content:has(.page--workspace) {
   padding: 0;
   overflow: hidden;
-  height: 100vh;
+  height: 100dvh;
 }
 
 .page--workspace {
@@ -31,15 +28,15 @@
   min-height: 0;
 }
 
-:root[data-sidebar-collapsed='true'] .main-content {
-  margin-left: 64px;
+:root[data-sidebar-collapsed="true"] .main-content {
+  margin-left: var(--ui-space-16);
 }
 
 /* Page Container - Standard width for all pages */
 .page-container {
   flex: 1;
   width: 100%;
-  max-width: 900px;
+  max-width: var(--ui-content-width);
   margin: 0 auto;
   animation: ui-fade-up var(--ui-duration-normal) var(--ui-ease-out);
 }
@@ -51,7 +48,8 @@
 
 /* Page Header */
 .page-header {
-  margin-bottom: var(--ui-space-5);
+  margin-bottom: var(--ui-section-gap);
+
   padding-bottom: var(--ui-space-4);
   border-bottom: 1px solid var(--ui-border);
 }
@@ -65,7 +63,7 @@
 
 .page-title {
   font-family: var(--ui-font-display);
-  font-size: var(--ui-text-3xl);
+  font-size: var(--ui-title-size);
   font-weight: 600;
   color: var(--ui-text-primary);
   letter-spacing: var(--ui-tracking-tight);
@@ -122,7 +120,7 @@
 }
 
 .content-grid--2 {
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .content-grid--3 {
@@ -134,7 +132,7 @@
 }
 
 .content-grid--auto {
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(20rem, 100%), 1fr));
 }
 
 /* Empty State */
@@ -257,7 +255,7 @@
 
 .stat-value {
   font-family: var(--ui-font-display);
-  font-size: var(--ui-text-2xl);
+  font-size: var(--ui-title-size);
   font-weight: 600;
   color: var(--ui-text-primary);
 }
@@ -280,7 +278,7 @@
   .content-grid--2,
   .content-grid--3,
   .content-grid--4 {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -288,21 +286,21 @@
   .main-content {
     margin-left: 0;
     padding: var(--ui-space-4);
-    padding-top: calc(var(--ui-space-4) + 60px);
+    padding-top: calc(var(--ui-gutter) + var(--ui-header-height));
   }
 
   .main-content:has(.page--workspace) {
     padding: 0;
-    padding-top: 60px;
-    height: 100vh;
+    padding-top: var(--ui-header-height);
+    height: 100dvh;
   }
 
-  :root[data-sidebar-collapsed='true'] .main-content {
+  :root[data-sidebar-collapsed="true"] .main-content {
     margin-left: 0;
   }
 
   .page-title {
-    font-size: var(--ui-text-2xl);
+    font-size: var(--ui-title-size);
   }
 
   .page-header-content {
@@ -323,4 +321,10 @@
   .stats-row {
     grid-template-columns: 1fr;
   }
+}
+
+.page-description {
+  margin-top: var(--ui-space-1);
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-secondary);
 }
