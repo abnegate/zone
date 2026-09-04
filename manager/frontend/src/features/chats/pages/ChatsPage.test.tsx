@@ -757,6 +757,7 @@ describe('ChatsPage', () => {
           automatic_title: true,
           model_name: 'llama2',
           agent_enabled: false,
+          auto_approve: false,
         });
       });
     });
@@ -1664,6 +1665,36 @@ describe('ChatsPage', () => {
       'title',
       'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
     );
+  });
+
+  it('shows auto-approve only while agent mode is on', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      auto_approve: false,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      auto_approve: true,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('auto-approve-toggle')).toBeInTheDocument());
+    expect(screen.getByTestId('auto-approve-toggle')).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(screen.getByTestId('auto-approve-toggle'));
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { auto_approve: true });
+    });
+  });
+
+  it('hides auto-approve when the chat is not agentic', async () => {
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-toggle')).toBeInTheDocument());
+    expect(screen.queryByTestId('auto-approve-toggle')).not.toBeInTheDocument();
   });
 
   describe('chat search', () => {

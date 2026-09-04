@@ -1,5 +1,6 @@
 //! ReAct agent loop implementation
 
+use futures::future::join_all;
 use std::time::Instant;
 use thiserror::Error;
 
@@ -128,6 +129,8 @@ impl Agent {
 
             let mut step = AgentStep::new(AgentPhase::Thinking);
 
+            super::compact_tool_history(&mut state.messages, super::KEEP_RECENT_TOOL_RESULTS);
+
             let response = self
                 .llm
                 .chat(state.messages.clone(), Some(tool_definitions.clone()))
@@ -157,27 +160,51 @@ impl Agent {
                 state.add_message(Message::assistant_with_tools(tool_calls.clone()));
 
                 let mut tool_results = Vec::new();
+                let parallel = tool_calls
+                    .iter()
+                    .all(|call| !self.tools.mutating(&call.function.name));
 
-                for tool_call in tool_calls {
-                    callback.on_tool_call(&tool_call.function.name, &tool_call.function.arguments);
+                if parallel && tool_calls.len() > 1 {
+                    for tool_call in tool_calls {
+                        callback
+                            .on_tool_call(&tool_call.function.name, &tool_call.function.arguments);
+                    }
+                    let executed = join_all(tool_calls.iter().map(|tool_call| async move {
+                        let start = Instant::now();
+                        let result = self.execute_tool(tool_call).await;
+                        (tool_call, result, start.elapsed().as_millis() as u64)
+                    }))
+                    .await;
+                    for (tool_call, result, duration_ms) in executed {
+                        callback.on_tool_result(&tool_call.function.name, &result);
+                        tool_results.push(ToolCallResult {
+                            call: tool_call.clone(),
+                            result: result.to_message(),
+                            success: result.success,
+                            duration_ms,
+                        });
+                        state.add_message(Message::tool_result(&tool_call.id, result.to_message()));
+                    }
+                } else {
+                    for tool_call in tool_calls {
+                        callback
+                            .on_tool_call(&tool_call.function.name, &tool_call.function.arguments);
 
-                    let start = Instant::now();
+                        let start = Instant::now();
+                        let result = self.execute_tool(tool_call).await;
+                        let duration_ms = start.elapsed().as_millis() as u64;
 
-                    let result = self.execute_tool(tool_call).await;
+                        callback.on_tool_result(&tool_call.function.name, &result);
 
-                    let duration_ms = start.elapsed().as_millis() as u64;
+                        tool_results.push(ToolCallResult {
+                            call: tool_call.clone(),
+                            result: result.to_message(),
+                            success: result.success,
+                            duration_ms,
+                        });
 
-                    callback.on_tool_result(&tool_call.function.name, &result);
-
-                    tool_results.push(ToolCallResult {
-                        call: tool_call.clone(),
-                        result: result.to_message(),
-                        success: result.success,
-                        duration_ms,
-                    });
-
-                    // Add tool result to messages
-                    state.add_message(Message::tool_result(&tool_call.id, result.to_message()));
+                        state.add_message(Message::tool_result(&tool_call.id, result.to_message()));
+                    }
                 }
 
                 step.tool_calls = Some(tool_results);

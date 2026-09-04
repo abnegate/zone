@@ -53,6 +53,7 @@ async fn setup_test_state() -> AppState {
         web_search: Default::default(),
         comfyui: Default::default(),
         source_index: Default::default(),
+        monitoring: Default::default(),
     };
 
     AppState::new(config, pool.inner().clone(), None)

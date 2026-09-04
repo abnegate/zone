@@ -57,6 +57,7 @@ pub fn test_config() -> Config {
         web_search: Default::default(),
         comfyui: Default::default(),
         source_index: Default::default(),
+        monitoring: Default::default(),
     }
 }
 
@@ -75,7 +76,9 @@ pub async fn create_test_pool() -> PgPool {
 
 /// Create an AppState for testing (without cache)
 pub fn create_test_state(config: Config, pool: PgPool) -> AppState {
-    AppState::new(config, pool, None)
+    let state = AppState::new(config, pool, None);
+    state.disable_mcp();
+    state
 }
 
 /// Create a test router with the given state
@@ -281,6 +284,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         web_search: Default::default(),
         comfyui: Default::default(),
         source_index: Default::default(),
+        monitoring: Default::default(),
     }
 }
 

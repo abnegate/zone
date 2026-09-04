@@ -52,6 +52,8 @@ pub struct Config {
     pub comfyui: ComfyUiConfig,
     /// Background source reindex (schedule + change detection)
     pub source_index: SourceIndexConfig,
+    /// Zone Prometheus / Grafana for on-call tools.
+    pub monitoring: MonitoringConfig,
 }
 
 /// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
@@ -81,6 +83,77 @@ impl SourceIndexConfig {
             enabled: env_truthy("SOURCE_RESYNC_ENABLED", true),
             poll_interval_secs: env_u64("SOURCE_RESYNC_POLL_SECS", 300, 30, 86_400),
             interval_secs: env_u64("SOURCE_RESYNC_INTERVAL_SECS", 3600, 60, 7 * 86_400),
+        }
+    }
+}
+
+/// Live cluster metrics and dashboards loaded from `MONITORING_*`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MonitoringConfig {
+    pub enabled: bool,
+    pub prometheus_url: String,
+    pub grafana_url: String,
+    pub grafana_token: Option<String>,
+    pub grafana_user: Option<String>,
+    pub grafana_password: Option<String>,
+}
+
+impl Default for MonitoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prometheus_url: "http://prometheus:9090".to_string(),
+            grafana_url: "http://grafana:3000".to_string(),
+            grafana_token: None,
+            grafana_user: None,
+            grafana_password: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for MonitoringConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MonitoringConfig")
+            .field("enabled", &self.enabled)
+            .field("prometheus_url", &self.prometheus_url)
+            .field("grafana_url", &self.grafana_url)
+            .field(
+                "grafana_token",
+                &self.grafana_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("grafana_user", &self.grafana_user)
+            .field(
+                "grafana_secret",
+                &self.grafana_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl MonitoringConfig {
+    pub fn from_env() -> Self {
+        Self {
+            enabled: env_truthy("MONITORING_ENABLED", true),
+            prometheus_url: env::var("MONITORING_PROMETHEUS_URL")
+                .or_else(|_| env::var("PROMETHEUS_URL"))
+                .unwrap_or_else(|_| "http://prometheus:9090".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            grafana_url: env::var("MONITORING_GRAFANA_URL")
+                .or_else(|_| env::var("GRAFANA_URL"))
+                .unwrap_or_else(|_| "http://grafana:3000".to_string())
+                .trim_end_matches('/')
+                .to_string(),
+            grafana_token: env::var("MONITORING_GRAFANA_TOKEN")
+                .or_else(|_| env::var("GRAFANA_TOKEN"))
+                .ok()
+                .filter(|token| !token.trim().is_empty()),
+            grafana_user: env::var("MONITORING_GRAFANA_ADMIN_USER")
+                .ok()
+                .filter(|user| !user.trim().is_empty()),
+            grafana_password: env::var("MONITORING_GRAFANA_ADMIN_PASSWORD")
+                .ok()
+                .filter(|password| !password.trim().is_empty()),
         }
     }
 }
@@ -329,6 +402,7 @@ impl Config {
             web_search: WebSearchConfig::from_env(),
             comfyui: ComfyUiConfig::from_env(),
             source_index: SourceIndexConfig::from_env(),
+            monitoring: MonitoringConfig::from_env(),
         })
     }
 }
@@ -360,6 +434,7 @@ impl std::fmt::Debug for Config {
             .field("web_search", &self.web_search)
             .field("comfyui", &self.comfyui)
             .field("source_index", &self.source_index)
+            .field("monitoring", &self.monitoring)
             .finish()
     }
 }
@@ -403,6 +478,7 @@ mod tests {
             web_search: WebSearchConfig::default(),
             comfyui: ComfyUiConfig::default(),
             source_index: SourceIndexConfig::default(),
+            monitoring: MonitoringConfig::default(),
         }
     }
 

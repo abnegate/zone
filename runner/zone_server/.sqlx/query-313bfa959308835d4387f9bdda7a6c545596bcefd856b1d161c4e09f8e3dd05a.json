@@ -1,0 +1,77 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, created_at, updated_at\n                FROM chats\n                WHERE workspace_id = $1 AND archived = $2\n                ORDER BY updated_at DESC\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workspace_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "model_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "archived",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "agent_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "agent_sandboxed",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "auto_approve",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool"
+      ]
+    }
+  },
+  "hash": "313bfa959308835d4387f9bdda7a6c545596bcefd856b1d161c4e09f8e3dd05a"
+}

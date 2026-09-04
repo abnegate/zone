@@ -41,6 +41,7 @@ export default function ChatsPage() {
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatModel, setNewChatModel] = useState('');
   const [newChatAgent, setNewChatAgent] = useState(false);
+  const [newChatAutoApprove, setNewChatAutoApprove] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -95,7 +96,9 @@ export default function ChatsPage() {
     status: chatStatus,
     sendMessage: sendMessageFn,
     cancelGeneration,
+    approveTool,
     setAgentEnabled: setAgentEnabledFn,
+    setAutoApprove: setAutoApproveFn,
     updateTitle,
   } = useChat(selectedChatId, updateListTitle);
 
@@ -171,10 +174,12 @@ export default function ChatsPage() {
         automatic_title: true,
         model_name: newChatModel,
         agent_enabled: newChatAgent,
+        auto_approve: newChatAgent && newChatAutoApprove,
       });
       setShowNewChatModal(false);
       setNewChatModel('');
       setNewChatAgent(false);
+      setNewChatAutoApprove(false);
       selectChat(chat.id);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
@@ -188,6 +193,16 @@ export default function ChatsPage() {
       await setAgentEnabledFn(!displayedChat.agent_enabled);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to change agent mode');
+    }
+  };
+
+  const handleToggleAutoApprove = async () => {
+    if (!isAuthenticated || !displayedChat) return;
+    setOperationError(null);
+    try {
+      await setAutoApproveFn(!displayedChat.auto_approve);
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to change auto-approve');
     }
   };
 
@@ -592,32 +607,50 @@ export default function ChatsPage() {
                 <h3>{displayedChat.title}</h3>
                 <span className="chat-model">{displayedChat.model_name}</span>
               </div>
-              <button
-                type="button"
-                className="agent-toggle"
-                onClick={handleToggleAgent}
-                aria-pressed={displayedChat.agent_enabled}
-                title={
-                  displayedChat.agent_enabled
-                    ? 'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
-                    : 'Agent mode off: replies come straight from the model'
-                }
-                data-testid="agent-toggle"
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.75"
-                  width="14"
-                  height="14"
-                  aria-hidden="true"
+              <div className="chat-header-actions">
+                {displayedChat.agent_enabled && (
+                  <button
+                    type="button"
+                    className="agent-toggle"
+                    onClick={handleToggleAutoApprove}
+                    aria-pressed={Boolean(displayedChat.auto_approve)}
+                    title={
+                      displayedChat.auto_approve
+                        ? 'Auto-approve on: file writes and shell commands run without asking'
+                        : 'Auto-approve off: file writes and shell commands wait for confirmation'
+                    }
+                    data-testid="auto-approve-toggle"
+                  >
+                    Auto-approve
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="agent-toggle"
+                  onClick={handleToggleAgent}
+                  aria-pressed={displayedChat.agent_enabled}
+                  title={
+                    displayedChat.agent_enabled
+                      ? 'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
+                      : 'Agent mode off: replies come straight from the model'
+                  }
+                  data-testid="agent-toggle"
                 >
-                  <path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4L7 17M17 7l1.4-1.4" />
-                  <circle cx="12" cy="12" r="3.5" />
-                </svg>
-                Agent
-              </button>
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    width="14"
+                    height="14"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4L7 17M17 7l1.4-1.4" />
+                    <circle cx="12" cy="12" r="3.5" />
+                  </svg>
+                  Agent
+                </button>
+              </div>
             </div>
 
             <div className="messages-container">
@@ -682,7 +715,9 @@ export default function ChatsPage() {
                           })}
                         </div>
                       )}
-                      {toolCalls.length > 0 && <ToolTrace calls={toolCalls} />}
+                      {toolCalls.length > 0 && (
+                        <ToolTrace calls={toolCalls} onDecide={approveTool} />
+                      )}
                       {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                       {message.content.trim() ? (
                         <div className="message-content">
@@ -896,8 +931,19 @@ export default function ChatsPage() {
             label="Agent mode"
             helpText="Let replies search workspace content, check connected GitHub data and manage workspace work, run shell commands and read and write server files when requested. Requires a model that supports tool calling."
             checked={newChatAgent}
-            onCheckedChange={setNewChatAgent}
+            onCheckedChange={(checked) => {
+              setNewChatAgent(checked);
+              if (!checked) setNewChatAutoApprove(false);
+            }}
           />
+          {newChatAgent && (
+            <Checkbox
+              label="Auto-approve writes and commands"
+              helpText="Skip the confirmation prompt for write_file, apply_patch, run_command and run_shell. You can change this later on the chat."
+              checked={newChatAutoApprove}
+              onCheckedChange={setNewChatAutoApprove}
+            />
+          )}
           <div className="modal-actions">
             <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>
               Cancel

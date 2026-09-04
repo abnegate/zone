@@ -305,13 +305,19 @@
   font-family: var(--ui-font-mono);
 }
 
+.chat-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+  margin-left: auto;
+}
+
 /* Agent mode changes how every reply is produced, so it stays visible in the
    header rather than hiding behind a settings menu. */
 .agent-toggle {
   display: inline-flex;
   align-items: center;
   gap: var(--ui-space-1);
-  margin-left: auto;
   padding: 0 var(--ui-space-3);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-full, 9999px);
@@ -576,9 +582,32 @@
   background: var(--ui-danger, #dc2626);
 }
 
-.tool-call--pending .tool-call-status {
+.tool-call--pending .tool-call-status,
+.tool-call--approval .tool-call-status {
   background: var(--ui-accent);
   animation: tool-call-pulse 1.2s ease-in-out infinite;
+}
+
+.tool-call-approval {
+  display: flex;
+  gap: var(--ui-space-2);
+  padding: 0 var(--ui-space-3) var(--ui-space-2);
+}
+
+.tool-call-approve,
+.tool-call-deny {
+  min-height: var(--ui-control-height-sm);
+  padding: 0 var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  background: var(--ui-bg-surface);
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-xs);
+  cursor: pointer;
+}
+
+.tool-call-approve:hover,
+.tool-call-deny:hover {
+  background: var(--ui-bg-base);
 }
 
 @keyframes tool-call-pulse {
@@ -592,7 +621,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tool-call--pending .tool-call-status {
+  .tool-call--pending .tool-call-status,
+  .tool-call--approval .tool-call-status {
     animation: none;
   }
 }
@@ -1220,7 +1250,7 @@
     max-width: 100%;
   }
 
-  .chat-header .agent-toggle {
+  .chat-header-actions {
     margin-left: 0;
   }
 

@@ -86,4 +86,85 @@ describe('ToolTrace', () => {
 
     expect(screen.getByText('{"query":')).toBeInTheDocument();
   });
+
+  it('asks the reader to approve a mutating tool', () => {
+    const decisions: Array<[string, boolean]> = [];
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'write_file',
+            pending: true,
+            approval: 'pending',
+            detail: 'Waiting for approval…',
+          }),
+        ]}
+        onDecide={(id, approved) => {
+          decisions.push([id, approved]);
+        }}
+      />
+    );
+
+    expect(screen.getByText('Waiting for approval…')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('tool-approve'));
+    expect(decisions).toEqual([['call_1', true]]);
+  });
+
+  it('lets the reader deny a mutating tool', () => {
+    const decisions: Array<[string, boolean]> = [];
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'run_shell',
+            pending: true,
+            approval: 'pending',
+            detail: 'Waiting for approval…',
+          }),
+        ]}
+        onDecide={(id, approved) => {
+          decisions.push([id, approved]);
+        }}
+      />
+    );
+
+    fireEvent.click(screen.getByTestId('tool-deny'));
+    expect(decisions).toEqual([['call_1', false]]);
+  });
+
+  it('does not show approval buttons without a decision handler', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'write_file',
+            pending: true,
+            approval: 'pending',
+          }),
+        ]}
+      />
+    );
+
+    expect(screen.queryByTestId('tool-approve')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tool-deny')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tool-call').closest('li')).toHaveClass('tool-call--approval');
+  });
+
+  it('hides approval buttons after the reader has decided', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'write_file',
+            pending: true,
+            approval: 'approved',
+            detail: 'Approved. Running…',
+          }),
+        ]}
+        onDecide={() => {}}
+      />
+    );
+
+    expect(screen.queryByTestId('tool-approve')).not.toBeInTheDocument();
+  });
 });

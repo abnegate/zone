@@ -1,18 +1,19 @@
 //! Task execution worker
 //!
-//! Executes agentic tasks in the background using the zone_core agent loop,
-//! persisting logs and progress to the database for monitoring.
+//! Executes agentic tasks in the background using the same streaming agent
+//! loop as chat, with a larger budget and a sandboxed tool context.
 
+use futures::StreamExt;
 use sqlx::PgPool;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
-use zone_core::agent::{Agent, AgentCallback, AgentConfig, AgentPhase};
-use zone_core::llm::{LlmClient, LlmConfig};
-use zone_core::tools::{self, ToolContext, ToolResult};
+use zone_core::agent::{AgentCallback, AgentPhase};
+use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
+use zone_core::tools::ToolResult;
 
+use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget};
 use crate::db::tasks;
 use crate::state::AppState;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
@@ -22,10 +23,6 @@ const MAX_CONCURRENT_TASKS: usize = 5;
 
 // Timeout for task execution (1 hour)
 const TASK_TIMEOUT_SECS: u64 = 3600;
-
-// Tool configuration constants
-const MAX_FILE_SIZE: usize = 10 * 1024 * 1024; // 10MB
-const COMMAND_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
 // LLM configuration defaults (overridable via environment variables)
 fn default_temperature() -> f32 {
@@ -46,37 +43,11 @@ fn default_model() -> String {
     std::env::var("ZONE_TASK_LLM_MODEL").unwrap_or_else(|_| "gpt-4".to_string())
 }
 
-// Safe environment variables to pass to agent tools
-// Only include variables needed for basic command execution
-const SAFE_ENV_VARS: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "LANG",
-    "LC_ALL",
-    "TERM",
-    "SHELL",
-    "TZ",
-    "TMPDIR",
-    "XDG_RUNTIME_DIR",
-];
-
 // Global semaphore to limit concurrent task executions
 static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 fn get_semaphore() -> &'static Arc<Semaphore> {
     TASK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_TASKS)))
-}
-
-/// Get safe environment variables for agent tool execution
-///
-/// Returns only allowlisted environment variables to prevent
-/// leaking sensitive data like API keys or database credentials.
-fn get_safe_env() -> HashMap<String, String> {
-    SAFE_ENV_VARS
-        .iter()
-        .filter_map(|key| std::env::var(key).ok().map(|val| (key.to_string(), val)))
-        .collect()
 }
 
 /// Callback that persists task execution events to the database
@@ -287,9 +258,22 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         }
     };
 
-    // Build system prompt with context if available
-    let mut system_prompt = String::from(
-        "You are an AI coding assistant. You help users with software development tasks.\n\n",
+    // Create tool context with safe environment
+    // SECURITY: Only allowlisted env vars are passed to prevent credential leakage
+    // Determine workspace path
+    let workspace_path = if let Some(_github_url) = &task.github_repo_url {
+        // For GitHub repos, we'd clone to a temp directory
+        // For now, just use a temp directory
+        std::env::temp_dir().join(format!("zone-task-{}", task_id))
+    } else {
+        // Use current directory or configured workspace
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
+    };
+
+    let tools = ChatTools::for_task(state, workspace_path.clone()).await;
+    let mut system_prompt = agent::system_prompt(&tools, true);
+    system_prompt.push_str(
+        "\n\nYou are completing a background coding task. Stay inside the sandboxed working directory.\n",
     );
 
     // Gather context if source_ids are specified
@@ -355,69 +339,23 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         system_prompt.push_str(&format!("\n# Acceptance Criteria\n{}\n", criteria));
     }
 
-    // Determine workspace path
-    let workspace_path = if let Some(_github_url) = &task.github_repo_url {
-        // For GitHub repos, we'd clone to a temp directory
-        // For now, just use a temp directory
-        std::env::temp_dir().join(format!("zone-task-{}", task_id))
-    } else {
-        // Use current directory or configured workspace
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
-    };
-
-    // Create tool context with safe environment
-    // SECURITY: Only allowlisted env vars are passed to prevent credential leakage
-    let tool_context = ToolContext {
-        cwd: workspace_path.clone(),
-        env: get_safe_env(),
-        max_file_size: MAX_FILE_SIZE,
-        command_timeout: COMMAND_TIMEOUT_SECS,
-        unrestricted: false,
-    };
-
-    // Default file/shell tools plus any configured MCP servers (magents by default).
-    let tools = tools::with_defaults_and_mcp().await;
-    if let Some(guidance) = tools.mcp_guidance() {
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(&guidance);
-    }
-
     // Get LLM configuration (from task, then environment, then defaults)
     let temperature = default_temperature();
     let max_tokens = default_max_tokens();
     let model = task.model_name.clone().unwrap_or_else(default_model);
 
-    // Configure LLM client
-    let llm_config = LlmConfig {
+    let llm = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
-        default_model: model,
+        default_model: model.clone(),
         temperature,
         max_tokens,
-    };
-
-    let llm = LlmClient::new(llm_config);
-
-    // Configure agent
-    let agent_config = AgentConfig {
-        max_iterations: 50,
-        max_tokens,
-        temperature,
-        stream: false,
-        system_prompt: Some(system_prompt),
-    };
-
-    // Create agent
-    let agent = Agent::new(llm, tools, agent_config, tool_context);
-
-    // Create callback
+    });
     let callback = DatabaseTaskCallback::new(state.db().clone(), run_id);
-
-    // Build task prompt
     let prompt = format!("# Task: {}\n\n{}", task.title, task.description);
+    let messages = vec![LlmMessage::system(system_prompt), LlmMessage::user(prompt)];
 
-    // Execute agent with timeout
-    let agent_future = agent.run(prompt, &callback);
+    let agent_future = run_task_loop(llm, model, tools, messages, &callback);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(TASK_TIMEOUT_SECS),
         agent_future,
@@ -425,18 +363,17 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     .await;
 
     match result {
-        Ok(Ok(agent_state)) => {
-            // Agent completed successfully
-            let summary = agent_state
-                .final_response
-                .clone()
-                .unwrap_or_else(|| "Task completed".to_string());
+        Ok(Ok(outcome)) => {
+            let summary = if outcome.summary.trim().is_empty() {
+                "Task completed".to_string()
+            } else {
+                outcome.summary
+            };
 
             tracing::info!(
-                "Task run {} completed: iterations={}, tokens={}",
+                "Task run {} completed: tool_calls={}",
                 run_id,
-                agent_state.iteration,
-                agent_state.tokens_used
+                outcome.tool_calls
             );
 
             // Attempt PR creation if there are code changes
@@ -476,8 +413,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
 
             // Build artifacts with PR info if available
             let mut artifacts = serde_json::json!({
-                "iterations": agent_state.iteration,
-                "tokens_used": agent_state.tokens_used,
+                "tool_calls": outcome.tool_calls,
                 "summary": summary,
             });
 
@@ -525,6 +461,65 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             }
         }
     }
+}
+
+struct TaskOutcome {
+    summary: String,
+    tool_calls: usize,
+}
+
+async fn run_task_loop(
+    llm: LlmClient,
+    model: String,
+    tools: ChatTools,
+    messages: Vec<LlmMessage>,
+    callback: &DatabaseTaskCallback,
+) -> Result<TaskOutcome, String> {
+    callback.on_phase_change(AgentPhase::Thinking, None);
+    let mut summary = String::new();
+    let mut tool_calls = 0usize;
+    let mut events = std::pin::pin!(agent::run(AgentRun {
+        llm,
+        model,
+        tools,
+        messages,
+        budget: LoopBudget::task(),
+        approval: ApprovalPolicy::Auto,
+    }));
+    while let Some(event) = events.next().await {
+        match event {
+            AgentEvent::Chunk(text) => summary.push_str(&text),
+            AgentEvent::ToolCallStarted {
+                name, arguments, ..
+            } => {
+                callback.on_phase_change(AgentPhase::Acting, None);
+                callback.on_tool_call(&name, &arguments);
+            }
+            AgentEvent::ToolCallCompleted {
+                name,
+                success,
+                detail,
+                ..
+            } => {
+                tool_calls += 1;
+                let result = if success {
+                    ToolResult::success(detail)
+                } else {
+                    ToolResult::error(detail)
+                };
+                callback.on_tool_result(&name, &result);
+                callback.on_phase_change(AgentPhase::Observing, None);
+            }
+            AgentEvent::Image(_) | AgentEvent::ToolApprovalRequired { .. } => {}
+            AgentEvent::Failed(error) => return Err(error),
+        }
+    }
+    callback.on_phase_change(AgentPhase::Responding, Some(&summary));
+    callback.on_response(&summary);
+    Ok(TaskOutcome {
+        summary,
+        tool_calls,
+    })
 }
 
 #[cfg(test)]

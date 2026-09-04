@@ -34,6 +34,10 @@ impl Tool for RunCommandTool {
         "Execute a shell command. Returns stdout/stderr output. Use for running tests, builds, git commands, etc."
     }
 
+    fn mutating(&self) -> bool {
+        true
+    }
+
     fn timeout(&self, context: &ToolContext) -> Duration {
         // Loose enough never to pre-empt the per-call limit applied below.
         Duration::from_secs(context.command_timeout + 30)
@@ -241,6 +245,10 @@ impl Tool for RunShellTool {
     fn description(&self) -> &str {
         "Run a shell command and return its stdout, stderr and exit code. Runs through `sh -c`, \
          so pipes, redirection and chaining work. Use for builds, tests, git and package managers."
+    }
+
+    fn mutating(&self) -> bool {
+        true
     }
 
     fn parameters_schema(&self) -> Value {

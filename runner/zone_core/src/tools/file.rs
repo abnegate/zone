@@ -116,7 +116,11 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Creates parent directories if needed. Use append=true to append instead of overwrite."
+        "Create a new file or replace an entire file. Prefer apply_patch when editing an existing file. Creates parent directories if needed. Use append=true to append instead of overwrite."
+    }
+
+    fn mutating(&self) -> bool {
+        true
     }
 
     fn parameters_schema(&self) -> Value {
@@ -221,6 +225,199 @@ impl Tool for WriteFileTool {
         Ok(ToolResult::success(format!(
             "Successfully {} {}",
             action, params.path
+        )))
+    }
+}
+
+/// Replace exact text in an existing file without rewriting the rest.
+pub struct ApplyPatchTool;
+
+#[derive(Debug, Clone, Deserialize)]
+struct PatchHunk {
+    old_string: String,
+    new_string: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyPatchParams {
+    path: String,
+    old_string: Option<String>,
+    new_string: Option<String>,
+    #[serde(default)]
+    hunks: Vec<PatchHunk>,
+    #[serde(default)]
+    replace_all: bool,
+}
+
+impl ApplyPatchParams {
+    fn hunks(&self) -> Result<Vec<PatchHunk>, ToolError> {
+        let mut hunks = self.hunks.clone();
+        match (&self.old_string, &self.new_string) {
+            (Some(old_string), Some(new_string)) => hunks.insert(
+                0,
+                PatchHunk {
+                    old_string: old_string.clone(),
+                    new_string: new_string.clone(),
+                },
+            ),
+            (None, None) => {}
+            _ => {
+                return Err(ToolError::InvalidParams(
+                    "old_string and new_string must be supplied together".to_string(),
+                ));
+            }
+        }
+        if hunks.is_empty() {
+            return Err(ToolError::InvalidParams(
+                "Provide old_string and new_string, or a non-empty hunks array".to_string(),
+            ));
+        }
+        for hunk in &hunks {
+            if hunk.old_string.is_empty() {
+                return Err(ToolError::InvalidParams(
+                    "old_string must not be empty".to_string(),
+                ));
+            }
+            if hunk.old_string == hunk.new_string {
+                return Err(ToolError::InvalidParams(
+                    "old_string and new_string are identical".to_string(),
+                ));
+            }
+        }
+        Ok(hunks)
+    }
+}
+
+#[async_trait]
+impl Tool for ApplyPatchTool {
+    fn name(&self) -> &str {
+        "apply_patch"
+    }
+
+    fn description(&self) -> &str {
+        "Edit an existing file by replacing exact text. old_string must match uniquely unless replace_all is true. Prefer this over write_file for changes to existing files. Rejected when the text does not match."
+    }
+
+    fn mutating(&self) -> bool {
+        true
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to an existing file (relative to working directory)"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact text to find. Include enough surrounding lines to make the match unique."
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement text"
+                },
+                "hunks": {
+                    "type": "array",
+                    "description": "Multiple replacements applied in order. Use instead of repeating apply_patch.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": { "type": "string" },
+                            "new_string": { "type": "string" }
+                        },
+                        "required": ["old_string", "new_string"]
+                    }
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence of each old_string (default false)"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let params: ApplyPatchParams =
+            serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+        let hunks = params.hunks()?;
+
+        let normalized_path = params.path.replace('\\', "/");
+        if !context.unrestricted
+            && (normalized_path.contains("..")
+                || normalized_path.starts_with('/')
+                || normalized_path.contains("/../")
+                || normalized_path.ends_with("/.."))
+        {
+            return Err(ToolError::Execution(
+                "Path contains traversal sequences".to_string(),
+            ));
+        }
+
+        let full_path = context.cwd.join(&params.path);
+        let canonical = full_path
+            .canonicalize()
+            .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
+        let canonical_cwd = context
+            .cwd
+            .canonicalize()
+            .unwrap_or_else(|_| context.cwd.clone());
+        if !context.unrestricted && !canonical.starts_with(&canonical_cwd) {
+            return Err(ToolError::Execution(
+                "Path escapes working directory".to_string(),
+            ));
+        }
+
+        let metadata = fs::metadata(&canonical)
+            .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
+        if metadata.len() > context.max_file_size as u64 {
+            return Err(ToolError::Execution(format!(
+                "File too large ({} bytes, max {})",
+                metadata.len(),
+                context.max_file_size
+            )));
+        }
+
+        let mut content = fs::read_to_string(&canonical)
+            .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
+        let mut replacements = Vec::new();
+
+        for (index, hunk) in hunks.iter().enumerate() {
+            let matches = content.matches(&hunk.old_string).count();
+            if matches == 0 {
+                return Err(ToolError::Execution(format!(
+                    "Hunk {} did not match any text in {}. Read the file and copy the exact text to replace.",
+                    index + 1,
+                    params.path
+                )));
+            }
+            if matches > 1 && !params.replace_all {
+                return Err(ToolError::Execution(format!(
+                    "Hunk {} matched {} times in {}. Include more surrounding context so the match is unique, or set replace_all=true.",
+                    index + 1,
+                    matches,
+                    params.path
+                )));
+            }
+            content = if params.replace_all {
+                content.replace(&hunk.old_string, &hunk.new_string)
+            } else {
+                content.replacen(&hunk.old_string, &hunk.new_string, 1)
+            };
+            replacements.push(matches);
+        }
+
+        fs::write(&canonical, &content)
+            .map_err(|e| ToolError::Execution(format!("Cannot write file: {}", e)))?;
+
+        let total: usize = replacements.iter().sum();
+        Ok(ToolResult::success(format!(
+            "Updated {} ({} replacement{})",
+            params.path,
+            total,
+            if total == 1 { "" } else { "s" }
         )))
     }
 }
@@ -368,7 +565,7 @@ impl Tool for SearchCodeTool {
     }
 
     fn description(&self) -> &str {
-        "Search for a pattern in code files. Returns matching lines with file paths and line numbers."
+        "Search for a literal pattern in code files. Uses ripgrep when available, otherwise walks the tree. Returns matching lines with file paths and line numbers."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -405,6 +602,11 @@ impl Tool for SearchCodeTool {
         } else {
             context.cwd.clone()
         };
+        let max_results = params.max_results.unwrap_or(100);
+
+        if let Some(result) = search_ripgrep(&params, &search_path, max_results).await {
+            return Ok(result);
+        }
 
         let pattern = if params.case_sensitive {
             params.pattern.clone()
@@ -413,111 +615,6 @@ impl Tool for SearchCodeTool {
         };
 
         let mut results = Vec::new();
-        let max_results = params.max_results.unwrap_or(100);
-
-        fn search_dir(
-            dir: &Path,
-            base: &Path,
-            pattern: &str,
-            case_sensitive: bool,
-            results: &mut Vec<String>,
-            max_results: usize,
-        ) -> Result<(), ToolError> {
-            if results.len() >= max_results {
-                return Ok(());
-            }
-
-            let entries = match fs::read_dir(dir) {
-                Ok(e) => e,
-                Err(_) => return Ok(()), // Skip unreadable directories
-            };
-
-            for entry in entries {
-                if results.len() >= max_results {
-                    break;
-                }
-
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-
-                let path = entry.path();
-
-                // Skip hidden files/directories
-                if path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with('.'))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-
-                if path.is_dir() {
-                    // Skip common non-code directories
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if [
-                        "node_modules",
-                        "target",
-                        "dist",
-                        "build",
-                        ".git",
-                        "__pycache__",
-                    ]
-                    .contains(&name)
-                    {
-                        continue;
-                    }
-
-                    search_dir(&path, base, pattern, case_sensitive, results, max_results)?;
-                } else if path.is_file() {
-                    // Only search text files
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    let code_exts = [
-                        "rs", "py", "js", "ts", "jsx", "tsx", "go", "java", "c", "cpp", "h", "hpp",
-                        "rb", "php", "swift", "kt", "scala", "cs", "fs", "ex", "exs", "erl",
-                        "gleam", "hs", "ml", "sql", "sh", "bash", "zsh", "yaml", "yml", "json",
-                        "toml", "xml", "html", "css", "scss", "sass", "md", "txt",
-                    ];
-
-                    if !code_exts.contains(&ext) {
-                        continue;
-                    }
-
-                    let content = match fs::read_to_string(&path) {
-                        Ok(c) => c,
-                        Err(_) => continue, // Skip binary/unreadable files
-                    };
-
-                    let relative = path.strip_prefix(base).unwrap_or(&path);
-
-                    for (line_num, line) in content.lines().enumerate() {
-                        if results.len() >= max_results {
-                            break;
-                        }
-
-                        let matches = if case_sensitive {
-                            line.contains(pattern)
-                        } else {
-                            line.to_lowercase().contains(pattern)
-                        };
-
-                        if matches {
-                            results.push(format!(
-                                "{}:{}: {}",
-                                relative.display(),
-                                line_num + 1,
-                                line.trim()
-                            ));
-                        }
-                    }
-                }
-            }
-
-            Ok(())
-        }
-
         search_dir(
             &search_path,
             &search_path,
@@ -526,23 +623,209 @@ impl Tool for SearchCodeTool {
             &mut results,
             max_results,
         )?;
+        Ok(format_search_results(results, max_results))
+    }
+}
 
-        if results.is_empty() {
-            Ok(ToolResult::success("No matches found"))
+fn format_search_results(results: Vec<String>, max_results: usize) -> ToolResult {
+    if results.is_empty() {
+        ToolResult::success("No matches found")
+    } else {
+        let truncated = if results.len() >= max_results {
+            format!("\n\n... (truncated at {} results)", max_results)
         } else {
-            let truncated = if results.len() >= max_results {
-                format!("\n\n... (truncated at {} results)", max_results)
-            } else {
-                String::new()
+            String::new()
+        };
+        ToolResult::success(format!(
+            "Found {} matches:\n\n{}{}",
+            results.len(),
+            results.join("\n"),
+            truncated
+        ))
+    }
+}
+
+fn search_dir(
+    dir: &Path,
+    base: &Path,
+    pattern: &str,
+    case_sensitive: bool,
+    results: &mut Vec<String>,
+    max_results: usize,
+) -> Result<(), ToolError> {
+    if results.len() >= max_results {
+        return Ok(());
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+
+    for entry in entries {
+        if results.len() >= max_results {
+            break;
+        }
+
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let path = entry.path();
+
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with('.'))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if [
+                "node_modules",
+                "target",
+                "dist",
+                "build",
+                ".git",
+                "__pycache__",
+            ]
+            .contains(&name)
+            {
+                continue;
+            }
+
+            search_dir(&path, base, pattern, case_sensitive, results, max_results)?;
+        } else if path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let code_exts = [
+                "rs", "py", "js", "ts", "jsx", "tsx", "go", "java", "c", "cpp", "h", "hpp", "rb",
+                "php", "swift", "kt", "scala", "cs", "fs", "ex", "exs", "erl", "gleam", "hs", "ml",
+                "sql", "sh", "bash", "zsh", "yaml", "yml", "json", "toml", "xml", "html", "css",
+                "scss", "sass", "md", "txt",
+            ];
+
+            if !code_exts.contains(&ext) {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
             };
-            Ok(ToolResult::success(format!(
-                "Found {} matches:\n\n{}{}",
-                results.len(),
-                results.join("\n"),
-                truncated
-            )))
+
+            let relative = path.strip_prefix(base).unwrap_or(&path);
+
+            for (line_num, line) in content.lines().enumerate() {
+                if results.len() >= max_results {
+                    break;
+                }
+
+                let matches = if case_sensitive {
+                    line.contains(pattern)
+                } else {
+                    line.to_lowercase().contains(pattern)
+                };
+
+                if matches {
+                    results.push(format!(
+                        "{}:{}: {}",
+                        relative.display(),
+                        line_num + 1,
+                        line.trim()
+                    ));
+                }
+            }
         }
     }
+
+    Ok(())
+}
+
+async fn search_ripgrep(
+    params: &SearchCodeParams,
+    search_path: &Path,
+    max_results: usize,
+) -> Option<ToolResult> {
+    if !ripgrep_available() {
+        return None;
+    }
+
+    let mut command = tokio::process::Command::new("rg");
+    command
+        .arg("-F")
+        .arg("-n")
+        .arg("--no-heading")
+        .arg("--color")
+        .arg("never")
+        .arg("--glob")
+        .arg("!node_modules/**")
+        .arg("--glob")
+        .arg("!target/**")
+        .arg("--glob")
+        .arg("!dist/**")
+        .arg("--glob")
+        .arg("!build/**")
+        .arg("--glob")
+        .arg("!__pycache__/**");
+    if !params.case_sensitive {
+        command.arg("-i");
+    }
+    command.arg("--").arg(&params.pattern).arg(search_path);
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::null());
+
+    let output = command.output().await.ok()?;
+    // 0 = matches, 1 = no matches; anything else is a real failure.
+    if !output.status.success() && output.status.code() != Some(1) {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut results = Vec::new();
+    for line in stdout.lines() {
+        if results.len() >= max_results {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        results.push(normalize_rg_line(line, search_path));
+    }
+    Some(format_search_results(results, max_results))
+}
+
+fn normalize_rg_line(line: &str, search_path: &Path) -> String {
+    // rg prints `path:line:text`. Prefer a path relative to the search root.
+    let Some((path_and_line, text)) = line.split_once(':').and_then(|(path, rest)| {
+        rest.split_once(':')
+            .map(|(number, text)| (format!("{path}:{number}"), text))
+    }) else {
+        return line.to_string();
+    };
+    let Some((path, number)) = path_and_line.rsplit_once(':') else {
+        return format!("{}: {}", path_and_line, text.trim());
+    };
+    let relative = Path::new(path)
+        .strip_prefix(search_path)
+        .unwrap_or(Path::new(path));
+    format!("{}:{}: {}", relative.display(), number, text.trim())
+}
+
+fn ripgrep_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(test)]
@@ -887,6 +1170,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_code_respects_max_results() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("many.rs"),
+            "hit one\nhit two\nhit three\nhit four\n",
+        )
+        .unwrap();
+        let tool = SearchCodeTool;
+        let context = create_test_context(dir.path());
+        let result = tool
+            .execute(
+                serde_json::json!({"pattern": "hit", "max_results": 2}),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        let output = result.output.unwrap();
+        assert!(output.contains("truncated at 2 results"), "{output}");
+        assert_eq!(output.matches("hit ").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_code_missing_path_is_no_matches() {
+        let dir = tempdir().unwrap();
+        let tool = SearchCodeTool;
+        let context = create_test_context(dir.path());
+        let result = tool
+            .execute(
+                serde_json::json!({"pattern": "anything", "path": "does-not-exist"}),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.unwrap().contains("No matches found"));
+    }
+
+    #[tokio::test]
     async fn test_search_code_no_matches() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("test.rs"), "fn main() {}").unwrap();
@@ -924,5 +1246,116 @@ mod tests {
         let search = SearchCodeTool;
         let def = search.to_definition();
         assert_eq!(def.function.name, "search_code");
+
+        let patch = ApplyPatchTool;
+        let def = patch.to_definition();
+        assert_eq!(def.function.name, "apply_patch");
+        assert!(patch.mutating());
+        assert!(!ReadFileTool.mutating());
+    }
+
+    #[tokio::test]
+    async fn apply_patch_replaces_unique_text() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("main.rs"),
+            "fn main() {\n    println!(\"a\");\n}\n",
+        )
+        .unwrap();
+        let tool = ApplyPatchTool;
+        let context = create_test_context(dir.path());
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": "main.rs",
+                    "old_string": "println!(\"a\");",
+                    "new_string": "println!(\"b\");"
+                }),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("main.rs")).unwrap(),
+            "fn main() {\n    println!(\"b\");\n}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_ambiguous_matches() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("dup.txt"), "foo\nfoo\n").unwrap();
+        let tool = ApplyPatchTool;
+        let context = create_test_context(dir.path());
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": "dup.txt",
+                    "old_string": "foo",
+                    "new_string": "bar"
+                }),
+                &context,
+            )
+            .await;
+
+        assert!(result.unwrap_err().to_string().contains("matched 2 times"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("dup.txt")).unwrap(),
+            "foo\nfoo\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_replace_all_and_hunks() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("dup.txt"), "foo\nfoo\nbaz\n").unwrap();
+        let tool = ApplyPatchTool;
+        let context = create_test_context(dir.path());
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": "dup.txt",
+                    "replace_all": true,
+                    "hunks": [
+                        {"old_string": "foo", "new_string": "bar"},
+                        {"old_string": "baz", "new_string": "qux"}
+                    ]
+                }),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("dup.txt")).unwrap(),
+            "bar\nbar\nqux\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_missing_text() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+        let tool = ApplyPatchTool;
+        let context = create_test_context(dir.path());
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": "a.txt",
+                    "old_string": "missing",
+                    "new_string": "x"
+                }),
+                &context,
+            )
+            .await;
+
+        assert!(result.unwrap_err().to_string().contains("did not match"));
     }
 }

@@ -52,6 +52,10 @@ impl Tool for McpTool {
         self.parameters_schema.clone()
     }
 
+    fn mutating(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let arguments = json_object(params)?;
         let request =

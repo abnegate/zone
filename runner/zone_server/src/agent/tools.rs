@@ -57,12 +57,49 @@ fn host_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/"))
 }
 
-/// The tools offered for one chat turn, and the context they run in.
+const TASK_SAFE_ENV: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "SHELL",
+    "TZ",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+];
+
+fn task_context(cwd: std::path::PathBuf) -> ToolContext {
+    ToolContext {
+        cwd,
+        env: TASK_SAFE_ENV
+            .iter()
+            .filter_map(|key| std::env::var(key).ok().map(|val| (key.to_string(), val)))
+            .collect(),
+        max_file_size: 10 * 1024 * 1024,
+        command_timeout: 300,
+        unrestricted: false,
+    }
+}
+
+/// Which surface is assembling the shared tool set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProfile {
+    Chat,
+    Task,
+}
+
+/// The tools offered for one turn, and the context they run in.
+///
+/// Chat and tasks share this builder. Workspace tools stay on chat; tasks
+/// get the sandboxed file/shell set plus MCP.
 pub struct ChatTools {
     registry: ToolRegistry,
     context: ToolContext,
-    scope: WorkspaceScope,
+    scope: Option<WorkspaceScope>,
     workspace: Vec<String>,
+    profile: ToolProfile,
 }
 
 impl ChatTools {
@@ -71,35 +108,78 @@ impl ChatTools {
     /// Search tools are omitted when their backing service is absent rather
     /// than advertised and failed at call time, so the model never burns an
     /// iteration on a tool that cannot work.
-    pub fn build(scope: WorkspaceScope) -> Self {
+    pub async fn build(scope: WorkspaceScope) -> Self {
+        Self::assemble(Some(scope), ToolProfile::Chat, None).await
+    }
+
+    /// Sandboxed file/shell tools plus MCP for a background task run.
+    pub async fn for_task(state: &AppState, cwd: std::path::PathBuf) -> Self {
+        let mut assembled = Self::assemble(None, ToolProfile::Task, Some(cwd)).await;
+        let added = assembled.registry.register_mcp(state.mcp_hub().await);
+        if added > 0 {
+            tracing::info!(tools = added, "Attached MCP tools to task");
+        }
+        assembled
+    }
+
+    async fn assemble(
+        scope: Option<WorkspaceScope>,
+        profile: ToolProfile,
+        task_cwd: Option<std::path::PathBuf>,
+    ) -> Self {
         let mut registry = ToolRegistry::new();
+        let mut workspace = Vec::new();
 
-        if scope.state.context_service().is_some() {
-            registry.register(Arc::new(SearchKnowledgeTool(scope.clone())));
+        if let Some(scope) = &scope {
+            if scope.state.context_service().is_some() {
+                registry.register(Arc::new(SearchKnowledgeTool(scope.clone())));
+            }
+            if scope.state.embedding_service().is_some() {
+                registry.register(Arc::new(SearchChatHistoryTool(scope.clone())));
+            }
+            registry.register(Arc::new(ListSourcesTool(scope.clone())));
+            registry.register(Arc::new(ListProjectsTool(scope.clone())));
+            super::actions::register(&mut registry, scope);
+            super::documents::register(&mut registry, scope);
+            super::integrations::register(&mut registry, scope);
+            super::images::register(&mut registry, scope);
+            super::monitoring::register(&mut registry, scope);
+            workspace = registry
+                .names()
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
+            super::web::register(&mut registry, scope);
         }
-        if scope.state.embedding_service().is_some() {
-            registry.register(Arc::new(SearchChatHistoryTool(scope.clone())));
-        }
-        registry.register(Arc::new(ListSourcesTool(scope.clone())));
-        registry.register(Arc::new(ListProjectsTool(scope.clone())));
-        super::actions::register(&mut registry, &scope);
-        super::documents::register(&mut registry, &scope);
-        super::integrations::register(&mut registry, &scope);
-        let workspace = registry
-            .names()
-            .iter()
-            .map(|name| name.to_string())
-            .collect();
 
-        for tool in ToolRegistry::with_host_tools().into_tools() {
-            registry.register(tool);
+        match profile {
+            ToolProfile::Chat => {
+                for tool in ToolRegistry::with_host_tools().into_tools() {
+                    registry.register(tool);
+                }
+            }
+            ToolProfile::Task => {
+                for tool in ToolRegistry::with_defaults().into_tools() {
+                    registry.register(tool);
+                }
+            }
         }
 
-        let context = ToolContext {
-            cwd: host_root(),
-            env: std::env::vars().collect(),
-            unrestricted: true,
-            ..Default::default()
+        if let Some(scope) = &scope {
+            let added = registry.register_mcp(scope.state.mcp_hub().await);
+            if added > 0 {
+                tracing::info!(tools = added, "Attached MCP tools to chat");
+            }
+        }
+
+        let context = match profile {
+            ToolProfile::Chat => ToolContext {
+                cwd: host_root(),
+                env: std::env::vars().collect(),
+                unrestricted: true,
+                ..Default::default()
+            },
+            ToolProfile::Task => task_context(task_cwd.unwrap_or_else(host_root)),
         };
 
         Self {
@@ -107,7 +187,12 @@ impl ChatTools {
             context,
             scope,
             workspace,
+            profile,
         }
+    }
+
+    pub fn profile(&self) -> ToolProfile {
+        self.profile
     }
 
     pub fn is_empty(&self) -> bool {
@@ -128,6 +213,14 @@ impl ChatTools {
             .collect();
         names.sort();
         names
+    }
+
+    pub fn mcp_guidance(&self) -> Option<String> {
+        self.registry.mcp_guidance()
+    }
+
+    pub fn mutating(&self, name: &str) -> bool {
+        self.registry.mutating(name)
     }
 
     /// Run a tool by name, turning every failure mode into a `ToolResult`.
@@ -160,9 +253,12 @@ impl ChatTools {
         };
 
         if self.workspace.iter().any(|registered| registered == name) {
+            let Some(scope) = self.scope.as_ref() else {
+                return ToolResult::error("Workspace access denied.");
+            };
             match sqlx::query_scalar::<_, bool>(
                 "SELECT check_workspace_membership($1, $2) AND EXISTS(SELECT 1 FROM chats WHERE id = $3 AND workspace_id = $2)"
-            ).bind(self.scope.user_id).bind(self.scope.workspace_id).bind(self.scope.chat_id).fetch_one(self.scope.state.db()).await
+            ).bind(scope.user_id).bind(scope.workspace_id).bind(scope.chat_id).fetch_one(scope.state.db()).await
             {
                 Ok(true) => {}
                 Ok(false) => return ToolResult::error("Workspace access denied."),
@@ -196,20 +292,22 @@ impl ChatTools {
         if !receipts::is_write_tool(name) {
             return None;
         }
-        let actor_name =
-            match users::get_user_by_id(self.scope.state.db(), self.scope.user_id).await {
-                Ok(Some(user)) => user
-                    .display_name
-                    .filter(|name| !name.trim().is_empty())
-                    .unwrap_or(user.email),
-                _ => self.scope.user_id.to_string(),
-            };
+        let Some(scope) = self.scope.as_ref() else {
+            return None;
+        };
+        let actor_name = match users::get_user_by_id(scope.state.db(), scope.user_id).await {
+            Ok(Some(user)) => user
+                .display_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(user.email),
+            _ => scope.user_id.to_string(),
+        };
         receipts::from_write(
             id,
             name,
             arguments,
             result,
-            self.scope.user_id,
+            scope.user_id,
             &actor_name,
             chrono::Utc::now(),
         )
@@ -245,7 +343,7 @@ pub(super) fn optional_string_arg<'a>(params: &'a Value, key: &str) -> Option<&'
 }
 
 /// Truncate on a character boundary, marking that we cut.
-pub(super) fn truncate(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
     match text.char_indices().nth(max_chars) {
         Some((byte_idx, _)) => format!("{}…", &text[..byte_idx]),
         None => text.to_string(),
@@ -774,15 +872,19 @@ mod tests {
 
     #[tokio::test]
     async fn agent_chats_always_get_server_tools() {
-        let tools = ChatTools::build(scope());
+        let tools = ChatTools::build(scope()).await;
         assert!(tools.names().contains(&"list_projects".to_string()));
         for name in [
             "run_shell",
             "run_command",
             "write_file",
+            "apply_patch",
             "read_file",
             "list_files",
             "search_code",
+            "start_task",
+            "get_task_run",
+            "tail_task_log",
         ] {
             assert!(
                 tools.names().contains(&name.to_string()),
@@ -790,11 +892,37 @@ mod tests {
             );
         }
         assert!(tools.context.unrestricted);
+        assert_eq!(tools.profile(), ToolProfile::Chat);
+        assert!(!tools.mutating("list_projects"));
+        assert!(!tools.mutating("read_file"));
+        assert!(tools.mutating("write_file"));
+        assert!(tools.mutating("apply_patch"));
+        assert!(tools.mutating("start_task"));
+        assert!(!tools.mutating("get_task_run"));
+        let required = crate::agent::system_prompt(&tools, false);
+        assert!(required.contains("wait for the user to approve"));
+        let auto = crate::agent::system_prompt(&tools, true);
+        assert!(auto.contains("without waiting for confirmation"));
+        assert!(!auto.contains("wait for the user to approve"));
+    }
+
+    #[tokio::test]
+    async fn task_tools_are_sandboxed_and_omit_workspace_catalog() {
+        let tools = ChatTools::for_task(&AppState::for_tests(), std::env::temp_dir()).await;
+        assert_eq!(tools.profile(), ToolProfile::Task);
+        assert!(!tools.context.unrestricted);
+        assert!(tools.names().contains(&"read_file".to_string()));
+        assert!(tools.names().contains(&"apply_patch".to_string()));
+        assert!(!tools.names().contains(&"run_shell".to_string()));
+        assert!(!tools.names().contains(&"list_projects".to_string()));
+        assert!(!tools.names().contains(&"start_task".to_string()));
+        assert!(!tools.names().contains(&"generate_image".to_string()));
+        assert!(!tools.names().contains(&"query_prometheus".to_string()));
     }
 
     #[tokio::test]
     async fn an_unknown_tool_lists_what_is_available() {
-        let tools = ChatTools::build(scope());
+        let tools = ChatTools::build(scope()).await;
         let result = tools.execute("definitely_not_a_tool", "{}").await;
 
         assert!(!result.success);
@@ -805,7 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_arguments_come_back_as_a_readable_failure() {
-        let tools = ChatTools::build(scope());
+        let tools = ChatTools::build(scope()).await;
         let result = tools.execute("list_projects", "{not json").await;
 
         assert!(!result.success);
@@ -814,7 +942,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_shell_runs_for_an_agent_chat() {
-        let tools = ChatTools::build(scope());
+        let tools = ChatTools::build(scope()).await;
         let result = tools
             .execute("run_shell", r#"{"command":"echo agentic"}"#)
             .await;
@@ -825,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_files_can_be_written_and_read() {
-        let tools = ChatTools::build(scope());
+        let tools = ChatTools::build(scope()).await;
         let path = std::env::temp_dir().join(format!("zone-agent-{}.txt", Uuid::new_v4()));
         let written = tools
             .execute(
@@ -842,6 +970,24 @@ mod tests {
         assert!(read.success, "{:?}", read.error);
         assert!(read.output.unwrap().contains("agent file round trip"));
         assert_eq!(contents.unwrap(), "agent file round trip");
+        cleanup.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_edits_without_rewriting_the_file() {
+        let tools = ChatTools::build(scope()).await;
+        let path = std::env::temp_dir().join(format!("zone-patch-{}.txt", Uuid::new_v4()));
+        std::fs::write(&path, "alpha\nkeep\n").unwrap();
+        let patched = tools
+            .execute(
+                "apply_patch",
+                &json!({"path": path, "old_string": "alpha", "new_string": "beta"}).to_string(),
+            )
+            .await;
+        let contents = std::fs::read_to_string(&path);
+        let cleanup = std::fs::remove_file(&path);
+        assert!(patched.success, "{:?}", patched.error);
+        assert_eq!(contents.unwrap(), "beta\nkeep\n");
         cleanup.unwrap();
     }
 
@@ -889,13 +1035,15 @@ mod tests {
         .await
         .unwrap();
         let chat: Uuid = sqlx::query_scalar("INSERT INTO chats (workspace_id, title, model_name) VALUES ($1, 'Scope tests', 'test') RETURNING id").bind(workspace.id).fetch_one(&pool).await.unwrap();
+        let state = AppState::new(test_config(), pool.clone(), None);
+        state.disable_mcp();
         let scope = WorkspaceScope {
-            state: AppState::new(test_config(), pool.clone(), None),
+            state,
             workspace_id: workspace.id,
             chat_id: chat,
             user_id: user.id,
         };
-        let tools = ChatTools::build(scope.clone());
+        let tools = ChatTools::build(scope.clone()).await;
         for name in [
             "list_projects",
             "list_sources",
@@ -913,7 +1061,8 @@ mod tests {
         let invalid = ChatTools::build(WorkspaceScope {
             chat_id: Uuid::new_v4(),
             ..scope
-        });
+        })
+        .await;
         assert!(!invalid.execute("list_sources", "{}").await.success);
         workspace_members::remove_member(&pool, workspace.id, user.id)
             .await

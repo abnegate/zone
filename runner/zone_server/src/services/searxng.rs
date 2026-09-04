@@ -57,10 +57,13 @@ impl SearchContext {
         let capability = if matches!(self, Self::Disabled) {
             "Web search capability: disabled. The server cannot perform a web lookup for this turn."
         } else {
-            "Zone can search the public web via SearXNG before sending a turn to the model. \
-             Search runs only on turns selected for a lookup; it does not run on every turn. \
-             This server-side search is separate from the callable tools and does not require model tool support. \
-             Do not deny this search capability because no web-search function appears in the callable tool list. \
+            "Zone can search the public web via SearXNG before sending a turn to the model, \
+             and agent chats can also call web_search or fetch_url during the turn. \
+             Search runs automatically only on turns selected for a lookup; it does not run on every turn. \
+             The automatic lookup does not require model tool support. \
+             When web_search is among the callable tools, use it to refine a query or search again after reading other results. \
+             Use fetch_url to read a specific public page. \
+             Do not deny this search capability because the automatic lookup is separate from callable tools. \
              It provides public search results, not arbitrary page browsing or access to private or authenticated services. \
              Use relevant supplied evidence to answer and cite its URLs. Do not invent facts, freshness or the user's location."
         };
@@ -504,9 +507,10 @@ mod tests {
         assert!(
             prompt.contains("outcome supersedes conflicting claims in earlier assistant messages")
         );
-        assert!(capability.contains("separate from the callable tools"));
+        assert!(capability.contains("separate from callable tools"));
         assert!(capability.contains("it does not run on every turn"));
         assert!(capability.contains("does not require model tool support"));
+        assert!(capability.contains("web_search"));
         assert!(prompt.contains("1. Auckland weather"));
         assert!(prompt.contains("https://example.com/weather"));
         assert!(prompt.contains("Current forecast."));

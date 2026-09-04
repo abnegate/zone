@@ -36,6 +36,13 @@ type ServerMessage =
       arguments: string;
     }
   | {
+      type: 'tool_approval_required';
+      message_id: string;
+      tool_call_id: string;
+      name: string;
+      arguments: string;
+    }
+  | {
       type: 'tool_result';
       message_id: string;
       tool_call_id: string;
@@ -365,6 +372,15 @@ export function useChat(
             pending: true,
           });
           break;
+        case 'tool_approval_required':
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            name: payload.name,
+            arguments: payload.arguments,
+            detail: 'Waiting for approval…',
+            pending: true,
+            approval: 'pending',
+          });
+          break;
         case 'tool_result':
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
@@ -537,6 +553,30 @@ export function useChat(
     }
   };
 
+  const approveTool = (toolCallId: string, approved: boolean): void => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const assistant = chat?.messages.find((message) =>
+      message.metadata?.tool_calls?.some((call) => call.id === toolCallId)
+    );
+    if (assistant) {
+      patchToolCall(assistant.id, toolCallId, {
+        approval: approved ? 'approved' : 'denied',
+        detail: approved ? 'Approved. Running…' : 'Denied',
+        pending: approved,
+      });
+    }
+    socket.send(
+      JSON.stringify({
+        type: 'approve_tool',
+        tool_call_id: toolCallId,
+        approved,
+      })
+    );
+  };
+
   // Persisted on the chat rather than sent per message, so the next reply uses
   // the new mode whichever window or device it comes from.
   const updateAgentSettings = async (settings: UpdateChatRequest): Promise<void> => {
@@ -549,6 +589,7 @@ export function useChat(
         ? {
             ...prev,
             agent_enabled: updated.agent_enabled,
+            auto_approve: updated.auto_approve,
           }
         : prev
     );
@@ -556,6 +597,9 @@ export function useChat(
 
   const setAgentEnabled = (enabled: boolean): Promise<void> =>
     updateAgentSettings({ agent_enabled: enabled });
+
+  const setAutoApprove = (enabled: boolean): Promise<void> =>
+    updateAgentSettings({ auto_approve: enabled });
 
   const deleteMessage = async (messageId: string): Promise<void> => {
     if (!chatId) {
@@ -579,7 +623,9 @@ export function useChat(
     status,
     sendMessage,
     cancelGeneration,
+    approveTool,
     setAgentEnabled,
+    setAutoApprove,
     deleteMessage,
     refresh,
     updateTitle,

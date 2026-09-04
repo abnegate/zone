@@ -41,6 +41,9 @@ pub struct ToolResult {
     pub output: Option<String>,
     /// Error message (for failed execution)
     pub error: Option<String>,
+    /// Artifact URLs the loop should surface as generated images.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 impl ToolResult {
@@ -49,6 +52,7 @@ impl ToolResult {
             success: true,
             output: Some(output.into()),
             error: None,
+            images: Vec::new(),
         }
     }
 
@@ -57,7 +61,13 @@ impl ToolResult {
             success: false,
             output: None,
             error: Some(error.into()),
+            images: Vec::new(),
         }
+    }
+
+    pub fn with_images(mut self, images: Vec<String>) -> Self {
+        self.images = images;
+        self
     }
 
     /// Convert to a string for the LLM
@@ -129,6 +139,14 @@ pub trait Tool: Send + Sync {
         std::time::Duration::from_secs(30)
     }
 
+    /// Whether this tool changes durable state.
+    ///
+    /// Read-only tools may run together in one batch. A mutating tool keeps
+    /// the whole batch sequential so later reads see earlier writes.
+    fn mutating(&self) -> bool {
+        false
+    }
+
     /// Convert to an OpenAI tool definition
     fn to_definition(&self) -> ToolDefinition {
         ToolDefinition::function(self.name(), self.description(), self.parameters_schema())
@@ -158,6 +176,7 @@ impl ToolRegistry {
         // File tools
         registry.register(Arc::new(ReadFileTool));
         registry.register(Arc::new(WriteFileTool));
+        registry.register(Arc::new(ApplyPatchTool));
         registry.register(Arc::new(ListFilesTool));
         registry.register(Arc::new(SearchCodeTool));
 
@@ -210,6 +229,14 @@ impl ToolRegistry {
     /// List all tool names
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Whether a named tool mutates state. Unknown names are treated as writes.
+    pub fn mutating(&self, name: &str) -> bool {
+        self.tools
+            .get(name)
+            .map(|tool| tool.mutating())
+            .unwrap_or(true)
     }
 
     /// Take the tools out, for folding one registry into another.
@@ -320,10 +347,11 @@ mod tests {
 
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"list_files"));
         assert!(names.contains(&"search_code"));
         assert!(names.contains(&"run_command"));
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
     }
 
     #[test]
@@ -339,7 +367,7 @@ mod tests {
         let registry = ToolRegistry::with_defaults();
         let definitions = registry.definitions();
 
-        assert_eq!(definitions.len(), 5);
+        assert_eq!(definitions.len(), 6);
 
         // All definitions should be function type
         for def in &definitions {

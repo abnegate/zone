@@ -19,6 +19,9 @@ enum Action {
     CreateReminder,
     ListReminders,
     CancelReminder,
+    StartTask,
+    GetTaskRun,
+    TailTaskLog,
 }
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
@@ -32,6 +35,9 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Action::CreateReminder,
         Action::ListReminders,
         Action::CancelReminder,
+        Action::StartTask,
+        Action::GetTaskRun,
+        Action::TailTaskLog,
     ] {
         registry.register(Arc::new(WorkspaceAction {
             scope: scope.clone(),
@@ -75,6 +81,9 @@ impl Tool for WorkspaceAction {
             Action::CreateReminder => "create_reminder",
             Action::ListReminders => "list_reminders",
             Action::CancelReminder => "cancel_reminder",
+            Action::StartTask => "start_task",
+            Action::GetTaskRun => "get_task_run",
+            Action::TailTaskLog => "tail_task_log",
         }
     }
     fn description(&self) -> &str {
@@ -102,7 +111,28 @@ impl Tool for WorkspaceAction {
                 "List the current user's workspace reminders, including pending, delivered, and cancelled reminders."
             }
             Action::CancelReminder => "Cancel one of the current user's pending reminders.",
+            Action::StartTask => {
+                "Create an agentic coding task and start the background runner immediately. Returns task_id and run_id. Does not wait for completion — poll get_task_run and tail_task_log. Use only when the user asked to run work in the background."
+            }
+            Action::GetTaskRun => {
+                "Get status, phase, progress and error for a runner task in this workspace."
+            }
+            Action::TailTaskLog => {
+                "Fetch new runner log lines since a previous log ID. Use to monitor start_task progress."
+            }
         }
+    }
+
+    fn mutating(&self) -> bool {
+        matches!(
+            self.action,
+            Action::CreateTask
+                | Action::UpdateTask
+                | Action::SendMessage
+                | Action::CreateReminder
+                | Action::CancelReminder
+                | Action::StartTask
+        )
     }
     fn parameters_schema(&self) -> Value {
         let identifier = json!({"type":"string","format":"uuid"});
@@ -128,6 +158,26 @@ impl Tool for WorkspaceAction {
                 json!(["content", "due_at"]),
             ),
             Action::CancelReminder => (json!({"reminder_id":identifier}), json!(["reminder_id"])),
+            Action::StartTask => (
+                json!({
+                    "title":{"type":"string","minLength":1},
+                    "description":{"type":"string","minLength":1},
+                    "acceptance_criteria":{"type":"string"},
+                    "project_ids":{"type":"array","items":identifier},
+                    "source_id":{"type":"string","format":"uuid"},
+                    "priority":{"type":"integer","minimum":1,"maximum":5}
+                }),
+                json!(["title", "description"]),
+            ),
+            Action::GetTaskRun => (json!({"run_id":identifier}), json!(["run_id"])),
+            Action::TailTaskLog => (
+                json!({
+                    "run_id":identifier,
+                    "after_log_id":{"type":"string","format":"uuid"},
+                    "limit":{"type":"integer","minimum":1,"maximum":200}
+                }),
+                json!(["run_id"]),
+            ),
             _ => (json!({}), json!([])),
         };
         json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
@@ -203,6 +253,46 @@ impl WorkspaceAction {
                 )
                 .await
             }
+            Action::StartTask => {
+                let started =
+                    actions::start_task(pool, scope.workspace_id, scope.user_id, decode(params)?)
+                        .await?;
+                if let (Some(run_id), Some(task_id)) = (
+                    started
+                        .get("run_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| Uuid::parse_str(id).ok()),
+                    started
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| Uuid::parse_str(id).ok()),
+                ) {
+                    let state = scope.state.clone();
+                    tokio::spawn(async move {
+                        crate::workers::task::execute_task_run(&state, run_id, task_id).await;
+                    });
+                }
+                Ok(started)
+            }
+            Action::GetTaskRun => {
+                actions::get_task_run(
+                    pool,
+                    scope.workspace_id,
+                    scope.user_id,
+                    decode::<RunLookup>(params)?.run_id,
+                )
+                .await
+            }
+            Action::TailTaskLog => {
+                actions::tail_task_log(pool, scope.workspace_id, scope.user_id, decode(params)?)
+                    .await
+            }
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunLookup {
+    run_id: Uuid,
 }

@@ -49,6 +49,10 @@ impl Tool for DocumentTool {
         }
     }
 
+    fn mutating(&self) -> bool {
+        matches!(self.operation, Operation::Create | Operation::Update)
+    }
+
     fn description(&self) -> &str {
         match self.operation {
             Operation::List => {

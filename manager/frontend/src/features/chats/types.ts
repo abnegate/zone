@@ -17,6 +17,8 @@ export interface ToolCallRecord {
   duration_ms: number;
   /** Client-only: set while the tool is still running. Never sent by the server. */
   pending?: boolean;
+  /** Client-only: mutating file/shell tools wait here for the user. */
+  approval?: 'pending' | 'approved' | 'denied';
 }
 
 export type CitationKind =
@@ -88,6 +90,11 @@ export interface Chat {
    * and server filesystem and shell tools.
    */
   agent_enabled: boolean;
+  /**
+   * When true, mutating file and shell tools run without a confirmation.
+   * Older servers omit this; treat those chats as requiring approval.
+   */
+  auto_approve?: boolean;
 }
 
 export interface ChatWithMessages extends Chat {
@@ -101,11 +108,13 @@ export interface CreateChatRequest {
   first_message?: string;
   automatic_title?: boolean;
   agent_enabled?: boolean;
+  auto_approve?: boolean;
 }
 
 export interface UpdateChatRequest {
   title?: string;
   agent_enabled?: boolean;
+  auto_approve?: boolean;
 }
 
 export interface SendMessageRequest {

@@ -11,7 +11,10 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::{LlmClient, LlmConfig, Message};
-use zone_server::agent::{AgentEvent, AgentRun, ChatTools, MAX_ITERATIONS, WorkspaceScope, run};
+use zone_server::agent::{
+    AgentEvent, AgentRun, ApprovalGate, ApprovalPolicy, ChatTools, MAX_ITERATIONS, WorkspaceScope,
+    run,
+};
 
 const MALFORMED: &str =
     r#"{"id":"call_0","type":"function","function":{"name":"read_file","arguments":{}}"#;
@@ -47,6 +50,14 @@ async fn exercise_messages(
     rounds: Vec<(u16, Vec<Value>)>,
     messages: Vec<Message>,
 ) -> (Vec<AgentEvent>, Vec<Value>) {
+    exercise_approved(rounds, messages, ApprovalPolicy::Auto).await
+}
+
+async fn exercise_approved(
+    rounds: Vec<(u16, Vec<Value>)>,
+    messages: Vec<Message>,
+    approval: ApprovalPolicy,
+) -> (Vec<AgentEvent>, Vec<Value>) {
     let provider = MockServer::start().await;
     let responses = Arc::new(Mutex::new(VecDeque::from(rounds)));
     Mock::given(method("POST"))
@@ -78,7 +89,8 @@ async fn exercise_messages(
         state,
         workspace_id: Uuid::new_v4(),
         chat_id: Uuid::new_v4(),
-    });
+    })
+    .await;
     // Missing `path` fails validation before read_file accesses the filesystem.
     let events = tokio::time::timeout(
         Duration::from_secs(10),
@@ -90,6 +102,8 @@ async fn exercise_messages(
             model: "test".to_string(),
             tools,
             messages,
+            budget: zone_server::agent::LoopBudget::chat(),
+            approval,
         })
         .collect::<Vec<_>>(),
     )
@@ -489,4 +503,58 @@ async fn reads_after_a_mutation_in_the_same_batch_execute_again() {
         .collect();
     assert!(results[0]["content"].as_str().unwrap().contains("before"));
     assert!(results[2]["content"].as_str().unwrap().contains("after"));
+}
+
+#[tokio::test]
+async fn auto_approve_writes_without_an_approval_event() {
+    let path = std::env::temp_dir().join(format!("zone-auto-{}.txt", Uuid::new_v4()));
+    let write =
+        json!({"id":"auto_write","name":"write_file","arguments":{"path":path,"content":"auto"}});
+    let (events, _) = exercise(vec![text(&write.to_string()), text("Wrote.")]).await;
+    let written = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(written.unwrap(), "auto");
+    assert_eq!(answer(&events), "Wrote.");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolApprovalRequired { .. }))
+    );
+}
+
+#[tokio::test]
+async fn denied_writes_do_not_touch_the_file() {
+    let path = std::env::temp_dir().join(format!("zone-deny-{}.txt", Uuid::new_v4()));
+    std::fs::write(&path, "before").unwrap();
+    let gate = ApprovalGate::new();
+    let poll = gate.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if poll.decide("deny_write", false) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    let write =
+        json!({"id":"deny_write","name":"write_file","arguments":{"path":path,"content":"after"}});
+    let (events, _) = exercise_approved(
+        vec![(200, text(&write.to_string())), (200, text("Stopped."))],
+        vec![Message::user("Overwrite the file.")],
+        ApprovalPolicy::Required(gate),
+    )
+    .await;
+    let kept = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(kept, "before");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolApprovalRequired { id, .. } if id == "deny_write"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ToolCallCompleted { id, success: false, .. } if id == "deny_write"
+    )));
+    assert_eq!(answer(&events), "Stopped.");
 }

@@ -51,6 +51,7 @@ fn test_config() -> Config {
         web_search: Default::default(),
         comfyui: Default::default(),
         source_index: Default::default(),
+        monitoring: Default::default(),
     }
 }
 

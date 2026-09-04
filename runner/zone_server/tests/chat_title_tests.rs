@@ -30,6 +30,7 @@ async fn automatic_title_fallback_is_persisted_once() {
             "image-checkpoint",
             (false, true),
             true,
+            false,
         )
         .await
         .unwrap();
@@ -75,10 +76,17 @@ async fn automatic_title_fallback_is_persisted_once() {
 #[tokio::test]
 async fn automatic_title_claim_is_first_user_only_and_concurrent_safe() {
     let pool = create_test_pool().await;
-    let chat =
-        chats::create_chat_with_title(&pool, None, "New chat", "llama3.2:3b", (false, true), true)
-            .await
-            .unwrap();
+    let chat = chats::create_chat_with_title(
+        &pool,
+        None,
+        "New chat",
+        "llama3.2:3b",
+        (false, true),
+        true,
+        false,
+    )
+    .await
+    .unwrap();
     let system = chats::create_message(&pool, chat.id, "system", "context", None)
         .await
         .unwrap();
@@ -119,6 +127,7 @@ async fn manual_title_even_unchanged_wins_pending_generation() {
             "llama3.2:3b",
             (false, true),
             true,
+            false,
         )
         .await
         .unwrap();
@@ -126,7 +135,7 @@ async fn manual_title_even_unchanged_wins_pending_generation() {
             .await
             .unwrap();
         assert!(message.title_claimed);
-        chats::update_chat(&pool, chat.id, Some(title), None, None)
+        chats::update_chat(&pool, chat.id, Some(title), None, None, None)
             .await
             .unwrap();
         assert!(
@@ -157,11 +166,12 @@ async fn custom_titles_and_renamed_empty_chats_are_not_claimed() {
             "llama3.2:3b",
             (false, true),
             automatic,
+            false,
         )
         .await
         .unwrap();
         if automatic {
-            chats::update_chat(&pool, chat.id, Some("Custom"), None, None)
+            chats::update_chat(&pool, chat.id, Some("Custom"), None, None, None)
                 .await
                 .unwrap();
         }

@@ -490,8 +490,10 @@ async fn web_search_turn(
             "run_command",
             "read_file",
             "write_file",
+            "apply_patch",
             "list_files",
             "search_code",
+            "start_task",
         ] {
             assert!(
                 definitions
@@ -500,11 +502,14 @@ async fn web_search_turn(
                 "{name} is required even for legacy sandboxed chats"
             );
         }
-        assert!(
-            definitions
-                .iter()
-                .all(|tool| !matches!(tool["function"]["name"].as_str(), Some("web_search")))
-        );
+        let has_web = definitions
+            .iter()
+            .any(|tool| tool["function"]["name"] == "web_search");
+        let has_fetch = definitions
+            .iter()
+            .any(|tool| tool["function"]["name"] == "fetch_url");
+        assert_eq!(has_web, !matches!(outcome, SearchOutcome::Disabled));
+        assert_eq!(has_fetch, has_web);
     }
     assert!(
         requests[0]["messages"]
@@ -578,7 +583,8 @@ async fn web_search_results_reach_plain_and_agent_models_despite_prior_denial() 
         assert!(search < generation);
         let (capability, instructions) = web_instructions(&requests[0], agentic);
         assert!(capability.contains("Zone can search the public web"));
-        assert!(capability.contains("server-side search is separate from the callable tools"));
+        assert!(capability.contains("separate from callable tools"));
+        assert!(capability.contains("web_search"));
         for evidence in [
             "Search outcome for this turn: succeeded",
             WEATHER_TITLE,

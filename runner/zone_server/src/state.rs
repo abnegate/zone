@@ -2,10 +2,11 @@
 
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 use zone_context::adapters::AdapterRegistry;
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
+use zone_core::mcp::McpHub;
 
 use crate::cache::Cache;
 use crate::config::Config;
@@ -39,6 +40,8 @@ struct AppStateInner {
     pub encryption_key: [u8; 32],
     /// Semaphore for limiting concurrent indexing operations
     pub index_semaphore: Arc<Semaphore>,
+    /// Process-wide MCP hub. Connected once, shared across chat turns.
+    pub mcp: OnceCell<McpHub>,
 }
 
 impl AppState {
@@ -76,6 +79,7 @@ impl AppState {
                 sync_registry: SyncRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
+                mcp: OnceCell::new(),
             }),
         }
     }
@@ -121,6 +125,7 @@ impl AppState {
                 sync_registry: SyncRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
+                mcp: OnceCell::new(),
             }),
         }
     }
@@ -167,6 +172,7 @@ impl AppState {
                 sync_registry: SyncRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
+                mcp: OnceCell::new(),
             }),
         }
     }
@@ -225,6 +231,16 @@ impl AppState {
     pub fn sync_registry(&self) -> &SyncRegistry {
         &self.inner.sync_registry
     }
+
+    /// MCP servers for this process. Connected once on first chat or task use.
+    pub async fn mcp_hub(&self) -> &McpHub {
+        self.inner.mcp.get_or_init(McpHub::connect_from_env).await
+    }
+
+    /// Install an empty hub so tests never spawn MCP children.
+    pub fn disable_mcp(&self) {
+        let _ = self.inner.mcp.set(McpHub::new());
+    }
 }
 
 #[cfg(test)]
@@ -235,7 +251,9 @@ impl AppState {
     pub fn for_tests() -> Self {
         let db =
             PgPool::connect_lazy("postgres://localhost/test").expect("a lazy pool needs no server");
-        Self::new(test_config(), db, None)
+        let state = Self::new(test_config(), db, None);
+        state.disable_mcp();
+        state
     }
 }
 
@@ -262,6 +280,7 @@ pub(crate) fn test_config() -> Config {
         web_search: crate::config::WebSearchConfig::default(),
         comfyui: Default::default(),
         source_index: Default::default(),
+        monitoring: Default::default(),
     }
 }
 
@@ -292,6 +311,7 @@ mod tests {
             web_search: Default::default(),
             comfyui: Default::default(),
             source_index: Default::default(),
+            monitoring: Default::default(),
         }
     }
 

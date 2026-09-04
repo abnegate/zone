@@ -114,6 +114,7 @@ pub struct ChatResponse {
     model_name: String,
     archived: bool,
     agent_enabled: bool,
+    auto_approve: bool,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -127,6 +128,7 @@ impl From<chats::ChatRow> for ChatResponse {
             model_name: row.model_name,
             archived: row.archived.unwrap_or(false),
             agent_enabled: row.agent_enabled,
+            auto_approve: row.auto_approve,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
     }
@@ -221,6 +223,8 @@ pub struct CreateChatRequest {
     model_name: String,
     #[serde(default)]
     agent_enabled: bool,
+    #[serde(default)]
+    auto_approve: bool,
 }
 
 /// Update chat request
@@ -228,6 +232,7 @@ pub struct CreateChatRequest {
 pub struct UpdateChatRequest {
     title: Option<String>,
     agent_enabled: Option<bool>,
+    auto_approve: Option<bool>,
 }
 
 /// Create message request
@@ -294,6 +299,7 @@ pub async fn create(
         // Preserve the legacy column default; it no longer controls tools.
         (req.agent_enabled, true),
         req.automatic_title,
+        req.auto_approve,
     )
     .await
     {
@@ -360,7 +366,16 @@ pub async fn update(
             .into_response();
     }
     // Leave the inert legacy sandbox column unchanged.
-    match chats::update_chat(state.db(), id, title, req.agent_enabled, None).await {
+    match chats::update_chat(
+        state.db(),
+        id,
+        title,
+        req.agent_enabled,
+        None,
+        req.auto_approve,
+    )
+    .await
+    {
         Ok(Some(chat)) => Json(SingleChatResponse {
             chat: chat_with_messages(&state, chat).await,
         })

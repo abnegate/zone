@@ -82,6 +82,7 @@ export const ChatSchema = z.object({
   archived: z.boolean(),
   // Servers predating agentic chat omit this; treat those chats as plain.
   agent_enabled: z.boolean().default(false),
+  auto_approve: z.boolean().default(false),
 });
 
 export const ChatWithMessagesSchema = ChatSchema.extend({
@@ -94,6 +95,7 @@ export const CreateChatRequestSchema = z.object({
   model_name: z.string().min(1, 'Model is required'),
   first_message: z.string().optional(),
   agent_enabled: z.boolean().optional(),
+  auto_approve: z.boolean().optional(),
 });
 
 export const SendMessageRequestSchema = z.object({

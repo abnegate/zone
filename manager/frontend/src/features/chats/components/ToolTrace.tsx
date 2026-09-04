@@ -23,6 +23,16 @@ const TOOL_LABELS: Record<string, string> = {
   send_message: 'Sent a message',
   create_reminder: 'Created a reminder',
   cancel_reminder: 'Cancelled a reminder',
+  generate_image: 'Generated an image',
+  edit_image: 'Edited an image',
+  query_prometheus: 'Queried Prometheus',
+  list_grafana_dashboards: 'Listed Grafana dashboards',
+  create_pull_request: 'Opened a pull request',
+  comment_on_issue: 'Commented on GitHub',
+  apply_patch: 'Patched a file',
+  write_file: 'Wrote a file',
+  run_shell: 'Ran a shell command',
+  run_command: 'Ran a command',
 };
 
 function toolLabel(name: string): string {
@@ -45,10 +55,23 @@ function formatArguments(raw: string): string | null {
   }
 }
 
-function ToolTraceRow({ call }: { call: ToolCallRecord }) {
+function ToolTraceRow({
+  call,
+  onDecide,
+}: {
+  call: ToolCallRecord;
+  onDecide?: (id: string, approved: boolean) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const args = formatArguments(call.arguments);
-  const status = call.pending ? 'pending' : call.success ? 'ok' : 'failed';
+  const status =
+    call.approval === 'pending'
+      ? 'approval'
+      : call.pending
+        ? 'pending'
+        : call.success
+          ? 'ok'
+          : 'failed';
 
   return (
     <li className={`tool-call tool-call--${status}`}>
@@ -67,18 +90,44 @@ function ToolTraceRow({ call }: { call: ToolCallRecord }) {
           <span className="tool-call-duration">{formatDuration(call.duration_ms)}</span>
         )}
       </button>
+      {call.approval === 'pending' && onDecide && (
+        <div className="tool-call-approval">
+          <button
+            type="button"
+            className="tool-call-approve"
+            data-testid="tool-approve"
+            onClick={() => onDecide(call.id, true)}
+          >
+            Approve
+          </button>
+          <button
+            type="button"
+            className="tool-call-deny"
+            data-testid="tool-deny"
+            onClick={() => onDecide(call.id, false)}
+          >
+            Deny
+          </button>
+        </div>
+      )}
       {expanded && args && <pre className="tool-call-args">{args}</pre>}
     </li>
   );
 }
 
-export function ToolTrace({ calls }: { calls: ToolCallRecord[] }) {
+export function ToolTrace({
+  calls,
+  onDecide,
+}: {
+  calls: ToolCallRecord[];
+  onDecide?: (id: string, approved: boolean) => void;
+}) {
   if (calls.length === 0) return null;
 
   return (
     <ol className="tool-trace" data-testid="tool-trace">
       {calls.map((call) => (
-        <ToolTraceRow key={call.id} call={call} />
+        <ToolTraceRow key={call.id} call={call} onDecide={onDecide} />
       ))}
     </ol>
   );

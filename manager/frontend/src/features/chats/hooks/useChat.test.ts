@@ -461,6 +461,63 @@ describe('useChat', () => {
     expect(result.current.chat?.messages).toHaveLength(2);
   });
 
+  it('persists auto-approve on the chat', async () => {
+    mockGetChat.mockResolvedValue({ ...mockChat, agent_enabled: true });
+    mockUpdateChat.mockResolvedValue({ ...mockChat, agent_enabled: true, auto_approve: true });
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    await result.current.setAutoApprove(true);
+
+    expect(mockUpdateChat).toHaveBeenCalledWith('1', { auto_approve: true });
+    await waitFor(() => {
+      expect(result.current.chat?.auto_approve).toBe(true);
+    });
+    expect(result.current.chat?.messages).toHaveLength(2);
+  });
+
+  it('marks a mutating tool as waiting and sends the decision', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_approval_required',
+      message_id: 'm4',
+      tool_call_id: 'call_write',
+      name: 'write_file',
+      arguments: '{"path":"x.txt"}',
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.approval).toBe(
+        'pending'
+      );
+    });
+
+    act(() => {
+      result.current.approveTool('call_write', false);
+    });
+
+    expect(JSON.parse(lastSocket?.sent.at(-1) ?? '{}')).toEqual({
+      type: 'approve_tool',
+      tool_call_id: 'call_write',
+      approved: false,
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.approval).toBe(
+      'denied'
+    );
+  });
+
   it('should delete a message', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     mockDeleteMessage.mockResolvedValue(undefined);

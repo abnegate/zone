@@ -6,7 +6,7 @@
 //! streams every completion and yields events instead. The websocket handler
 //! consumes the result exactly like the plain completion stream it replaces.
 
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, future::join_all};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use zone_core::llm::{
@@ -14,16 +14,41 @@ use zone_core::llm::{
 };
 
 use super::Citation;
+use super::approval::{ApprovalPolicy, requires_approval};
 use super::citations;
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
+use zone_core::agent::{KEEP_RECENT_TOOL_RESULTS, compact_tool_history};
 
-/// Maximum reason/act rounds before we stop and answer with what we have.
-pub const MAX_ITERATIONS: usize = 6;
+/// Maximum reason/act rounds for a chat turn. Raised now that old tool
+/// traces are compacted instead of replayed raw.
+pub const MAX_ITERATIONS: usize = 12;
 
-/// Maximum tool executions in a single turn, across all rounds. A model that
-/// loops on one tool would otherwise sit inside the iteration budget forever.
-pub const MAX_TOOL_CALLS: usize = 12;
+/// Maximum tool executions in a single chat turn, across all rounds.
+pub const MAX_TOOL_CALLS: usize = 24;
+
+/// How many reason/act rounds and tool calls a surface is allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopBudget {
+    pub max_iterations: usize,
+    pub max_tool_calls: usize,
+}
+
+impl LoopBudget {
+    pub const fn chat() -> Self {
+        Self {
+            max_iterations: MAX_ITERATIONS,
+            max_tool_calls: MAX_TOOL_CALLS,
+        }
+    }
+
+    pub const fn task() -> Self {
+        Self {
+            max_iterations: 50,
+            max_tool_calls: 100,
+        }
+    }
+}
 
 /// What the loop reports as it runs.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +76,12 @@ pub enum AgentEvent {
     /// The model produced an image. Carries the raw URL from the provider;
     /// the consumer decides how to store it and whether it is a duplicate.
     Image(String),
+    /// A mutating file or shell tool is waiting for the user to confirm.
+    ToolApprovalRequired {
+        id: String,
+        name: String,
+        arguments: String,
+    },
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
 }
@@ -62,12 +93,14 @@ pub struct AgentRun {
     pub tools: ChatTools,
     /// Conversation so far, including the system prompt and the new user turn.
     pub messages: Vec<LlmMessage>,
+    pub budget: LoopBudget,
+    pub approval: ApprovalPolicy,
 }
 
 /// Run one agent turn, yielding events until the model produces a final answer.
 pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
     async_stream::stream! {
-        let AgentRun { llm, model, tools, mut messages } = run;
+        let AgentRun { llm, model, tools, mut messages, budget, approval } = run;
         let definitions = tools.definitions();
         let mut tool_calls_used = 0usize;
         let names = tools.names();
@@ -75,8 +108,9 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
         let mut previous = Vec::new();
         let mut finalizing = false;
 
-        for iteration in 0..=MAX_ITERATIONS {
-            if iteration == MAX_ITERATIONS {
+        for iteration in 0..=budget.max_iterations {
+            compact_tool_history(&mut messages, KEEP_RECENT_TOOL_RESULTS);
+            if iteration == budget.max_iterations {
                 finalizing = true;
             }
             if finalizing {
@@ -214,8 +248,9 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
             previous = signatures;
             finalizing = repeated;
 
+            let mut executable = Vec::new();
             for call in requested {
-                if repeated || tool_calls_used >= MAX_TOOL_CALLS {
+                if repeated || tool_calls_used + executable.len() >= budget.max_tool_calls {
                     finalizing = true;
                     messages.push(LlmMessage::tool_result(
                         &call.id,
@@ -223,47 +258,118 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                     ));
                     continue;
                 }
-                tool_calls_used += 1;
-
                 yield AgentEvent::ToolCallStarted {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
                     arguments: call.function.arguments.clone(),
                 };
-
-                let started = Instant::now();
-                let result = tools
-                    .execute(&call.function.name, &call.function.arguments)
-                    .await;
-                let duration_ms = started.elapsed().as_millis() as u64;
-                let receipt = tools
-                    .write_receipt(
-                        &call.id,
-                        &call.function.name,
-                        &call.function.arguments,
-                        &result,
-                    )
-                    .await;
-
-                let output = result.to_message();
-
-                yield AgentEvent::ToolCallCompleted {
-                    id: call.id.clone(),
-                    name: call.function.name.clone(),
-                    success: result.success,
-                    detail: summarize(&result, &output),
-                    duration_ms,
-                    citations: if result.success {
-                        citations::from_tool(&call.function.name, &output)
-                    } else {
-                        Vec::new()
-                    },
-                    receipt,
-                };
-
-                messages.push(LlmMessage::tool_result(&call.id, output));
+                executable.push(call);
             }
-            finalizing |= tool_calls_used >= MAX_TOOL_CALLS;
+
+            let parallel = !executable.is_empty()
+                && executable
+                    .iter()
+                    .all(|call| !tools.mutating(&call.function.name))
+                && executable
+                    .iter()
+                    .all(|call| approval.is_auto() || !requires_approval(&call.function.name));
+            if parallel {
+                let results = join_all(executable.iter().map(|call| {
+                    let tools = &tools;
+                    async move {
+                        let started = Instant::now();
+                        let result = tools
+                            .execute(&call.function.name, &call.function.arguments)
+                            .await;
+                        (result, started.elapsed().as_millis() as u64)
+                    }
+                }))
+                .await;
+                for (call, (result, duration_ms)) in executable.into_iter().zip(results) {
+                    tool_calls_used += 1;
+                    let receipt = tools
+                        .write_receipt(
+                            &call.id,
+                            &call.function.name,
+                            &call.function.arguments,
+                            &result,
+                        )
+                        .await;
+                    let output = result.to_message();
+                    for url in &result.images {
+                        yield AgentEvent::Image(url.clone());
+                    }
+                    yield AgentEvent::ToolCallCompleted {
+                        id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        success: result.success,
+                        detail: summarize(&result, &output),
+                        duration_ms,
+                        citations: if result.success {
+                            citations::from_tool(&call.function.name, &output)
+                        } else {
+                            Vec::new()
+                        },
+                        receipt,
+                    };
+                    messages.push(LlmMessage::tool_result(&call.id, output));
+                }
+            } else {
+                for call in executable {
+                    tool_calls_used += 1;
+                    let denied = if !approval.is_auto() && requires_approval(&call.function.name) {
+                        yield AgentEvent::ToolApprovalRequired {
+                            id: call.id.clone(),
+                            name: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                        };
+                        match &approval {
+                            ApprovalPolicy::Required(gate) => !gate.await_decision(&call.id).await,
+                            ApprovalPolicy::Auto => false,
+                        }
+                    } else {
+                        false
+                    };
+                    let started = Instant::now();
+                    let result = if denied {
+                        zone_core::tools::ToolResult::error(
+                            "The user denied this tool call.",
+                        )
+                    } else {
+                        tools
+                            .execute(&call.function.name, &call.function.arguments)
+                            .await
+                    };
+                    let duration_ms = started.elapsed().as_millis() as u64;
+                    let receipt = tools
+                        .write_receipt(
+                            &call.id,
+                            &call.function.name,
+                            &call.function.arguments,
+                            &result,
+                        )
+                        .await;
+                    let output = result.to_message();
+                    for url in &result.images {
+                        yield AgentEvent::Image(url.clone());
+                    }
+                    yield AgentEvent::ToolCallCompleted {
+                        id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        success: result.success,
+                        detail: summarize(&result, &output),
+                        duration_ms,
+                        citations: if result.success {
+                            citations::from_tool(&call.function.name, &output)
+                        } else {
+                            Vec::new()
+                        },
+                        receipt,
+                    };
+                    messages.push(LlmMessage::tool_result(&call.id, output));
+                }
+            }
+            finalizing |= tool_calls_used >= budget.max_tool_calls;
         }
     }
 }

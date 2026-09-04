@@ -100,6 +100,8 @@ static CHAT_CANCELLATIONS: Lazy<DashMap<(Uuid, Uuid), broadcast::Sender<()>>> =
 static CHAT_GENERATIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
 /// Keep direct image jobs globally bounded for the shared GPU runtime.
 static IMAGE_GENERATIONS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
+/// Approval waiters for the active generation on a chat.
+static CHAT_APPROVALS: Lazy<DashMap<Uuid, crate::agent::ApprovalGate>> = Lazy::new(DashMap::new);
 
 type SharedSender = Arc<Mutex<futures::stream::SplitSink<WebSocket, Message>>>;
 
@@ -118,6 +120,7 @@ struct Generation {
     chat_id: Uuid,
     message_id: Uuid,
     cancel: broadcast::Receiver<()>,
+    approvals: crate::agent::ApprovalGate,
 }
 
 impl Generation {
@@ -125,10 +128,13 @@ impl Generation {
         let message_id = Uuid::new_v4();
         let (sender, cancel) = broadcast::channel(1);
         CHAT_CANCELLATIONS.insert((chat_id, message_id), sender);
+        let approvals = crate::agent::ApprovalGate::new();
+        CHAT_APPROVALS.insert(chat_id, approvals.clone());
         Self {
             chat_id,
             message_id,
             cancel,
+            approvals,
         }
     }
 
@@ -153,12 +159,20 @@ impl Generation {
 impl Drop for Generation {
     fn drop(&mut self) {
         CHAT_CANCELLATIONS.remove(&(self.chat_id, self.message_id));
+        if let Some(entry) = CHAT_APPROVALS.get(&self.chat_id)
+            && entry.value().same_as(&self.approvals)
+        {
+            drop(entry);
+            CHAT_APPROVALS.remove(&self.chat_id);
+        }
+        self.approvals.deny_all();
     }
 }
 
 struct ChatPreparation {
     model: String,
     agentic: bool,
+    auto_approve: bool,
     tools: agent::ChatTools,
     messages: Vec<LlmMessage>,
 }
@@ -182,6 +196,11 @@ pub enum ClientMessage {
     },
     /// Cancel current generation
     Cancel,
+    /// Confirm or reject a mutating file/shell tool call.
+    ApproveTool {
+        tool_call_id: String,
+        approved: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -213,6 +232,13 @@ pub enum ServerMessage {
     Chunk { content: String, index: u32 },
     /// The agent started running a tool
     ToolCall {
+        message_id: Uuid,
+        tool_call_id: String,
+        name: String,
+        arguments: String,
+    },
+    /// A mutating file or shell tool is waiting for the user to confirm.
+    ToolApprovalRequired {
         message_id: Uuid,
         tool_call_id: String,
         name: String,
@@ -690,7 +716,27 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         let _ = tx.send(());
                                     }
                                 }
-
+                                if let Some(gate) = CHAT_APPROVALS.get(&chat_id) {
+                                    gate.deny_all();
+                                }
+                            }
+                            Ok(ClientMessage::ApproveTool {
+                                tool_call_id,
+                                approved,
+                            }) => {
+                                let decided = CHAT_APPROVALS
+                                    .get(&chat_id)
+                                    .is_some_and(|gate| gate.decide(&tool_call_id, approved));
+                                if !decided {
+                                    let _ = send_server(
+                                        &sender,
+                                        ServerMessage::Error {
+                                            message: "That tool call is not waiting for approval."
+                                                .to_string(),
+                                        },
+                                    )
+                                    .await;
+                                }
                             }
                             Ok(ClientMessage::Auth { .. }) => {
                                 // Ignore duplicate auth messages
@@ -1268,7 +1314,7 @@ async fn prepare_message(
         return Ok(None);
     }
 
-    Ok(Some(if image_request {
+    Ok(Some(if image_request && !chat.agent_enabled {
         Routing::Image(image_config)
     } else {
         Routing::Chat(chat)
@@ -1331,11 +1377,12 @@ async fn prepare_chat(
         workspace_id,
         chat_id,
         user_id,
-    });
+    })
+    .await;
     let agentic = chat.agent_enabled && !tools.is_empty();
 
     let mut prompt = if agentic {
-        agent::system_prompt(&tools)
+        agent::system_prompt(&tools, chat.auto_approve)
     } else {
         "You are Zone's assistant, answering inside one of the user's workspaces.".to_string()
     };
@@ -1356,19 +1403,15 @@ async fn prepare_chat(
                     {
                         Ok(hits) => {
                             for hit in hits {
-                                let note = hit.content.split_whitespace().collect::<Vec<_>>().join(" ");
+                                let note =
+                                    hit.content.split_whitespace().collect::<Vec<_>>().join(" ");
                                 let note = if note.chars().count() > 500 {
-                                    format!(
-                                        "{}…",
-                                        note.chars().take(500).collect::<String>()
-                                    )
+                                    format!("{}…", note.chars().take(500).collect::<String>())
                                 } else {
                                     note
                                 };
-                                context_lines.push(format!(
-                                    "- [knowledge] {}: {}",
-                                    hit.title, note
-                                ));
+                                context_lines
+                                    .push(format!("- [knowledge] {}: {}", hit.title, note));
                             }
                         }
                         Err(e) => {
@@ -1459,6 +1502,7 @@ async fn prepare_chat(
     ChatPreparation {
         model: model_name.to_string(),
         agentic,
+        auto_approve: chat.auto_approve,
         tools,
         messages: context_messages,
     }
@@ -1474,6 +1518,7 @@ async fn handle_chat_generation(
     let ChatPreparation {
         model,
         agentic,
+        auto_approve,
         tools,
         messages: context_messages,
     } = preparation;
@@ -1509,6 +1554,12 @@ async fn handle_chat_generation(
             model: model_name.to_string(),
             tools,
             messages: context_messages,
+            budget: agent::LoopBudget::chat(),
+            approval: if auto_approve {
+                agent::ApprovalPolicy::Auto
+            } else {
+                agent::ApprovalPolicy::Required(generation.approvals.clone())
+            },
         }))
     } else {
         let stream = tokio::select! {
@@ -1591,6 +1642,20 @@ async fn handle_chat_generation(
                             client_gone = true;
                         }
                         chunk_index += 1;
+                    }
+                    Some(AgentEvent::ToolApprovalRequired { id, name, arguments }) => {
+                        if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
+                            record.detail = "Waiting for approval…".to_string();
+                        }
+                        let tool_msg = ServerMessage::ToolApprovalRequired {
+                            message_id: assistant_message_id,
+                            tool_call_id: id,
+                            name,
+                            arguments,
+                        };
+                        if !client_gone && !send_server(sender, tool_msg).await {
+                            client_gone = true;
+                        }
                     }
                     Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
                         // Recorded before the tool runs so a turn cancelled
@@ -2050,7 +2115,8 @@ mod tests {
             duration_ms: 3,
         }];
 
-        let merged = merge_metadata(images, &records, &[], &[]).expect("both sides produce metadata");
+        let merged =
+            merge_metadata(images, &records, &[], &[]).expect("both sides produce metadata");
         assert_eq!(merged["attachments"][0]["name"], "generated-image-1.png");
         assert_eq!(merged["tool_calls"][0]["name"], "run_shell");
     }
@@ -2067,7 +2133,8 @@ mod tests {
             outcome: crate::agent::CitationOutcome::Incomplete,
             note: Some("Observed CI only".into()),
         }];
-        let merged = merge_metadata(None, &[], &citations, &[]).expect("citations produce metadata");
+        let merged =
+            merge_metadata(None, &[], &citations, &[]).expect("citations produce metadata");
         assert_eq!(merged["citations"][0]["url"], citations[0].url);
         assert_eq!(
             merged["citations"][0]["revision"],
@@ -2253,5 +2320,39 @@ mod tests {
         assert_eq!(value["role"], "assistant");
         assert_eq!(value["metadata"], metadata);
         assert!(saved_action(&serde_json::json!({"id":"invalid"})).is_none());
+    }
+
+    #[test]
+    fn approve_tool_client_message_round_trips() {
+        let parsed: ClientMessage = serde_json::from_value(serde_json::json!({
+            "type": "approve_tool",
+            "tool_call_id": "call_1",
+            "approved": false
+        }))
+        .unwrap();
+        match parsed {
+            ClientMessage::ApproveTool {
+                tool_call_id,
+                approved,
+            } => {
+                assert_eq!(tool_call_id, "call_1");
+                assert!(!approved);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_approval_required_serializes_for_the_console() {
+        let json = serde_json::to_value(ServerMessage::ToolApprovalRequired {
+            message_id: Uuid::nil(),
+            tool_call_id: "call_1".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path":"x"}"#.into(),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "tool_approval_required");
+        assert_eq!(json["tool_call_id"], "call_1");
+        assert_eq!(json["name"], "write_file");
     }
 }

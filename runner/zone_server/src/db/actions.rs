@@ -241,6 +241,170 @@ pub async fn list_tasks(
     Ok(result)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartTask {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub acceptance_criteria: Option<String>,
+    #[serde(default)]
+    pub project_ids: Vec<Uuid>,
+    pub source_id: Option<Uuid>,
+    pub priority: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskRunLookup {
+    pub run_id: Uuid,
+    pub after_log_id: Option<Uuid>,
+    pub limit: Option<u32>,
+}
+
+fn stamp(value: Option<chrono::NaiveDateTime>) -> Option<String> {
+    value.map(|ts| ts.and_utc().to_rfc3339())
+}
+
+/// Create an agentic task and a running `task_runs` row. The caller starts the worker.
+pub async fn start_task(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    input: StartTask,
+) -> DbResult<Value> {
+    if input.title.trim().is_empty() {
+        return Err(invalid("Title must not be blank"));
+    }
+    if input.description.trim().is_empty() {
+        return Err(invalid("Description must not be blank"));
+    }
+    if input
+        .priority
+        .is_some_and(|priority| !(1..=5).contains(&priority))
+    {
+        return Err(invalid("priority must be between 1 and 5"));
+    }
+    let mut transaction = pool.begin().await?;
+    authorize(&mut transaction, workspace_id, user_id, true).await?;
+    if let Some(source_id) = input.source_id {
+        let active: Option<Option<bool>> =
+            sqlx::query_scalar("SELECT is_active FROM sources WHERE id = $1 AND workspace_id = $2")
+                .bind(source_id)
+                .bind(workspace_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if !matches!(active, Some(None) | Some(Some(true))) {
+            return Err(invalid("Source not found in this workspace or inactive"));
+        }
+    }
+    transaction.commit().await?;
+
+    let task = super::tasks::create_task(
+        pool,
+        workspace_id,
+        &input.project_ids,
+        input.title.trim(),
+        input.description.trim(),
+        input.acceptance_criteria.as_deref(),
+        input.priority,
+        true,
+        input.source_id,
+    )
+    .await?;
+    let run = super::tasks::create_task_run(pool, task.id).await?;
+    Ok(json!({
+        "task_id": task.id,
+        "run_id": run.id,
+        "title": task.title,
+        "is_agentic": true,
+        "status": run.status,
+        "message": "Runner started. Poll get_task_run and tail_task_log; do not claim the work finished."
+    }))
+}
+
+pub async fn get_task_run(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    run_id: Uuid,
+) -> DbResult<Value> {
+    let mut transaction = pool.begin().await?;
+    authorize(&mut transaction, workspace_id, user_id, false).await?;
+    transaction.commit().await?;
+    let run = super::tasks::get_task_run(pool, run_id)
+        .await?
+        .ok_or_else(|| invalid("Task run not found"))?;
+    let task = super::tasks::get_task(pool, run.task_id)
+        .await?
+        .ok_or_else(|| invalid("Task run not found"))?;
+    if task.workspace_id != workspace_id {
+        return Err(invalid("Task run not found"));
+    }
+    Ok(json!({
+        "id": run.id,
+        "task_id": run.task_id,
+        "title": task.title,
+        "status": run.status,
+        "current_phase": run.current_phase,
+        "progress_percent": run.progress_percent,
+        "started_at": stamp(run.started_at),
+        "completed_at": stamp(run.completed_at),
+        "error_message": run.error_message,
+        "artifacts": run.artifacts,
+    }))
+}
+
+pub async fn tail_task_log(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    input: TaskRunLookup,
+) -> DbResult<Value> {
+    let mut transaction = pool.begin().await?;
+    authorize(&mut transaction, workspace_id, user_id, false).await?;
+    transaction.commit().await?;
+    let run = super::tasks::get_task_run(pool, input.run_id)
+        .await?
+        .ok_or_else(|| invalid("Task run not found"))?;
+    let task = super::tasks::get_task(pool, run.task_id)
+        .await?
+        .ok_or_else(|| invalid("Task run not found"))?;
+    if task.workspace_id != workspace_id {
+        return Err(invalid("Task run not found"));
+    }
+    let logs = super::tasks::get_task_run_logs(pool, run.id).await?;
+    let after = input.after_log_id;
+    let limit = input.limit.unwrap_or(50).clamp(1, 200) as usize;
+    let selected: Vec<_> = logs
+        .into_iter()
+        .filter(|log| after.is_none_or(|id| log.id > id))
+        .take(limit + 1)
+        .collect();
+    let has_more = selected.len() > limit;
+    let lines: Vec<Value> = selected
+        .into_iter()
+        .take(limit)
+        .map(|log| {
+            json!({
+                "id": log.id,
+                "phase": log.phase,
+                "agent_type": log.agent_type,
+                "log_level": log.log_level,
+                "message": log.message,
+                "metadata": log.metadata,
+                "created_at": stamp(log.created_at),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "run_id": run.id,
+        "status": run.status,
+        "logs": lines,
+        "has_more": has_more,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

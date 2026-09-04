@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE chats\n        SET title = COALESCE($2, title),\n            agent_enabled = COALESCE($3, agent_enabled),\n            agent_sandboxed = COALESCE($4, agent_sandboxed),\n            auto_approve = COALESCE($5, auto_approve),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, created_at, updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workspace_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "model_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "archived",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "agent_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "agent_sandboxed",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "auto_approve",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    }
+  },
+  "hash": "7d9e13ea3dcb81d026a7f23a42b3830939f4b7ac012195d7cbf2193566bea688"
+}

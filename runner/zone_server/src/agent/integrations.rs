@@ -1,4 +1,4 @@
-//! Live, read-only GitHub observations using an authorized workspace source.
+//! Live GitHub observations and writes using an authorized workspace source.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -22,6 +22,8 @@ enum Operation {
     Deployments,
     Issues,
     File,
+    CreatePull,
+    Comment,
 }
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
@@ -30,6 +32,8 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::Deployments,
         Operation::Issues,
         Operation::File,
+        Operation::CreatePull,
+        Operation::Comment,
     ] {
         registry.register(Arc::new(Integration {
             scope: scope.clone(),
@@ -52,6 +56,11 @@ struct Arguments {
     path: Option<String>,
     page: Option<u32>,
     state: Option<String>,
+    title: Option<String>,
+    head: Option<String>,
+    base: Option<String>,
+    body: Option<String>,
+    number: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +80,8 @@ impl Tool for Integration {
             Operation::Deployments => "list_deployments",
             Operation::Issues => "list_issues",
             Operation::File => "read_repository_file",
+            Operation::CreatePull => "create_pull_request",
+            Operation::Comment => "comment_on_issue",
         }
     }
 
@@ -87,6 +98,12 @@ impl Tool for Integration {
             }
             Operation::File => {
                 "Read the complete UTF-8 content of a specific repository file from a connected GitHub source at an immutable commit, with a source URL. Does not read host files. GitHub files over 100 MB are unsupported."
+            }
+            Operation::CreatePull => {
+                "Open a pull request on a connected GitHub source. Requires write access. Only do this when the user asked to open a PR."
+            }
+            Operation::Comment => {
+                "Comment on a GitHub issue or pull request for a connected source. Requires write access. Only do this when the user asked to comment."
             }
         }
     }
@@ -107,6 +124,19 @@ impl Tool for Integration {
             properties["path"] = json!({"type": "string", "description": "Exact repository-relative file path, within the configured source path."});
             required.push("path");
         }
+        if matches!(self.operation, Operation::CreatePull) {
+            properties["title"] = json!({"type": "string", "description": "Pull request title."});
+            properties["head"] = json!({"type": "string", "description": "Head branch, or owner:branch for a fork."});
+            properties["base"] = json!({"type": "string", "description": "Base branch; defaults to the source branch or repository default."});
+            properties["body"] =
+                json!({"type": "string", "description": "Pull request description."});
+            required.extend(["title", "head"]);
+        }
+        if matches!(self.operation, Operation::Comment) {
+            properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Issue or pull request number."});
+            properties["body"] = json!({"type": "string", "description": "Comment markdown."});
+            required.extend(["number", "body"]);
+        }
         json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
     }
 
@@ -120,6 +150,10 @@ impl Tool for Integration {
     fn timeout(&self, _: &ToolContext) -> Duration {
         Duration::from_secs(120)
     }
+
+    fn mutating(&self) -> bool {
+        matches!(self.operation, Operation::CreatePull | Operation::Comment)
+    }
 }
 
 impl Integration {
@@ -129,15 +163,29 @@ impl Integration {
         if arguments.page == Some(0) {
             return Err("page must be positive.".to_string());
         }
-        if !workspace_members::can_read(
-            self.scope.state.db(),
-            self.scope.workspace_id,
-            self.scope.user_id,
-        )
-        .await
-        .map_err(|_| "Workspace authorization failed.".to_string())?
-        {
-            return Err("You cannot read this workspace.".to_string());
+        let write = matches!(self.operation, Operation::CreatePull | Operation::Comment);
+        let allowed = if write {
+            workspace_members::can_write(
+                self.scope.state.db(),
+                self.scope.workspace_id,
+                self.scope.user_id,
+            )
+            .await
+        } else {
+            workspace_members::can_read(
+                self.scope.state.db(),
+                self.scope.workspace_id,
+                self.scope.user_id,
+            )
+            .await
+        }
+        .map_err(|_| "Workspace authorization failed.".to_string())?;
+        if !allowed {
+            return Err(if write {
+                "You cannot write to this workspace.".to_string()
+            } else {
+                "You cannot read this workspace.".to_string()
+            });
         }
         let source = sources::get_source(
             self.scope.state.db(),
@@ -162,7 +210,11 @@ impl Integration {
             );
         }
         let github = Github::new(configuration)?;
-        let mut result = github.observe(self.operation, &arguments).await?;
+        let mut result = if write {
+            github.write(self.operation, &arguments).await?
+        } else {
+            github.observe(self.operation, &arguments).await?
+        };
         result["source_id"] = json!(arguments.source_id);
         result["observed_at"] = json!(Utc::now().to_rfc3339());
         Ok(result)
@@ -210,16 +262,18 @@ impl Github {
 
     async fn response(
         &self,
+        method: reqwest::Method,
         parts: &[&str],
         query: &[(&str, String)],
         raw: bool,
+        body: Option<&Value>,
     ) -> Result<reqwest::Response, String> {
         let mut url = self.url(parts);
         url.query_pairs_mut()
             .extend_pairs(query.iter().map(|(key, value)| (*key, value.as_str())));
         let mut request = self
             .client
-            .get(url)
+            .request(method, url)
             .header(
                 "Accept",
                 if raw {
@@ -231,6 +285,9 @@ impl Github {
             .header("X-GitHub-Api-Version", "2026-03-10");
         if let Some(token) = &self.configuration.token {
             request = request.bearer_auth(token);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
         }
         let response = request
             .send()
@@ -247,11 +304,89 @@ impl Github {
     }
 
     async fn get(&self, parts: &[&str], query: &[(&str, String)]) -> Result<Value, String> {
-        self.response(parts, query, false)
+        self.response(reqwest::Method::GET, parts, query, false, None)
             .await?
             .json()
             .await
             .map_err(|_| "GitHub returned an invalid response.".to_string())
+    }
+
+    async fn post(&self, parts: &[&str], body: &Value) -> Result<Value, String> {
+        self.response(reqwest::Method::POST, parts, &[], false, Some(body))
+            .await?
+            .json()
+            .await
+            .map_err(|_| "GitHub returned an invalid response.".to_string())
+    }
+
+    async fn write(&self, operation: Operation, arguments: &Arguments) -> Result<Value, String> {
+        let repository = format!(
+            "https://github.com/{}/{}",
+            self.configuration.owner, self.configuration.repo
+        );
+        match operation {
+            Operation::CreatePull => {
+                let title = arguments
+                    .title
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or("title is required.")?;
+                let head = arguments
+                    .head
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or("head is required.")?;
+                if !git_ref(head) {
+                    return Err("head is invalid.".to_string());
+                }
+                let base = arguments
+                    .base
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| self.configuration.branch.clone())
+                    .ok_or("base is required (or set the source branch).")?;
+                if !git_ref(&base) {
+                    return Err("base is invalid.".to_string());
+                }
+                let created = self
+                    .post(
+                        &["pulls"],
+                        &json!({
+                            "title": title,
+                            "head": head,
+                            "base": base,
+                            "body": arguments.body.clone().unwrap_or_default(),
+                        }),
+                    )
+                    .await?;
+                Ok(json!({
+                    "repository": repository,
+                    "pull_request": project(&created, &["number", "html_url", "title", "state"]),
+                }))
+            }
+            Operation::Comment => {
+                let number = arguments.number.ok_or("number is required.")?;
+                if number == 0 {
+                    return Err("number must be positive.".to_string());
+                }
+                let body = arguments
+                    .body
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or("body is required.")?;
+                let created = self
+                    .post(
+                        &["issues", &number.to_string(), "comments"],
+                        &json!({ "body": body }),
+                    )
+                    .await?;
+                Ok(json!({
+                    "repository": repository,
+                    "comment": project(&created, &["id", "html_url", "body", "created_at"]),
+                }))
+            }
+            _ => Err("This operation is read-only.".to_string()),
+        }
     }
 
     async fn resolve(&self, reference: Option<&str>) -> Result<(String, String), String> {
@@ -326,7 +461,7 @@ impl Github {
                 self.file(&sha, arguments.path.as_deref().ok_or("path is required.")?)
                     .await?
             }
-            Operation::Issues => unreachable!(),
+            Operation::Issues | Operation::CreatePull | Operation::Comment => unreachable!(),
         };
         result["repository"] = json!(repository);
         result["ref"] = json!(reference);
@@ -520,7 +655,13 @@ impl Github {
         }
         let blob = tree;
         let bytes = self
-            .response(&["git", "blobs", &blob], &[], true)
+            .response(
+                reqwest::Method::GET,
+                &["git", "blobs", &blob],
+                &[],
+                true,
+                None,
+            )
             .await?
             .bytes()
             .await
@@ -544,6 +685,14 @@ fn segment(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+}
+
+fn git_ref(value: &str) -> bool {
+    if let Some((owner, branch)) = value.split_once(':') {
+        segment(owner) && segment(branch)
+    } else {
+        segment(value)
+    }
 }
 
 fn valid_sha(value: &str) -> bool {
@@ -720,6 +869,11 @@ mod tests {
                     path: None,
                     page: None,
                     state: None,
+                    title: None,
+                    head: None,
+                    base: None,
+                    body: None,
+                    number: None,
                 },
             )
             .await
@@ -953,6 +1107,11 @@ mod tests {
                     path: None,
                     page: Some(1),
                     state: Some("all".into()),
+                    title: None,
+                    head: None,
+                    base: None,
+                    body: None,
+                    number: None,
                 },
             )
             .await
@@ -961,6 +1120,173 @@ mod tests {
         assert_eq!(result["issues"][0]["body"], body);
         assert_eq!(result["next_page"], 2);
     }
+
+    #[tokio::test]
+    async fn create_pull_request_posts_title_head_and_base() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repository/pulls"))
+            .and(header("Authorization", "Bearer test-secret"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "number": 12,
+                "html_url": "https://github.com/owner/repository/pull/12",
+                "title": "Fix",
+                "state": "open"
+            })))
+            .mount(&server)
+            .await;
+        let result = github(&server)
+            .write(
+                Operation::CreatePull,
+                &Arguments {
+                    source_id: Uuid::new_v4(),
+                    reference: None,
+                    path: None,
+                    page: None,
+                    state: None,
+                    title: Some("Fix".into()),
+                    head: Some("feature".into()),
+                    base: None,
+                    body: Some("details".into()),
+                    number: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["pull_request"]["number"], 12);
+        assert_eq!(
+            result["pull_request"]["html_url"],
+            "https://github.com/owner/repository/pull/12"
+        );
+    }
+
+    #[tokio::test]
+    async fn comment_on_issue_posts_markdown() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repository/issues/7/comments"))
+            .and(header("Authorization", "Bearer test-secret"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "id": 99,
+                "html_url": "https://github.com/owner/repository/issues/7#issuecomment-99",
+                "body": "ship it",
+                "created_at": "2026-09-05T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+        let result = github(&server)
+            .write(
+                Operation::Comment,
+                &Arguments {
+                    source_id: Uuid::new_v4(),
+                    reference: None,
+                    path: None,
+                    page: None,
+                    state: None,
+                    title: None,
+                    head: None,
+                    base: None,
+                    body: Some("ship it".into()),
+                    number: Some(7),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["comment"]["id"], 99);
+        assert_eq!(result["comment"]["body"], "ship it");
+    }
+
+    fn write_args(
+        title: Option<&str>,
+        head: Option<&str>,
+        body: Option<&str>,
+        number: Option<u64>,
+    ) -> Arguments {
+        Arguments {
+            source_id: Uuid::new_v4(),
+            reference: None,
+            path: None,
+            page: None,
+            state: None,
+            title: title.map(str::to_string),
+            head: head.map(str::to_string),
+            base: None,
+            body: body.map(str::to_string),
+            number,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_pull_rejects_empty_title_and_invalid_head() {
+        let server = MockServer::start().await;
+        let github = github(&server);
+        assert!(
+            github
+                .write(
+                    Operation::CreatePull,
+                    &write_args(None, Some("feature"), None, None)
+                )
+                .await
+                .unwrap_err()
+                .contains("title")
+        );
+        assert!(
+            github
+                .write(
+                    Operation::CreatePull,
+                    &write_args(Some("Fix"), Some("has space"), None, None)
+                )
+                .await
+                .unwrap_err()
+                .contains("head")
+        );
+        assert!(
+            github
+                .write(
+                    Operation::CreatePull,
+                    &write_args(Some("Fix"), Some(".."), None, None)
+                )
+                .await
+                .unwrap_err()
+                .contains("head")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn comment_rejects_zero_and_empty_body() {
+        let server = MockServer::start().await;
+        let github = github(&server);
+        assert!(
+            github
+                .write(
+                    Operation::Comment,
+                    &write_args(None, None, Some("hi"), Some(0))
+                )
+                .await
+                .unwrap_err()
+                .contains("positive")
+        );
+        assert!(
+            github
+                .write(
+                    Operation::Comment,
+                    &write_args(None, None, Some("  "), Some(7))
+                )
+                .await
+                .unwrap_err()
+                .contains("body")
+        );
+        assert!(
+            github
+                .write(Operation::Build, &write_args(None, None, None, None))
+                .await
+                .unwrap_err()
+                .contains("read-only")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    }
+
     #[tokio::test]
     #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
     async fn source_access_requires_active_membership_and_matching_workspace() {
