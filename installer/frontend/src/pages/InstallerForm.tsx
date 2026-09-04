@@ -23,7 +23,6 @@ import { useInstallation } from '../hooks/useInstallation';
 import { useKeyboardNavigation } from '../hooks/useKeyboardNavigation';
 import { AdvancedStep } from '../steps/AdvancedStep';
 import { DomainStep } from '../steps/DomainStep';
-import { InterfaceStep } from '../steps/InterfaceStep';
 import { ModelsStep } from '../steps/ModelsStep';
 import { SearchStep } from '../steps/SearchStep';
 import { SecurityStep } from '../steps/SecurityStep';
@@ -68,15 +67,9 @@ const DEFAULT_CONFIG: InstallerConfig = {
   AI_MODEL_REASONING: 'deepseek-r1:32b',
   AI_MODEL_EMBEDDING: 'nomic-embed-text',
 
-  // Interface
-  WEBUI_AUTH: 'true',
-  WEBUI_ENABLE_SIGNUP: 'false',
-  WEBUI_DEFAULT_LOCALE: 'en-US',
-
   // Search
   SEARCH_ENABLE_WEB_SEARCH: 'true',
   SEARCH_RESULT_COUNT: '5',
-  SEARCH_CONCURRENT_REQUESTS: '8',
   SEARCH_SEARXNG_INSTANCE_NAME: 'Zone Search',
 
   // VPN
@@ -126,7 +119,7 @@ export default function InstallerForm() {
   const [completionSnapshot, setCompletionSnapshot] = useState<{
     completedAt: Date;
     summaryRows: Array<{ label: string; value: string }>;
-    webUiHost: string;
+    domain: string;
   } | null>(null);
   const [completedAt, setCompletedAt] = useState<Date | null>(null);
   const [summaryRows, setSummaryRows] = useState<Array<{ label: string; value: string }>>([]);
@@ -143,7 +136,10 @@ export default function InstallerForm() {
   useEffect(() => {
     loadConfig().then((stored) => {
       if (stored && Object.keys(stored).length > 0) {
-        methods.reset({ ...DEFAULT_CONFIG, ...stored });
+        const current = Object.fromEntries(
+          Object.entries(stored).filter(([key]) => Object.keys(DEFAULT_CONFIG).includes(key))
+        );
+        methods.reset({ ...DEFAULT_CONFIG, ...current });
       }
     });
   }, [methods]);
@@ -163,12 +159,8 @@ export default function InstallerForm() {
     }
 
     const summary = [
-      { label: 'Web UI Host', value: methods.getValues('DOMAIN_HOST_WEBUI') || '—' },
+      { label: 'Stack Domain', value: methods.getValues('DOMAIN_HOST_WEBUI') || '—' },
       { label: 'AI Provider', value: methods.getValues('AI_PROVIDER') || '—' },
-      {
-        label: 'Web UI Auth',
-        value: methods.getValues('WEBUI_AUTH') === 'true' ? 'Enabled' : 'Disabled',
-      },
       {
         label: 'Web Search',
         value: methods.getValues('SEARCH_ENABLE_WEB_SEARCH') === 'true' ? 'Enabled' : 'Disabled',
@@ -176,12 +168,12 @@ export default function InstallerForm() {
       { label: 'VPN Provider', value: methods.getValues('VPN_SERVICE_PROVIDER') || '—' },
     ];
     const completionTime = completedAt ?? new Date();
-    const webUiHost = methods.getValues('DOMAIN_HOST_WEBUI') || '';
+    const domain = methods.getValues('DOMAIN_HOST_WEBUI') || '';
 
     setCompletedAt(completionTime);
     setSummaryRows(summary);
     setCompletionSnapshot(
-      (prev) => prev ?? { completedAt: completionTime, summaryRows: summary, webUiHost }
+      (prev) => prev ?? { completedAt: completionTime, summaryRows: summary, domain }
     );
   }, [completedAt, isComplete, methods]);
 
@@ -244,7 +236,7 @@ export default function InstallerForm() {
     }
 
     return true;
-  }, [methods, setCurrentStep, validateStep]);
+  }, [methods, validateStep]);
 
   const handleNext = useCallback(async () => {
     const isValid = await validateCurrentStep();
@@ -255,7 +247,7 @@ export default function InstallerForm() {
     if (currentStep < totalSteps) {
       setCurrentStep((prev) => prev + 1);
     }
-  }, [currentStep, totalSteps, validateCurrentStep]);
+  }, [currentStep, validateCurrentStep]);
 
   const handlePrevious = useCallback(() => {
     if (currentStep > 1) {
@@ -293,12 +285,8 @@ export default function InstallerForm() {
           return prev;
         }
         const summary = [
-          { label: 'Web UI Host', value: methods.getValues('DOMAIN_HOST_WEBUI') || '—' },
+          { label: 'Stack Domain', value: methods.getValues('DOMAIN_HOST_WEBUI') || '—' },
           { label: 'AI Provider', value: methods.getValues('AI_PROVIDER') || '—' },
-          {
-            label: 'Web UI Auth',
-            value: methods.getValues('WEBUI_AUTH') === 'true' ? 'Enabled' : 'Disabled',
-          },
           {
             label: 'Web Search',
             value:
@@ -309,7 +297,7 @@ export default function InstallerForm() {
         return {
           completedAt: completedAt ?? new Date(),
           summaryRows: summary,
-          webUiHost: methods.getValues('DOMAIN_HOST_WEBUI') || '',
+          domain: methods.getValues('DOMAIN_HOST_WEBUI') || '',
         };
       });
     }
@@ -333,12 +321,10 @@ export default function InstallerForm() {
       case 3:
         return <ModelsStep />;
       case 4:
-        return <InterfaceStep />;
-      case 5:
         return <SearchStep />;
-      case 6:
+      case 5:
         return <VPNStep />;
-      case 7:
+      case 6:
         return <AdvancedStep />;
       default:
         return null;
@@ -346,13 +332,8 @@ export default function InstallerForm() {
   };
 
   if (showCompletionPage && completionSnapshot) {
-    const webUiHost = completionSnapshot.webUiHost.trim();
-    const webUiUrl =
-      webUiHost.length === 0
-        ? ''
-        : webUiHost.startsWith('http://') || webUiHost.startsWith('https://')
-          ? webUiHost
-          : `http://${webUiHost}`;
+    const domain = completionSnapshot.domain.trim();
+    const chatUrl = domain.length === 0 ? '' : `http://manager.${domain}/chats`;
 
     return (
       <div className="min-h-screen bg-muted/30 text-foreground">
@@ -378,12 +359,12 @@ export default function InstallerForm() {
                 </AlertDescription>
               </InfoBox>
 
-              {webUiUrl && (
+              {chatUrl && (
                 <InfoBox variant="info">
-                  <AlertTitle>Open Web UI</AlertTitle>
+                  <AlertTitle>Open Zone Chat</AlertTitle>
                   <AlertDescription>
-                    <a className="underline" href={webUiUrl} target="_blank" rel="noreferrer">
-                      {webUiUrl}
+                    <a className="underline" href={chatUrl} target="_blank" rel="noreferrer">
+                      {chatUrl}
                     </a>
                   </AlertDescription>
                 </InfoBox>

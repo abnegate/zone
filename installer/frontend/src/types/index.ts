@@ -30,15 +30,9 @@ export interface InstallerConfig {
   AI_MODEL_REASONING: string;
   AI_MODEL_EMBEDDING: string;
 
-  // Interface
-  WEBUI_AUTH: string;
-  WEBUI_ENABLE_SIGNUP: string;
-  WEBUI_DEFAULT_LOCALE: string;
-
   // Search
   SEARCH_ENABLE_WEB_SEARCH: string;
   SEARCH_RESULT_COUNT: string;
-  SEARCH_CONCURRENT_REQUESTS: string;
   SEARCH_SEARXNG_INSTANCE_NAME: string;
 
   // VPN
@@ -81,7 +75,7 @@ export interface InstallerConfig {
   OLLAMA_MAX_LOADED_MODELS: string;
 }
 
-export type StepId = 'domain' | 'security' | 'models' | 'interface' | 'search' | 'vpn' | 'advanced';
+export type StepId = 'domain' | 'security' | 'models' | 'search' | 'vpn' | 'advanced';
 
 export interface Step {
   id: StepId;
@@ -118,20 +112,12 @@ export const STEPS: Step[] = [
     number: 3,
   },
   {
-    id: 'interface',
-    label: 'Interface',
-    title: 'Interface Settings',
-    description: 'Configure the web interface',
-    sidebarDescription: 'Customize the web interface',
-    number: 4,
-  },
-  {
     id: 'search',
     label: 'Search',
     title: 'Web Search',
     description: 'Configure search integration',
     sidebarDescription: 'Configure search settings',
-    number: 5,
+    number: 4,
   },
   {
     id: 'vpn',
@@ -139,7 +125,7 @@ export const STEPS: Step[] = [
     title: 'VPN Configuration',
     description: 'Optional: Configure VPN for private web search',
     sidebarDescription: 'Set up VPN connection',
-    number: 6,
+    number: 5,
   },
   {
     id: 'advanced',
@@ -147,7 +133,7 @@ export const STEPS: Step[] = [
     title: 'Advanced Settings',
     description: 'Performance tuning and system configuration',
     sidebarDescription: 'Fine-tune advanced options',
-    number: 7,
+    number: 6,
   },
 ];
 

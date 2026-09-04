@@ -4,8 +4,8 @@ import { selectOption } from './helpers';
 test.describe('VPN Configuration', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    // Navigate to VPN step (step 6)
-    await page.click('[data-step="6"]');
+    // Navigate to VPN step (step 5)
+    await page.click('[data-step="5"]');
     await expect(page.getByRole('heading', { name: 'VPN Configuration' })).toBeVisible();
   });
 

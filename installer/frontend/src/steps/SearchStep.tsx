@@ -35,15 +35,6 @@ export function SearchStep() {
         />
 
         <Input
-          label="Concurrent Requests"
-          type="number"
-          min={1}
-          max={32}
-          error={errors.SEARCH_CONCURRENT_REQUESTS?.message}
-          {...register('SEARCH_CONCURRENT_REQUESTS')}
-        />
-
-        <Input
           label="Search Instance Name"
           type="text"
           error={errors.SEARCH_SEARXNG_INSTANCE_NAME?.message}
@@ -53,8 +44,8 @@ export function SearchStep() {
 
       <InfoBox variant="info">
         <AlertDescription>
-          Web search requires VPN configuration in the next step. Open WebUI and Manager chat both
-          query SearXNG through Gluetun.
+          Web search requires VPN configuration in the next step. Zone chat queries SearXNG through
+          Gluetun.
         </AlertDescription>
       </InfoBox>
     </div>

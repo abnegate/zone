@@ -214,19 +214,6 @@ impl Setup {
         content = replace_env_value(&content, "POSTGRES_PASSWORD", &postgres_password);
         content = replace_env_value(&content, "SECURITY_MANAGER_API_KEY", &manager_api_key);
         content = replace_env_value(&content, "JWT_SECRET", &jwt_secret);
-        content = replace_env_value(&content, "WEBUI_OPENAI_API_KEY", &litellm_key);
-
-        // Update CORS origin based on domain
-        if let Some(domain) = get_env_value(&content, "DOMAIN_HOST_WEBUI")
-            && !domain.is_empty()
-        {
-            content = replace_env_value(
-                &content,
-                "WEBUI_CORS_ALLOW_ORIGIN",
-                &format!("http://{}", domain),
-            );
-            self.log_info(&format!("Set WEBUI_CORS_ALLOW_ORIGIN to http://{}", domain));
-        }
 
         std::fs::write(&self.env_file, content)?;
 
@@ -476,6 +463,30 @@ fn replace_env_value(content: &str, key: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_does_not_create_retired_webui_settings() {
+        let directory = std::env::temp_dir().join(format!("zone-setup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join(".env.example"),
+            "DOMAIN_HOST_WEBUI=zone.example.com\nSECURITY_LITELLM_MASTER_KEY=\n",
+        )
+        .unwrap();
+        let setup = Setup::new(directory.clone());
+        let result = setup.setup_env_file();
+        let content = std::fs::read_to_string(directory.join(".env"));
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        result.unwrap();
+        let content = content.unwrap();
+        assert!(content.contains("DOMAIN_HOST_WEBUI=zone.example.com"));
+        assert!(!content.lines().any(|line| line.starts_with("WEBUI_")));
+        assert!(
+            get_env_value(&content, "SECURITY_LITELLM_MASTER_KEY")
+                .is_some_and(|value| value.len() >= 40)
+        );
+    }
 
     #[test]
     fn test_get_env_value_simple() {

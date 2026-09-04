@@ -4,8 +4,8 @@ import { selectOption } from './helpers';
 test.describe('Advanced Settings', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    // Navigate to Advanced step (step 7 - last step)
-    await page.click('[data-step="7"]');
+    // Navigate to Advanced step (step 6 - last step)
+    await page.click('[data-step="6"]');
     await expect(page.getByRole('heading', { name: 'Advanced Settings' })).toBeVisible();
   });
 

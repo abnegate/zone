@@ -27,12 +27,8 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   AI_MODEL_FAST: '',
   AI_MODEL_REASONING: '',
   AI_MODEL_EMBEDDING: '',
-  WEBUI_AUTH: 'false',
-  WEBUI_ENABLE_SIGNUP: 'false',
-  WEBUI_DEFAULT_LOCALE: 'en-US',
   SEARCH_ENABLE_WEB_SEARCH: 'true',
   SEARCH_RESULT_COUNT: '5',
-  SEARCH_CONCURRENT_REQUESTS: '8',
   SEARCH_SEARXNG_INSTANCE_NAME: '',
   VPN_SERVICE_PROVIDER: '',
   VPN_TYPE: 'openvpn',
@@ -88,7 +84,7 @@ describe('DomainStep', () => {
       </TestWrapper>
     );
 
-    expect(screen.getByLabelText(/Web Interface Hostname/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Stack Domain/i)).toBeInTheDocument();
   });
 
   it('displays current hostname value', () => {
@@ -108,7 +104,7 @@ describe('DomainStep', () => {
       </TestWrapper>
     );
 
-    const input = screen.getByLabelText(/Web Interface Hostname/i);
+    const input = screen.getByLabelText(/Stack Domain/i);
     fireEvent.change(input, {
       target: { value: 'new.localhost' },
     });
@@ -127,6 +123,6 @@ describe('DomainStep', () => {
     );
 
     // The component should render without errors initially
-    expect(screen.getByLabelText(/Web Interface Hostname/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Stack Domain/i)).toBeInTheDocument();
   });
 });

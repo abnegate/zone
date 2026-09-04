@@ -10,14 +10,14 @@ test.describe('Installation Process', () => {
 
   test('shows Install button on final step', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('[data-step="7"]');
+    await page.click('[data-step="6"]');
 
     await expect(page.locator('button:has-text("Install")')).toBeVisible();
   });
 
   test('opens modal when Install clicked', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('[data-step="7"]');
+    await page.click('[data-step="6"]');
 
     // Set up route before clicking Install
     await page.route('**/api/install', (route) => {
@@ -37,7 +37,7 @@ test.describe('Installation Process', () => {
 
   test('shows progress during installation', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('[data-step="7"]');
+    await page.click('[data-step="6"]');
 
     await page.route('**/api/install', async (route) => {
       await new Promise((r) => setTimeout(r, 500));
@@ -57,7 +57,7 @@ test.describe('Installation Process', () => {
 
   test('shows success message on completion', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('[data-step="7"]');
+    await page.click('[data-step="6"]');
 
     await page.route('**/api/install', (route) => {
       route.fulfill({
@@ -77,7 +77,7 @@ test.describe('Installation Process', () => {
 
   test('shows error message on failure', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('[data-step="7"]');
+    await page.click('[data-step="6"]');
 
     await page.route('**/api/install', (route) => {
       route.fulfill({
@@ -94,11 +94,13 @@ test.describe('Installation Process', () => {
     await expect(page.locator('text=Installation Failed')).toBeVisible({ timeout: 10000 });
   });
 
-  test('can close modal after completion', async ({ page }) => {
+  test('opens Zone chat after completion without retired settings', async ({ page }) => {
     // Navigate to final step via step pill
-    await page.click('[data-step="7"]');
+    await page.click('[data-step="6"]');
 
+    let config: Record<string, string> = {};
     await page.route('**/api/install', (route) => {
+      config = route.request().postDataJSON();
       route.fulfill({
         status: 200,
         contentType: 'text/plain',
@@ -114,5 +116,11 @@ test.describe('Installation Process', () => {
     await page.getByRole('dialog').locator('button.w-full', { hasText: 'Close' }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Installation complete' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'http://manager.webui.localhost/chats' })).toHaveAttribute('href', 'http://manager.webui.localhost/chats');
+    await expect(page.getByText('Web UI Auth', { exact: true })).toHaveCount(0);
+    expect(config.DOMAIN_HOST_WEBUI).toBe('webui.localhost');
+    expect(Object.keys(config).filter((key) => key.startsWith('WEBUI_'))).toEqual([]);
+    expect(config).not.toHaveProperty('SEARCH_CONCURRENT_REQUESTS');
+    await page.screenshot({ path: 'screenshots/zone-chat-completion.png', fullPage: true });
   });
 });

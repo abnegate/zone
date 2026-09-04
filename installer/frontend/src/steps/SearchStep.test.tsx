@@ -28,12 +28,8 @@ const createMockConfig = (overrides?: Partial<InstallerConfig>): InstallerConfig
   AI_MODEL_FAST: '',
   AI_MODEL_REASONING: '',
   AI_MODEL_EMBEDDING: '',
-  WEBUI_AUTH: 'false',
-  WEBUI_ENABLE_SIGNUP: 'false',
-  WEBUI_DEFAULT_LOCALE: 'en-US',
   SEARCH_ENABLE_WEB_SEARCH: 'true',
   SEARCH_RESULT_COUNT: '5',
-  SEARCH_CONCURRENT_REQUESTS: '8',
   SEARCH_SEARXNG_INSTANCE_NAME: 'my-searx',
   VPN_SERVICE_PROVIDER: '',
   VPN_TYPE: 'openvpn',
@@ -121,23 +117,6 @@ describe('SearchStep', () => {
     });
 
     expect(methods.getValues('SEARCH_RESULT_COUNT')).toBe('10');
-  });
-
-  it('renders concurrent requests input with current value', () => {
-    renderWithForm(createMockConfig());
-
-    const input = screen.getByLabelText(/concurrent requests/i);
-    expect(input).toHaveValue(8);
-  });
-
-  it('updates concurrent requests', () => {
-    const { methods } = renderWithForm(createMockConfig());
-
-    fireEvent.change(screen.getByLabelText(/concurrent requests/i), {
-      target: { value: '16' },
-    });
-
-    expect(methods.getValues('SEARCH_CONCURRENT_REQUESTS')).toBe('16');
   });
 
   it('renders instance name input with current value', () => {

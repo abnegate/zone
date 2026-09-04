@@ -116,13 +116,6 @@ export const ModelsSchema = z
     }
   });
 
-// Interface step schema
-export const InterfaceSchema = z.object({
-  WEBUI_AUTH: z.enum(['true', 'false']),
-  WEBUI_ENABLE_SIGNUP: z.enum(['true', 'false']),
-  WEBUI_DEFAULT_LOCALE: z.string().min(1, 'Locale is required'),
-});
-
 // Search step schema
 export const SearchSchema = z.object({
   SEARCH_ENABLE_WEB_SEARCH: z.enum(['true', 'false']),
@@ -133,13 +126,6 @@ export const SearchSchema = z.object({
       const num = Number.parseInt(val, 10);
       return num >= 1 && num <= 20;
     }, 'Must be between 1 and 20'),
-  SEARCH_CONCURRENT_REQUESTS: z
-    .string()
-    .regex(/^\d+$/, 'Must be a number')
-    .refine((val: string) => {
-      const num = Number.parseInt(val, 10);
-      return num >= 1 && num <= 32;
-    }, 'Must be between 1 and 32'),
   SEARCH_SEARXNG_INSTANCE_NAME: z.string().min(1, 'Instance name is required'),
 });
 
@@ -205,7 +191,6 @@ export const StepSchemas = {
   domain: DomainSchema,
   security: SecuritySchema,
   models: ModelsSchema,
-  interface: InterfaceSchema,
   search: SearchSchema,
   vpn: VPNSchema,
   advanced: AdvancedSchema,

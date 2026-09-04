@@ -36,23 +36,18 @@ test.describe('Screenshots - Installer Steps', () => {
     await page.screenshot({ path: `${screenshotsDir}/ai-provider.png`, fullPage: true });
   });
 
-  test('Interface step', async ({ page }) => {
-    await goToStep(page, 4, 'Interface Settings');
-    await page.screenshot({ path: `${screenshotsDir}/interface.png`, fullPage: true });
-  });
-
   test('Web search step', async ({ page }) => {
-    await goToStep(page, 5, 'Web Search');
+    await goToStep(page, 4, 'Web Search');
     await page.screenshot({ path: `${screenshotsDir}/web-search.png`, fullPage: true });
   });
 
   test('VPN step', async ({ page }) => {
-    await goToStep(page, 6, 'VPN Configuration');
+    await goToStep(page, 5, 'VPN Configuration');
     await page.screenshot({ path: `${screenshotsDir}/vpn.png`, fullPage: true });
   });
 
   test('Advanced step', async ({ page }) => {
-    await goToStep(page, 7, 'Advanced Settings');
+    await goToStep(page, 6, 'Advanced Settings');
     await page.screenshot({ path: `${screenshotsDir}/advanced.png`, fullPage: true });
   });
 });
@@ -61,7 +56,7 @@ test.describe('Screenshots - Installation Modal', () => {
   test('Install complete modal', async ({ page }) => {
     // Fill in required secrets first so validation passes
     await fillRequiredSecrets(page);
-    await goToStep(page, 7, 'Advanced Settings');
+    await goToStep(page, 6, 'Advanced Settings');
 
     await page.route('**/api/install', (route) => {
       route.fulfill({

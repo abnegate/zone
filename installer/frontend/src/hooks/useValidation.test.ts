@@ -105,7 +105,6 @@ describe('useValidation', () => {
       const isValid = result.current.validateStep('search', {
         SEARCH_ENABLE_WEB_SEARCH: 'true',
         SEARCH_RESULT_COUNT: '25', // Over max of 20
-        SEARCH_CONCURRENT_REQUESTS: '8',
         SEARCH_SEARXNG_INSTANCE_NAME: 'Test',
       });
       expect(isValid).toBe(false);
@@ -173,19 +172,6 @@ describe('useValidation', () => {
         AI_MODEL_FAST: 'llama3.1:8b',
         AI_MODEL_REASONING: 'deepseek-r1:7b',
         AI_MODEL_EMBEDDING: 'nomic-embed-text',
-      });
-      expect(isValid).toBe(true);
-    });
-  });
-
-  it('validates interface step', () => {
-    const { result } = renderHook(() => useValidation());
-
-    act(() => {
-      const isValid = result.current.validateStep('interface', {
-        WEBUI_AUTH: 'true',
-        WEBUI_ENABLE_SIGNUP: 'false',
-        WEBUI_DEFAULT_LOCALE: 'en-US',
       });
       expect(isValid).toBe(true);
     });

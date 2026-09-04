@@ -7,7 +7,7 @@ test.describe('Form Validation', () => {
   });
 
   test('shows validation error for empty hostname', async ({ page }) => {
-    const input = page.locator('input#web-interface-hostname');
+    const input = page.locator('input#stack-domain');
     await input.clear();
     await page.click('text=Next');
 
@@ -17,7 +17,7 @@ test.describe('Form Validation', () => {
   });
 
   test('accepts valid hostname', async ({ page }) => {
-    const input = page.locator('input#web-interface-hostname');
+    const input = page.locator('input#stack-domain');
     await input.fill('myzone.example.com');
     await page.click('text=Next');
 
@@ -40,7 +40,7 @@ test.describe('Form Validation', () => {
     // Fill required secrets first so validation can reach the email check
     await fillRequiredSecrets(page);
     // Navigate to advanced step via step pill
-    await page.click('[data-step="7"]');
+    await page.click('[data-step="6"]');
 
     const emailInput = page.getByLabel("ACME Email (for Let's Encrypt)");
     await emailInput.clear();

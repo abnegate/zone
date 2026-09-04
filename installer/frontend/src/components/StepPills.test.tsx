@@ -59,7 +59,6 @@ describe('StepPills', () => {
     expect(screen.getByText('Configure your domain settings')).toBeInTheDocument();
     expect(screen.getByText('Set up authentication and keys')).toBeInTheDocument();
     expect(screen.getByText('Choose your AI models')).toBeInTheDocument();
-    expect(screen.getByText('Customize the web interface')).toBeInTheDocument();
     expect(screen.getByText('Configure search settings')).toBeInTheDocument();
     expect(screen.getByText('Set up VPN connection')).toBeInTheDocument();
     expect(screen.getByText('Fine-tune advanced options')).toBeInTheDocument();

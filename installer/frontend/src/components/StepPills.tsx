@@ -21,7 +21,7 @@ export function StepPills({ currentStep, onStepClick }: StepPillsProps) {
             onClick={() => onStepClick(step.number)}
             aria-current={isActive ? 'step' : undefined}
             className={cn(
-              'h-auto w-full items-start justify-start gap-3 rounded-lg px-3 py-2 text-left whitespace-normal',
+              'h-auto! w-full items-start justify-start gap-3 rounded-lg px-3 py-2 text-left whitespace-normal',
               isActive && 'bg-accent text-accent-foreground'
             )}
             data-step={step.number}
@@ -52,7 +52,7 @@ export function StepPills({ currentStep, onStepClick }: StepPillsProps) {
                 step.number
               )}
             </span>
-            <span className="min-w-0 flex-1 flex flex-col items-start text-left">
+            <span className="min-w-0 flex-1 flex flex-col items-start text-left whitespace-normal">
               <span
                 className={cn(
                   'text-sm font-medium leading-tight',

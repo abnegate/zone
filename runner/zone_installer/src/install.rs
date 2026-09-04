@@ -202,16 +202,6 @@ async fn create_env_from_config(config: &InstallerConfig) -> Result<(), std::io:
         }
     }
 
-    if let Some(domain) = config.get("DOMAIN_HOST_WEBUI")
-        && !domain.trim().is_empty()
-    {
-        content = replace_env_value(
-            &content,
-            "WEBUI_CORS_ALLOW_ORIGIN",
-            &format!("http://{}", domain.trim()),
-        );
-    }
-
     if let Some(value) = config.get("AI_MODEL_FAST") {
         content = replace_env_value(&content, "OLLAMA_MODEL_FAST", value);
     }

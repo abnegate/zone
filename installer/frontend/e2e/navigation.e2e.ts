@@ -10,7 +10,23 @@ test.describe('Installer Navigation', () => {
   });
 
   test('shows step items', async ({ page }) => {
-    await expect(page.locator('[data-step]')).toHaveCount(7);
+    await expect(page.locator('[data-step]')).toHaveCount(6);
+  });
+
+  test('keeps every step description inside the sidebar', async ({ page }) => {
+    const sidebar = await page.getByTestId('installer-sidebar').boundingBox();
+    expect(sidebar).not.toBeNull();
+    let previousBottom = 0;
+    for (const button of await page.locator('[data-step]').all()) {
+      const description = await button.locator('span').last().boundingBox();
+      expect(description).not.toBeNull();
+      expect(description!.x + description!.width).toBeLessThanOrEqual(sidebar!.x + sidebar!.width);
+      const row = await button.boundingBox();
+      expect(row).not.toBeNull();
+      expect(description!.y + description!.height).toBeLessThanOrEqual(row!.y + row!.height);
+      expect(row!.y).toBeGreaterThanOrEqual(previousBottom);
+      previousBottom = row!.y + row!.height;
+    }
   });
 
   test('navigates forward through steps', async ({ page }) => {
@@ -58,7 +74,7 @@ test.describe('Installer Navigation', () => {
 
   test('shows Install button on last step', async ({ page }) => {
     // Navigate to final step via step item
-    await page.click('[data-step="7"]');
+    await page.click('[data-step="6"]');
 
     await expect(page.locator('button:has-text("Install")')).toBeVisible();
   });

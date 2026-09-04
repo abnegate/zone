@@ -3,8 +3,8 @@ import { test, expect } from '@playwright/test';
 test.describe('Search Configuration', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
-    // Navigate to Search step (step 5)
-    await page.click('[data-step="5"]');
+    // Navigate to Search step (step 4)
+    await page.click('[data-step="4"]');
     await expect(page.getByRole('heading', { name: 'Web Search' })).toBeVisible();
   });
 
@@ -37,19 +37,6 @@ test.describe('Search Configuration', () => {
     await expect(input).toHaveValue('10');
   });
 
-  test('displays concurrent requests input', async ({ page }) => {
-    const input = page.getByLabel('Concurrent Requests');
-    await expect(input).toBeVisible();
-    await expect(input).toHaveAttribute('type', 'number');
-  });
-
-  test('can change concurrent requests', async ({ page }) => {
-    const input = page.getByLabel('Concurrent Requests');
-    await input.clear();
-    await input.fill('8');
-    await expect(input).toHaveValue('8');
-  });
-
   test('displays search instance name input', async ({ page }) => {
     const input = page.getByLabel('Search Instance Name');
     await expect(input).toBeVisible();
@@ -72,9 +59,4 @@ test.describe('Search Configuration', () => {
     await expect(input).toHaveAttribute('max', '20');
   });
 
-  test('concurrent requests has min/max constraints', async ({ page }) => {
-    const input = page.getByLabel('Concurrent Requests');
-    await expect(input).toHaveAttribute('min', '1');
-    await expect(input).toHaveAttribute('max', '32');
-  });
 });
