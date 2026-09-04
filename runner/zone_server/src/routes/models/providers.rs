@@ -880,6 +880,10 @@ pub struct Gpt4AllProvider;
 const GPT4ALL_MODELS_URL: &str =
     "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
 
+fn gpt4all_models_url() -> String {
+    std::env::var("GPT4ALL_MODELS_URL").unwrap_or_else(|_| GPT4ALL_MODELS_URL.to_string())
+}
+
 #[async_trait]
 impl ModelProvider for Gpt4AllProvider {
     fn name(&self) -> &'static str {
@@ -890,7 +894,7 @@ impl ModelProvider for Gpt4AllProvider {
         // GPT4All uses a static JSON catalog, so we fetch all and paginate client-side
         let offset = parse_cursor_offset(opts.cursor)?;
 
-        let response = HTTP_CLIENT.get(GPT4ALL_MODELS_URL).send().await?;
+        let response = HTTP_CLIENT.get(gpt4all_models_url()).send().await?;
 
         if !response.status().is_success() {
             return Err(ProviderError::Unavailable(format!(

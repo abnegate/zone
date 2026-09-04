@@ -79,4 +79,10 @@ jobs:
 
       - name: Run security audit
         working-directory: manager/frontend
-        run: bun run audit
+        run: |
+          for i in 1 2 3 4; do
+            bun run audit && exit 0
+            echo "npm audit registry returned an error (attempt $i), retrying..."
+            sleep $((i * 15))
+          done
+          bun run audit

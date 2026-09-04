@@ -15,6 +15,7 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use tokio::sync::OnceCell;
 use tower::ServiceExt;
 
 // =============================================================================
@@ -189,6 +190,45 @@ async fn start_invalid_json_ollama_server() -> SocketAddr {
     addr
 }
 
+fn mock_gpt4all_catalog() -> Json<serde_json::Value> {
+    Json(json!([{
+        "name": "Llama 3 Instruct",
+        "filename": "llama-3-8b-instruct.Q4_0.gguf",
+        "filesize": "4000000000",
+        "parameters": "8B",
+        "type": "LLaMA",
+        "description": "A compact Llama 3 chat model",
+        "quant": "q4_0"
+    }]))
+}
+
+async fn start_gpt4all_catalog_server() -> SocketAddr {
+    let router = Router::new().route("/models3.json", get(|| async { mock_gpt4all_catalog() }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    addr
+}
+
+static GPT4ALL_MOCK_READY: OnceCell<()> = OnceCell::const_new();
+
+async fn use_local_gpt4all_catalog() {
+    GPT4ALL_MOCK_READY
+        .get_or_init(|| async {
+            let addr = start_gpt4all_catalog_server().await;
+            let url = format!("http://{addr}/models3.json");
+            unsafe {
+                std::env::set_var("GPT4ALL_MODELS_URL", url);
+            }
+        })
+        .await;
+}
+
 // =============================================================================
 // Test Helpers
 // =============================================================================
@@ -325,6 +365,7 @@ async fn test_list_models_huggingface_with_search() {
 
 #[tokio::test]
 async fn test_list_models_gpt4all() {
+    use_local_gpt4all_catalog().await;
     let router = create_test_router_with_ollama("http://localhost:9999").await;
     let token = get_auth_token(&router).await;
 
@@ -350,6 +391,7 @@ async fn test_list_models_gpt4all() {
 
 #[tokio::test]
 async fn test_list_models_gpt4all_with_search() {
+    use_local_gpt4all_catalog().await;
     let router = create_test_router_with_ollama("http://localhost:9999").await;
     let token = get_auth_token(&router).await;
 
@@ -366,6 +408,7 @@ async fn test_list_models_gpt4all_with_search() {
 
 #[tokio::test]
 async fn test_list_models_accepts_sort_and_filter_params() {
+    use_local_gpt4all_catalog().await;
     let router = create_test_router_with_ollama("http://localhost:9999").await;
     let token = get_auth_token(&router).await;
 

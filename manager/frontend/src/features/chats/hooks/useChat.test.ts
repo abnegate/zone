@@ -1,8 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
-import type { ReactNode } from 'react';
-import { createElement } from 'react';
+import { createElement, StrictMode, type ReactNode } from 'react';
 import type { ChatWithMessages, Message } from '../types';
 
 const mockGetChat = mock();
@@ -425,6 +424,37 @@ describe('useChat', () => {
       const saved = result.current.chat?.messages.find((m) => m.id === 'm-real');
       expect(saved?.metadata).toEqual(metadata);
       expect(result.current.chat?.messages.filter((m) => m.content === 'see this')).toHaveLength(1);
+    });
+  });
+
+  it('keeps a single user message when message_saved arrives under Strict Mode', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const QueryWrapper = createWrapper();
+
+    const { result } = renderHook(() => useChat('1'), {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        createElement(StrictMode, null, createElement(QueryWrapper, null, children)),
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    await result.current.sendMessage({ content: 'Test message' });
+    lastSocket?.emit({
+      type: 'message_saved',
+      message_id: 'saved-sync',
+      role: 'user',
+      content: 'Test message',
+    });
+
+    await waitFor(() => {
+      const matches = result.current.chat?.messages.filter((m) => m.content === 'Test message');
+      expect(matches).toHaveLength(1);
+      expect(matches?.[0].id).toBe('saved-sync');
     });
   });
 
