@@ -42,12 +42,11 @@ export interface Chat {
   created_at: string;
   updated_at: string;
   archived: boolean;
-  /** Whether replies run the tool-calling agent loop. */
-  agent_enabled: boolean;
   /**
-   * Whether the agent is limited to authorized workspace tools. When false it
-   * also gets a shell and file access on the machine running the server.
+   * Whether replies run the tool-calling agent loop, including workspace tools
+   * and server filesystem and shell tools.
    */
+  agent_enabled: boolean;
 }
 
 export interface ChatWithMessages extends Chat {

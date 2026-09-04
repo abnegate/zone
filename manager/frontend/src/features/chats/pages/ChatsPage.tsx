@@ -567,7 +567,7 @@ export default function ChatsPage() {
                 aria-pressed={displayedChat.agent_enabled}
                 title={
                   displayedChat.agent_enabled
-                    ? 'Agent mode on: replies can search this workspace before answering'
+                    ? 'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
                     : 'Agent mode off: replies come straight from the model'
                 }
                 data-testid="agent-toggle"

@@ -1659,6 +1659,10 @@ describe('ChatsPage', () => {
     );
     expect(screen.queryByTestId('sandbox-toggle')).not.toBeInTheDocument();
     expect(screen.queryByText('Host access')).not.toBeInTheDocument();
+    expect(screen.getByTestId('agent-toggle')).toHaveAttribute(
+      'title',
+      'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
+    );
   });
 
   describe('chat search', () => {
