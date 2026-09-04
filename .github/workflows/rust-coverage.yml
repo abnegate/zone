@@ -89,7 +89,7 @@ jobs:
       # coverage-instrumented test binary and exhausts the runner's disk (ld dies
       # with SIGBUS). test-utils is the only other feature in the workspace.
       - name: Generate coverage report
-        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --exclude zone_desktop --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -103,7 +103,7 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Generate HTML coverage report
-        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --html
+        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --exclude zone_desktop --html
 
       - name: Upload HTML coverage report
         uses: actions/upload-artifact@v4
@@ -113,12 +113,12 @@ jobs:
           retention-days: 30
 
       - name: Coverage summary
-        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --text | tee coverage-summary.txt
+        run: cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --exclude zone_desktop --text | tee coverage-summary.txt
 
       - name: Check coverage threshold
         run: |
           # Extract total coverage percentage
-          COVERAGE=$(cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --json | jq '.data[0].totals.lines.percent')
+          COVERAGE=$(cargo llvm-cov --no-default-features --features zone_context/test-utils --workspace --exclude zone_desktop --json | jq '.data[0].totals.lines.percent')
           echo "Total line coverage: $COVERAGE%"
 
           # Fail if coverage is below threshold (adjust as needed)

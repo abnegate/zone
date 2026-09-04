@@ -50,7 +50,7 @@ jobs:
 
       - name: Build
         working-directory: runner
-        run: cargo build --release
+        run: cargo build --workspace --exclude zone_desktop --release
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3

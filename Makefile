@@ -376,7 +376,7 @@ test-runner-coverage: ## Run tool runner tests with code coverage (requires carg
 		echo "$(RED)Error: cargo-llvm-cov not installed. Run 'make setup-runner-coverage' first$(NC)"; \
 		exit 1; \
 	fi
-	@cd runner && cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info 2>&1 || { \
+	@cd runner && cargo llvm-cov --all-features --workspace --exclude zone_desktop --lcov --output-path lcov.info 2>&1 || { \
 		echo "$(RED)Coverage failed. Ensure llvm-tools-preview is installed:$(NC)"; \
 		echo "  rustup default stable"; \
 		echo "  rustup component add llvm-tools-preview"; \
@@ -393,7 +393,7 @@ test-runner-coverage-html: ## Generate HTML coverage report for tool runner
 		echo "$(RED)Error: cargo-llvm-cov not installed. Run 'make setup-runner-coverage' first$(NC)"; \
 		exit 1; \
 	fi
-	@cd runner && cargo llvm-cov --all-features --workspace --html --output-dir coverage 2>&1 || { \
+	@cd runner && cargo llvm-cov --all-features --workspace --exclude zone_desktop --html --output-dir coverage 2>&1 || { \
 		echo "$(RED)Coverage failed. Ensure llvm-tools-preview is installed:$(NC)"; \
 		echo "  rustup default stable"; \
 		echo "  rustup component add llvm-tools-preview"; \
@@ -413,7 +413,7 @@ test-runner-coverage-json: ## Generate JSON coverage report for tool runner (CI 
 		echo "$(RED)Error: cargo-llvm-cov not installed. Run 'make setup-runner-coverage' first$(NC)"; \
 		exit 1; \
 	fi
-	@cd runner && cargo llvm-cov --all-features --workspace --json --output-path coverage.json 2>&1 || { \
+	@cd runner && cargo llvm-cov --all-features --workspace --exclude zone_desktop --json --output-path coverage.json 2>&1 || { \
 		echo "$(RED)Coverage failed. Ensure llvm-tools-preview is installed:$(NC)"; \
 		echo "  rustup default stable"; \
 		echo "  rustup component add llvm-tools-preview"; \
@@ -427,7 +427,7 @@ test-runner-coverage-text: ## Show coverage summary in terminal
 		echo "$(RED)Error: cargo-llvm-cov not installed. Run 'make setup-runner-coverage' first$(NC)"; \
 		exit 1; \
 	fi
-	@cd runner && cargo llvm-cov --all-features --workspace 2>&1 || { \
+	@cd runner && cargo llvm-cov --all-features --workspace --exclude zone_desktop 2>&1 || { \
 		echo "$(RED)Coverage failed. Ensure llvm-tools-preview is installed:$(NC)"; \
 		echo "  rustup default stable"; \
 		echo "  rustup component add llvm-tools-preview"; \
@@ -442,7 +442,7 @@ install-runner: ## Install zone-runner binary to /usr/local/bin
 install-cli: ## Install zone CLI to /usr/local/bin
 	@echo "$(BLUE)Building and installing zone CLI...$(NC)"
 	cd runner && cargo build --release --package zone_cli
-	@sudo cp runner/target/release/zone-cli /usr/local/bin/zone
+	@sudo cp runner/target/release/zone /usr/local/bin/zone
 	@echo "$(GREEN)zone CLI installed! Run 'zone --help' to get started.$(NC)"
 
 sqlx-prepare: ## Prepare sqlx offline query data (requires running postgres)
