@@ -657,7 +657,7 @@ var import_react_dom = require("react-dom");
 var import_class_variance_authority3 = require("class-variance-authority");
 var import_jsx_runtime12 = require("react/jsx-runtime");
 var overlayVariants = (0, import_class_variance_authority3.cva)([
-  "fixed inset-0 z-50",
+  "fixed inset-0",
   "flex items-center justify-center",
   "bg-[var(--ui-overlay-medium)]",
   "backdrop-blur-sm"

@@ -568,7 +568,7 @@
 
   .ui-select-content {
     position: relative;
-    z-index: 50;
+    z-index: var(--ui-layer-popover);
     max-height: 24rem;
     min-width: 8rem;
     overflow: hidden;
@@ -678,7 +678,7 @@
   .ui-dialog-overlay {
     position: fixed;
     inset: 0;
-    z-index: 50;
+    z-index: var(--ui-layer-modal);
     background-color: rgba(0, 0, 0, 0.4);
     backdrop-filter: blur(4px);
   }
@@ -694,7 +694,7 @@
   .ui-dialog-content {
     position: fixed;
     inset: 0;
-    z-index: 50;
+    z-index: var(--ui-layer-modal);
     display: grid;
     width: min(32rem, calc(100vw - 2rem));
     max-width: 32rem;
@@ -878,7 +878,7 @@
   .ui-wizard-overlay {
     position: fixed;
     inset: 0;
-    z-index: 1100;
+    z-index: var(--ui-layer-modal);
     display: flex;
     align-items: center;
     justify-content: center;

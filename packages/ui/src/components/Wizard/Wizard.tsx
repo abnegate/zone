@@ -5,7 +5,7 @@ import { cn } from '../../lib/utils';
 import { Button } from '../Button';
 
 const overlayVariants = cva([
-  'fixed inset-0 z-50',
+  'fixed inset-0',
   'flex items-center justify-center',
   'bg-[var(--ui-overlay-medium)]',
   'backdrop-blur-sm',

@@ -22,6 +22,8 @@
   --ui-icon-size-sm: 1rem;
   --ui-empty-icon-size: 2.5rem;
   --ui-row-padding: 0.75rem 1rem;
+  --ui-layer-modal: 1100;
+  --ui-layer-popover: 1200;
 
   /* Type Scale */
   --ui-text-xs: 0.75rem; /* 12px */

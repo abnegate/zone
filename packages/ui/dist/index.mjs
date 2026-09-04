@@ -566,7 +566,7 @@ import { createPortal } from "react-dom";
 import { cva as cva3 } from "class-variance-authority";
 import { jsx as jsx12, jsxs as jsxs8 } from "react/jsx-runtime";
 var overlayVariants = cva3([
-  "fixed inset-0 z-50",
+  "fixed inset-0",
   "flex items-center justify-center",
   "bg-[var(--ui-overlay-medium)]",
   "backdrop-blur-sm"
