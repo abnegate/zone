@@ -1,6 +1,7 @@
 //! Workspace-scoped document reads and persistent, searchable notes.
 
 use async_trait::async_trait;
+use chrono::Utc;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -145,7 +146,7 @@ impl DocumentTool {
                 )
                 .await?;
                 ToolResult::success(
-                    json!({"documents":documents,"offset":offset,"limit":limit}).to_string(),
+                    json!({"documents":documents,"offset":offset,"limit":limit,"observed_at":Utc::now().to_rfc3339()}).to_string(),
                 )
             }
             Operation::Read => {
@@ -163,7 +164,7 @@ impl DocumentTool {
                 {
                     Some(document) => {
                         let complete = document.content.is_some();
-                        ToolResult::success(json!({"document":document,"complete":complete,"content_state":if complete { "stored_text" } else { "metadata_only_content_unavailable" }}).to_string())
+                        ToolResult::success(json!({"document":document,"complete":complete,"content_state":if complete { "stored_text" } else { "metadata_only_content_unavailable" },"observed_at":Utc::now().to_rfc3339()}).to_string())
                     }
                     None => ToolResult::error("Document not found in this workspace."),
                 }

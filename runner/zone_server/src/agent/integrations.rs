@@ -828,10 +828,24 @@ mod tests {
         )
         .await;
         mock(&server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
-        assert_eq!(
-            github(&server).build(COMMIT).await.unwrap()["state"],
-            "unknown"
-        );
+        let empty = github(&server).build(COMMIT).await.unwrap();
+        assert_eq!(empty["state"], "unknown");
+        let citation = crate::agent::citations::from_tool_at(
+            "get_build_status",
+            &json!({
+                "repository": "https://github.com/owner/repository",
+                "sha": COMMIT,
+                "state": empty["state"],
+                "complete": empty["complete"],
+                "assessment": empty["assessment"],
+                "observed_at": "2026-09-05T00:00:00+00:00"
+            })
+            .to_string(),
+            "2026-09-05T00:00:00+00:00",
+        )
+        .remove(0);
+        assert!(!citation.passing());
+        assert_eq!(citation.outcome, crate::agent::CitationOutcome::Incomplete);
         assert_eq!(
             latest(
                 vec![

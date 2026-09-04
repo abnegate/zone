@@ -526,6 +526,100 @@
   color: var(--ui-text-secondary);
 }
 
+/* Citations.
+   Checkable sources for an agent reply. Incomplete evidence must never read
+   as a passing result — that distinction is carried in the label and colour. */
+
+.message-citations {
+  margin: var(--ui-space-3) 0 0;
+  padding-top: var(--ui-space-3);
+  border-top: 1px solid var(--ui-border);
+}
+
+.citations-heading {
+  margin: 0 0 var(--ui-space-2);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  font-weight: 600;
+  letter-spacing: var(--ui-tracking-tight);
+  text-transform: uppercase;
+}
+
+.citation-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.citation-link {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--ui-space-2);
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.citation-link:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.citation-link--static {
+  text-decoration: none;
+}
+
+.citation-title {
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+}
+
+.citation-kind {
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.citation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-2);
+  margin-top: 0.15rem;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.citation-revision {
+  font-family: var(--ui-font-mono);
+}
+
+.citation-evidence {
+  font-weight: 600;
+}
+
+.citation--passing .citation-evidence {
+  color: var(--ui-success, #16a34a);
+}
+
+.citation--failed .citation-evidence {
+  color: var(--ui-danger, #dc2626);
+}
+
+.citation--pending .citation-evidence,
+.citation--incomplete .citation-evidence {
+  color: var(--ui-warning, #b45309);
+}
+
+.citation-note {
+  margin: var(--ui-space-1) 0 0;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
 .message-images {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

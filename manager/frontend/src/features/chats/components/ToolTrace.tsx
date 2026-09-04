@@ -10,6 +10,12 @@ const TOOL_LABELS: Record<string, string> = {
   list_sources: 'Listed connected sources',
   list_projects: 'Listed projects',
   list_tasks: 'Listed tasks',
+  list_documents: 'Listed workspace documents',
+  read_document: 'Read a workspace document',
+  get_build_status: 'Checked GitHub build status',
+  list_deployments: 'Listed GitHub deployments',
+  list_issues: 'Listed GitHub issues',
+  read_repository_file: 'Read a repository file',
 };
 
 function toolLabel(name: string): string {

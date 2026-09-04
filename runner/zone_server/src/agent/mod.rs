@@ -10,11 +10,13 @@
 //! Docker deployments execute these tools inside the server container.
 
 pub mod actions;
+pub mod citations;
 pub mod documents;
 pub mod integrations;
 pub mod runner;
 pub mod tools;
 
+pub use citations::{Citation, CitationKind, CitationOutcome};
 pub use runner::{AgentEvent, AgentRun, MAX_ITERATIONS, MAX_TOOL_CALLS, run};
 pub use tools::{ChatTools, WorkspaceScope};
 
@@ -50,7 +52,8 @@ pub fn system_prompt(tools: &ChatTools) -> String {
          Call a tool only when its result is needed for the user's request.\n\
          - Prefer one well-phrased search over several near-identical ones, and stop searching \
          once you can answer. Do not repeat an unchanged tool call after receiving its result.\n\
-         - Name the documents you drew on so the user can check them.\n\
+         - Name the sources you drew on. Structured citations keep the source URL, immutable \
+         ref or document revision, and observation time. Incomplete evidence is never a passing result.\n\
          - If the tools return nothing useful, say so plainly instead of guessing. A wrong answer \
          about the user's own data is worse than an admission that you could not find it.",
         tools.names().join(", ")

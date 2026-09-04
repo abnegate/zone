@@ -294,6 +294,55 @@ describe('useChat', () => {
     expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls).toHaveLength(1);
   });
 
+  it('attaches streamed citations and keeps them through message_end', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const citation = {
+      kind: 'github_build' as const,
+      title: 'repository main@aaaaaaa',
+      url: 'https://github.com/owner/repository/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      observed_at: '2026-09-05T00:00:00+00:00',
+      complete: false,
+      outcome: 'incomplete' as const,
+      note: 'Observed CI only',
+    };
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm-cite', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm-cite',
+      tool_call_id: 'call_1',
+      name: 'get_build_status',
+      success: true,
+      detail: 'unknown',
+      duration_ms: 12,
+      citations: [citation],
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.citations).toEqual([citation]);
+    });
+
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm-cite',
+      content: 'Checks are still incomplete.',
+      metadata: { citations: [citation] },
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('Checks are still incomplete.');
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.citations).toEqual([citation]);
+  });
+
   it('keeps the tool trace when an image arrives on the same message', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

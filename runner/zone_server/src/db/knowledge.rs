@@ -839,19 +839,22 @@ pub struct Document {
     pub updated_at: Option<NaiveDateTime>,
     pub fetched_at: Option<NaiveDateTime>,
     pub editable: bool,
+    /// Content hash when stored; used as the immutable document revision.
+    pub revision: Option<String>,
 }
 
 macro_rules! documents {
     () => { r#"
     SELECT id, title, content, 'knowledge'::text AS source, NULL::uuid AS source_id,
            COALESCE(source_url, 'knowledge://' || id::text) AS uri,
-           updated_at, last_fetched_at AS fetched_at, source_url IS NULL AS editable
+           updated_at, last_fetched_at AS fetched_at, source_url IS NULL AS editable,
+           content_hash AS revision
     FROM knowledge_entries
     WHERE workspace_id = $1 AND is_active = TRUE
     UNION ALL
     SELECT item.id, item.title, CASE WHEN item.metadata_only THEN NULL ELSE item.content END AS content, source.name AS source, source.id AS source_id,
            item.uri, item.modified_at AS updated_at, item.fetched_at,
-           FALSE AS editable
+           FALSE AS editable, item.content_hash AS revision
     FROM content_items item
     JOIN sources source ON source.id = item.source_id
     WHERE source.workspace_id = $1 AND source.is_active = TRUE
@@ -870,7 +873,7 @@ pub async fn list_documents(
     offset: i64,
 ) -> DbResult<Vec<Document>> {
     sqlx::query_as::<_, Document>(concat!(
-        "SELECT id, title, NULL::text AS content, source, source_id, uri, updated_at, fetched_at, editable FROM (", documents!(), ") document
+        "SELECT id, title, NULL::text AS content, source, source_id, uri, updated_at, fetched_at, editable, revision FROM (", documents!(), ") document
          WHERE check_workspace_membership($2, $1)
            AND ($3::text IS NULL OR to_tsvector('english', title || ' ' || COALESCE(content, ''))
                 @@ plainto_tsquery('english', $3))

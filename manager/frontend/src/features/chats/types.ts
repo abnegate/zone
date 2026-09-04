@@ -19,9 +19,31 @@ export interface ToolCallRecord {
   pending?: boolean;
 }
 
+export type CitationKind =
+  | 'github_build'
+  | 'github_deployment'
+  | 'github_issue'
+  | 'github_file'
+  | 'workspace_document';
+
+export type CitationOutcome = 'success' | 'failure' | 'pending' | 'incomplete' | 'observed';
+
+/// A checkable source behind an agent reply. Incomplete evidence is never a pass.
+export interface Citation {
+  kind: CitationKind;
+  title: string;
+  url: string;
+  revision?: string | null;
+  observed_at: string;
+  complete: boolean;
+  outcome: CitationOutcome;
+  note?: string | null;
+}
+
 export interface MessageMetadata {
   attachments?: MessageAttachment[];
   tool_calls?: ToolCallRecord[];
+  citations?: Citation[];
   /** Optional API override: force web search on/off for one message. */
   web_search?: boolean;
 }

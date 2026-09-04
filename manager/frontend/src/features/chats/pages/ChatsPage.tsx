@@ -4,7 +4,13 @@ import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
 import { isProtectedArtifactUrl } from '../api/protectedImages';
-import { AuthenticatedImage, Generation, MessageContent, ToolTrace } from '../components';
+import {
+  AuthenticatedImage,
+  Citations,
+  Generation,
+  MessageContent,
+  ToolTrace,
+} from '../components';
 import { useChat, useChatSearch, useChats } from '../hooks';
 import type { ChatSearchResult } from '../types';
 import {
@@ -57,7 +63,7 @@ export default function ChatsPage() {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
 
-  const useAsStartingImage = (image: { name: string; mime: string; url: string }) => {
+  const addStartingImage = (image: { name: string; mime: string; url: string }) => {
     const next = sourceAttachment(image);
     setAttachments((prev) => (prev.some((item) => item.id === next.id) ? prev : [...prev, next]));
   };
@@ -597,6 +603,7 @@ export default function ChatsPage() {
                 displayedChat.messages.map((message) => {
                   const images = imageAttachments(message.metadata);
                   const toolCalls = message.metadata?.tool_calls ?? [];
+                  const citations = message.metadata?.citations ?? [];
                   return (
                     <div key={message.id} className={`message message-${message.role}`}>
                       <div className="message-header">
@@ -633,7 +640,7 @@ export default function ChatsPage() {
                                 <button
                                   type="button"
                                   className="message-image-use"
-                                  onClick={() => useAsStartingImage(a)}
+                                  onClick={() => addStartingImage(a)}
                                   disabled={starting}
                                 >
                                   {starting ? 'Added as starting image' : 'Use as starting image'}
@@ -649,6 +656,7 @@ export default function ChatsPage() {
                           <MessageContent content={message.content} />
                         </div>
                       ) : null}
+                      {citations.length > 0 && <Citations citations={citations} />}
                     </div>
                   );
                 })

@@ -13,6 +13,8 @@ use zone_core::llm::{
     LlmClient, Message as LlmMessage, Role as LlmRole, StreamToolCall, ToolCall as LlmToolCall,
 };
 
+use super::Citation;
+use super::citations;
 use super::tools::ChatTools;
 
 /// Maximum reason/act rounds before we stop and answer with what we have.
@@ -41,6 +43,7 @@ pub enum AgentEvent {
         success: bool,
         detail: String,
         duration_ms: u64,
+        citations: Vec<Citation>,
     },
     /// The model produced an image. Carries the raw URL from the provider;
     /// the consumer decides how to store it and whether it is a duplicate.
@@ -239,6 +242,11 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                     success: result.success,
                     detail: summarize(&result, &output),
                     duration_ms,
+                    citations: if result.success {
+                        citations::from_tool(&call.function.name, &output)
+                    } else {
+                        Vec::new()
+                    },
                 };
 
                 messages.push(LlmMessage::tool_result(&call.id, output));

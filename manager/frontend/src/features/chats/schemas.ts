@@ -21,10 +21,28 @@ export const ToolCallRecordSchema = z.object({
   duration_ms: z.number(),
 });
 
+export const CitationSchema = z.object({
+  kind: z.enum([
+    'github_build',
+    'github_deployment',
+    'github_issue',
+    'github_file',
+    'workspace_document',
+  ]),
+  title: z.string(),
+  url: z.string(),
+  revision: z.string().nullish(),
+  observed_at: z.string(),
+  complete: z.boolean(),
+  outcome: z.enum(['success', 'failure', 'pending', 'incomplete', 'observed']),
+  note: z.string().nullish(),
+});
+
 export const MessageMetadataSchema = z
   .object({
     attachments: z.array(MessageAttachmentSchema).optional(),
     tool_calls: z.array(ToolCallRecordSchema).optional(),
+    citations: z.array(CitationSchema).optional(),
     web_search: z.boolean().optional(),
   })
   .passthrough();
