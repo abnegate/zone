@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use zone_core::{
     Agent, AgentCallback, AgentConfig, AgentError, AgentPhase, FileSessionStore, LlmClient,
-    LlmConfig, Session, SessionStore, ToolContext, ToolRegistry, ToolResult,
+    LlmConfig, Session, SessionStore, ToolContext, ToolResult,
 };
 
 use crate::auth::AuthManager;
@@ -169,7 +169,7 @@ pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result
 
     // Create agent
     let llm = LlmClient::new(llm_config);
-    let tools = ToolRegistry::with_defaults();
+    let tools = zone_core::tools::with_defaults_and_mcp().await;
     let agent_config = AgentConfig {
         max_iterations: config.max_iterations as usize,
         ..Default::default()
@@ -304,7 +304,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
         .unwrap_or_else(|| std::env::current_dir().unwrap());
 
     let llm = LlmClient::new(llm_config);
-    let tools = ToolRegistry::with_defaults();
+    let tools = zone_core::tools::with_defaults_and_mcp().await;
     let agent_config = AgentConfig {
         max_iterations: config.max_iterations as usize,
         ..Default::default()

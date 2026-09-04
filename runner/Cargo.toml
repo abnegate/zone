@@ -29,6 +29,7 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 uuid = { version = "=1.26.0", features = ["v4", "serde"] }
 reqwest = { version = "=0.13.4", features = ["json", "stream"] }
 async-trait = "=0.1.92"
+rmcp = { version = "=3.2.0", default-features = false }
 
 # Server dependencies
 axum = { version = "=0.8.9", features = ["ws", "macros"] }

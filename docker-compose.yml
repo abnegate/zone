@@ -314,6 +314,10 @@ services:
       - COMFYUI_GENERATION_TIMEOUT_SECS=${COMFYUI_GENERATION_TIMEOUT_SECS:-300}
       - COMFYUI_POLL_INTERVAL_MS=${COMFYUI_POLL_INTERVAL_MS:-500}
       - ARTIFACT_ROOT=${ARTIFACT_ROOT:-/app/artifacts}
+      - ZONE_MCP_ENABLED=${ZONE_MCP_ENABLED:-true}
+      - ZONE_MCP_AUTO_MAGENTS=${ZONE_MCP_AUTO_MAGENTS:-true}
+      - ZONE_MCP_CONFIG=${ZONE_MCP_CONFIG:-}
+      - ZONE_MCP_SERVERS=${ZONE_MCP_SERVERS:-}
     volumes:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts

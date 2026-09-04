@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zone_core::agent::{Agent, AgentCallback, AgentConfig, AgentPhase};
 use zone_core::llm::{LlmClient, LlmConfig};
-use zone_core::tools::{ToolContext, ToolRegistry, ToolResult};
+use zone_core::tools::{self, ToolContext, ToolResult};
 
 use crate::db::tasks;
 use crate::state::AppState;
@@ -375,8 +375,12 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         unrestricted: false,
     };
 
-    // Create tool registry with defaults
-    let tools = ToolRegistry::with_defaults();
+    // Default file/shell tools plus any configured MCP servers (magents by default).
+    let tools = tools::with_defaults_and_mcp().await;
+    if let Some(guidance) = tools.mcp_guidance() {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&guidance);
+    }
 
     // Get LLM configuration (from task, then environment, then defaults)
     let temperature = default_temperature();
