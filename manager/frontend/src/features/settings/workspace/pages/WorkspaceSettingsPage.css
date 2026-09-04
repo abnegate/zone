@@ -42,24 +42,6 @@
   min-width: 0;
 }
 
-.settings-page .settings-tabs,
-.settings-page .tabs-container {
-  margin-bottom: var(--ui-space-5);
-  border-bottom: 1px solid var(--ui-border);
-}
-
-.settings-page .tab-button,
-.settings-page .tab {
-  padding: var(--ui-space-3) var(--ui-space-4);
-  color: var(--ui-text-secondary);
-}
-
-.settings-page .tab-button.active,
-.settings-page .tab-active {
-  color: var(--ui-accent);
-  border-bottom-color: var(--ui-accent);
-}
-
 .settings-page .alert {
   padding: var(--ui-space-3) var(--ui-space-4);
   border-radius: var(--ui-radius-md);
@@ -71,79 +53,6 @@
   background: color-mix(in srgb, var(--ui-error) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--ui-error) 35%, transparent);
   color: var(--ui-error);
-}
-
-/* Tabs */
-.tabs-container {
-  display: flex;
-
-  gap: var(--ui-space-2);
-  margin-bottom: var(--ui-space-6);
-  border-bottom: 2px solid var(--color-border);
-  overflow-x: auto;
-  min-width: 0;
-}
-
-.tab {
-  padding: var(--ui-space-2) var(--ui-space-3);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -2px;
-  font-size: var(--ui-text-sm);
-  font-weight: 500;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all 0.2s;
-  min-height: var(--ui-control-height);
-  white-space: nowrap;
-  line-height: var(--ui-leading-normal);
-}
-
-.tab:hover {
-  color: var(--color-text-primary);
-  background: var(--color-background-hover);
-}
-
-.tab-active {
-  color: var(--color-primary);
-  border-bottom-color: var(--color-primary);
-}
-
-/* Legacy styles (for backwards compatibility) */
-.settings-tabs {
-  display: flex;
-  gap: var(--ui-space-2);
-  margin-bottom: var(--ui-space-6);
-  border-bottom: 2px solid var(--color-border);
-  overflow-x: auto;
-  min-width: 0;
-}
-
-.tab-button {
-  padding: var(--ui-space-2) var(--ui-space-3);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -2px;
-  font-size: var(--ui-text-sm);
-  font-weight: 500;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: all 0.2s;
-  min-height: var(--ui-control-height);
-  white-space: nowrap;
-  line-height: var(--ui-leading-normal);
-}
-
-.tab-button:hover {
-  color: var(--color-text-primary);
-  background: var(--color-background-hover);
-}
-
-.tab-button.active {
-  color: var(--color-primary);
-  border-bottom-color: var(--color-primary);
 }
 
 .settings-form {
@@ -209,7 +118,6 @@
   border-color: var(--color-border-focus);
 }
 
-/* Color Input */
 .color-input-wrapper {
   display: flex;
   gap: var(--ui-space-2);
@@ -254,7 +162,6 @@
   border-color: var(--color-border-focus);
 }
 
-/* Slider Input */
 .slider-input-wrapper {
   display: flex;
   gap: var(--ui-space-4);
@@ -296,7 +203,6 @@
   font-family: var(--ui-font-mono);
 }
 
-/* Radio Group */
 .radio-group {
   display: flex;
   flex-wrap: wrap;
@@ -322,7 +228,6 @@
   color: var(--color-text);
 }
 
-/* Preview Box */
 .preview-box {
   background: var(--color-bg);
   border: 1px solid var(--color-border);
@@ -360,7 +265,6 @@
   color: var(--color-text-muted);
 }
 
-/* Settings Actions */
 .settings-actions {
   display: flex;
   justify-content: space-between;
@@ -369,7 +273,6 @@
   border-top: 1px solid var(--color-border);
 }
 
-/* Alerts */
 .alert {
   padding: var(--ui-space-4);
   border-radius: var(--radius-md);
@@ -389,11 +292,6 @@
   color: var(--color-success);
 }
 
-/* Loading State */
-
-/* Secondary Button Style */
-
-/* Form Input */
 .form-input {
   width: 100%;
 
@@ -415,9 +313,6 @@
   color: var(--color-text-muted);
 }
 
-/* Form Hint */
-
-/* Checkbox Label */
 .checkbox-label {
   display: flex;
   align-items: center;
@@ -438,14 +333,12 @@
   color: var(--color-text);
 }
 
-/* Credential Set Indicator */
 .credential-set {
   font-weight: 400;
   color: var(--color-success);
   font-size: var(--ui-text-xs);
 }
 
-/* Effective Settings Display */
 .effective-settings {
   display: flex;
   flex-direction: column;

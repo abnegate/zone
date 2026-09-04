@@ -451,7 +451,10 @@ describe('OrgSettingsPage', () => {
         expect(screen.getByRole('tab', { name: 'Members' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Members' }));
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Members' }), {
+        button: 0,
+        ctrlKey: false,
+      });
 
       expect(screen.getByTestId('org-members-section')).toBeInTheDocument();
       expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
@@ -463,7 +466,10 @@ describe('OrgSettingsPage', () => {
         expect(screen.getByRole('tab', { name: 'Invitations' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Invitations' }));
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Invitations' }), {
+        button: 0,
+        ctrlKey: false,
+      });
 
       expect(screen.getByTestId('invitations-section')).toBeInTheDocument();
       expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
@@ -475,7 +481,10 @@ describe('OrgSettingsPage', () => {
         expect(screen.getByRole('tab', { name: 'Billing' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Billing' }));
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Billing' }), {
+        button: 0,
+        ctrlKey: false,
+      });
 
       expect(screen.getByTestId('billing-section')).toBeInTheDocument();
       expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
@@ -487,7 +496,10 @@ describe('OrgSettingsPage', () => {
         expect(screen.getByRole('tab', { name: 'Audit Logs' })).toBeInTheDocument();
       });
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Audit Logs' }));
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Audit Logs' }), {
+        button: 0,
+        ctrlKey: false,
+      });
 
       expect(screen.getByTestId('audit-logs-section')).toBeInTheDocument();
       expect(screen.queryByText('AI Provider Configuration')).not.toBeInTheDocument();
@@ -515,7 +527,7 @@ describe('OrgSettingsPage', () => {
       const aiTab = screen.getByRole('tab', { name: 'AI Settings' });
       expect(aiTab).toHaveAttribute('aria-selected', 'true');
 
-      fireEvent.click(screen.getByRole('tab', { name: 'Audit Logs' }));
+      fireEvent.keyDown(screen.getByRole('tab', { name: 'Audit Logs' }), { key: 'Enter' });
 
       await waitFor(() => {
         expect(screen.getByRole('tab', { name: 'Audit Logs' })).toHaveAttribute(

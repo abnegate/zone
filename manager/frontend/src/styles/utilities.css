@@ -255,10 +255,6 @@
     width: 100%;
   }
 
-  .modal-content {
-    margin: var(--ui-space-4);
-  }
-
   .modal-actions {
     flex-direction: column-reverse;
   }

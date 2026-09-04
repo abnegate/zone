@@ -1,4 +1,4 @@
-import { Button } from '@zone/ui';
+import { Button, Tabs, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
@@ -247,81 +247,31 @@ export default function OrgSettingsPage() {
         <h1 className="page-title">Organization Settings</h1>
       </header>
       <div className="settings-page-body">
-        {/* Tabs */}
-        <div className="settings-tabs" role="tablist">
-          <button
-            type="button"
-            className={`tab-button ${activeTab === 'ai' ? 'active' : ''}`}
-            onClick={() => setActiveTab('ai')}
-            role="tab"
-            aria-selected={activeTab === 'ai'}
-            aria-controls="ai-settings-panel"
-          >
-            AI Settings
-          </button>
-          <button
-            type="button"
-            className={`tab-button ${activeTab === 'members' ? 'active' : ''}`}
-            onClick={() => setActiveTab('members')}
-            role="tab"
-            aria-selected={activeTab === 'members'}
-            aria-controls="members-panel"
-          >
-            Members
-          </button>
-          <button
-            type="button"
-            className={`tab-button ${activeTab === 'invitations' ? 'active' : ''}`}
-            onClick={() => setActiveTab('invitations')}
-            role="tab"
-            aria-selected={activeTab === 'invitations'}
-            aria-controls="invitations-panel"
-          >
-            Invitations
-          </button>
-          <button
-            type="button"
-            className={`tab-button ${activeTab === 'billing' ? 'active' : ''}`}
-            onClick={() => setActiveTab('billing')}
-            role="tab"
-            aria-selected={activeTab === 'billing'}
-            aria-controls="billing-panel"
-          >
-            Billing
-          </button>
-          <button
-            type="button"
-            className={`tab-button ${activeTab === 'audit' ? 'active' : ''}`}
-            onClick={() => setActiveTab('audit')}
-            role="tab"
-            aria-selected={activeTab === 'audit'}
-            aria-controls="audit-panel"
-          >
-            Audit Logs
-          </button>
-        </div>
-
         {error && <div className="alert alert-error">{error}</div>}
         {success && <div className="alert alert-success">{success}</div>}
 
-        {activeTab === 'members' ? (
-          <div id="members-panel" role="tabpanel">
+        <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as TabType)}>
+          <TabsList aria-label="Organization settings">
+            <TabsTrigger value="ai">AI Settings</TabsTrigger>
+            <TabsTrigger value="members">Members</TabsTrigger>
+            <TabsTrigger value="invitations">Invitations</TabsTrigger>
+            <TabsTrigger value="billing">Billing</TabsTrigger>
+            <TabsTrigger value="audit">Audit Logs</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="members">
             <OrgMembersSection orgId={currentOrganization.id} />
-          </div>
-        ) : activeTab === 'invitations' ? (
-          <div id="invitations-panel" role="tabpanel">
+          </TabsContent>
+          <TabsContent value="invitations">
             <InvitationsSection orgId={currentOrganization.id} workspaces={workspaces} />
-          </div>
-        ) : activeTab === 'billing' ? (
-          <div id="billing-panel" role="tabpanel">
+          </TabsContent>
+          <TabsContent value="billing">
             <BillingSection orgId={currentOrganization.id} />
-          </div>
-        ) : activeTab === 'audit' ? (
-          <div id="audit-panel" role="tabpanel">
+          </TabsContent>
+          <TabsContent value="audit">
             <AuditLogsSection orgId={currentOrganization.id} />
-          </div>
-        ) : (
-          <div id="ai-settings-panel" role="tabpanel">
+          </TabsContent>
+          <TabsContent value="ai">
             <form onSubmit={handleSave} className="settings-form">
               <section className="settings-section">
                 <h2 className="section-title">AI Provider Configuration</h2>
@@ -604,8 +554,8 @@ export default function OrgSettingsPage() {
                 </Button>
               </div>
             </form>
-          </div>
-        )}
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );

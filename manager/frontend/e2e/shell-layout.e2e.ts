@@ -124,6 +124,22 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
   );
 }
 
+async function tabs(page: Page): Promise<{ height: number; gap: number }> {
+  return page.locator('.settings-page-body').evaluate((element) => {
+    const list = element
+      .querySelector('[role="tablist"]')
+      ?.getBoundingClientRect();
+    const panel = element
+      .querySelector('[role="tabpanel"]:not([hidden])')
+      ?.getBoundingClientRect();
+    if (!list || !panel) throw new Error('Settings tabs must be visible');
+    return {
+      height: Math.round(list.height),
+      gap: Math.round(panel.y - list.y - list.height),
+    };
+  });
+}
+
 async function capture(
   page: Page,
   information: TestInfo,
@@ -202,6 +218,8 @@ for (const scenario of scenarios) {
     await setupAdminAuth(page);
     await page.goto('/settings', { waitUntil: 'domcontentloaded' });
     await expect(page.locator('#font-family')).toBeVisible();
+    const workspaceTabs = await tabs(page);
+    expect(workspaceTabs).toEqual({ height: 36, gap: 24 });
     const workspaceTitle = page.locator('.settings-page-header h1');
     const rhythm = await page
       .locator('.settings-form')
@@ -267,6 +285,10 @@ for (const scenario of scenarios) {
     ]) {
       await page.getByRole('tab', { name: tab, exact: true }).click();
       await expect(page.getByRole('tabpanel')).toBeVisible();
+      await expect(
+        page.getByRole('tab', { name: tab, exact: true }),
+      ).toHaveAttribute('aria-selected', 'true');
+      expect.soft(await tabs(page)).toEqual(workspaceTabs);
       await capture(
         page,
         information,
@@ -281,6 +303,19 @@ for (const scenario of scenarios) {
           page.getByLabel('Email Address', { exact: true }),
         ).toHaveCSS('height', '36px');
         await capture(page, information, 'invitation-dialog');
+        if (scenario.width === 390) {
+          const bounds = await page
+            .locator('.invitation-dialog .modal-content')
+            .boundingBox();
+          expect.soft(bounds ? Math.round(bounds.x) : null).toBe(16);
+          expect
+            .soft(
+              bounds
+                ? Math.round(scenario.width - bounds.x - bounds.width)
+                : null,
+            )
+            .toBe(16);
+        }
         await page.getByRole('button', { name: 'Cancel', exact: true }).click();
       }
     }

@@ -460,6 +460,14 @@ for (const viewport of [
         await page.getByRole('tab', { name: /Browse/ }).click();
         await expect(page.locator('.browse-item').first()).toBeVisible();
         await expect(page.locator('.browse-description').first()).toBeVisible();
+        await expect
+          .soft(
+            page
+              .locator('.browse-item')
+              .first()
+              .getByRole('button', { name: 'Install', exact: true })
+          )
+          .toHaveCSS('font-size', '14px');
         const rows = await page
           .locator('.virtual-browse-item-wrapper')
           .evaluateAll((elements) =>
@@ -482,6 +490,22 @@ for (const viewport of [
           );
         await fitsViewport(page);
         await capture(page, `${profile}-browse`, theme);
+        await page.locator('.browse-item').first().click();
+        const details = page.locator('.modal-content.modal-details');
+        await expect(details).toBeVisible();
+        await capture(page, `${profile}-model-details`, theme);
+        if (viewport.width === 390) {
+          await expect
+            .poll(async () => {
+              const bounds = await details.boundingBox();
+              return bounds ? Math.round(bounds.x) : null;
+            })
+            .toBe(16);
+          const bounds = await details.boundingBox();
+          expect(
+            bounds ? Math.round(viewport.width - bounds.x - bounds.width) : null
+          ).toBe(16);
+        }
       });
     });
   }
