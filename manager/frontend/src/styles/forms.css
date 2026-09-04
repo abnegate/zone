@@ -33,12 +33,12 @@
   }
 
   /* Text Input */
-  :where(input[type="text"]),
-  :where(input[type="email"]),
-  :where(input[type="password"]),
-  :where(input[type="number"]),
-  :where(input[type="url"]),
-  :where(input[type="search"]) {
+  :where(input[type='text']),
+  :where(input[type='email']),
+  :where(input[type='password']),
+  :where(input[type='number']),
+  :where(input[type='url']),
+  :where(input[type='search']) {
     width: 100%;
     height: var(--ui-control-height);
     padding: 0 var(--ui-space-3);
@@ -54,32 +54,32 @@
       box-shadow var(--ui-transition-fast);
   }
 
-  .chat-search input[type="text"] {
+  .chat-search input[type='text'] {
     padding-right: var(--ui-space-8);
     padding-left: 2.25rem;
   }
 
-  .wiki-search input[type="text"],
-  .wiki-search input[type="search"] {
+  .wiki-search input[type='text'],
+  .wiki-search input[type='search'] {
     height: 2.25rem;
     padding-left: var(--ui-space-10);
   }
 
-  :where(input[type="text"])::placeholder,
-  :where(input[type="email"])::placeholder,
-  :where(input[type="password"])::placeholder {
+  :where(input[type='text'])::placeholder,
+  :where(input[type='email'])::placeholder,
+  :where(input[type='password'])::placeholder {
     color: var(--ui-text-muted);
   }
 
-  :where(input[type="text"]):hover:not(:focus):not(:disabled),
-  :where(input[type="email"]):hover:not(:focus):not(:disabled),
-  :where(input[type="password"]):hover:not(:focus):not(:disabled) {
+  :where(input[type='text']):hover:not(:focus):not(:disabled),
+  :where(input[type='email']):hover:not(:focus):not(:disabled),
+  :where(input[type='password']):hover:not(:focus):not(:disabled) {
     border-color: var(--ui-border-strong);
   }
 
-  :where(input[type="text"]):focus,
-  :where(input[type="email"]):focus,
-  :where(input[type="password"]):focus {
+  :where(input[type='text']):focus,
+  :where(input[type='email']):focus,
+  :where(input[type='password']):focus {
     outline: none;
     border-color: var(--ui-accent-500);
     background: var(--ui-bg-elevated);
@@ -88,9 +88,9 @@
       var(--ui-shadow-sm);
   }
 
-  :where(input[type="text"]):disabled,
-  :where(input[type="email"]):disabled,
-  :where(input[type="password"]):disabled {
+  :where(input[type='text']):disabled,
+  :where(input[type='email']):disabled,
+  :where(input[type='password']):disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
@@ -177,7 +177,7 @@
   }
 
   .search-input::before {
-    content: "";
+    content: '';
     position: absolute;
     left: var(--ui-space-3);
     top: 50%;
@@ -249,7 +249,7 @@
   }
 
   .toggle-switch::after {
-    content: "";
+    content: '';
     position: absolute;
     top: 2px;
     left: 2px;
@@ -295,6 +295,7 @@
     color: var(--ui-text-secondary);
   }
   .label-optional {
+    margin-inline-start: var(--ui-space-2);
     font-weight: 400;
     color: var(--ui-text-muted);
   }
@@ -354,7 +355,7 @@
 
   .toggle-slider::before {
     position: absolute;
-    content: "";
+    content: '';
     height: 18px;
     width: 18px;
     left: 3px;
