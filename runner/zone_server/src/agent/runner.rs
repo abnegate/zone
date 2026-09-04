@@ -66,25 +66,37 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
         let mut tool_calls_used = 0usize;
         let names = tools.names();
         let mut identifiers = BTreeSet::new();
+        let mut previous = BTreeSet::new();
+        let mut finalizing = false;
 
-        for iteration in 0..MAX_ITERATIONS {
+        for iteration in 0..=MAX_ITERATIONS {
+            if iteration == MAX_ITERATIONS {
+                finalizing = true;
+            }
+            if finalizing {
+                messages.push(LlmMessage::system(
+                    "Tool use has ended for this turn. Answer the user in ordinary text using the results already available. \
+                     Do not request more tools or return function JSON. If the results are insufficient, explain what remains unknown. \
+                     For a greeting or general conversation, reply directly without claiming workspace facts."
+                ));
+            }
             let stream = match llm
-                .chat_stream_with_model(&model, messages.clone(), Some(definitions.clone()))
+                .chat_stream_with_model(&model, messages.clone(), (!finalizing).then(|| definitions.clone()))
                 .await
             {
                 Ok(stream) => stream,
                 Err(e) => {
                     tracing::error!("Agent completion failed on iteration {}: {}", iteration, e);
-                    // A first-round failure is usually the provider rejecting
-                    // the tool definitions, which is the one cause the reader
-                    // can actually act on.
-                    yield AgentEvent::Failed(if iteration == 0 {
-                        "Failed to generate response. This model may not support tool calling — \
-                         turn off agent mode to continue."
-                            .to_string()
-                    } else {
-                        "Failed to generate response".to_string()
-                    });
+                    if !finalizing && e.unsupported_tools() {
+                        messages.push(LlmMessage::system(
+                            "This model does not support the available tools. No tools were executed from this request. \
+                             Answer directly when tools are unnecessary. If the user's request requires tools, explain that \
+                             they need to choose a model with tool support; do not invent tool results."
+                        ));
+                        finalizing = true;
+                        continue;
+                    }
+                    yield AgentEvent::Failed("Failed to generate response. Check the model connection and try again.".to_string());
                     return;
                 }
             };
@@ -92,6 +104,7 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
 
             let mut text = String::new();
             let mut pending = ToolCallAccumulator::default();
+            let mut has_image = false;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -119,6 +132,7 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 }
 
                 for image in &choice.delta.generated_images {
+                    has_image = true;
                     yield AgentEvent::Image(image.image_url.url.clone());
                 }
 
@@ -133,6 +147,18 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
 
             let mut requested = pending.finish();
             let parsed = parse_text_tool_calls(&text, &names);
+            if finalizing {
+                if !requested.is_empty() || !matches!(parsed, TextToolCalls::Prose) {
+                    yield AgentEvent::Failed(
+                        "The model could not finish without requesting more tools. Try a model with reliable tool support.".to_string()
+                    );
+                } else if !text.trim().is_empty() {
+                    yield AgentEvent::Chunk(text);
+                } else if !has_image {
+                    yield AgentEvent::Failed("The model returned an empty response. Try again or choose another model.".to_string());
+                }
+                return;
+            }
             let replay_content = match parsed {
                 TextToolCalls::Calls(calls) => {
                     if requested.is_empty() {
@@ -142,13 +168,6 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 }
                 TextToolCalls::Malformed if !requested.is_empty() => None,
                 TextToolCalls::Malformed => {
-                    if iteration + 1 == MAX_ITERATIONS {
-                        yield AgentEvent::Failed(
-                            "The model repeatedly returned malformed tool calls. Try another model or turn off agent mode."
-                                .to_string()
-                        );
-                        return;
-                    }
                     messages.push(LlmMessage::user(
                         "Your previous response contained a malformed tool call and no tools from it were executed. \
                          Return a complete valid function tool call with a JSON object for arguments, \
@@ -159,8 +178,10 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 TextToolCalls::Prose => (!text.is_empty()).then(|| text.clone()),
             };
             if requested.is_empty() {
-                if !text.is_empty() {
+                if !text.trim().is_empty() {
                     yield AgentEvent::Chunk(text);
+                } else if !has_image {
+                    yield AgentEvent::Failed("The model returned an empty response. Try again or choose another model.".to_string());
                 }
                 return;
             }
@@ -178,13 +199,21 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 generated_images: Vec::new(),
             });
 
+            // Compare adjacent rounds only: a read after an intervening write
+            // must run again to observe the changed state.
+            let signatures: BTreeSet<_> = requested.iter().map(signature).collect();
+            let repeated = signatures.is_subset(&previous);
+            previous = signatures;
+            finalizing = repeated;
+
             for call in requested {
-                if tool_calls_used >= MAX_TOOL_CALLS {
-                    yield AgentEvent::Failed(format!(
-                        "Stopped after {} tool calls without reaching an answer",
-                        MAX_TOOL_CALLS
+                if repeated || tool_calls_used >= MAX_TOOL_CALLS {
+                    finalizing = true;
+                    messages.push(LlmMessage::tool_result(
+                        &call.id,
+                        "Not executed: tool use stopped because the requests repeated or the turn's tool budget was exhausted. Use the existing results to answer."
                     ));
-                    return;
+                    continue;
                 }
                 tool_calls_used += 1;
 
@@ -212,13 +241,20 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
 
                 messages.push(LlmMessage::tool_result(&call.id, output));
             }
+            finalizing |= tool_calls_used >= MAX_TOOL_CALLS;
         }
-
-        yield AgentEvent::Failed(format!(
-            "Stopped after {} rounds of tool use without reaching an answer",
-            MAX_ITERATIONS
-        ));
     }
+}
+
+/// Match semantic arguments even when a provider changes JSON key ordering.
+fn signature(call: &LlmToolCall) -> (String, String) {
+    let arguments = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+        .map(|mut value| {
+            value.sort_all_objects();
+            value.to_string()
+        })
+        .unwrap_or_else(|_| call.function.arguments.clone());
+    (call.function.name.clone(), arguments)
 }
 
 /// Longest tool outcome we show in the UI trace.
