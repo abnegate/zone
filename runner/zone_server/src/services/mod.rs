@@ -8,6 +8,7 @@ pub mod email;
 pub mod embedding;
 pub mod git;
 pub mod image_intent;
+pub mod image_source;
 pub mod model;
 pub mod pr;
 pub mod runner;

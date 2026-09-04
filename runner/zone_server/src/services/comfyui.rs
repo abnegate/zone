@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 use crate::config::ComfyUiConfig;
 
+pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const PACKAGED_IMG2IMG_WORKFLOW: &str =
+    include_str!("../../../../comfyui/workflows/flux1-schnell-fp8-img2img-api.json");
+
 #[derive(Debug, thiserror::Error)]
 pub enum ComfyUiError {
     #[error("ComfyUI is disabled")]
@@ -33,16 +37,52 @@ pub struct GeneratedImage {
     pub filename: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SourceImage {
+    pub bytes: bytes::Bytes,
+    pub mime: String,
+    pub filename: String,
+}
+
+impl SourceImage {
+    pub fn new(bytes: impl Into<bytes::Bytes>, mime: &str) -> Result<Self, ComfyUiError> {
+        let mime = normalize_source_mime(mime)?;
+        let bytes = bytes.into();
+        if bytes.is_empty() || bytes.len() > MAX_SOURCE_IMAGE_BYTES {
+            return Err(ComfyUiError::Configuration(
+                "source image is empty or too large",
+            ));
+        }
+        Ok(Self {
+            filename: format!(
+                "zone-img2img-{}.{}",
+                Uuid::new_v4(),
+                extension_for_mime(&mime)
+            ),
+            bytes,
+            mime,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct ComfyUiClient {
     config: ComfyUiConfig,
     client: Client,
     workflow: Value,
+    img2img_workflow: Value,
 }
 
 #[derive(Deserialize)]
 struct PromptResponse {
     prompt_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadResponse {
+    name: String,
+    #[serde(default)]
+    subfolder: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,24 +116,22 @@ impl ComfyUiClient {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(config.request_timeout_secs))
             .build()?;
-        let workflow = std::fs::read_to_string(&config.workflow_path)
-            .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not readable"))
-            .and_then(|contents| {
-                serde_json::from_str(&contents).map_err(|_| {
-                    ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not valid JSON")
-                })
-            })?;
+        let workflow = load_workflow_file(&config.workflow_path)?;
         validate_workflow(&workflow)?;
+        let img2img_workflow = load_img2img_workflow(&config.workflow_path)?;
+        validate_img2img_workflow(&img2img_workflow)?;
         Ok(Self {
             config,
             client,
             workflow,
+            img2img_workflow,
         })
     }
 
     pub async fn generate(
         &self,
         prompt: &str,
+        source: Option<&SourceImage>,
         cancel: &mut broadcast::Receiver<()>,
         progress: mpsc::UnboundedSender<String>,
     ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
@@ -106,12 +144,33 @@ impl ComfyUiClient {
         }
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(self.config.generation_timeout_secs);
-        let workflow = configure_flux_schnell_workflow(
-            self.workflow.clone(),
-            prompt,
-            &self.config.checkpoint,
-            rand::random::<u64>() & i64::MAX as u64,
-        )?;
+        let prompt = if prompt.trim().is_empty() {
+            if source.is_some() {
+                "edit this image"
+            } else {
+                return Err(ComfyUiError::Configuration("prompt is empty or too long"));
+            }
+        } else {
+            prompt
+        };
+        let workflow = if let Some(source) = source {
+            let _ = progress.send("Uploading source image...".to_string());
+            let uploaded = self.upload_source(source, cancel, deadline).await?;
+            configure_flux_schnell_img2img_workflow(
+                self.img2img_workflow.clone(),
+                prompt,
+                &self.config.checkpoint,
+                rand::random::<u64>() & i64::MAX as u64,
+                &uploaded,
+            )?
+        } else {
+            configure_flux_schnell_workflow(
+                self.workflow.clone(),
+                prompt,
+                &self.config.checkpoint,
+                rand::random::<u64>() & i64::MAX as u64,
+            )?
+        };
         let request = self
             .authorize(self.client.post(format!("{}/prompt", self.config.base_url)))
             .json(&json!({
@@ -169,6 +228,39 @@ impl ComfyUiClient {
                 }
             }
         }
+    }
+
+    async fn upload_source(
+        &self,
+        source: &SourceImage,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+    ) -> Result<String, ComfyUiError> {
+        let filename = sanitize_upload_name(&source.filename)?;
+        let part = reqwest::multipart::Part::bytes(source.bytes.to_vec())
+            .file_name(filename.clone())
+            .mime_str(&source.mime)
+            .map_err(|_| ComfyUiError::Configuration("source image type is not supported"))?;
+        let form = reqwest::multipart::Form::new()
+            .part("image", part)
+            .text("overwrite", "true")
+            .text("type", "input");
+        let request = self.authorize(
+            self.client
+                .post(format!("{}/upload/image", self.config.base_url))
+                .multipart(form),
+        );
+        let uploaded = self
+            .bounded(cancel, deadline, async move {
+                request
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<UploadResponse>()
+                    .await
+            })
+            .await?;
+        uploaded_image_name(&uploaded, &filename)
     }
 
     fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -331,6 +423,37 @@ pub fn build_flux_schnell_workflow(
     configure_flux_schnell_workflow(workflow, prompt, checkpoint, seed)
 }
 
+/// Build the image-to-image workflow and mutate only approved inputs.
+pub fn build_flux_schnell_img2img_workflow(
+    prompt: &str,
+    checkpoint: &str,
+    seed: u64,
+    image_name: &str,
+) -> Result<Value, ComfyUiError> {
+    let workflow = serde_json::from_str(PACKAGED_IMG2IMG_WORKFLOW)
+        .map_err(|_| ComfyUiError::Configuration("packaged img2img workflow is not valid JSON"))?;
+    configure_flux_schnell_img2img_workflow(workflow, prompt, checkpoint, seed, image_name)
+}
+
+fn load_workflow_file(path: &std::path::Path) -> Result<Value, ComfyUiError> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not readable"))?;
+    serde_json::from_str(&contents)
+        .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not valid JSON"))
+}
+
+fn load_img2img_workflow(text_to_image_path: &std::path::Path) -> Result<Value, ComfyUiError> {
+    let sibling = text_to_image_path
+        .parent()
+        .map(|directory| directory.join("flux1-schnell-fp8-img2img-api.json"));
+    if let Some(path) = sibling.filter(|path| path.is_file()) {
+        return load_workflow_file(&path)
+            .map_err(|_| ComfyUiError::Configuration("img2img workflow path is not readable"));
+    }
+    serde_json::from_str(PACKAGED_IMG2IMG_WORKFLOW)
+        .map_err(|_| ComfyUiError::Configuration("packaged img2img workflow is not valid JSON"))
+}
+
 fn validate_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
     for pointer in [
         "/3/inputs/seed",
@@ -377,6 +500,116 @@ fn configure_flux_schnell_workflow(
     Ok(workflow)
 }
 
+fn validate_img2img_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
+    for pointer in [
+        "/3/inputs/seed",
+        "/3/inputs/denoise",
+        "/4/inputs/ckpt_name",
+        "/6/inputs/text",
+        "/9/inputs/images",
+        "/10/inputs/image",
+        "/11/inputs/width",
+        "/11/inputs/height",
+        "/12/inputs/pixels",
+    ] {
+        if workflow.pointer(pointer).is_none() {
+            return Err(ComfyUiError::Configuration(
+                "workflow does not match the FLUX Schnell img2img contract",
+            ));
+        }
+    }
+    if workflow.pointer("/9/class_type").and_then(Value::as_str) != Some("PreviewImage") {
+        return Err(ComfyUiError::Configuration(
+            "workflow output must use temporary PreviewImage storage",
+        ));
+    }
+    if workflow.pointer("/10/class_type").and_then(Value::as_str) != Some("LoadImage") {
+        return Err(ComfyUiError::Configuration(
+            "img2img workflow must load a source image",
+        ));
+    }
+    if workflow.pointer("/12/class_type").and_then(Value::as_str) != Some("VAEEncode") {
+        return Err(ComfyUiError::Configuration(
+            "img2img workflow must encode the source image",
+        ));
+    }
+    Ok(())
+}
+
+fn configure_flux_schnell_img2img_workflow(
+    mut workflow: Value,
+    prompt: &str,
+    checkpoint: &str,
+    seed: u64,
+    image_name: &str,
+) -> Result<Value, ComfyUiError> {
+    if prompt.trim().is_empty() || prompt.len() > 100_000 {
+        return Err(ComfyUiError::Configuration("prompt is empty or too long"));
+    }
+    if checkpoint.is_empty()
+        || checkpoint.contains('/')
+        || checkpoint.contains('\\')
+        || checkpoint.contains("..")
+    {
+        return Err(ComfyUiError::Configuration("invalid checkpoint filename"));
+    }
+    let image_name = sanitize_upload_name(image_name)?;
+    validate_img2img_workflow(&workflow)?;
+    workflow["3"]["inputs"]["seed"] = json!(seed);
+    workflow["4"]["inputs"]["ckpt_name"] = json!(checkpoint);
+    workflow["6"]["inputs"]["text"] = json!(prompt);
+    workflow["10"]["inputs"]["image"] = json!(image_name);
+    Ok(workflow)
+}
+
+fn normalize_source_mime(mime: &str) -> Result<String, ComfyUiError> {
+    match mime.trim().to_ascii_lowercase().as_str() {
+        "image/jpg" | "image/jpeg" => Ok("image/jpeg".to_string()),
+        "image/png" => Ok("image/png".to_string()),
+        "image/webp" => Ok("image/webp".to_string()),
+        _ => Err(ComfyUiError::Configuration(
+            "source image type is not supported",
+        )),
+    }
+}
+
+fn extension_for_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+fn sanitize_upload_name(name: &str) -> Result<String, ComfyUiError> {
+    if name.is_empty()
+        || name.len() > 128
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+    {
+        return Err(ComfyUiError::Configuration("invalid source image filename"));
+    }
+    Ok(name.to_string())
+}
+
+fn uploaded_image_name(uploaded: &UploadResponse, fallback: &str) -> Result<String, ComfyUiError> {
+    if !uploaded.subfolder.trim().is_empty() {
+        return Err(ComfyUiError::InvalidResponse(
+            "upload returned a nested path",
+        ));
+    }
+    let name = if uploaded.name.trim().is_empty() {
+        fallback
+    } else {
+        uploaded.name.as_str()
+    };
+    sanitize_upload_name(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +630,41 @@ mod tests {
         assert_eq!(workflow["3"]["inputs"]["seed"], 42);
         assert_eq!(workflow["3"]["inputs"]["steps"], 4);
         assert_eq!(workflow["5"]["inputs"]["width"], 1024);
+        assert!(workflow.get("10").is_none());
+    }
+
+    #[test]
+    fn img2img_workflow_mutates_only_approved_inputs() {
+        let workflow = build_flux_schnell_img2img_workflow(
+            "make it dusk",
+            "custom-image.safetensors",
+            42,
+            "zone-img2img-source.png",
+        )
+        .unwrap();
+        assert_eq!(
+            workflow["4"]["inputs"]["ckpt_name"],
+            "custom-image.safetensors"
+        );
+        assert_eq!(workflow["6"]["inputs"]["text"], "make it dusk");
+        assert_eq!(workflow["3"]["inputs"]["seed"], 42);
+        assert_eq!(workflow["3"]["inputs"]["denoise"], 0.75);
+        assert_eq!(workflow["3"]["inputs"]["steps"], 4);
+        assert_eq!(workflow["10"]["inputs"]["image"], "zone-img2img-source.png");
+        assert_eq!(workflow["11"]["inputs"]["width"], 1024);
+        assert_eq!(workflow["12"]["class_type"], "VAEEncode");
+    }
+
+    #[test]
+    fn img2img_workflow_rejects_pathful_filenames() {
+        assert!(
+            build_flux_schnell_img2img_workflow("fox", "ok.safetensors", 1, "../secret.png")
+                .is_err()
+        );
+        assert!(
+            build_flux_schnell_img2img_workflow("fox", "ok.safetensors", 1, "nested/file.png")
+                .is_err()
+        );
     }
 
     #[test]
@@ -456,7 +724,7 @@ mod tests {
         let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let images = client
-            .generate("a fox", &mut cancel_rx, progress_tx)
+            .generate("a fox", None, &mut cancel_rx, progress_tx)
             .await
             .unwrap();
         assert_eq!(images.len(), 1);
@@ -488,10 +756,11 @@ mod tests {
         .unwrap();
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
-        let task =
-            tokio::spawn(
-                async move { client.generate("a fox", &mut cancel_rx, progress_tx).await },
-            );
+        let task = tokio::spawn(async move {
+            client
+                .generate("a fox", None, &mut cancel_rx, progress_tx)
+                .await
+        });
         tokio::time::sleep(Duration::from_millis(25)).await;
         cancel_tx.send(()).unwrap();
         assert!(matches!(task.await.unwrap(), Err(ComfyUiError::Cancelled)));
@@ -526,12 +795,75 @@ mod tests {
         .unwrap();
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
-        let task =
-            tokio::spawn(
-                async move { client.generate("a fox", &mut cancel_rx, progress_tx).await },
-            );
+        let task = tokio::spawn(async move {
+            client
+                .generate("a fox", None, &mut cancel_rx, progress_tx)
+                .await
+        });
         tokio::time::sleep(Duration::from_millis(25)).await;
         cancel_tx.send(()).unwrap();
         assert!(matches!(task.await.unwrap(), Err(ComfyUiError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn img2img_uploads_source_then_submits_encoded_workflow() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "uploaded-source.png",
+                "subfolder": "",
+                "type": "input"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains(
+                "uploaded-source.png",
+            ))
+            .and(wiremock::matchers::body_string_contains("VAEEncode"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "i2i"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/i2i"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "i2i": {"status": {"status_str": "success"}, "outputs": {
+                    "9": {"images": [{"filename": "edited.png", "subfolder": "", "type": "temp"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![9, 8, 7]),
+            )
+            .mount(&server)
+            .await;
+        let client = ComfyUiClient::new(ComfyUiConfig {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let source = SourceImage::new(vec![1, 2, 3, 4], "image/png").unwrap();
+        let images = client
+            .generate("make it dusk", Some(&source), &mut cancel_rx, progress_tx)
+            .await
+            .unwrap();
+        assert_eq!(images[0].bytes.as_ref(), &[9, 8, 7]);
+        assert_eq!(
+            progress_rx.recv().await.as_deref(),
+            Some("Uploading source image...")
+        );
     }
 }

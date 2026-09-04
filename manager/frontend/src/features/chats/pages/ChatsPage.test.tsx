@@ -1586,6 +1586,68 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('reuses a thread image as the next starting image', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-generated',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'Here is the image.',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              attachments: [
+                {
+                  name: 'generated-image-1.webp',
+                  mime: 'image/webp',
+                  url: 'data:image/webp;base64,generated',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      renderChatsPage();
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Use as starting image' })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Use as starting image' }));
+      expect(screen.getByText('Starting image')).toBeInTheDocument();
+      expect(
+        screen.getByText('Ask to generate or edit and this image will be the starting point.')
+      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Added as starting image' })).toBeDisabled();
+
+      fireEvent.change(screen.getByPlaceholderText('Type a message, or drop a file...'), {
+        target: { value: 'Make this a watercolor' },
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => {
+        expect(mockWsSend).toHaveBeenCalledWith(
+          JSON.stringify({
+            type: 'send',
+            content: 'Make this a watercolor',
+            metadata: {
+              attachments: [
+                {
+                  name: 'generated-image-1.webp',
+                  mime: 'image/webp',
+                  url: 'data:image/webp;base64,generated',
+                },
+              ],
+            },
+          })
+        );
+      });
+    });
+
     it('displays chat model name', async () => {
       renderChatsPage();
 

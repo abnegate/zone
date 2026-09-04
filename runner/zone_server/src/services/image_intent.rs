@@ -42,14 +42,15 @@ impl ImageIntentClassifier {
             return force;
         }
 
-        match deterministic_decision(content) {
+        let has_source_image = crate::services::image_source::has_image_attachment(metadata);
+        match deterministic_decision(content, has_source_image) {
             RuleDecision::Image => true,
             RuleDecision::Chat => false,
-            RuleDecision::Ambiguous => self.classify_ambiguous(content).await,
+            RuleDecision::Ambiguous => self.classify_ambiguous(content, has_source_image).await,
         }
     }
 
-    async fn classify_ambiguous(&self, content: &str) -> bool {
+    async fn classify_ambiguous(&self, content: &str, has_source_image: bool) -> bool {
         let client = LlmClient::new(LlmConfig {
             base_url: self.litellm_host.clone(),
             api_key: self.litellm_key.clone(),
@@ -57,11 +58,20 @@ impl ImageIntentClassifier {
             temperature: 0.0,
             max_tokens: 3,
         });
-        let prompt = format!(
-            "Return exactly IMAGE or CHAT. IMAGE only when the user wants a new image generated now. \
-             Discussion, analysis, prompt-writing, coding, and editing instructions without asking to \
-             generate now are CHAT.\nUser: {content}"
-        );
+        let prompt = if has_source_image {
+            format!(
+                "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
+                 or wants the attached image edited now: add, remove, replace, restyle, or transform. \
+                 Discussion, analysis, prompt-writing, coding, and questions about the attached \
+                 image are CHAT.\nUser: {content}"
+            )
+        } else {
+            format!(
+                "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
+                 or wants something added to, removed from, or changed on an existing image now. \
+                 Discussion, analysis, prompt-writing, coding, and how-to questions are CHAT.\nUser: {content}"
+            )
+        };
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.classifier_timeout_secs),
             client.chat_with_model(
@@ -86,21 +96,13 @@ impl ImageIntentClassifier {
     }
 }
 
-fn deterministic_decision(content: &str) -> RuleDecision {
-    let tokens: Vec<String> = content
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
-        .collect();
+fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision {
+    let tokens = tokenize(content);
     if tokens.is_empty() {
         return RuleDecision::Chat;
     }
     let has = |word: &str| tokens.iter().any(|token| token == word);
-    let has_phrase = |phrase: &[&str]| {
-        tokens
-            .windows(phrase.len())
-            .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
-    };
+    let has_phrase = |phrase: &[&str]| phrase_in(&tokens, phrase);
 
     // High-confidence non-generation intents take precedence. Exact tokens
     // avoid treating "a teacher explaining relativity" as a request to
@@ -127,7 +129,7 @@ fn deterministic_decision(content: &str) -> RuleDecision {
             && ["component", "api", "workflow", "code", "implement"]
                 .iter()
                 .any(|word| has(word)));
-    let analysis_request = ["describe", "analyze", "analyse", "inspect"]
+    let analysis_request = ["describe", "analyze", "analyse", "inspect", "look"]
         .iter()
         .any(|word| has(word))
         && (has("image") || has("picture") || has("photo"));
@@ -135,9 +137,16 @@ fn deterministic_decision(content: &str) -> RuleDecision {
         has("prompt") && (has("write") || has("improve") || has_phrase(&["prompt", "for"]));
     let discussion_request = has_phrase(&["talk", "about"])
         || has_phrase(&["discuss", "image"])
-        || (asks_how && (has("generate") || has("create") || has("make")));
-    if analysis_request || prompt_request || discussion_request || discusses_code {
+        || (asks_how
+            && (has("generate") || has("create") || has("make") || has("add") || has("remove")));
+    if analysis_request || prompt_request || discussion_request || discusses_code || asks_how {
         return RuleDecision::Chat;
+    }
+
+    if is_edit_request(&tokens, &has_phrase)
+        && (has_source_image || refers_to_existing_image(&tokens, &has_phrase))
+    {
+        return RuleDecision::Image;
     }
 
     const ACTIONS: &[&str] = &[
@@ -200,6 +209,98 @@ fn deterministic_decision(content: &str) -> RuleDecision {
     }
 }
 
+/// True when the prompt asks to change an image that is already on the thread.
+pub fn should_reuse_thread_image(content: &str) -> bool {
+    matches!(deterministic_decision(content, false), RuleDecision::Image) && {
+        let tokens = tokenize(content);
+        refers_to_existing_image(&tokens, &|phrase| phrase_in(&tokens, phrase))
+    }
+}
+
+fn tokenize(content: &str) -> Vec<String> {
+    content
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn phrase_in(tokens: &[String], phrase: &[&str]) -> bool {
+    tokens
+        .windows(phrase.len())
+        .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+}
+
+fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    const STRONG_EDITS: &[&str] = &[
+        "add",
+        "remove",
+        "delete",
+        "erase",
+        "replace",
+        "insert",
+        "overlay",
+        "crop",
+        "inpaint",
+        "outpaint",
+        "recolor",
+        "restyle",
+        "remix",
+        "redraw",
+        "repaint",
+        "reimagine",
+        "edit",
+        "transform",
+        "modify",
+        "convert",
+        "wipe",
+    ];
+    const WEAK_EDITS: &[&str] = &[
+        "put", "take", "fill", "hide", "fix", "clean", "clear", "brighten", "darken", "sharpen",
+        "blur", "vary", "swap", "move",
+    ];
+    tokens
+        .iter()
+        .any(|token| STRONG_EDITS.contains(&token.as_str()))
+        || (tokens
+            .iter()
+            .any(|token| WEAK_EDITS.contains(&token.as_str()))
+            && refers_to_existing_image(tokens, has_phrase))
+        || has_phrase(&["get", "rid"])
+        || has_phrase(&["take", "out"])
+        || has_phrase(&["take", "off"])
+        || has_phrase(&["cut", "out"])
+        || has_phrase(&["make", "this"])
+        || has_phrase(&["make", "it"])
+        || has_phrase(&["turn", "this"])
+        || has_phrase(&["turn", "it"])
+        || has_phrase(&["change", "this"])
+        || has_phrase(&["change", "the"])
+        || has_phrase(&["based", "on", "this"])
+        || has_phrase(&["from", "this"])
+        || has_phrase(&["using", "this"])
+        || has_phrase(&["to", "this"])
+        || has_phrase(&["in", "this"])
+        || has_phrase(&["on", "this"])
+        || has_phrase(&["into", "this"])
+}
+
+fn refers_to_existing_image(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    has_phrase(&["this", "image"])
+        || has_phrase(&["this", "picture"])
+        || has_phrase(&["this", "photo"])
+        || has_phrase(&["the", "image"])
+        || has_phrase(&["the", "picture"])
+        || has_phrase(&["the", "photo"])
+        || has_phrase(&["that", "image"])
+        || has_phrase(&["that", "picture"])
+        || has_phrase(&["that", "photo"])
+        || has_phrase(&["the", "attached"])
+        || tokens
+            .iter()
+            .any(|token| token == "background" || token == "watermark")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,11 +325,73 @@ mod tests {
             "make me an image",
         ] {
             assert_eq!(
-                deterministic_decision(request),
+                deterministic_decision(request, false),
                 RuleDecision::Image,
                 "{request}"
             );
         }
+        for edit in [
+            "Make this a watercolor",
+            "Turn this into a painting",
+            "Edit this image to add a sunset",
+            "Restyle this as cyberpunk",
+            "Change the background to a forest",
+            "Remove from this image",
+            "Add to this image",
+            "Add a hat to this picture",
+            "Remove the person from this photo",
+            "Delete the text in this image",
+            "Erase the watermark",
+            "Put a sunset in this photo",
+            "Take the logo off this image",
+            "Get rid of the background",
+            "Replace the sky in this picture",
+        ] {
+            assert_eq!(
+                deterministic_decision(edit, true),
+                RuleDecision::Image,
+                "{edit}"
+            );
+        }
+        for needs_source in [
+            "Make this a watercolor",
+            "Turn this into a painting",
+            "Restyle this as cyberpunk",
+        ] {
+            assert_ne!(
+                deterministic_decision(needs_source, false),
+                RuleDecision::Image,
+                "{needs_source}"
+            );
+        }
+        for named_image in [
+            "Remove from this image",
+            "Add to this image",
+            "Add a hat to this picture",
+            "Edit this image to add a sunset",
+            "Change the background to a forest",
+        ] {
+            assert_eq!(
+                deterministic_decision(named_image, false),
+                RuleDecision::Image,
+                "{named_image}"
+            );
+            assert!(should_reuse_thread_image(named_image), "{named_image}");
+        }
+        assert!(!should_reuse_thread_image(
+            "Generate an image of a blue fox"
+        ));
+        assert!(!should_reuse_thread_image(
+            "How do I add a hat to this image?"
+        ));
+        assert_eq!(
+            deterministic_decision("How do I add a hat to this image?", true),
+            RuleDecision::Chat
+        );
+        assert_eq!(
+            deterministic_decision("Add a hat", false),
+            RuleDecision::Chat
+        );
         for chat in [
             "Explain image generation code",
             "Write an image prompt for a red panda",
@@ -239,10 +402,18 @@ mod tests {
             "Render an image component in React",
             "What is the capital of France?",
         ] {
-            assert_eq!(deterministic_decision(chat), RuleDecision::Chat, "{chat}");
+            assert_eq!(
+                deterministic_decision(chat, false),
+                RuleDecision::Chat,
+                "{chat}"
+            );
         }
         assert_eq!(
-            deterministic_decision("Could you design a logo for Acme?"),
+            deterministic_decision("Describe this image", true),
+            RuleDecision::Chat
+        );
+        assert_eq!(
+            deterministic_decision("Could you design a logo for Acme?", false),
             RuleDecision::Ambiguous
         );
     }

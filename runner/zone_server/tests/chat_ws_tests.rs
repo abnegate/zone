@@ -1180,6 +1180,127 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
 }
 
 #[tokio::test]
+async fn test_attached_image_routes_to_image_to_image() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "uploaded-source.png",
+            "subfolder": "",
+            "type": "input"
+        })))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .and(wiremock::matchers::body_string_contains(
+            "uploaded-source.png",
+        ))
+        .and(wiremock::matchers::body_string_contains("VAEEncode"))
+        .and(wiremock::matchers::body_string_contains(
+            "Make this a watercolor",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "img2img-1"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/img2img-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "img2img-1": {
+                "status": {"status_str": "success"},
+                "outputs": {"9": {"images": [{
+                    "filename": "edited.png", "subfolder": "", "type": "temp"
+                }]}}
+            }
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(vec![137, 80, 78, 71]),
+        )
+        .expect(1)
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-img2img-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let addr = spawn_server_with_config(config).await;
+
+    let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "Make this a watercolor",
+                "metadata": {
+                    "attachments": [{
+                        "name": "rooster.png",
+                        "mime": "image/png",
+                        "url": red_png_data_url()
+                    }]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut image_url = None;
+    let mut saw_img2img = false;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("status") => {
+                if frame["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("image-to-image"))
+                {
+                    saw_img2img = true;
+                }
+            }
+            Some("image") => {
+                image_url = frame["attachment"]["url"].as_str().map(str::to_string);
+            }
+            Some("message_end") => break,
+            Some("error") => panic!("unexpected image-to-image error: {frame}"),
+            _ => {}
+        }
+    }
+    assert!(saw_img2img, "status should announce image-to-image");
+    let image_url = image_url.expect("image event must contain an artifact URL");
+    assert!(image_url.starts_with("/api/artifacts/"));
+    let artifact = reqwest::Client::new()
+        .get(format!("http://{addr}{image_url}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(artifact.status(), reqwest::StatusCode::OK);
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
 async fn test_image_failure_never_announces_empty_assistant_message() {
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))

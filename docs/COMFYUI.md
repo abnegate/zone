@@ -165,8 +165,9 @@ docker compose --profile bundled-comfyui logs comfyui
 
 ## Workflow contract
 
-`comfyui/workflows/flux1-schnell-fp8-api.json` is an API-format workflow using
-only built-in ComfyUI nodes. Integration code may replace only these inputs:
+`comfyui/workflows/flux1-schnell-fp8-api.json` is the text-to-image API-format
+workflow. It uses only built-in ComfyUI nodes. Integration code may replace
+only these inputs:
 
 - node `6`: positive prompt text
 - node `4`: checkpoint filename from trusted server configuration
@@ -174,11 +175,27 @@ only built-in ComfyUI nodes. Integration code may replace only these inputs:
 - node `3`: seed, steps, CFG, sampler, scheduler, and denoise
 - node `9`: temporary `PreviewImage` output (persistent `SaveImage` is rejected)
 
+`comfyui/workflows/flux1-schnell-fp8-img2img-api.json` is the image-to-image
+sibling. Chat uses it when the current message includes an image attachment
+(a data URL or a same-chat `/api/artifacts/...` URL). The manager uploads
+that image to ComfyUI's input folder, then may replace only:
+
+- node `6`: positive prompt text
+- node `4`: checkpoint filename from trusted server configuration
+- node `3`: seed (steps, CFG, sampler, scheduler, and denoise stay packaged)
+- node `10`: uploaded source filename
+- node `9`: temporary `PreviewImage` output (persistent `SaveImage` is rejected)
+
+Node `11` scales the source to 1024×1024 with a centered crop. Node `12`
+VAE-encodes it. Packaged denoise is `0.75` so Schnell's four Euler/simple
+steps still transform the source instead of ignoring it.
+
 The packaged defaults are Schnell-appropriate: four Euler/simple steps and CFG
 1. Node `4` defaults to the manifest filename and is never changed from
 untrusted request data. Zone copies successful temporary output into its
 protected artifact store and clears the ComfyUI history entry; cancelled
-running jobs remain only in ComfyUI's temporary lifecycle.
+running jobs remain only in ComfyUI's temporary lifecycle. Remote `http(s)`
+attachment URLs are never fetched as img2img sources.
 
 ## Troubleshooting
 

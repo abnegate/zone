@@ -3,6 +3,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
+import { isProtectedArtifactUrl } from '../api/protectedImages';
 import { AuthenticatedImage, Generation, MessageContent, ToolTrace } from '../components';
 import { useChat, useChatSearch, useChats } from '../hooks';
 import type { ChatSearchResult } from '../types';
@@ -14,7 +15,9 @@ import {
   formatDate,
   imageAttachments,
   isSendable,
+  isStartingImage,
   readAttachment,
+  sourceAttachment,
 } from '../utils';
 import './ChatsPage.css';
 
@@ -53,6 +56,11 @@ export default function ChatsPage() {
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const useAsStartingImage = (image: { name: string; mime: string; url: string }) => {
+    const next = sourceAttachment(image);
+    setAttachments((prev) => (prev.some((item) => item.id === next.id) ? prev : [...prev, next]));
   };
   const [sending, setSending] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
@@ -661,19 +669,33 @@ export default function ChatsPage() {
                           className="message-images"
                           data-image-count={Math.min(images.length, 3)}
                         >
-                          {images.map((a, index) => (
-                            <AuthenticatedImage
-                              key={a.url}
-                              src={a.url}
-                              alt={a.name || `Generated image ${index + 1}`}
-                              openLabel={`Open ${a.name || `image ${index + 1}`} full size`}
-                              linkClassName="message-image-link"
-                              title="Open full size"
-                              loading="lazy"
-                              decoding="async"
-                              data-testid="message-image"
-                            />
-                          ))}
+                          {images.map((a, index) => {
+                            const starting = attachments.some(
+                              (item) => item.id === `source:${a.url}`
+                            );
+                            return (
+                              <div key={a.url} className="message-image-frame">
+                                <AuthenticatedImage
+                                  src={a.url}
+                                  alt={a.name || `Generated image ${index + 1}`}
+                                  openLabel={`Open ${a.name || `image ${index + 1}`} full size`}
+                                  linkClassName="message-image-link"
+                                  title="Open full size"
+                                  loading="lazy"
+                                  decoding="async"
+                                  data-testid="message-image"
+                                />
+                                <button
+                                  type="button"
+                                  className="message-image-use"
+                                  onClick={() => useAsStartingImage(a)}
+                                  disabled={starting}
+                                >
+                                  {starting ? 'Added as starting image' : 'Use as starting image'}
+                                </button>
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                       {toolCalls.length > 0 && <ToolTrace calls={toolCalls} />}
@@ -722,12 +744,24 @@ export default function ChatsPage() {
                       className={`attachment-chip${attachment.rejected ? ' is-rejected' : ''}${attachment.url ? ' has-thumb' : ''}`}
                     >
                       {attachment.url ? (
-                        <img className="attachment-chip-thumb" src={attachment.url} alt="" />
+                        isProtectedArtifactUrl(attachment.url) ? (
+                          <AuthenticatedImage
+                            src={attachment.url}
+                            alt=""
+                            className="attachment-chip-thumb"
+                            linked={false}
+                            compact
+                          />
+                        ) : (
+                          <img className="attachment-chip-thumb" src={attachment.url} alt="" />
+                        )
                       ) : null}
                       <span className="attachment-chip-name">{attachment.name}</span>
                       <span className="attachment-chip-size">
                         {attachment.rejected ? (
                           <span className="attachment-chip-note">{attachment.rejected}</span>
+                        ) : isStartingImage(attachment) ? (
+                          <span className="attachment-chip-source">Starting image</span>
                         ) : (
                           formatBytes(attachment.size)
                         )}
@@ -744,6 +778,11 @@ export default function ChatsPage() {
                   ))}
                 </div>
               )}
+              {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
+                <p className="message-form-hint">
+                  Ask to generate or edit and this image will be the starting point.
+                </p>
+              ) : null}
 
               <div className="message-form-row">
                 <input

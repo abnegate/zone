@@ -7,6 +7,8 @@ interface AuthenticatedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElemen
   accessToken?: string | null;
   openLabel?: string;
   linkClassName?: string;
+  linked?: boolean;
+  compact?: boolean;
 }
 
 interface LoadedImage {
@@ -20,6 +22,8 @@ export function AuthenticatedImage({
   accessToken,
   openLabel = `Open ${alt || 'image'} full size`,
   linkClassName,
+  linked = true,
+  compact = false,
   ...imageProps
 }: AuthenticatedImageProps) {
   const protectedArtifact = isProtectedArtifactUrl(src);
@@ -59,8 +63,12 @@ export function AuthenticatedImage({
 
   if (protectedArtifact && failedSource === src) {
     return (
-      <span className="message-image-error" role="alert">
-        Image unavailable
+      <span
+        className={compact ? 'attachment-chip-thumb-fallback' : 'message-image-error'}
+        role="alert"
+        aria-label="Image unavailable"
+      >
+        {compact ? '' : 'Image unavailable'}
       </span>
     );
   }
@@ -73,10 +81,19 @@ export function AuthenticatedImage({
 
   if (!displaySrc) {
     return (
-      <span className="message-image-loading" role="status">
-        Loading image…
+      <span
+        className={compact ? 'attachment-chip-thumb-fallback' : 'message-image-loading'}
+        role="status"
+        aria-label="Loading image"
+      >
+        {compact ? '' : 'Loading image…'}
       </span>
     );
+  }
+
+  const image = <img {...imageProps} src={displaySrc} alt={alt} />;
+  if (!linked) {
+    return image;
   }
 
   return (
@@ -87,7 +104,7 @@ export function AuthenticatedImage({
       rel="noreferrer"
       aria-label={openLabel}
     >
-      <img {...imageProps} src={displaySrc} alt={alt} />
+      {image}
     </a>
   );
 }

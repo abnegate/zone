@@ -69,7 +69,7 @@ dashmap = { workspace = true }
 once_cell = { workspace = true }
 
 # HTTP client (for proxying to Ollama)
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
 urlencoding = "=2.1.3"
 
 # HTML parsing for web content extraction

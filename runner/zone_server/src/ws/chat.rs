@@ -754,12 +754,53 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     }
 }
 
+async fn resolve_generation_source(
+    state: &AppState,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    prompt: &str,
+    metadata: Option<&serde_json::Value>,
+    store: &crate::services::artifacts::ArtifactStore,
+) -> Result<
+    Option<crate::services::comfyui::SourceImage>,
+    crate::services::image_source::SourceImageError,
+> {
+    use crate::services::image_source::{
+        has_image_attachment, resolve_source_image, resolve_source_image_from,
+    };
+
+    if has_image_attachment(metadata) {
+        return resolve_source_image(metadata, workspace_id, chat_id, store).await;
+    }
+    if !crate::services::image_intent::should_reuse_thread_image(prompt) {
+        return Ok(None);
+    }
+    let history = match chats::list_messages(state.db(), chat_id).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!("Failed to load chat images for image-to-image: {error}");
+            return Ok(None);
+        }
+    };
+    resolve_source_image_from(
+        history
+            .iter()
+            .rev()
+            .map(|message| message.metadata.as_ref()),
+        workspace_id,
+        chat_id,
+        store,
+    )
+    .await
+}
+
 async fn handle_image_generation(
     state: &AppState,
     sender: &SharedSender,
     chat_id: Uuid,
     workspace_id: Uuid,
     prompt: &str,
+    metadata: Option<&serde_json::Value>,
     image_config: crate::config::ComfyUiConfig,
     generation: &mut Generation,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -784,10 +825,31 @@ async fn handle_image_generation(
             return Ok(());
         }
     };
+    let store = ArtifactStore::new(image_config.artifact_root.clone());
+    let source =
+        match resolve_generation_source(state, chat_id, workspace_id, prompt, metadata, &store)
+            .await
+        {
+            Ok(source) => source,
+            Err(error) => {
+                let _ = send_server(
+                    sender,
+                    ServerMessage::Error {
+                        message: format!("Image generation failed: {error}"),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
     let _ = send_server(
         sender,
         ServerMessage::Status {
-            message: "Preparing image generation...".to_string(),
+            message: if source.is_some() {
+                "Preparing image-to-image...".to_string()
+            } else {
+                "Preparing image generation...".to_string()
+            },
         },
     )
     .await;
@@ -813,7 +875,7 @@ async fn handle_image_generation(
     });
 
     let result = client
-        .generate(prompt, &mut generation.cancel, progress_tx)
+        .generate(prompt, source.as_ref(), &mut generation.cancel, progress_tx)
         .await;
     progress_task.abort();
     let _ = progress_task.await;
@@ -847,7 +909,6 @@ async fn handle_image_generation(
         }
     };
 
-    let store = ArtifactStore::new(image_config.artifact_root.clone());
     let mut attachments = Vec::new();
     for image in images.into_iter().take(MAX_GENERATED_IMAGES) {
         if image.bytes.len() > MAX_ARTIFACT_BYTES {
@@ -1058,7 +1119,7 @@ async fn handle_send_message(
 
         // Once persistence begins, finish the commit and acknowledgement
         // before honouring Stop. Dropping an INSERT future cannot roll it back.
-        save_message(state, sender, chat_id, content, metadata).await?;
+        save_message(state, sender, chat_id, content, metadata.clone()).await?;
 
         if request.is_cancelled() {
             request.cancelled(sender).await;
@@ -1066,7 +1127,17 @@ async fn handle_send_message(
         }
         match routing {
             Routing::Image(config) => {
-                handle_image_generation(state, sender, chat_id, workspace_id, content, config, &mut request).await
+                handle_image_generation(
+                    state,
+                    sender,
+                    chat_id,
+                    workspace_id,
+                    content,
+                    metadata.as_ref(),
+                    config,
+                    &mut request,
+                )
+                .await
             }
             Routing::Chat(chat) => {
                 let preparation = tokio::select! {

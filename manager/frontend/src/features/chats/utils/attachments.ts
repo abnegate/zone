@@ -9,6 +9,8 @@ export interface Attachment {
   url?: string;
   /** Why this file cannot be sent, if it cannot. */
   rejected?: string;
+  /** Reused chat image that should be the img2img starting point. */
+  source?: boolean;
 }
 
 // Text files are inlined into the prompt; images travel as data URLs to a
@@ -151,6 +153,22 @@ export function attachmentMetadata(attachments: Attachment[]) {
 
 export function isSendable(attachment: Attachment): boolean {
   return attachment.text !== undefined || attachment.url !== undefined;
+}
+
+/** Reuse an image already on the thread as the next generation's source. */
+export function sourceAttachment(image: { name: string; mime: string; url: string }): Attachment {
+  return {
+    id: `source:${image.url}`,
+    name: image.name,
+    size: 0,
+    type: image.mime,
+    url: image.url,
+    source: true,
+  };
+}
+
+export function isStartingImage(attachment: Attachment): boolean {
+  return Boolean(attachment.source && attachment.url);
 }
 
 /** Images stored on a message so the thread can render them after send. */

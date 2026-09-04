@@ -314,4 +314,28 @@ test.describe('Chat images', () => {
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(page.getByRole('status')).toHaveText('Generating response…');
   });
+
+  test('sends an attached image as the image-to-image source', async ({ page }) => {
+    let sent: { content?: string; metadata?: { attachments?: { url?: string }[] } } | undefined;
+    socket.setOnSend((payload) => {
+      sent = payload;
+    });
+
+    await mockChatRoutes(page, [userPrompt, assistantImageMessage(MOCK_PNG_DATA_URL)]);
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openImageChat(page);
+
+    await page.getByRole('button', { name: 'Use as starting image' }).click();
+    await expect(page.getByText('Starting image')).toBeVisible();
+    await expect(
+      page.getByText('Ask to generate or edit and this image will be the starting point.')
+    ).toBeVisible();
+
+    await page.fill('.message-form textarea', 'Make this a watercolor');
+    await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+
+    await expect.poll(() => sent?.content).toBe('Make this a watercolor');
+    expect(sent?.metadata?.attachments?.[0]?.url).toBe(MOCK_PNG_DATA_URL);
+  });
 });
