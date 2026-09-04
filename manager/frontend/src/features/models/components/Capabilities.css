@@ -1,0 +1,9 @@
+.model-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ui-space-1);
+}
+
+.model-capabilities .tag {
+  white-space: nowrap;
+}

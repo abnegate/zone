@@ -1,7 +1,3 @@
-// =============================================================================
-// Model Types
-// =============================================================================
-
 export interface InstalledModel {
   name: string;
   size: number;
@@ -26,6 +22,22 @@ export interface ModelSizeOption {
   size?: number | null;
 }
 
+export const MODEL_CAPABILITIES = [
+  'text',
+  'image_input',
+  'image_generation',
+  'audio',
+  'audio_input',
+  'audio_generation',
+  'video_input',
+  'video_generation',
+  'tools',
+  'embeddings',
+  'reasoning',
+] as const;
+
+export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
+
 export interface BrowseModel {
   name: string;
   display_name?: string | null;
@@ -39,6 +51,7 @@ export interface BrowseModel {
   likes?: number | null;
   tags?: string[] | null;
   use_cases?: string[] | null;
+  capabilities?: ModelCapability[] | null;
   sizes?: ModelSizeOption[] | null;
   details?: ModelDetails | null;
   source?: ModelSource;
@@ -104,10 +117,6 @@ export const MODEL_SIZE_FILTERS: Array<{ value: ModelSizeFilter; label: string }
   { value: 'xl', label: '70B+' },
 ];
 
-// =============================================================================
-// Pull Progress Types
-// =============================================================================
-
 export interface PullProgress {
   type: 'progress' | 'step' | 'complete' | 'error' | 'authenticated';
   status?: string;
@@ -123,10 +132,6 @@ export interface Step {
   message: string;
   status: 'pending' | 'success' | 'error';
 }
-
-// =============================================================================
-// API Response Types
-// =============================================================================
 
 export interface ModelsResponse {
   models: InstalledModel[];

@@ -48,11 +48,31 @@ pub struct ModelResponse {
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub use_cases: Option<Vec<String>>,
+    /// Capabilities declared by provider metadata; absent when unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<ModelCapability>>,
     /// Distinct downloadable sizes when a catalogue entry ships more than one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sizes: Option<Vec<ModelSize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<ModelDetails>,
+}
+
+/// Exact capabilities advertised by a catalogue provider.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCapability {
+    Text,
+    ImageInput,
+    ImageGeneration,
+    Audio,
+    AudioInput,
+    AudioGeneration,
+    VideoInput,
+    VideoGeneration,
+    Tools,
+    Embeddings,
+    Reasoning,
 }
 
 /// A concrete downloadable size for a browsed model (e.g. `llama3.2:1b`).

@@ -2,6 +2,7 @@ import { Badge, Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger }
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
+import Capabilities from '../components/Capabilities';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
@@ -668,18 +669,10 @@ export default function ModelsPage() {
                   </div>
                 )}
 
-                {detailsModel.use_cases && detailsModel.use_cases.length > 0 && (
-                  <div className="details-use-cases">
-                    <span className="details-label">Use cases</span>
-                    <div className="details-tags">
-                      {detailsModel.use_cases.map((useCase) => (
-                        <span key={useCase} className="tag">
-                          {useCase}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <div className="details-use-cases">
+                  <span className="details-label">Capabilities</span>
+                  <Capabilities capabilities={detailsModel.capabilities} />
+                </div>
 
                 {detailsModel.tags && detailsModel.tags.length > 0 && (
                   <div className="details-tags">

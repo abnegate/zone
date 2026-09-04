@@ -917,7 +917,7 @@ describe('ModelsPage', () => {
       });
     });
 
-    it('shows description and use cases for browse models', async () => {
+    it('shows description and declared capabilities for browse models', async () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
         source: 'ollama',
@@ -927,7 +927,7 @@ describe('ModelsPage', () => {
             name: 'llama3:7b',
             size: 3800000000,
             description: 'A general-purpose local chat model.',
-            use_cases: ['Chat', 'Coding'],
+            capabilities: ['text', 'tools'],
             details: {
               family: 'llama',
               parameter_size: '7B',
@@ -952,9 +952,9 @@ describe('ModelsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('A general-purpose local chat model.')).toBeInTheDocument();
-        expect(screen.getByText('Use cases')).toBeInTheDocument();
-        expect(screen.getByText('Chat')).toBeInTheDocument();
-        expect(screen.getByText('Coding')).toBeInTheDocument();
+        expect(screen.getByText('Capabilities')).toBeInTheDocument();
+        expect(screen.getByText('Text')).toBeInTheDocument();
+        expect(screen.getByText('Tools')).toBeInTheDocument();
         expect(screen.getByText('Parameters')).toBeInTheDocument();
         expect(screen.getByText('128K')).toBeInTheDocument();
       });

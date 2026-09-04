@@ -9,7 +9,7 @@ const mockModels: BrowseModel[] = [
     size: 3800000000,
     description: 'A compact Llama 2 chat model.',
     downloads: 28700,
-    use_cases: ['Chat', 'Tool use'],
+    capabilities: ['text', 'image_input', 'audio_input', 'reasoning', 'tools', 'image_generation'],
     details: {
       family: 'llama',
       parameter_size: '7B',
@@ -82,7 +82,7 @@ describe('VirtualBrowseList', () => {
     expect(screen.getByText('3.8 GB')).toBeInTheDocument();
   });
 
-  it('renders parameter size, description, and use cases', () => {
+  it('renders parameter size, description, and all capabilities', () => {
     render(
       <VirtualBrowseList
         models={mockModels}
@@ -98,8 +98,12 @@ describe('VirtualBrowseList', () => {
     expect(screen.getByText('Q4_0')).toBeInTheDocument();
     expect(screen.getByText('llama')).toBeInTheDocument();
     expect(screen.getByText('A compact Llama 2 chat model.')).toBeInTheDocument();
-    expect(screen.getByText('Chat')).toBeInTheDocument();
-    expect(screen.getByText('Tool use')).toBeInTheDocument();
+    expect(screen.getByText('Text')).toBeInTheDocument();
+    expect(screen.getByText('Image input')).toBeInTheDocument();
+    expect(screen.getByText('Image generation')).toBeInTheDocument();
+    expect(screen.getByText('Reasoning')).toBeInTheDocument();
+    expect(screen.getByText('Audio input')).toBeInTheDocument();
+    expect(screen.getByText('Tools')).toBeInTheDocument();
     expect(screen.getByText('28.7K downloads')).toBeInTheDocument();
   });
 
@@ -223,6 +227,7 @@ describe('VirtualBrowseList', () => {
       {
         name: 'no-details-model',
         size: 1000000000,
+        use_cases: ['Tools'],
       },
     ];
 
@@ -238,6 +243,8 @@ describe('VirtualBrowseList', () => {
     );
 
     expect(screen.getByText('no-details-model')).toBeInTheDocument();
+    expect(screen.getByText('Capabilities unknown')).toBeInTheDocument();
+    expect(screen.queryByText('Tools')).not.toBeInTheDocument();
     expect(document.querySelectorAll('.browse-tags').length).toBe(0);
   });
 });
