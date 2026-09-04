@@ -49,8 +49,8 @@ spec:
             - name: PGPASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "zone-apps.fullname" . }}-secrets
-                  key: dbPassword
+                  name: {{ include "zone-apps.secretsName" . }}
+                  key: {{ include "zone-apps.secretKey" (dict "root" . "name" "dbPassword" "default" "postgres-password") }}
           resources:
             limits:
               cpu: 100m
@@ -82,33 +82,43 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-            - name: DB_PASSWORD
+            - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "zone-apps.fullname" . }}-secrets
-                  key: dbPassword
+                  name: {{ include "zone-apps.secretsName" . }}
+                  key: {{ include "zone-apps.secretKey" (dict "root" . "name" "databaseUrl" "default" "database-url") }}
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "zone-apps.secretsName" . }}
+                  key: {{ include "zone-apps.secretKey" (dict "root" . "name" "redisUrl" "default" "valkey-url") }}
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "zone-apps.fullname" . }}-secrets
-                  key: jwtSecret
+                  name: {{ include "zone-apps.secretsName" . }}
+                  key: {{ include "zone-apps.secretKey" (dict "root" . "name" "jwtSecret" "default" "jwt-secret") }}
             - name: ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "zone-apps.fullname" . }}-secrets
-                  key: encryptionKey
+                  name: {{ include "zone-apps.secretsName" . }}
+                  key: {{ include "zone-apps.secretKey" (dict "root" . "name" "encryptionKey" "default" "encryption-key") }}
+            - name: LITELLM_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "zone-apps.secretsName" . }}
+                  key: {{ include "zone-apps.secretKey" (dict "root" . "name" "litellmKey" "default" "litellm-master-key") }}
             {{- if .Values.secrets.stripeSecretKey }}
             - name: STRIPE_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "zone-apps.fullname" . }}-secrets
+                  name: {{ include "zone-apps.secretsName" . }}
                   key: stripeSecretKey
             {{- end }}
             {{- if .Values.secrets.smtpPassword }}
             - name: SMTP_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "zone-apps.fullname" . }}-secrets
+                  name: {{ include "zone-apps.secretsName" . }}
                   key: smtpPassword
             {{- end }}
           livenessProbe:
@@ -121,7 +131,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5
@@ -132,12 +142,16 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: cache
-              mountPath: /var/cache
+            - name: artifacts
+              mountPath: /app/artifacts
+            - name: embed-cache
+              mountPath: /app/embed-cache
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: cache
+        - name: artifacts
+          emptyDir: {}
+        - name: embed-cache
           emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:

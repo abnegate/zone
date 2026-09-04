@@ -13,7 +13,7 @@
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
 	install-runner install-cli \
 	build-dev-cli install-dev-cli dev-format dev-format-check dev-lint dev-test dev-coverage dev-check \
-	kind-create kind-delete tilt-up tilt-down kind-status \
+	kind-create kind-delete tilt-up tilt-down kind-status helm-lint \
 
 .DEFAULT_GOAL := help
 
@@ -158,6 +158,14 @@ tilt-down: ## Stop Tilt and clean up
 	@cd k8s && tilt down
 	@echo "$(GREEN)Tilt stopped. Kind cluster still running.$(NC)"
 	@echo "$(YELLOW)Run 'make kind-delete' to remove the cluster entirely.$(NC)"
+
+helm-lint: ## Lint and render Helm charts
+	@helm lint helm/zone-infra helm/zone-ai helm/zone-apps
+	@helm template zone-infra helm/zone-infra --namespace zone >/dev/null
+	@helm template zone-ai helm/zone-ai --namespace zone >/dev/null
+	@helm template zone-apps helm/zone-apps --namespace zone >/dev/null
+	@helm template zone-apps helm/zone-apps --namespace zone -f helm/zone-apps/examples/minimal.yaml >/dev/null
+	@echo "$(GREEN)Helm charts linted and rendered.$(NC)"
 
 ##@ Health & Monitoring
 

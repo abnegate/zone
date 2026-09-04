@@ -1,4 +1,6 @@
-# Kind cluster configuration for Zone development
+# Kind cluster configuration for Zone development.
+# scripts/kind-create.sh substitutes KIND_HTTP_PORT / KIND_HTTPS_PORT / KIND_STATS_PORT
+# when host ports 80/443 are already bound (for example by docker compose).
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: zone-dev
@@ -13,19 +15,15 @@ nodes:
           kubeletExtraArgs:
             node-labels: "ingress-ready=true"
     extraPortMappings:
-      # HTTP for Ingress
       - containerPort: 80
-        hostPort: 80
+        hostPort: ${KIND_HTTP_PORT}
         protocol: TCP
-      # HTTPS for Ingress
       - containerPort: 443
-        hostPort: 443
+        hostPort: ${KIND_HTTPS_PORT}
         protocol: TCP
-      # HAProxy stats
       - containerPort: 31024
-        hostPort: 31024
+        hostPort: ${KIND_STATS_PORT}
         protocol: TCP
-      # NodePort range for direct service access
       - containerPort: 30000
         hostPort: 30000
         protocol: TCP
@@ -35,14 +33,7 @@ nodes:
       - containerPort: 30002
         hostPort: 30002
         protocol: TCP
-    extraMounts:
-      # Mount local storage for persistent volumes
-      # Note: This path uses shell expansion and must be processed by the script that creates the cluster
-      # The actual path will be: $HOME/.zone/data
-      - hostPath: ~/.zone/data
-        containerPath: /zone-data
 
-# Networking configuration
 networking:
   podSubnet: "10.244.0.0/16"
   serviceSubnet: "10.96.0.0/12"

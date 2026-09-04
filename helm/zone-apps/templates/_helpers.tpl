@@ -117,3 +117,23 @@ Common environment variables for all containers
   value: {{ $value | quote }}
 {{- end }}
 {{- end }}
+
+{{/*
+Secret name used by zone-server
+*/}}
+{{- define "zone-apps.secretsName" -}}
+{{- if and (not .Values.secrets.create) .Values.secrets.existingSecret }}
+{{- .Values.secrets.existingSecret }}
+{{- else }}
+{{- printf "%s-secrets" (include "zone-apps.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{- define "zone-apps.secretKey" -}}
+{{- $keys := default dict .root.Values.secrets.keys -}}
+{{- $override := "" -}}
+{{- if hasKey $keys .name }}
+{{- $override = index $keys .name -}}
+{{- end }}
+{{- default .default $override -}}
+{{- end }}

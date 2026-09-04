@@ -56,7 +56,7 @@ The following table lists the configurable parameters and their default values.
 | `server.image.repository` | Server image repository | `zone/server` |
 | `server.image.tag` | Server image tag | `latest` |
 | `server.service.type` | Kubernetes service type | `ClusterIP` |
-| `server.service.port` | Service port | `8080` |
+| `server.service.port` | Service port | `8000` |
 | `server.autoscaling.enabled` | Enable horizontal pod autoscaler | `true` |
 | `server.autoscaling.minReplicas` | Minimum number of replicas | `2` |
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
@@ -71,31 +71,32 @@ The following table lists the configurable parameters and their default values.
 | `manager.image.repository` | Manager image repository | `zone/manager` |
 | `manager.image.tag` | Manager image tag | `latest` |
 | `manager.service.type` | Kubernetes service type | `ClusterIP` |
-| `manager.service.port` | Service port | `3000` |
+| `manager.service.port` | Service port | `3001` |
 
 ### Database Configuration
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `commonEnv.DB_HOST` | Database host | `zone-postgres` |
+| `commonEnv.DB_HOST` | Database host | `zone-postgres-rw` |
 | `commonEnv.DB_PORT` | Database port | `5432` |
-| `commonEnv.DB_NAME` | Database name | `zone` |
+| `commonEnv.DB_NAME` | Database name | `manager` |
 | `commonEnv.DB_USER` | Database user | `zone` |
-| `secrets.dbPassword` | Database password | `changeme` |
+| `secrets.create` | Create a chart-managed Secret | `false` |
+| `secrets.existingSecret` | Existing Secret name | `zone-secrets` |
 
 ### Ingress Configuration
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `ingress.enabled` | Enable ingress | `true` |
-| `ingress.className` | Ingress class name | `""` |
+| `ingress.className` | Ingress class name | `haproxy` |
 | `ingress.hosts[0].host` | Hostname | `zone.local` |
 
 ### Migration Job
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `migration.enabled` | Enable migration job | `true` |
+| `migration.enabled` | Unused; zone-server migrates on boot | `false` |
 | `migration.backoffLimit` | Job backoff limit | `0` |
 | `migration.activeDeadlineSeconds` | Job timeout in seconds | `600` |
 
@@ -289,7 +290,7 @@ kubectl logs -l app.kubernetes.io/component=migration
 
 # Check if database is accessible
 kubectl run -it --rm debug --image=postgres:15-alpine --restart=Never -- \
-  psql -h zone-postgres -p 5432 -U zone -d zone
+  psql -h zone-postgres-rw -p 5432 -U zone -d manager
 ```
 
 ### Pods Not Starting

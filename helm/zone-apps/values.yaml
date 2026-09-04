@@ -3,56 +3,56 @@ environment: production
 global:
   imageRegistry: ""
   imagePullSecrets: []
-  externalDatabase: false    # Use external database instead of in-cluster
-  securityContexts: true     # Apply pod security contexts
+  externalDatabase: false
+  securityContexts: true
 
-# Init container configuration
 initContainers:
   postgres:
-    image: "postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b"
+    image: "postgres:16-alpine"
 
 image:
   pullPolicy: IfNotPresent
 
-# Common environment variables shared across all components
+# Non-secret configuration shared by zone-server
 commonEnv:
-  DB_HOST: "zone-postgres"
+  DB_HOST: "zone-postgres-rw"
   DB_PORT: "5432"
-  DB_NAME: "zone"
+  DB_NAME: "manager"
   DB_USER: "zone"
   RUST_LOG: "info"
+  LITELLM_HOST: "http://litellm:4000"
+  OLLAMA_HOST: "http://ollama:11434"
+  EMBEDDING_ENGINE: "ollama"
+  VALKEY_HOST: "valkey"
+  VALKEY_PORT: "6379"
 
-# Secrets - REQUIRED: Must be set via --set or external secret management
-# These MUST be provided during installation and should NEVER use default values in production
+# Prefer an existing Secret (created by tilt-up.sh as zone-secrets).
+# Set create=true and fill the values below for a standalone install.
 secrets:
-  # Create secret - set to false when using external secret management (e.g., External Secrets Operator)
-  create: true
+  create: false
+  existingSecret: "zone-secrets"
 
-  # Database password - REQUIRED
-  # Set via: --set secrets.dbPassword=<secure-password>
   dbPassword: ""
-
-  # JWT secret for authentication - REQUIRED
-  # Set via: --set secrets.jwtSecret=<secure-random-string>
   jwtSecret: ""
-
-  # Encryption key for data at rest - REQUIRED
-  # Set via: --set secrets.encryptionKey=<secure-random-key>
   encryptionKey: ""
-
-  # Stripe secret key for payments - Optional
+  litellmMasterKey: ""
+  redisPassword: ""
   stripeSecretKey: ""
-
-  # SMTP password for email - Optional
   smtpPassword: ""
 
-# Service account configuration
+  keys:
+    databaseUrl: database-url
+    redisUrl: valkey-url
+    jwtSecret: jwt-secret
+    encryptionKey: encryption-key
+    litellmKey: litellm-master-key
+    dbPassword: postgres-password
+
 serviceAccount:
   create: true
   annotations: {}
   name: ""
 
-# Pod security context
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
@@ -62,7 +62,6 @@ podSecurityContext:
   seccompProfile:
     type: RuntimeDefault
 
-# Container security context
 securityContext:
   allowPrivilegeEscalation: false
   capabilities:
@@ -75,7 +74,7 @@ securityContext:
   seccompProfile:
     type: RuntimeDefault
 
-# Server (Rust backend API)
+# Server is zone-server (Rust API). Image is built from manager/Dockerfile.
 server:
   enabled: true
   replicaCount: 2
@@ -87,8 +86,8 @@ server:
 
   service:
     type: ClusterIP
-    port: 8080
-    targetPort: 8080
+    port: 8000
+    targetPort: 8000
 
   resources:
     limits:
@@ -105,15 +104,13 @@ server:
     targetCPUUtilization: 70
 
   env:
-    PORT: "8080"
+    PORT: "8000"
     HOST: "0.0.0.0"
 
-  # High availability configuration
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
 
-  # Anti-affinity to spread pods across nodes
   podAntiAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
       - weight: 100
@@ -123,9 +120,6 @@ server:
               app.kubernetes.io/component: server
           topologyKey: kubernetes.io/hostname
 
-  # Topology spread for better distribution
-  # Note: In development (with HPA minReplicas < number of nodes), use ScheduleAnyway
-  # In production, use DoNotSchedule for strict distribution
   topologySpreadConstraints:
     - maxSkew: 1
       topologyKey: kubernetes.io/hostname
@@ -134,7 +128,7 @@ server:
         matchLabels:
           app.kubernetes.io/component: server
 
-# Manager (React frontend)
+# Manager is the React console (static bun serve on 3001).
 manager:
   enabled: true
   replicaCount: 2
@@ -146,8 +140,8 @@ manager:
 
   service:
     type: ClusterIP
-    port: 3000
-    targetPort: 3000
+    port: 3001
+    targetPort: 3001
 
   resources:
     limits:
@@ -164,7 +158,7 @@ manager:
     targetCPUUtilization: 70
 
   env:
-    PORT: "3000"
+    PORT: "3001"
 
   podDisruptionBudget:
     enabled: true
@@ -187,44 +181,36 @@ manager:
         matchLabels:
           app.kubernetes.io/component: manager
 
-# Ingress configuration
 ingress:
   enabled: true
-  className: ""
+  className: "haproxy"
   annotations: {}
-    # nginx example:
-    # nginx.ingress.kubernetes.io/rewrite-target: /
-    # cert-manager.io/cluster-issuer: letsencrypt-prod
-    # haproxy example:
-    # haproxy.org/path-rewrite: "/"
-    # haproxy.org/rate-limit-requests: "100"
   hosts:
     - host: zone.local
       paths:
         - path: /api
           pathType: Prefix
           service: server
+        - path: /ws
+          pathType: Prefix
+          service: server
         - path: /
           pathType: Prefix
           service: manager
   tls: []
-    # - secretName: zone-tls
-    #   hosts:
-    #     - zone.local
 
-# Database migration job
+# zone-server runs sqlx migrations on startup. Leave this disabled.
 migration:
-  enabled: true
+  enabled: false
 
   image:
     repository: zone/server
     tag: latest
     pullPolicy: Always
 
-  # Job configuration
-  backoffLimit: 0                    # No retries - fail fast
-  activeDeadlineSeconds: 600         # 10 minute timeout
-  ttlSecondsAfterFinished: 3600      # Keep job for 1 hour after completion
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 3600
 
   resources:
     limits:
@@ -236,22 +222,14 @@ migration:
 
   env: {}
 
-# Optional: Node selector for pod placement
 nodeSelector: {}
-
-# Optional: Tolerations for pod scheduling
 tolerations: []
-
-# Optional: Affinity rules
 affinity: {}
 
-# Network Policy configuration
 networkPolicy:
-  enabled: false  # Enable in production for enhanced security
-  # Ingress namespace for allowing traffic from ingress controller
-  ingressNamespace: ingress-nginx
+  enabled: false
+  ingressNamespace: haproxy-controller
 
-# OpenWebUI - Chat interface
 openwebui:
   enabled: true
   replicaCount: 1
@@ -266,7 +244,6 @@ openwebui:
     port: 8080
     targetPort: 8080
 
-  # OpenWebUI configuration
   config:
     auth: true
     signup: true
@@ -274,13 +251,11 @@ openwebui:
     defaultModels: "llama3.1:8b"
     corsAllowOrigin: "http://localhost:8080,http://webui.localhost"
 
-  # LiteLLM connection
   litellm:
     host: "http://litellm:4000/v1"
     secretName: "zone-secrets"
     secretKey: "litellm-master-key"
 
-  # Storage for user data
   persistence:
     enabled: true
     size: 5Gi

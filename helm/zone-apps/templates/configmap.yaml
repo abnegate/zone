@@ -5,14 +5,12 @@ metadata:
   labels:
     {{- include "zone-apps.labels" . | nindent 4 }}
 data:
-  # Database configuration
   DB_HOST: {{ .Values.commonEnv.DB_HOST | quote }}
   DB_PORT: {{ .Values.commonEnv.DB_PORT | quote }}
   DB_NAME: {{ .Values.commonEnv.DB_NAME | quote }}
   DB_USER: {{ .Values.commonEnv.DB_USER | quote }}
-
-  # Logging
   RUST_LOG: {{ .Values.commonEnv.RUST_LOG | quote }}
-
-  # Environment
+  LITELLM_HOST: {{ .Values.commonEnv.LITELLM_HOST | quote }}
+  OLLAMA_HOST: {{ .Values.commonEnv.OLLAMA_HOST | quote }}
+  EMBEDDING_ENGINE: {{ .Values.commonEnv.EMBEDDING_ENGINE | quote }}
   ENVIRONMENT: {{ .Values.environment | quote }}

@@ -62,19 +62,11 @@ spec:
         - protocol: UDP
           port: 53
     # Allow database connections
-    - to:
-        - podSelector:
-            matchLabels:
-              app: postgres
-      ports:
-        - protocol: TCP
-          port: 5432
     {{- if not .Values.global.externalDatabase }}
-    # Allow connections to in-cluster postgres
     - to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: postgresql
+              cnpg.io/cluster: zone-postgres
       ports:
         - protocol: TCP
           port: 5432

@@ -1,0 +1,20 @@
+{{- if .Values.postgres.enabled }}
+{{- range .Values.postgres.extraDatabases }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: zone-{{ . }}
+  namespace: {{ include "zone-infra.namespace" $ }}
+  labels:
+    {{- include "zone-infra.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  name: {{ . }}
+  owner: {{ $.Values.postgres.owner }}
+  ensure: present
+  template: template1
+  cluster:
+    name: zone-postgres
+{{- end }}
+{{- end }}
