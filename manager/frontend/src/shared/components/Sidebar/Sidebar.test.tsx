@@ -5,6 +5,8 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 mock.module('react-router-dom', () => ({
   BrowserRouter: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useLocation: () => ({ pathname: '/' }),
+  useNavigate: () => mock(),
+  useSearchParams: () => [new URLSearchParams(), mock()],
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
     <a href={to}>{children}</a>
   ),

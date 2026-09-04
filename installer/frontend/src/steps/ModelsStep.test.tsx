@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
+import { FormProvider, type UseFormReturn, useForm } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
 import { ModelsStep } from './ModelsStep';
 
@@ -162,9 +162,7 @@ describe('ModelsStep', () => {
 
     expect(screen.getByText('Anthropic Configuration')).toBeInTheDocument();
     expect(screen.getByLabelText(/anthropic api key/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/anthropic does not provide embedding models/i)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/anthropic does not provide embedding models/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/embedding model \(external\)/i)).toBeInTheDocument();
   });
 

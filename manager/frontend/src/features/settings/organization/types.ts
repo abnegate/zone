@@ -1,9 +1,10 @@
 import type { WorkspaceRole } from '../../auth/types';
+
 export type {
-  Workspace,
   AiProvider,
   AiSettings,
   UpdateAiSettingsRequest,
+  Workspace,
 } from '../workspace/types';
 
 // Organization Types

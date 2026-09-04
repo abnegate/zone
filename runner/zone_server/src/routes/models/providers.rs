@@ -7,6 +7,8 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use std::time::Duration;
 
+use crate::config::{DEFAULT_GPT4ALL_MODELS_URL, DEFAULT_HUGGINGFACE_MODELS_URL};
+
 use super::types::{
     BrowseQuery, BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSize,
     ModelSizeFilter, ModelSort,
@@ -104,8 +106,8 @@ pub trait ModelProvider: Send + Sync {
 pub fn get_provider(name: &str) -> Result<Box<dyn ModelProvider>, ProviderError> {
     match name {
         "ollama" => Ok(Box::new(OllamaLibraryProvider)),
-        "huggingface" => Ok(Box::new(HuggingFaceProvider)),
-        "gpt4all" => Ok(Box::new(Gpt4AllProvider)),
+        "huggingface" => Ok(Box::new(HuggingFaceProvider::default())),
+        "gpt4all" => Ok(Box::new(Gpt4AllProvider::default())),
         "openrouter" => Ok(Box::new(OpenRouterProvider)),
         _ => Err(ProviderError::Unavailable(format!(
             "Unknown provider: {}",
@@ -513,7 +515,23 @@ fn get_popular_ollama_models() -> Vec<ModelResponse> {
 // HuggingFace Provider
 // =============================================================================
 
-pub struct HuggingFaceProvider;
+pub struct HuggingFaceProvider {
+    catalog_url: String,
+}
+
+impl Default for HuggingFaceProvider {
+    fn default() -> Self {
+        Self::new(DEFAULT_HUGGINGFACE_MODELS_URL)
+    }
+}
+
+impl HuggingFaceProvider {
+    pub fn new(catalog_url: impl Into<String>) -> Self {
+        Self {
+            catalog_url: catalog_url.into(),
+        }
+    }
+}
 
 #[async_trait]
 impl ModelProvider for HuggingFaceProvider {
@@ -524,7 +542,7 @@ impl ModelProvider for HuggingFaceProvider {
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
         if !huggingface_uses_local_window(&opts) {
             let (models, next_cursor) =
-                fetch_huggingface_page(&opts, opts.cursor, opts.limit).await?;
+                fetch_huggingface_page(&self.catalog_url, &opts, opts.cursor, opts.limit).await?;
             return Ok(BrowseResponse {
                 models: refine_models(models, &opts),
                 next_cursor,
@@ -542,8 +560,13 @@ impl ModelProvider for HuggingFaceProvider {
         let mut pages = 0;
 
         loop {
-            let (page, next) =
-                fetch_huggingface_page(&opts, hf_cursor.as_deref(), MAX_PAGE_SIZE).await?;
+            let (page, next) = fetch_huggingface_page(
+                &self.catalog_url,
+                &opts,
+                hf_cursor.as_deref(),
+                MAX_PAGE_SIZE,
+            )
+            .await?;
             pages += 1;
             accumulated.extend(page);
             hf_cursor = next;
@@ -624,15 +647,14 @@ fn huggingface_uses_local_window(opts: &BrowseQuery<'_>) -> bool {
 }
 
 async fn fetch_huggingface_page(
+    catalog_url: &str,
     opts: &BrowseQuery<'_>,
     cursor: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<ModelResponse>, Option<String>), ProviderError> {
     let (sort_field, direction) = huggingface_sort_params(opts.sort);
-    let mut url = format!(
-        "https://huggingface.co/api/models?filter=gguf&sort={}&direction={}&limit={}",
-        sort_field, direction, limit
-    );
+    let mut url =
+        format!("{catalog_url}?filter=gguf&sort={sort_field}&direction={direction}&limit={limit}");
     for field in [
         "cardData",
         "gguf",
@@ -875,10 +897,23 @@ fn huggingface_description(
 // GPT4All Provider
 // =============================================================================
 
-pub struct Gpt4AllProvider;
+pub struct Gpt4AllProvider {
+    catalog_url: String,
+}
 
-const GPT4ALL_MODELS_URL: &str =
-    "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
+impl Default for Gpt4AllProvider {
+    fn default() -> Self {
+        Self::new(DEFAULT_GPT4ALL_MODELS_URL)
+    }
+}
+
+impl Gpt4AllProvider {
+    pub fn new(catalog_url: impl Into<String>) -> Self {
+        Self {
+            catalog_url: catalog_url.into(),
+        }
+    }
+}
 
 #[async_trait]
 impl ModelProvider for Gpt4AllProvider {
@@ -890,24 +925,7 @@ impl ModelProvider for Gpt4AllProvider {
         // GPT4All uses a static JSON catalog, so we fetch all and paginate client-side
         let offset = parse_cursor_offset(opts.cursor)?;
 
-        let response = HTTP_CLIENT.get(GPT4ALL_MODELS_URL).send().await?;
-
-        if !response.status().is_success() {
-            return Err(ProviderError::Unavailable(format!(
-                "GPT4All API returned status: {}",
-                response.status()
-            )));
-        }
-
-        let body = response.text().await?;
-        let gpt4all_models: Vec<Gpt4AllModel> = serde_json::from_str(&body).map_err(|e| {
-            tracing::error!(
-                "GPT4All JSON parse error: {}. Body preview: {}",
-                e,
-                &body[..body.len().min(500)]
-            );
-            ProviderError::ParseError(format!("{}", e))
-        })?;
+        let gpt4all_models = fetch_gpt4all_catalog(&self.catalog_url).await?;
 
         // Filter by query if provided
         let filtered: Vec<_> = if let Some(q) = opts.query {
@@ -939,6 +957,36 @@ impl ModelProvider for Gpt4AllProvider {
             opts.limit,
         ))
     }
+}
+
+async fn fetch_gpt4all_catalog(url: &str) -> Result<Vec<Gpt4AllModel>, ProviderError> {
+    let mut last_error: Option<ProviderError> = None;
+    for attempt in 1_u32..=3 {
+        match HTTP_CLIENT.get(url).send().await {
+            Ok(response) if response.status().is_success() => {
+                let body = response.text().await?;
+                return serde_json::from_str(&body).map_err(|e| {
+                    tracing::error!(
+                        "GPT4All JSON parse error: {}. Body preview: {}",
+                        e,
+                        &body[..body.len().min(500)]
+                    );
+                    ProviderError::ParseError(format!("{e}"))
+                });
+            }
+            Ok(response) => {
+                last_error = Some(ProviderError::Unavailable(format!(
+                    "GPT4All API returned status: {}",
+                    response.status()
+                )));
+            }
+            Err(error) => last_error = Some(error.into()),
+        }
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt))).await;
+        }
+    }
+    Err(last_error.expect("at least one GPT4All catalog attempt"))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2193,6 +2241,61 @@ mod tests {
         let json = r#"[{"name":"Test","filename":"test.gguf","filesize":12345}]"#;
         let models: Vec<Gpt4AllModel> = serde_json::from_str(json).unwrap();
         assert_eq!(models[0].filesize, 12345);
+    }
+
+    #[tokio::test]
+    async fn test_gpt4all_search_uses_injected_catalog() {
+        let router = axum::Router::new().route(
+            "/models3.json",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!([{
+                    "name": "Llama 3 Instruct",
+                    "filename": "llama-3-8b-instruct.Q4_0.gguf",
+                    "filesize": "4000000000",
+                    "parameters": "8B",
+                    "type": "LLaMA",
+                    "description": "A compact Llama 3 chat model",
+                    "quant": "q4_0"
+                }]))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/models3.json");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for _ in 0..50 {
+            if client
+                .get(&url)
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let provider = Gpt4AllProvider::new(url);
+        let result = provider
+            .search(BrowseQuery {
+                query: None,
+                cursor: None,
+                limit: DEFAULT_PAGE_SIZE,
+                sort: ModelSort::default(),
+                family: None,
+                size: ModelSizeFilter::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].name, "Llama 3 Instruct");
     }
 
     #[test]

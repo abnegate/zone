@@ -1,14 +1,14 @@
 // Types
-export * from './types';
+
+// Components
+export * from './components';
 
 // Hooks
 export * from './hooks';
 
 // Pages
 export * from './pages';
-
-// Components
-export * from './components';
+export * from './types';
 
 // Utils
 export * from './utils';

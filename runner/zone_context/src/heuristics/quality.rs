@@ -380,7 +380,9 @@ mod tests {
         let hash_str = format!("{:016x}", hash1);
 
         let dup = QualityAnalyzer::calculate_duplication(text2, &hash_str);
-        assert!(dup < 0.5); // Should be different
+        // Unrelated 64-bit SimHashes naturally average 0.5 similarity, so the
+        // duplicate classifier boundary is a more meaningful assertion.
+        assert!(dup < 0.8); // Should not be classified as similar
     }
 
     #[test]

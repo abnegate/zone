@@ -1159,7 +1159,7 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
     // Calculate content hash
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
-    let hash = format!("{:x}", hasher.finalize());
+    let hash = hex::encode(hasher.finalize());
 
     Ok((text, hash))
 }

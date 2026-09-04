@@ -267,7 +267,7 @@ async fn semantic_search(
             cc.text as chunk_text,
             ci.uri as item_uri,
             ci.title as item_title,
-            (1 - (e.vector <=> $1::vector))::FLOAT as similarity
+            (1 - (e.vector <=> $1::vector))::REAL as similarity
         FROM embeddings e
         JOIN content_chunks cc ON cc.id = e.chunk_id
         JOIN content_items ci ON ci.id = e.content_item_id

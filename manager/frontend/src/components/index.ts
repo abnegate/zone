@@ -1,27 +1,21 @@
 // Re-export shared components from @zone/ui
-export { Button, Input, Select, Checkbox, InfoBox, Modal, ProgressBar, Wizard } from '@zone/ui';
+
 export type {
   ButtonProps,
-  InputProps,
-  SelectProps,
-  SelectOption,
   CheckboxProps,
   InfoBoxProps,
+  InputProps,
   ModalProps,
   ProgressBarProps,
+  SelectOption,
+  SelectProps,
   WizardProps,
   WizardStep,
 } from '@zone/ui';
-
-// Re-export shared components
-export {
-  ContextSwitcher,
-  Layout,
-  PermissionGate,
-  ProtectedRoute,
-  Sidebar,
-} from '../shared/components';
-
+export { Button, Checkbox, InfoBox, Input, Modal, ProgressBar, Select, Wizard } from '@zone/ui';
+export { ResendVerificationButton, VerificationPendingBanner } from '../features/auth';
+// Backward compatibility re-exports
+export { VirtualBrowseList } from '../features/models/components';
 // App-specific components - now re-exported from features/settings
 export {
   AuditLogsSection,
@@ -30,7 +24,11 @@ export {
   OrgMembersSection,
 } from '../features/settings/organization/components';
 export { WorkspaceMembersSection } from '../features/settings/workspace/components';
-
-// Backward compatibility re-exports
-export { VirtualBrowseList } from '../features/models/components';
-export { ResendVerificationButton, VerificationPendingBanner } from '../features/auth';
+// Re-export shared components
+export {
+  ContextSwitcher,
+  Layout,
+  PermissionGate,
+  ProtectedRoute,
+  Sidebar,
+} from '../shared/components';

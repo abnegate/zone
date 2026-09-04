@@ -1,6 +1,6 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { InstallerConfig } from '../types';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 const mockLoadConfig = mock();
 const mockSaveConfig = mock();
@@ -210,7 +210,9 @@ describe('useConfigPersistence', () => {
   it('clears config and resets to default', () => {
     const setConfig = mock();
 
-    const { result } = renderHook(() => useConfigPersistence(defaultConfig, setConfig, defaultConfig));
+    const { result } = renderHook(() =>
+      useConfigPersistence(defaultConfig, setConfig, defaultConfig)
+    );
 
     act(() => {
       result.current.resetConfig();

@@ -9,11 +9,8 @@ export * from './schemas';
 export function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T> {
   const result = schema.safeParse(data);
   if (!result.success) {
-    const errors = result.error.errors
-      .map(
-        (e: { path: (string | number)[]; message: string }) =>
-          `${e.path.join('.') || 'Field'}: ${e.message}`
-      )
+    const errors = result.error.issues
+      .map((e) => `${e.path.join('.') || 'Field'}: ${e.message}`)
       .join(', ');
     throw new Error(`Validation failed: ${errors}`);
   }
@@ -53,7 +50,7 @@ export function getErrors<T extends z.ZodType>(schema: T, data: unknown): Record
     return {};
   }
   const errors: Record<string, string> = {};
-  for (const error of result.error.errors) {
+  for (const error of result.error.issues) {
     const path = error.path.join('.') || '_root';
     errors[path] = error.message;
   }

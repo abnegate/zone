@@ -64,6 +64,7 @@ export function useChat(chatId: string | null) {
   const socketRef = useRef<WebSocket | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
+  const supersededPendingIdsRef = useRef<Set<string>>(new Set());
   const activeGenerationRef = useRef(false);
 
   const fetchChat = useCallback(
@@ -107,6 +108,11 @@ export function useChat(chatId: string | null) {
     (id: string, role: MessageRole, content: string, metadata?: MessageMetadata | null) => {
       setChat((prev) => {
         if (!prev) return prev;
+        // message_saved can win the race (and Strict Mode can replay this
+        // updater). Never revive a pending row that was already replaced.
+        if (supersededPendingIdsRef.current.has(id)) {
+          return prev;
+        }
         const existing = prev.messages.find((m) => m.id === id);
         if (existing) {
           return {
@@ -175,10 +181,17 @@ export function useChat(chatId: string | null) {
 
   const applySavedUserMessage = useCallback(
     (id: string, content: string, metadata?: MessageMetadata | null) => {
+      // Read and clear refs outside setChat so the updater stays pure.
+      // Strict Mode invokes updaters twice with the same prev; mutating the
+      // ref inside the updater left the pending row and appended the saved one.
+      const pendingId = pendingUserIdRef.current;
+      pendingUserIdRef.current = null;
+      if (pendingId) {
+        supersededPendingIdsRef.current.add(pendingId);
+      }
+
       setChat((prev) => {
         if (!prev) return prev;
-        const pendingId = pendingUserIdRef.current;
-        pendingUserIdRef.current = null;
         const replaceId =
           pendingId && prev.messages.some((m) => m.id === pendingId) ? pendingId : id;
         if (prev.messages.some((m) => m.id === replaceId)) {

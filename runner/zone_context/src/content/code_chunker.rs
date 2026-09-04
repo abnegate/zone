@@ -1917,7 +1917,10 @@ fn is_likely_generated_or_minified(content: &str) -> bool {
 fn compute_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())[..16].to_string()
+    hasher.finalize()[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Fallback to simple text chunking

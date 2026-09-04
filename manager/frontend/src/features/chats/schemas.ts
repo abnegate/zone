@@ -70,7 +70,7 @@ export const SendMessageRequestSchema = z.object({
 export const ChatsResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
-  chats: z.array(ChatSchema),
+  chats: z.array(ChatSchema).default([]),
 });
 
 export const ChatResponseSchema = z.object({

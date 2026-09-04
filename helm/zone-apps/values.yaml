@@ -9,7 +9,7 @@ global:
 # Init container configuration
 initContainers:
   postgres:
-    image: "postgres:15-alpine@sha256:f58300ac8d393b2e3b09d36ea12d7d24ee9440440e421472a300e929ddb63460"
+    image: "postgres:15-alpine@sha256:fe0737ba566a2c5b2a28f34433c0a423261900ec17b9bf7ad115e1aae7e57f1b"
 
 image:
   pullPolicy: IfNotPresent
@@ -258,7 +258,7 @@ openwebui:
 
   image:
     repository: ghcr.io/open-webui/open-webui
-    tag: v0.6.43
+    tag: v0.11.3@sha256:751b617714b91e4cfd0186a509c72480c858e012976103b09a30dad053c36175
     pullPolicy: IfNotPresent
 
   service:

@@ -21,13 +21,13 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
-anyhow = "1.0"
+anyhow = "=1.0.104"
 
 # CLI
 clap = { workspace = true }
 dialoguer = { workspace = true }
 indicatif = { workspace = true }
-console = "0.15"
+console = "=0.16.4"
 rand = { workspace = true }
 
 # Config & storage

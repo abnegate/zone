@@ -31,6 +31,46 @@ async fn create_test_pool() -> sqlx::PgPool {
         .expect("Failed to connect to test database. Set DATABASE_URL environment variable.")
 }
 
+/// Insert org + workspace + source so content_items satisfy the FK.
+async fn insert_test_source(pool: &sqlx::PgPool) -> Uuid {
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3)")
+        .bind(org_id)
+        .bind("Test Org")
+        .bind(format!("test-org-{}", org_id.as_simple()))
+        .execute(pool)
+        .await
+        .expect("insert test organization");
+
+    let workspace_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, $3, $4)")
+        .bind(workspace_id)
+        .bind(org_id)
+        .bind("Test Workspace")
+        .bind(format!("test-ws-{}", workspace_id.as_simple()))
+        .execute(pool)
+        .await
+        .expect("insert test workspace");
+
+    let source_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO sources (id, workspace_id, name, source_type, config)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(source_id)
+    .bind(workspace_id)
+    .bind(format!("Test Source {}", source_id.as_simple()))
+    .bind("text")
+    .bind(serde_json::json!({}))
+    .execute(pool)
+    .await
+    .expect("insert test source");
+
+    source_id
+}
+
 /// Create a test content item
 fn create_test_item(source_id: Uuid) -> ContentItem {
     ContentItem::new(
@@ -65,7 +105,7 @@ async fn test_pgvector_store_and_search() {
     let store = PgVectorStore::new(pool.clone());
 
     // Create test data
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
     let mut item = create_test_item(source_id);
 
     // Store content item
@@ -83,7 +123,18 @@ async fn test_pgvector_store_and_search() {
 
     // Search with the same vector (should return high similarity)
     let query = vec![1.0 / (1536_f32).sqrt(); 1536];
-    let results = store.search(&query, 10, Some(0.5), None).await.unwrap();
+    let results = store
+        .search(
+            &query,
+            10,
+            Some(0.5),
+            Some(SearchFilters {
+                source_ids: Some(vec![source_id]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
 
     assert!(!results.is_empty(), "Should find at least one result");
     assert_eq!(results[0].chunk_id, chunk_id);
@@ -106,8 +157,8 @@ async fn test_pgvector_search_with_filters() {
     let store = PgVectorStore::new(pool.clone());
 
     // Create two different sources
-    let source_id_1 = Uuid::new_v4();
-    let source_id_2 = Uuid::new_v4();
+    let source_id_1 = insert_test_source(&pool).await;
+    let source_id_2 = insert_test_source(&pool).await;
 
     // Create items for both sources
     let mut item1 = create_test_item(source_id_1);
@@ -159,9 +210,10 @@ async fn test_pgvector_search_with_filters() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].source_id, source_id_1);
 
-    // Search with category filter
+    // Search with category filter, scoped to this test's source so parallel
+    // suites cannot contribute extra web embeddings.
     let filters = SearchFilters {
-        source_ids: None,
+        source_ids: Some(vec![source_id_2]),
         workspace_id: None,
         categories: Some(vec!["web".to_string()]),
         min_quality: None,
@@ -191,7 +243,7 @@ async fn test_pgvector_delete_operations() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
 
     // Create multiple items and embeddings
     let mut items = vec![];
@@ -230,15 +282,37 @@ async fn test_pgvector_delete_operations() {
 
     // Verify all are stored
     let query = vec![1.0 / (1536_f32).sqrt(); 1536];
-    let results = store.search(&query, 10, Some(0.5), None).await.unwrap();
-    assert!(results.len() >= 3, "Should have at least 3 results");
+    let results = store
+        .search(
+            &query,
+            10,
+            Some(0.5),
+            Some(SearchFilters {
+                source_ids: Some(vec![source_id]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 3, "Should have 3 results for this source");
 
     // Delete by content item
     let deleted = store.delete_by_content_item(items[0].id).await.unwrap();
     assert_eq!(deleted, 1, "Should delete 1 embedding");
 
     // Verify deletion
-    let results = store.search(&query, 10, Some(0.5), None).await.unwrap();
+    let results = store
+        .search(
+            &query,
+            10,
+            Some(0.5),
+            Some(SearchFilters {
+                source_ids: Some(vec![source_id]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
     let remaining = results
         .iter()
         .filter(|r| r.content_item_id == items[0].id)
@@ -273,7 +347,7 @@ async fn test_pgvector_dimension_validation() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
     let item = create_test_item(source_id);
     let item_id = store.store_content_item(&item).await.unwrap();
 
@@ -301,7 +375,7 @@ async fn test_pgvector_get_content_item() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
     let item = create_test_item(source_id);
     let item_id = store.store_content_item(&item).await.unwrap();
 
@@ -335,7 +409,7 @@ async fn test_pgvector_upsert_behavior() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
     let item = create_test_item(source_id);
     let item_id = store.store_content_item(&item).await.unwrap();
 
@@ -360,7 +434,18 @@ async fn test_pgvector_upsert_behavior() {
     store.store(&embedding2).await.unwrap();
 
     // Search should return the updated embedding
-    let results = store.search(&vector2, 1, Some(0.5), None).await.unwrap();
+    let results = store
+        .search(
+            &vector2,
+            1,
+            Some(0.5),
+            Some(SearchFilters {
+                source_ids: Some(vec![source_id]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].chunk_id, chunk_id);
@@ -379,7 +464,7 @@ async fn test_pgvector_batch_operations() {
     let pool = create_test_pool().await;
     let store = PgVectorStore::new(pool.clone());
 
-    let source_id = Uuid::new_v4();
+    let source_id = insert_test_source(&pool).await;
 
     // Create batch of items
     let mut embeddings = vec![];

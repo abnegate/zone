@@ -107,7 +107,11 @@ impl ContentItem {
         } else {
             hasher.update(self.uri.as_bytes());
         }
-        format!("{:x}", hasher.finalize())
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 

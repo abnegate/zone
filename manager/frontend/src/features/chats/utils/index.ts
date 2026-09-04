@@ -1,2 +1,2 @@
-export { formatDate } from './formatters';
 export * from './attachments';
+export { formatDate } from './formatters';

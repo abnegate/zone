@@ -5,9 +5,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
-import { act } from 'react';
-import { createElement } from 'react';
 import type { ReactNode } from 'react';
+import { act, createElement } from 'react';
 import type { Source } from '../types';
 
 const mockGetSources = mock();

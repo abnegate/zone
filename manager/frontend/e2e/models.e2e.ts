@@ -157,9 +157,10 @@ test.describe('Models Page', () => {
   test('displays model tags', async ({ page }) => {
     await switchToBrowseTab(page);
     const firstItem = page.locator('.browse-item').first();
-    // Tags come from model.details (family, parameter_size)
-    await expect(firstItem.locator('.tag')).toHaveCount(2);
-    await expect(firstItem.locator('.tag').first()).toHaveText('llama');
+    // Family and parameter size render as specs, not use-case tags.
+    await expect(firstItem.locator('.browse-spec')).toHaveCount(2);
+    await expect(firstItem.locator('.browse-spec').first()).toHaveText('3.2B');
+    await expect(firstItem.locator('.browse-spec').nth(1)).toHaveText('llama');
   });
 
   test('sorts browse results', async ({ page }) => {
@@ -224,7 +225,7 @@ test.describe('Models Page', () => {
       }
     });
 
-    await page.getByRole('button', { name: 'Mistral' }).click();
+    await page.getByRole('button', { name: 'Mistral', exact: true }).click();
     await expect(page.locator('.browse-item')).toHaveCount(1);
     await expect(page.locator('.browse-name')).toHaveText('mistral');
   });
@@ -790,8 +791,8 @@ test.describe('Models Page', () => {
     await page.fill('.search-container input', 'test');
     await page.click('.search-container button');
 
-    await expect(page.locator('.browse-size').nth(0)).toContainText('500 B');
-    await expect(page.locator('.browse-size').nth(1)).toContainText('500 KB');
-    await expect(page.locator('.browse-size').nth(2)).toContainText('500 MB');
+    await expect(page.locator('.browse-item').nth(0).locator('.browse-spec')).toContainText('500 B');
+    await expect(page.locator('.browse-item').nth(1).locator('.browse-spec')).toContainText('500 KB');
+    await expect(page.locator('.browse-item').nth(2).locator('.browse-spec')).toContainText('500 MB');
   });
 });

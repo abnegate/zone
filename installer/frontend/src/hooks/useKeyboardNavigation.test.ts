@@ -21,7 +21,9 @@ describe('useKeyboardNavigation', () => {
       })
     );
 
-    const handler = addEventListenerSpy.mock.calls.find(([eventName]) => eventName === 'keydown')?.[1];
+    const handler = addEventListenerSpy.mock.calls.find(
+      ([eventName]) => eventName === 'keydown'
+    )?.[1];
     if (typeof handler === 'function') {
       handler(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
     }
@@ -57,7 +59,9 @@ describe('useKeyboardNavigation', () => {
       })
     );
 
-    const handler = addEventListenerSpy.mock.calls.find(([eventName]) => eventName === 'keydown')?.[1];
+    const handler = addEventListenerSpy.mock.calls.find(
+      ([eventName]) => eventName === 'keydown'
+    )?.[1];
     if (typeof handler === 'function') {
       handler(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
     }

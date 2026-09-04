@@ -76,7 +76,7 @@ impl GitHubSyncProvider {
 
     /// Verify HMAC-SHA256 signature for GitHub webhooks
     fn verify_signature(secret: &str, body: &[u8], signature: &str) -> bool {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use subtle::ConstantTimeEq;
         type HmacSha256 = Hmac<Sha256>;
 
@@ -340,7 +340,7 @@ mod tests {
         let body = b"test payload";
 
         // Compute expected signature
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
 
@@ -371,7 +371,7 @@ mod tests {
         let body = b"test payload";
 
         // Compute signature with different secret
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
 
@@ -450,7 +450,7 @@ mod tests {
         let secret = "test-secret";
 
         // Compute valid signature
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
 

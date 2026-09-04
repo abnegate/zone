@@ -89,7 +89,9 @@ describe('useInstallation', () => {
         })
         .mockResolvedValueOnce({
           done: false,
-          value: new TextEncoder().encode('{"status": "Done", "progress": 100, "complete": true}\n'),
+          value: new TextEncoder().encode(
+            '{"status": "Done", "progress": 100, "complete": true}\n'
+          ),
         })
         .mockResolvedValueOnce({ done: true }),
     };

@@ -11,7 +11,7 @@ postgres:
 
   # CNPG Cluster configuration
   instances: 1
-  image: ghcr.io/cloudnative-pg/postgresql:16.11
+  image: ghcr.io/cloudnative-pg/postgresql:16.15@sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a
 
   # Database initialization
   database: zone
@@ -50,7 +50,7 @@ valkey:
 
   image:
     repository: valkey/valkey
-    tag: "8.1-alpine"
+    tag: "8.1.10-alpine@sha256:b21fd94099dcd4bc6b2b9230daef69b6558b887ad4a2a1afe56ff6e745a88cdb"
     pullPolicy: IfNotPresent
 
   # Configuration

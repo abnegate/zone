@@ -74,7 +74,7 @@ export const SearchResultSchema = z.object({
   content: z.string(),
   snippet: z.string(),
   relevance_score: z.number().min(0).max(1),
-  metadata: z.record(z.unknown()),
+  metadata: z.record(z.string(), z.unknown()),
 });
 
 export const SearchOptionsSchema = z.object({

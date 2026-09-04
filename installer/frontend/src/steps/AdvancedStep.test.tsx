@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
-import { FormProvider, useForm, type UseFormReturn } from 'react-hook-form';
+import { FormProvider, type UseFormReturn, useForm } from 'react-hook-form';
 import type { InstallerConfig } from '../types';
 import { AdvancedStep } from './AdvancedStep';
 
@@ -120,9 +120,7 @@ describe('AdvancedStep', () => {
     });
 
     it('does not override existing Grafana password when toggled on', () => {
-      renderWithForm(
-        createMockConfig({ MONITORING_GRAFANA_ADMIN_PASSWORD: 'existing-pw' })
-      );
+      renderWithForm(createMockConfig({ MONITORING_GRAFANA_ADMIN_PASSWORD: 'existing-pw' }));
 
       fireEvent.click(screen.getByLabelText(/enable prometheus \+ grafana monitoring/i));
 

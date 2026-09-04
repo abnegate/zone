@@ -1,9 +1,9 @@
 // Workspace Member Types - import from auth for consistency
 import type { WorkspaceRole } from '../../auth/types';
 import type { ApiResponse, OrganizationMember } from '../organization/types';
-export type { WorkspaceRole };
+
 // Re-export OrganizationMember for WorkspaceMembersSection
-export type { OrganizationMember, ApiResponse };
+export type { ApiResponse, OrganizationMember, WorkspaceRole };
 
 // Workspace Types
 export interface Workspace {

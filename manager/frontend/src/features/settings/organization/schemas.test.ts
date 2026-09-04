@@ -2,8 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import {
   InvitationSchema,
   InvitationsResponseSchema,
-  OrgMembersResponseSchema,
   OrganizationMemberSchema,
+  OrgMembersResponseSchema,
 } from './schemas';
 
 describe('organization API schemas', () => {

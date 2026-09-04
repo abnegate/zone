@@ -578,13 +578,13 @@ export default function OrgSettingsPage() {
                       className="form-select"
                     >
                       <option value="">Use server default</option>
-                      {Array.from(new Set([...IMAGE_MODEL_OPTIONS, modelImage].filter(Boolean))).map(
-                        (model) => (
-                          <option key={model} value={model}>
-                            {model}
-                          </option>
-                        )
-                      )}
+                      {Array.from(
+                        new Set([...IMAGE_MODEL_OPTIONS, modelImage].filter(Boolean))
+                      ).map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
                     </select>
                     <p className="form-hint">
                       ComfyUI checkpoint used when a message asks for an image. Leave empty to use

@@ -511,15 +511,20 @@ describe('OrgMembersSection', () => {
         joined_at: '2024-01-04T00:00:00Z',
       };
 
-      mockClient.addOrgMember.mockResolvedValueOnce(newMember);
-      mockClient.getOrgMembers.mockResolvedValueOnce({
-        members: [mockOwner, mockAdmin, mockMember, newMember],
+      mockClient.addOrgMember.mockResolvedValue(newMember);
+      mockClient.getOrgMembers.mockImplementation(async () => {
+        if (mockClient.addOrgMember.mock.calls.length > 0) {
+          return { members: [mockOwner, mockAdmin, mockMember, newMember] };
+        }
+        return { members: [mockOwner, mockAdmin, mockMember] };
       });
 
       render(<OrgMembersSection orgId="org-123" />);
       await waitFor(() => {
-        fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
+        expect(screen.getByRole('button', { name: /Add Member/i })).toBeInTheDocument();
       });
+
+      fireEvent.click(screen.getByRole('button', { name: /Add Member/i }));
 
       await waitFor(() => {
         const emailInput = screen.getByLabelText(/Email/i);
@@ -536,7 +541,8 @@ describe('OrgMembersSection', () => {
           email: 'newuser@test.com',
           role: 'member',
         });
-        expect(mockClient.getOrgMembers).toHaveBeenCalledTimes(2);
+        expect(screen.getByText('Member added successfully')).toBeInTheDocument();
+        expect(screen.getByText('New User')).toBeInTheDocument();
       });
     });
   });
