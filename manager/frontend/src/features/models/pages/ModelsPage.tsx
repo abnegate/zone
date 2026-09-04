@@ -369,8 +369,6 @@ export default function ModelsPage() {
                 <TabsTrigger value="all">All</TabsTrigger>
                 <TabsTrigger value="ollama">Ollama</TabsTrigger>
                 <TabsTrigger value="huggingface">HuggingFace</TabsTrigger>
-                <TabsTrigger value="gpt4all">GPT4All</TabsTrigger>
-                <TabsTrigger value="openrouter">OpenRouter</TabsTrigger>
               </TabsList>
             </Tabs>
 

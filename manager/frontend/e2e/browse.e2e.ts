@@ -380,11 +380,11 @@ test.describe('Browse Models - Source Tab Switching', () => {
     await expect(page.locator('.search-container')).toBeVisible();
   });
 
-  test('all four source tabs are visible', async ({ page }) => {
+  test('downloadable source tabs are visible', async ({ page }) => {
     await expect(page.locator('button[role="tab"]:has-text("Ollama")')).toBeVisible();
     await expect(page.locator('button[role="tab"]:has-text("HuggingFace")')).toBeVisible();
-    await expect(page.locator('button[role="tab"]:has-text("GPT4All")')).toBeVisible();
-    await expect(page.locator('button[role="tab"]:has-text("OpenRouter")')).toBeVisible();
+    await expect(page.locator('button[role="tab"]:has-text("GPT4All")')).toHaveCount(0);
+    await expect(page.locator('button[role="tab"]:has-text("OpenRouter")')).toHaveCount(0);
   });
 
   test('clicking source tabs sends correct source parameter', async ({ page }) => {
@@ -409,26 +409,16 @@ test.describe('Browse Models - Source Tab Switching', () => {
       });
     });
 
-    // Click HuggingFace tab
     await page.click('button[role="tab"]:has-text("HuggingFace")');
     await page.waitForTimeout(100);
 
-    // Click GPT4All tab
-    await page.click('button[role="tab"]:has-text("GPT4All")');
-    await page.waitForTimeout(100);
-
-    // Click OpenRouter tab
-    await page.click('button[role="tab"]:has-text("OpenRouter")');
-    await page.waitForTimeout(100);
-
-    // Click Ollama tab
     await page.click('button[role="tab"]:has-text("Ollama")');
     await page.waitForTimeout(100);
 
     expect(requests).toContain('huggingface');
-    expect(requests).toContain('gpt4all');
-    expect(requests).toContain('openrouter');
     expect(requests).toContain('ollama');
+    expect(requests).not.toContain('gpt4all');
+    expect(requests).not.toContain('openrouter');
   });
 });
 
@@ -591,213 +581,5 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     await page.locator('.browse-item').first().click();
 
     await expect(page.locator('.details-install code')).toHaveText('hf.co/TheBloke/Model-GGUF');
-  });
-});
-
-test.describe('Browse Models - GPT4All Specific', () => {
-  test.beforeEach(async ({ context, page }) => {
-    // Block service worker to allow route interception to work
-    await blockServiceWorker(context);
-    await mockCommonEndpoints(page);
-    await setupAuth(page);
-    await page.goto('/models');
-    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    // Open the Browse catalogue
-    await page.click('button[role="tab"]:has-text("Browse")');
-    await expect(page.locator('.search-container')).toBeVisible();
-  });
-
-  test('displays GPT4All model', async ({ page }) => {
-    const gpt4allModel = {
-      id: 'llama3-8b-instruct',
-      name: 'Llama 3 8B Instruct',
-      description: 'Meta Llama 3 8B Instruct model',
-      downloads: 100000,
-      tags: ['gguf', 'llama'],
-    };
-
-    await page.unroute('**/api/models*');
-    await routeApi(page, '**/api/models*', (route) => {
-      const url = new URL(route.request().url());
-      const source = url.searchParams.get('source');
-
-      if (!source) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ models: [] }),
-        });
-        return;
-      }
-
-      if (source === 'gpt4all') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [gpt4allModel], next_cursor: null }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], next_cursor: null }),
-        });
-      }
-    });
-
-    // Switch to GPT4All tab
-    await page.click('button[role="tab"]:has-text("GPT4All")');
-
-    await expect(page.locator('.browse-item')).toHaveCount(1);
-    await expect(page.locator('.browse-name')).toHaveText('Llama 3 8B Instruct');
-  });
-
-  test('GPT4All shows models from response', async ({ page }) => {
-    const gpt4allModels = Array.from({ length: 5 }, (_, i) => ({
-      id: `model-${i}`,
-      name: `Model ${i}`,
-      description: 'A GGUF model',
-      downloads: 1000 * (5 - i),
-      tags: ['gguf'],
-    }));
-
-    await page.unroute('**/api/models*');
-    await routeApi(page, '**/api/models*', (route) => {
-      const url = new URL(route.request().url());
-      const source = url.searchParams.get('source');
-
-      if (!source) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ models: [] }),
-        });
-        return;
-      }
-
-      if (source === 'gpt4all') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: gpt4allModels, next_cursor: 'offset:5' }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], next_cursor: null }),
-        });
-      }
-    });
-
-    await page.click('button[role="tab"]:has-text("GPT4All")');
-
-    // Wait for GPT4All results to load
-    await expect(page.locator('.browse-name').first()).toHaveText('Model 0');
-    await expect(page.locator('.browse-item').first()).toBeVisible();
-  });
-});
-
-test.describe('Browse Models - OpenRouter Specific', () => {
-  test.beforeEach(async ({ context, page }) => {
-    // Block service worker to allow route interception to work
-    await blockServiceWorker(context);
-    await mockCommonEndpoints(page);
-    await setupAuth(page);
-    await page.goto('/models');
-    await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-    // Open the Browse catalogue
-    await page.click('button[role="tab"]:has-text("Browse")');
-    await expect(page.locator('.search-container')).toBeVisible();
-  });
-
-  test('displays OpenRouter model', async ({ page }) => {
-    const openrouterModel = {
-      id: 'anthropic/claude-3-opus',
-      name: 'Claude 3 Opus',
-      description: 'Anthropic Claude 3 Opus model',
-      downloads: 500000,
-      tags: ['api'],
-    };
-
-    await page.unroute('**/api/models*');
-    await routeApi(page, '**/api/models*', (route) => {
-      const url = new URL(route.request().url());
-      const source = url.searchParams.get('source');
-
-      if (!source) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ models: [] }),
-        });
-        return;
-      }
-
-      if (source === 'openrouter') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [openrouterModel], next_cursor: null }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], next_cursor: null }),
-        });
-      }
-    });
-
-    // Switch to OpenRouter tab
-    await page.click('button[role="tab"]:has-text("OpenRouter")');
-
-    await expect(page.locator('.browse-item')).toHaveCount(1);
-    await expect(page.locator('.browse-name')).toHaveText('Claude 3 Opus');
-  });
-
-  test('OpenRouter shows models from response', async ({ page }) => {
-    const openrouterModels = Array.from({ length: 5 }, (_, i) => ({
-      id: `provider/model-${i}`,
-      name: `Model ${i}`,
-      description: 'An API model',
-      downloads: 1000 * (5 - i),
-      tags: ['api'],
-    }));
-
-    await page.unroute('**/api/models*');
-    await routeApi(page, '**/api/models*', (route) => {
-      const url = new URL(route.request().url());
-      const source = url.searchParams.get('source');
-
-      if (!source) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ models: [] }),
-        });
-        return;
-      }
-
-      if (source === 'openrouter') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: openrouterModels, next_cursor: 'offset:5' }),
-        });
-      } else {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ source, models: [], next_cursor: null }),
-        });
-      }
-    });
-
-    await page.click('button[role="tab"]:has-text("OpenRouter")');
-
-    // Wait for OpenRouter results to load
-    await expect(page.locator('.browse-name').first()).toHaveText('Model 0');
-    await expect(page.locator('.browse-item').first()).toBeVisible();
   });
 });

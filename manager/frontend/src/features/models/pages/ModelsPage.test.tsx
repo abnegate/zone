@@ -429,8 +429,8 @@ describe('ModelsPage', () => {
       });
       expect(screen.getByText('Ollama')).toBeInTheDocument();
       expect(screen.getByText('HuggingFace')).toBeInTheDocument();
-      expect(screen.getByText('GPT4All')).toBeInTheDocument();
-      expect(screen.getByText('OpenRouter')).toBeInTheDocument();
+      expect(screen.queryByText('GPT4All')).not.toBeInTheDocument();
+      expect(screen.queryByText('OpenRouter')).not.toBeInTheDocument();
     });
 
     it('changes source when tab clicked', async () => {
@@ -662,39 +662,29 @@ describe('ModelsPage', () => {
   });
 
   describe('browse model installation', () => {
-    for (const source of ['openrouter', 'gpt4all'] as const) {
-      it(`does not pull ${source} catalog identifiers even if an install callback fires`, async () => {
-        const pullMock = mock(() => Promise.resolve(true));
-        mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
-        mockUseBrowse.mockReturnValue({
-          ...defaultBrowseHook,
-          models: [{ id: 'remote', name: 'qwen/qwen3.8-27b', source }],
-        });
-        renderModelsPage();
-        fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
-        fireEvent.click(await screen.findByRole('button', { name: 'Install' }));
-
-        expect(pullMock).not.toHaveBeenCalled();
-        expect(screen.queryByText('Install command')).not.toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'Install Model' })).not.toBeInTheDocument();
-        expect(screen.getByText(/cannot be installed through Ollama/)).toBeInTheDocument();
+    it('does not pull remote API catalog identifiers even if an install callback fires', async () => {
+      const pullMock = mock(() => Promise.resolve(true));
+      mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        models: [
+          {
+            id: 'remote',
+            name: 'qwen/qwen3.8-27b',
+            source: 'huggingface',
+            details: { format: 'api' },
+          },
+        ],
       });
+      renderModelsPage();
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Install' }));
 
-      it(`uses the ${source} tab when a catalog result has no source`, async () => {
-        const pullMock = mock(() => Promise.resolve(true));
-        mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
-        mockUseBrowse.mockReturnValue({
-          ...defaultBrowseHook,
-          source,
-          models: [{ id: 'remote', name: 'qwen/qwen3.8-27b' }],
-        });
-        renderModelsPage();
-        fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
-        fireEvent.click(await screen.findByRole('button', { name: 'Install' }));
-
-        expect(pullMock).not.toHaveBeenCalled();
-      });
-    }
+      expect(pullMock).not.toHaveBeenCalled();
+      expect(screen.queryByText('Install command')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Install Model' })).not.toBeInTheDocument();
+      expect(screen.getByText(/cannot be installed through Ollama/)).toBeInTheDocument();
+    });
 
     it('pulls HuggingFace browse names with the Ollama registry prefix', async () => {
       const pullMock = mock(() => Promise.resolve(true));
@@ -1111,17 +1101,16 @@ describe('ModelsPage', () => {
       });
     });
 
-    it('GPT4All models do not fetch model card info', async () => {
-      // GPT4All models don't fetch model card info (no README content)
+    it('Ollama models do not fetch model card info', async () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
-        source: 'gpt4all',
+        source: 'ollama',
         models: [
           {
-            id: 'gpt4all-model',
-            name: 'gpt4all-model',
+            id: 'ollama-model',
+            name: 'ollama-model',
             size: 2000000000,
-            source: 'gpt4all',
+            source: 'ollama',
           },
         ],
       });
@@ -1134,12 +1123,11 @@ describe('ModelsPage', () => {
       fireEvent.click(tab);
 
       await waitFor(() => {
-        expect(screen.getByTestId('browse-model-gpt4all-model')).toBeInTheDocument();
+        expect(screen.getByTestId('browse-model-ollama-model')).toBeInTheDocument();
       });
 
       fireEvent.click(screen.getByText('Details'));
 
-      // GPT4All models should not trigger model info fetch
       await waitFor(() => {
         expect(mockGetModelInfo).not.toHaveBeenCalled();
       });
@@ -1282,7 +1270,7 @@ describe('ModelsPage', () => {
   });
 
   describe('source tab switching', () => {
-    it('switches to GPT4All source', async () => {
+    it('switches to Ollama source', async () => {
       const changeSourceMock = mock();
       mockUseBrowse.mockReturnValue({ ...defaultBrowseHook, changeSource: changeSourceMock });
 
@@ -1294,41 +1282,16 @@ describe('ModelsPage', () => {
       fireEvent.click(tab);
 
       await waitFor(() => {
-        expect(screen.getByText('GPT4All')).toBeInTheDocument();
+        expect(screen.getByText('Ollama')).toBeInTheDocument();
       });
 
-      const gpt4allTab = screen.getByText('GPT4All');
-      fireEvent.mouseDown(gpt4allTab);
-      fireEvent.mouseUp(gpt4allTab);
-      fireEvent.click(gpt4allTab);
+      const ollamaTab = screen.getByText('Ollama');
+      fireEvent.mouseDown(ollamaTab);
+      fireEvent.mouseUp(ollamaTab);
+      fireEvent.click(ollamaTab);
 
       await waitFor(() => {
-        expect(changeSourceMock).toHaveBeenCalledWith('gpt4all');
-      });
-    });
-
-    it('switches to OpenRouter source', async () => {
-      const changeSourceMock = mock();
-      mockUseBrowse.mockReturnValue({ ...defaultBrowseHook, changeSource: changeSourceMock });
-
-      renderModelsPage();
-
-      const tab = screen.getByRole('tab', { name: 'Browse' });
-      fireEvent.mouseDown(tab);
-      fireEvent.mouseUp(tab);
-      fireEvent.click(tab);
-
-      await waitFor(() => {
-        expect(screen.getByText('OpenRouter')).toBeInTheDocument();
-      });
-
-      const openRouterTab = screen.getByText('OpenRouter');
-      fireEvent.mouseDown(openRouterTab);
-      fireEvent.mouseUp(openRouterTab);
-      fireEvent.click(openRouterTab);
-
-      await waitFor(() => {
-        expect(changeSourceMock).toHaveBeenCalledWith('openrouter');
+        expect(changeSourceMock).toHaveBeenCalledWith('ollama');
       });
     });
   });

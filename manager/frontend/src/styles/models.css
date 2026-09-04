@@ -140,28 +140,8 @@
   border-color: color-mix(in srgb, var(--ui-warning) 28%, transparent);
 }
 
-.browse-source.browse-source-gpt4all {
-  color: var(--ui-success-600);
-  background: var(--ui-success-muted);
-  border-color: color-mix(in srgb, var(--ui-success) 28%, transparent);
-}
-
-.browse-source.browse-source-openrouter {
-  color: var(--ui-info-600);
-  background: var(--ui-info-muted);
-  border-color: color-mix(in srgb, var(--ui-info) 28%, transparent);
-}
-
 :root[data-theme="dark"] .browse-source.browse-source-huggingface {
   color: var(--ui-warning-300);
-}
-
-:root[data-theme="dark"] .browse-source.browse-source-gpt4all {
-  color: var(--ui-success-300);
-}
-
-:root[data-theme="dark"] .browse-source.browse-source-openrouter {
-  color: var(--ui-info-300);
 }
 
 .browse-downloads {

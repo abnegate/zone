@@ -93,12 +93,9 @@ describe('useBrowse', () => {
     const ollamaModels = [{ name: 'llama:7b', size: 1000000000 }];
     const huggingfaceModels = [{ name: 'hf/model', size: 2000000000 }];
 
-    // Mock responses for each source - all 4 sources will be called
     mockBrowseModels
       .mockResolvedValueOnce({ models: ollamaModels, next_cursor: null })
-      .mockResolvedValueOnce({ models: huggingfaceModels, next_cursor: null })
-      .mockResolvedValueOnce({ models: [], next_cursor: null })
-      .mockResolvedValueOnce({ models: [], next_cursor: null });
+      .mockResolvedValueOnce({ models: huggingfaceModels, next_cursor: null });
 
     const { result } = renderHook(() => useBrowse());
 

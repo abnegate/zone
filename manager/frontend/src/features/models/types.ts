@@ -58,7 +58,7 @@ export interface BrowseModel {
   source?: ModelSource;
 }
 
-export type ModelSource = 'ollama' | 'huggingface' | 'gpt4all' | 'openrouter';
+export type ModelSource = 'ollama' | 'huggingface';
 export type BrowseSource = ModelSource | 'all';
 
 export type ModelSort =
@@ -82,7 +82,7 @@ export interface BrowseOptions {
   size?: ModelSizeFilter;
 }
 
-export const ALL_SOURCES: ModelSource[] = ['ollama', 'huggingface', 'gpt4all', 'openrouter'];
+export const ALL_SOURCES: ModelSource[] = ['ollama', 'huggingface'];
 
 export const MODEL_SORT_OPTIONS: Array<{ value: ModelSort; label: string }> = [
   { value: 'relevance', label: 'Relevance' },

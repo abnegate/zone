@@ -42,10 +42,10 @@ export const BrowseModelSchema = z.object({
   capabilities: z.array(z.enum(MODEL_CAPABILITIES)).nullable().optional(),
   sizes: z.array(ModelSizeOptionSchema).nullable().optional(),
   details: ModelDetailsSchema.nullable().optional(),
-  source: z.enum(['ollama', 'huggingface', 'gpt4all', 'openrouter']).optional(),
+  source: z.enum(['ollama', 'huggingface']).optional(),
 });
 
-export const ModelSourceSchema = z.enum(['ollama', 'huggingface', 'gpt4all', 'openrouter']);
+export const ModelSourceSchema = z.enum(['ollama', 'huggingface']);
 
 export const ModelsResponseSchema = z.object({
   models: z.array(InstalledModelSchema),

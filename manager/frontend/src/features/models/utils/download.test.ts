@@ -41,21 +41,19 @@ describe('modelDownload', () => {
     expect(modelDownload({ name: 'Qwen/Qwen3-GGUF' }, undefined, 'huggingface').name).toBe(
       'hf.co/Qwen/Qwen3-GGUF'
     );
-    expect(modelDownload({ name: 'qwen/qwen3.8-27b' }, undefined, 'openrouter').name).toBeNull();
+    expect(modelDownload({ name: 'qwen3.8:27b' }, undefined, 'ollama').name).toBe('qwen3.8:27b');
   });
 
   it('uses model provenance ahead of the currently selected source', () => {
     expect(
-      modelDownload({ name: 'qwen/qwen3.8-27b', source: 'openrouter' }, undefined, 'ollama').name
-    ).toBeNull();
+      modelDownload({ name: 'Qwen/Qwen3-GGUF', source: 'huggingface' }, undefined, 'ollama').name
+    ).toBe('hf.co/Qwen/Qwen3-GGUF');
     expect(
-      modelDownload({ name: 'qwen3.8:27b', source: 'ollama' }, undefined, 'openrouter').name
+      modelDownload({ name: 'qwen3.8:27b', source: 'ollama' }, undefined, 'huggingface').name
     ).toBe('qwen3.8:27b');
   });
 
-  it('does not invent local names for remote APIs or GPT4All downloads', () => {
-    expect(modelDownload({ name: 'qwen/qwen3.8-27b', source: 'openrouter' }).name).toBeNull();
-    expect(modelDownload({ name: 'model.gguf', source: 'gpt4all' }).name).toBeNull();
+  it('does not invent local names for remote APIs', () => {
     expect(modelDownload({ name: 'qwen/qwen3.8-27b', details: { format: 'api' } }).name).toBeNull();
   });
 });

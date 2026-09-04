@@ -52,8 +52,6 @@ export function useBrowse() {
   const sourceCursorsRef = useRef<Record<ModelSource, SourceState>>({
     ollama: { cursor: null, hasMore: true },
     huggingface: { cursor: null, hasMore: true },
-    gpt4all: { cursor: null, hasMore: true },
-    openrouter: { cursor: null, hasMore: true },
   });
 
   // Drop overlapping search/loadMore results that are no longer current.
@@ -123,8 +121,6 @@ export function useBrowse() {
       const resultsBySource: Record<ModelSource, BrowseModel[]> = {
         ollama: [],
         huggingface: [],
-        gpt4all: [],
-        openrouter: [],
       };
 
       for (const result of results) {
@@ -177,8 +173,6 @@ export function useBrowse() {
       const resultsBySource: Record<ModelSource, BrowseModel[]> = {
         ollama: [],
         huggingface: [],
-        gpt4all: [],
-        openrouter: [],
       };
 
       for (const result of results) {

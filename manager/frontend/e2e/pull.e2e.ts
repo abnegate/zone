@@ -104,15 +104,6 @@ test.describe('catalog download references', () => {
         details: { format: 'gguf' },
       },
     ],
-    openrouter: [
-      {
-        name: 'qwen/qwen3.8-27b',
-        description: 'A remote OpenRouter model',
-        modified_at: '2026-09-04T00:00:00Z',
-        details: { format: 'api' },
-      },
-    ],
-    gpt4all: [{ name: 'model.gguf', description: 'A GPT4All model' }],
   };
 
   test.beforeEach(async ({ context, page }) => {
@@ -128,54 +119,6 @@ test.describe('catalog download references', () => {
     await routeApi(page, '**/api/models/**', (route) =>
       route.fulfill({ json: { content: null, gguf_size: null } })
     );
-  });
-
-  test('remote and unsupported sources explain download eligibility in rows and details', async ({
-    page,
-  }, testInfo) => {
-    const connections: WebSocketRoute[] = [];
-    await page.routeWebSocket('**/ws/pull?*', (connection) => connections.push(connection));
-    await page.goto('/models');
-    await page.getByRole('tab', { name: 'Browse', exact: true }).click();
-    const rows = page.locator('.browse-item');
-    const remote = rows.filter({ hasText: 'qwen/qwen3.8-27b' });
-    await expect(remote.getByRole('button', { name: 'Remote API', exact: true })).toBeDisabled();
-    await expect(remote).toContainText('cannot be installed through Ollama');
-    await expect(
-      rows.filter({ hasText: 'model.gguf' }).getByRole('button', {
-        name: 'Download unavailable',
-        exact: true,
-      })
-    ).toBeDisabled();
-    await page.screenshot({
-      path: testInfo.outputPath('browse-eligibility.png'),
-      fullPage: true,
-      animations: 'disabled',
-    });
-
-    for (const [name, label, source] of [
-      ['qwen/qwen3.8-27b', 'Remote API', 'OpenRouter'],
-      ['model.gguf', 'Download unavailable', 'GPT4All'],
-    ]) {
-      await page.getByRole('tab', { name: source, exact: true }).click();
-      const row = rows.filter({ hasText: name });
-      await expect(row.getByRole('button', { name: label, exact: true })).toBeDisabled();
-      await row.locator('.browse-name').click();
-      const details = page.locator('.modal-details');
-      await expect(details.getByRole('button', { name: label, exact: true })).toBeDisabled();
-      await expect(details).toContainText('cannot be installed through Ollama');
-      await expect(details.locator('.details-install')).toHaveCount(0);
-      await expect(details.getByRole('button', { name: 'Delete Model' })).toHaveCount(0);
-      if (source === 'OpenRouter') {
-        await page.screenshot({
-          path: testInfo.outputPath('remote-details.png'),
-          fullPage: true,
-          animations: 'disabled',
-        });
-      }
-      await details.getByRole('button', { name: 'Close', exact: true }).click();
-    }
-    expect(connections).toHaveLength(0);
   });
 
   for (const [source, name, reference] of [
