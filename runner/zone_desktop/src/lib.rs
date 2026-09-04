@@ -71,6 +71,7 @@ async fn setup_client(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         manager = %manager_dir.display(),
         config = %config_path.display(),
         %proxy_target,
+        effective_proxy_target = %zone_installer::proxy::effective_proxy_target(&proxy_target),
         configured = frontend::is_configured_at(&config_path),
         "Starting Zone client server"
     );

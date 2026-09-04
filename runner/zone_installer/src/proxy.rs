@@ -1,6 +1,7 @@
 //! Reverse-proxy the manager API and WebSockets to a Zone server.
 
 use axum::{
+    Json,
     body::Body,
     extract::{
         State, WebSocketUpgrade,
@@ -11,6 +12,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use reqwest::Client;
+use serde_json::json;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
 use crate::serve::AppState;
@@ -34,7 +36,70 @@ pub fn upstream_url(base: &str, uri: &Uri) -> String {
         .map(|pq| pq.as_str())
         .unwrap_or_else(|| uri.path());
     let path = if path.is_empty() { "/" } else { path };
-    format!("{}{path}", base.trim_end_matches('/'))
+    format!("{}{path}", effective_proxy_target(base))
+}
+
+/// Prefer cleartext for loopback HTTPS.
+///
+/// Local Traefik serves `manager.localhost` on port 80. Port 443 uses an
+/// untrusted default certificate when `SECURITY_GENERATE_CERTIFICATE=false`,
+/// which reqwest rejects (`unable to get local issuer certificate`) and the
+/// UI surfaces as "Registration failed".
+pub fn effective_proxy_target(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let Some(rest) = base.strip_prefix("https://") else {
+        return base.to_string();
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    match cleartext_loopback_authority(authority) {
+        Some(authority) => format!("http://{authority}"),
+        None => base.to_string(),
+    }
+}
+
+fn cleartext_loopback_authority(authority: &str) -> Option<String> {
+    let (host, port) = split_authority(authority)?;
+    if !is_loopback_host(&host) {
+        return None;
+    }
+    match port {
+        None | Some(443) => Some(http_authority(&host)),
+        Some(_) => None,
+    }
+}
+
+fn split_authority(authority: &str) -> Option<(String, Option<u16>)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']')?;
+        let port = match tail {
+            "" => None,
+            tail => Some(tail.strip_prefix(':')?.parse().ok()?),
+        };
+        return Some((host.to_ascii_lowercase(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => Some((
+            host.trim_end_matches('.').to_ascii_lowercase(),
+            Some(port.parse().ok()?),
+        )),
+        _ => Some((authority.trim_end_matches('.').to_ascii_lowercase(), None)),
+    }
+}
+
+fn http_authority(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.to_ascii_lowercase().ends_with(".localhost")
 }
 
 pub fn ws_upstream_url(base: &str, uri: &Uri) -> String {
@@ -106,9 +171,12 @@ pub async fn proxy_http(
         }
         Err(err) => {
             tracing::error!(error = %err, url, "Failed to proxy HTTP request");
+            let target = state.proxy_target();
             (
                 StatusCode::BAD_GATEWAY,
-                format!("Failed to reach Zone server at {}", state.proxy_target()),
+                Json(json!({
+                    "error": format!("Failed to reach Zone server at {target}")
+                })),
             )
                 .into_response()
         }
@@ -217,6 +285,61 @@ mod tests {
         assert_eq!(
             ws_upstream_url("http://localhost:8000", &uri),
             "ws://localhost:8000/ws/chats/1"
+        );
+    }
+
+    #[test]
+    fn uses_cleartext_for_loopback_https() {
+        let uri: Uri = "/api/auth/register".parse().unwrap();
+        assert_eq!(
+            upstream_url("https://manager.localhost", &uri),
+            "http://manager.localhost/api/auth/register"
+        );
+        assert_eq!(
+            upstream_url("https://manager.localhost:443/", &uri),
+            "http://manager.localhost/api/auth/register"
+        );
+        assert_eq!(
+            upstream_url("https://localhost", &uri),
+            "http://localhost/api/auth/register"
+        );
+        assert_eq!(
+            upstream_url("https://127.0.0.1", &uri),
+            "http://127.0.0.1/api/auth/register"
+        );
+        assert_eq!(
+            upstream_url("https://[::1]", &uri),
+            "http://[::1]/api/auth/register"
+        );
+        assert_eq!(
+            upstream_url("https://[::1]:443", &uri),
+            "http://[::1]/api/auth/register"
+        );
+    }
+
+    #[test]
+    fn keeps_remote_https_and_custom_local_ports() {
+        let uri: Uri = "/api/auth/login".parse().unwrap();
+        assert_eq!(
+            upstream_url("https://zone.example.com/", &uri),
+            "https://zone.example.com/api/auth/login"
+        );
+        assert_eq!(
+            upstream_url("https://localhost:8443", &uri),
+            "https://localhost:8443/api/auth/login"
+        );
+        assert_eq!(
+            effective_proxy_target("http://manager.localhost"),
+            "http://manager.localhost"
+        );
+    }
+
+    #[test]
+    fn converts_loopback_wss_to_ws() {
+        let uri: Uri = "/ws/chats/1".parse().unwrap();
+        assert_eq!(
+            ws_upstream_url("https://manager.localhost", &uri),
+            "ws://manager.localhost/ws/chats/1"
         );
     }
 }

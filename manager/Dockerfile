@@ -22,9 +22,11 @@ COPY runner/zone_context/Cargo.toml ./runner/zone_context/
 COPY runner/zone_server/Cargo.toml ./runner/zone_server/
 COPY runner/zone_cli/Cargo.toml ./runner/zone_cli/
 COPY runner/zone_installer/Cargo.toml ./runner/zone_installer/
+COPY runner/zone_desktop/Cargo.toml ./runner/zone_desktop/
 
 RUN mkdir -p runner/tool_runner/src runner/zone_runner/src runner/zone_core/src \
-    runner/zone_context/src runner/zone_server/src runner/zone_cli/src runner/zone_installer/src && \
+    runner/zone_context/src runner/zone_server/src runner/zone_cli/src \
+    runner/zone_installer/src runner/zone_desktop/src && \
     echo "fn main() {}" > runner/tool_runner/src/lib.rs && \
     echo "fn main() {}" > runner/zone_runner/src/main.rs && \
     echo "fn main() {}" > runner/zone_core/src/lib.rs && \
@@ -32,7 +34,9 @@ RUN mkdir -p runner/tool_runner/src runner/zone_runner/src runner/zone_core/src 
     echo "fn main() {}" > runner/zone_server/src/lib.rs && \
     echo "fn main() {}" > runner/zone_server/src/main.rs && \
     echo "fn main() {}" > runner/zone_cli/src/main.rs && \
-    echo "fn main() {}" > runner/zone_installer/src/main.rs
+    echo "fn main() {}" > runner/zone_installer/src/main.rs && \
+    echo "fn main() {}" > runner/zone_desktop/src/lib.rs && \
+    echo "fn main() {}" > runner/zone_desktop/src/main.rs
 
 WORKDIR /build/runner
 RUN cargo build --release --package zone_server --package zone_runner 2>/dev/null || true

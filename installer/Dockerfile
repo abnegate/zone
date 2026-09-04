@@ -33,16 +33,19 @@ COPY runner/zone_cli/Cargo.toml ./zone_cli/
 COPY runner/zone_runner/Cargo.toml ./zone_runner/
 COPY runner/tool_runner/Cargo.toml ./tool_runner/
 COPY runner/zone_context/Cargo.toml ./zone_context/
+COPY runner/zone_desktop/Cargo.toml ./zone_desktop/
 
 RUN mkdir -p zone_installer/src zone_core/src zone_server/src zone_cli/src \
-             zone_runner/src tool_runner/src zone_context/src && \
+             zone_runner/src tool_runner/src zone_context/src zone_desktop/src && \
     echo "fn main() {}" > zone_installer/src/main.rs && \
     echo "fn main() {}" > zone_core/src/lib.rs && \
     echo "fn main() {}" > zone_server/src/main.rs && \
     echo "fn main() {}" > zone_cli/src/main.rs && \
     echo "fn main() {}" > zone_runner/src/main.rs && \
     echo "fn main() {}" > tool_runner/src/lib.rs && \
-    echo "fn main() {}" > zone_context/src/lib.rs
+    echo "fn main() {}" > zone_context/src/lib.rs && \
+    echo "fn main() {}" > zone_desktop/src/lib.rs && \
+    echo "fn main() {}" > zone_desktop/src/main.rs
 
 RUN cargo build --release --package zone_installer 2>/dev/null || true
 

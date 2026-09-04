@@ -84,5 +84,6 @@ mod tests {
         assert!(html.contains("Android and iOS"));
         assert!(html.contains("Zone menu on desktop"));
         assert!(html.contains(r#"id="host""#));
+        assert!(html.contains("http://manager.localhost"));
     }
 }

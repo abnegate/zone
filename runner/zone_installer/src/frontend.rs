@@ -13,7 +13,7 @@ const DEFAULT_INSTALLER_DIR: &str = "frontend/build";
 const DOCKER_INSTALLER_DIR: &str = "/app/frontend/build";
 const DEBIAN_INSTALLER_DIR: &str = "/usr/share/zone/installer";
 const DEBIAN_MANAGER_DIR: &str = "/usr/share/zone/manager";
-const DEFAULT_PROXY_TARGET: &str = "https://manager.localhost";
+const DEFAULT_PROXY_TARGET: &str = "http://manager.localhost";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontendKind {
