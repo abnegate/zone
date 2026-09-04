@@ -1128,18 +1128,26 @@ describe('Client', () => {
       );
     });
 
-    it('resetWorkspaceTheme resets theme', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ theme: mockTheme }),
+    it.each([204, 404])('resetWorkspaceTheme accepts empty %i responses', async (status) => {
+      const json = mock(() => {
+        throw new Error('No response body');
       });
+      mockFetch.mockResolvedValueOnce({ ok: status === 204, status, json });
+      expect(await client.resetWorkspaceTheme('org-1', 'ws-1')).toBeNull();
+      expect(json).not.toHaveBeenCalled();
+    });
 
-      await client.resetWorkspaceTheme('org-1', 'ws-1');
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        '/api/workspaces/ws-1/theme',
-        expect.objectContaining({ method: 'DELETE' })
-      );
+    it('accepts the backend nullable theme without a synthetic id', async () => {
+      const theme = {
+        ...mockTheme,
+        id: undefined,
+        primary_color_light: null,
+        font_family: null,
+        font_size_base: null,
+        border_radius: null,
+      };
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ theme }) });
+      expect(await client.getWorkspaceTheme('org-1', 'ws-1')).toEqual(theme);
     });
   });
 

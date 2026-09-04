@@ -157,9 +157,7 @@ class Client {
     return modelsApi.createPullWebSocket(modelName);
   }
 
-  // =============================================================================
   // Chats API (delegates to chatsApi)
-  // =============================================================================
 
   async getChats(workspaceId: string, archived?: boolean): Promise<Chat[]> {
     return chatsApi.getChats(workspaceId, archived);
@@ -205,9 +203,7 @@ class Client {
     return chatsApi.searchChatMessages(options);
   }
 
-  // =============================================================================
   // Projects API (delegates to projectsApi)
-  // =============================================================================
 
   async getProjects(workspaceId: string, status?: string): Promise<Project[]> {
     return projectsApi.getProjects(workspaceId, status);
@@ -263,9 +259,7 @@ class Client {
     return data.project;
   }
 
-  // =============================================================================
   // Tasks API (delegates to tasksApi)
-  // =============================================================================
 
   async getTasks(workspaceId: string, projectId?: string, status?: string) {
     return tasksApi.getTasks(workspaceId, projectId, status);
@@ -310,9 +304,7 @@ class Client {
     return tasksApi.createTaskWebSocket(runId);
   }
 
-  // =============================================================================
   // Sources API (delegates to sourcesApi)
-  // =============================================================================
 
   async getSourceTypes(): Promise<SourceTypesResponse['types']> {
     return sourcesApi.getSourceTypes();
@@ -350,9 +342,7 @@ class Client {
     return sourcesApi.reindexSource(workspaceId, id);
   }
 
-  // =============================================================================
   // Organizations API
-  // =============================================================================
 
   async getOrganizations(activeOnly = false): Promise<Organization[]> {
     const params = activeOnly ? '?active=true' : '';
@@ -413,9 +403,7 @@ class Client {
     }
   }
 
-  // =============================================================================
   // Workspaces API (nested under organizations)
-  // =============================================================================
 
   async getWorkspaces(orgId: string, activeOnly = false): Promise<Workspace[]> {
     const params = activeOnly ? '?active=true' : '';
@@ -480,9 +468,7 @@ class Client {
     }
   }
 
-  // =============================================================================
   // Workspace Theme API (nested under organizations/workspaces)
-  // =============================================================================
 
   async getWorkspaceTheme(_orgId: string, wsId: string): Promise<WorkspaceTheme | null> {
     const response = await fetch(`${API_BASE}/api/workspaces/${wsId}/theme`, {
@@ -517,21 +503,18 @@ class Client {
     return data.theme;
   }
 
-  async resetWorkspaceTheme(_orgId: string, wsId: string): Promise<WorkspaceTheme> {
+  async resetWorkspaceTheme(_orgId: string, wsId: string): Promise<null> {
     const response = await fetch(`${API_BASE}/api/workspaces/${wsId}/theme`, {
       method: 'DELETE',
       headers: this.getHeaders(),
     });
-    if (!response.ok) {
+    if (!response.ok && response.status !== 404) {
       throw new Error(`Failed to reset workspace theme: ${response.status}`);
     }
-    const data = parse(WorkspaceThemeResponseSchema, await response.json());
-    return data.theme;
+    return null;
   }
 
-  // =============================================================================
   // Organization AI Settings API
-  // =============================================================================
 
   async getOrgAiSettings(orgId: string): Promise<AiSettings> {
     const response = await fetch(`${API_BASE}/api/organizations/${orgId}/settings/ai`, {
@@ -566,9 +549,7 @@ class Client {
     return parse(AiSettingsResponseSchema, await response.json());
   }
 
-  // =============================================================================
   // Workspace AI Settings API
-  // =============================================================================
 
   async getWorkspaceAiSettings(orgId: string, wsId: string): Promise<AiSettings> {
     const response = await fetch(
@@ -625,9 +606,7 @@ class Client {
     return parse(AiSettingsResponseSchema, await response.json());
   }
 
-  // =============================================================================
   // Email Verification & Password Reset API
-  // =============================================================================
 
   async verifyEmail(token: string): Promise<{ success: boolean; message: string }> {
     const response = await fetch(`${API_BASE}/api/auth/verify-email`, {
@@ -699,9 +678,7 @@ class Client {
     }
   }
 
-  // =============================================================================
   // Session Management API
-  // =============================================================================
 
   async getSessions(): Promise<SessionsResponse> {
     const response = await fetch(`${API_BASE}/api/auth/sessions`, {
@@ -733,9 +710,7 @@ class Client {
     }
   }
 
-  // =============================================================================
   // Organization Member Management API
-  // =============================================================================
 
   async getOrgMembers(orgId: string): Promise<OrgMembersResponse> {
     const response = await fetch(
@@ -807,9 +782,7 @@ class Client {
     }
   }
 
-  // =============================================================================
   // Workspace Member Management API
-  // =============================================================================
 
   async getWorkspaceMembers(workspaceId: string): Promise<WorkspaceMembersResponse> {
     const response = await fetch(
@@ -880,9 +853,7 @@ class Client {
     }
   }
 
-  // =============================================================================
   // Invitation Management API
-  // =============================================================================
 
   async createInvitation(orgId: string, request: CreateInvitationRequest): Promise<Invitation> {
     const response = await fetch(
@@ -955,9 +926,7 @@ class Client {
     }
   }
 
-  // =============================================================================
   // Billing & Usage API
-  // =============================================================================
 
   async getPlans(): Promise<Plan[]> {
     const response = await fetch(`${API_BASE}/api/plans`, {
@@ -1026,9 +995,7 @@ class Client {
     return parse(LimitsResponseSchema, await response.json());
   }
 
-  // =============================================================================
   // Audit Logs API
-  // =============================================================================
 
   async getAuditLogs(orgId: string, filters?: AuditLogFilters): Promise<AuditLogsResponse> {
     const params = new URLSearchParams();
@@ -1092,9 +1059,7 @@ class Client {
     return response.blob();
   }
 
-  // =============================================================================
   // Knowledge Base API (delegates to knowledgeApi)
-  // =============================================================================
 
   async getKnowledge(workspaceId?: string) {
     if (!workspaceId) {
@@ -1115,9 +1080,7 @@ class Client {
     return knowledgeApi.refreshKnowledge(id);
   }
 
-  // =============================================================================
   // Context Search API (delegates to knowledgeApi)
-  // =============================================================================
 
   async searchContext(options: SearchOptions) {
     return knowledgeApi.searchContext(options);
@@ -1131,9 +1094,7 @@ class Client {
     return knowledgeApi.createContextGatheringWebSocket(gatheringId);
   }
 
-  // =============================================================================
   // Sync Configuration API (delegates to projectsApi)
-  // =============================================================================
 
   async getSyncConfigs(projectId: string): Promise<SyncConfig[]> {
     return projectsApi.getSyncConfigs(projectId);

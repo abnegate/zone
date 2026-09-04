@@ -57,29 +57,11 @@ export interface WorkspaceMembersResponse {
 export type FontFamily = 'system' | 'inter' | 'roboto' | 'open-sans' | 'lato' | 'nunito';
 export type BorderRadius = 'none' | 'small' | 'medium' | 'large';
 
-export interface WorkspaceTheme {
-  id: string;
-  workspace_id: string;
-  primary_color_light: string;
-  secondary_color_light: string;
-  primary_color_dark: string;
-  secondary_color_dark: string;
-  font_family: FontFamily;
-  font_size_base: string;
-  border_radius: BorderRadius;
-  created_at: string;
-  updated_at: string;
-}
+export type WorkspaceTheme = import('./schemas').WorkspaceThemeZ;
 
-export interface UpdateWorkspaceThemeRequest {
-  primary_color_light?: string;
-  secondary_color_light?: string;
-  primary_color_dark?: string;
-  secondary_color_dark?: string;
-  font_family?: FontFamily;
-  font_size_base?: string;
-  border_radius?: BorderRadius;
-}
+export type UpdateWorkspaceThemeRequest = import('zod').z.infer<
+  typeof import('./schemas').UpdateWorkspaceThemeRequestSchema
+>;
 
 export interface WorkspaceThemeResponse {
   success?: boolean;

@@ -91,28 +91,33 @@ export const BorderRadiusSchema = z.enum(['none', 'small', 'medium', 'large']);
 
 const hexColorRegex = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
 
+export const FontSizeSchema = z
+  .string()
+  .regex(/^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)px$/, 'Font size must be a positive pixel value')
+  .refine((value) => Number.isFinite(Number.parseFloat(value)), 'Font size must be finite');
+
 export const WorkspaceThemeSchema = z.object({
-  id: z.string(),
+  id: z.string().optional(),
   workspace_id: z.string(),
-  primary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color'),
-  secondary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color'),
-  primary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color'),
-  secondary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color'),
-  font_family: FontFamilySchema,
-  font_size_base: z.string(),
-  border_radius: BorderRadiusSchema,
+  primary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color').nullable(),
+  secondary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color').nullable(),
+  primary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color').nullable(),
+  secondary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color').nullable(),
+  font_family: FontFamilySchema.nullable(),
+  font_size_base: FontSizeSchema.nullable(),
+  border_radius: BorderRadiusSchema.nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 });
 
 export const UpdateWorkspaceThemeRequestSchema = z.object({
-  primary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color').optional(),
-  secondary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color').optional(),
-  primary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color').optional(),
-  secondary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color').optional(),
-  font_family: FontFamilySchema.optional(),
-  font_size_base: z.string().optional(),
-  border_radius: BorderRadiusSchema.optional(),
+  primary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color').nullable().optional(),
+  secondary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color').nullable().optional(),
+  primary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color').nullable().optional(),
+  secondary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color').nullable().optional(),
+  font_family: FontFamilySchema.nullable().optional(),
+  font_size_base: FontSizeSchema.nullable().optional(),
+  border_radius: BorderRadiusSchema.nullable().optional(),
 });
 
 export const WorkspaceThemeResponseSchema = z.object({

@@ -31,9 +31,7 @@ import type {
   TasksResponseSchema,
 } from '../features/tasks/schemas';
 
-// =============================================================================
 // Auth Schemas - now re-exported from features/auth
-// =============================================================================
 
 export {
   AuthResponseSchema,
@@ -53,9 +51,7 @@ export {
   WorkspaceRoleSchema,
 } from '../features/auth/schemas';
 
-// =============================================================================
 // Organization Schemas
-// =============================================================================
 
 export const OrganizationSchema = z.object({
   id: z.string(),
@@ -80,9 +76,7 @@ export const UpdateOrganizationRequestSchema = z.object({
   is_active: z.boolean().optional(),
 });
 
-// =============================================================================
 // Workspace Schemas
-// =============================================================================
 
 export const WorkspaceSchema = z.object({
   id: z.string(),
@@ -108,9 +102,7 @@ export const UpdateWorkspaceRequestSchema = z.object({
   is_active: z.boolean().optional(),
 });
 
-// =============================================================================
 // Model Schemas
-// =============================================================================
 
 export {
   BrowseModelSchema,
@@ -121,9 +113,7 @@ export {
   PullProgressSchema,
 } from '../features/models/schemas';
 
-// =============================================================================
 // Chat Schemas
-// =============================================================================
 
 export {
   ChatResponseSchema,
@@ -140,9 +130,7 @@ export {
   SendMessageRequestSchema,
 } from '../features/chats/schemas';
 
-// =============================================================================
 // Source Schemas - re-exported from features/sources
-// =============================================================================
 
 export {
   CalendarMetadataSchema,
@@ -176,9 +164,7 @@ export {
   WebMetadataSchema,
 } from '../features/sources/schemas';
 
-// =============================================================================
 // Project Schemas
-// =============================================================================
 
 export {
   CreateProjectRequestSchema,
@@ -195,10 +181,15 @@ export {
   UpdateProjectRequestSchema,
 } from '../features/projects/schemas';
 
-// =============================================================================
 // Task Schemas - now re-exported from features/tasks
-// =============================================================================
 
+export {
+  BorderRadiusSchema,
+  FontFamilySchema,
+  UpdateWorkspaceThemeRequestSchema,
+  WorkspaceThemeResponseSchema,
+  WorkspaceThemeSchema,
+} from '../features/settings/workspace/schemas';
 export {
   CreateTaskRequestSchema,
   LogLevelSchema,
@@ -217,55 +208,12 @@ export {
   UpdateTaskRequestSchema,
 } from '../features/tasks/schemas';
 
-// =============================================================================
-// Workspace Theme Schemas
-// =============================================================================
+import type {
+  WorkspaceThemeResponseSchema,
+  WorkspaceThemeSchema,
+} from '../features/settings/workspace/schemas';
 
-export const FontFamilySchema = z.enum([
-  'system',
-  'inter',
-  'roboto',
-  'open-sans',
-  'lato',
-  'nunito',
-]);
-export const BorderRadiusSchema = z.enum(['none', 'small', 'medium', 'large']);
-
-const hexColorRegex = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
-
-export const WorkspaceThemeSchema = z.object({
-  id: z.string(),
-  workspace_id: z.string(),
-  primary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color'),
-  secondary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color'),
-  primary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color'),
-  secondary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color'),
-  font_family: FontFamilySchema,
-  font_size_base: z.string(),
-  border_radius: BorderRadiusSchema,
-  created_at: z.string(),
-  updated_at: z.string(),
-});
-
-export const UpdateWorkspaceThemeRequestSchema = z.object({
-  primary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color').optional(),
-  secondary_color_light: z.string().regex(hexColorRegex, 'Invalid hex color').optional(),
-  primary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color').optional(),
-  secondary_color_dark: z.string().regex(hexColorRegex, 'Invalid hex color').optional(),
-  font_family: FontFamilySchema.optional(),
-  font_size_base: z.string().optional(),
-  border_radius: BorderRadiusSchema.optional(),
-});
-
-export const WorkspaceThemeResponseSchema = z.object({
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-  theme: WorkspaceThemeSchema,
-});
-
-// =============================================================================
 // Organizations Response Schemas
-// =============================================================================
 
 export const OrganizationsResponseSchema = z.object({
   success: z.boolean().optional(),
@@ -279,9 +227,7 @@ export const OrganizationResponseSchema = z.object({
   organization: OrganizationSchema,
 });
 
-// =============================================================================
 // Workspaces Response Schemas
-// =============================================================================
 
 export const WorkspacesResponseSchema = z.object({
   success: z.boolean().optional(),
@@ -295,13 +241,10 @@ export const WorkspaceResponseSchema = z.object({
   workspace: WorkspaceSchema,
 });
 
-// =============================================================================
 // Content Schemas
 // (Content schemas re-exported from features/sources above)
 
-// =============================================================================
 // Type Exports (inferred from schemas)
-// =============================================================================
 
 export type UserZ = z.infer<typeof UserSchema>;
 export type AuthResponseZ = z.infer<typeof AuthResponseSchema>;
@@ -337,9 +280,7 @@ export type WorkspaceResponse = z.infer<typeof WorkspaceResponseSchema>;
 export type WorkspaceThemeResponse = z.infer<typeof WorkspaceThemeResponseSchema>;
 export type SourceVerifyResponse = z.infer<typeof SourceVerifyResponseSchema>;
 
-// =============================================================================
 // AI Settings Schemas
-// =============================================================================
 
 export const AiProviderSchema = z.enum(['self_hosted', 'openai', 'anthropic', 'bedrock']);
 
@@ -400,14 +341,11 @@ export const AiSettingsResponseSchema = z.object({
 export type AiSettingsZ = z.infer<typeof AiSettingsSchema>;
 export type AiSettingsResponse = z.infer<typeof AiSettingsResponseSchema>;
 
-// =============================================================================
 // Session Schemas
-// =============================================================================
 
 export type { SessionsResponse, SessionZ } from '../features/auth/schemas';
 export { SessionSchema, SessionsResponseSchema } from '../features/auth/schemas';
 
-// =============================================================================
 // Organization Member Schemas
 
 export type { OrgRoleZ } from '../features/auth/schemas';
@@ -422,7 +360,6 @@ export {
   UpdateOrgMemberRequestSchema,
 } from '../features/settings/organization/schemas';
 
-// =============================================================================
 // Workspace Member Schemas
 
 export type { WorkspaceRoleZ } from '../features/auth/schemas';
@@ -437,7 +374,6 @@ export {
   WorkspaceMembersResponseSchema,
 } from '../features/settings/workspace/schemas';
 
-// =============================================================================
 // Invitation Schemas - now re-exported from features/settings
 
 export type { InvitationDetailsZ } from '../features/auth/schemas';
@@ -452,9 +388,7 @@ export {
   InvitationsResponseSchema,
 } from '../features/settings/organization/schemas';
 
-// =============================================================================
 // Billing & Usage Schemas
-// =============================================================================
 
 export const SubscriptionStatusSchema = z.enum(['active', 'canceled', 'past_due', 'trialing']);
 
@@ -532,9 +466,7 @@ export type SubscriptionResponse = z.infer<typeof SubscriptionResponseSchema>;
 export type UsageResponse = z.infer<typeof UsageResponseSchema>;
 export type LimitsResponse = z.infer<typeof LimitsResponseSchema>;
 
-// =============================================================================
 // Audit Log Schemas
-// =============================================================================
 
 export const AuditActionSchema = z.enum([
   'create',
@@ -591,9 +523,7 @@ export type AuditResourceTypeZ = z.infer<typeof AuditResourceTypeSchema>;
 export type AuditLogZ = z.infer<typeof AuditLogSchema>;
 export type AuditLogsResponse = z.infer<typeof AuditLogsResponseSchema>;
 
-// =============================================================================
 // Knowledge Base & Context Search Schemas - re-exported from features/knowledge
-// =============================================================================
 
 export type {
   CreateKnowledgeRequestZ,

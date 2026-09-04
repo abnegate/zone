@@ -30,10 +30,18 @@ mock.module('../../../auth', () => ({
 
 // Mock useTheme
 const mockSetWorkspaceTheme = mock();
+const mockPreviewWorkspaceTheme = mock();
+let savedTheme: WorkspaceTheme | null;
+let selectedWorkspace = '00000000-0000-0000-0000-000000000001';
+let themeLoading = false;
+let themeError: string | null = null;
 mock.module('../../../../shared/context/ThemeContext', () => ({
   useTheme: () => ({
     theme: 'light',
-    workspaceTheme: null,
+    workspaceTheme: savedTheme,
+    workspaceThemeLoading: themeLoading,
+    workspaceThemeError: themeError,
+    previewWorkspaceTheme: mockPreviewWorkspaceTheme,
     setWorkspaceTheme: mockSetWorkspaceTheme,
   }),
 }));
@@ -50,7 +58,7 @@ mock.module('../../../../shared/context/WorkspaceContext', () => ({
       updated_at: '2024-01-01T00:00:00Z',
     },
     currentWorkspace: {
-      id: '00000000-0000-0000-0000-000000000001',
+      id: selectedWorkspace,
       organization_id: '00000000-0000-0000-0000-000000000001',
       name: 'Test Workspace',
       slug: 'test-workspace',
@@ -114,6 +122,10 @@ const mockAiSettings: AiSettings = {
 describe('WorkspaceSettingsPage', () => {
   beforeEach(() => {
     mock.clearAllMocks();
+    selectedWorkspace = '00000000-0000-0000-0000-000000000001';
+    savedTheme = mockTheme;
+    themeLoading = false;
+    themeError = null;
     mockClient.getWorkspaceTheme.mockResolvedValue(mockTheme);
     mockClient.getWorkspaceAiSettings.mockResolvedValue(mockAiSettings);
     mockClient.getEffectiveAiSettings.mockResolvedValue(mockAiSettings);
@@ -124,15 +136,13 @@ describe('WorkspaceSettingsPage', () => {
   });
 
   it('shows loading state', async () => {
-    mockClient.getWorkspaceTheme.mockImplementation(() => new Promise(() => {}));
+    themeLoading = true;
     render(<WorkspaceSettingsPage />);
     expect(screen.getByText('Loading theme settings...')).toBeInTheDocument();
   });
 
   it('shows error when loading fails', async () => {
-    mockClient.getWorkspaceTheme.mockRejectedValueOnce(new Error('Failed to load settings'));
-    mockClient.getWorkspaceAiSettings.mockRejectedValueOnce(new Error('Failed to load settings'));
-    mockClient.getEffectiveAiSettings.mockRejectedValueOnce(new Error('Failed to load settings'));
+    themeError = 'Failed to load settings';
     render(<WorkspaceSettingsPage />);
     await waitFor(() => {
       expect(screen.getByText('Failed to load settings')).toBeInTheDocument();
@@ -203,9 +213,107 @@ describe('WorkspaceSettingsPage', () => {
   it('loads and displays current theme values', async () => {
     render(<WorkspaceSettingsPage />);
     await waitFor(() => {
-      expect(mockClient.getWorkspaceTheme).toHaveBeenCalled();
+      expect(screen.getByLabelText('Font Family')).toHaveValue('inter');
     });
-    expect(mockSetWorkspaceTheme).toHaveBeenCalled();
+    expect(mockSetWorkspaceTheme).not.toHaveBeenCalled();
+  });
+
+  it('keeps previews separate from saved settings and clears them on unmount', async () => {
+    const { unmount } = render(<WorkspaceSettingsPage />);
+    await screen.findByLabelText('Font Family');
+    expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
+      0
+    );
+    fireEvent.change(screen.getByLabelText('Font Family'), { target: { value: 'roboto' } });
+    expect(mockPreviewWorkspaceTheme).toHaveBeenLastCalledWith(
+      expect.objectContaining({ font_family: 'roboto' })
+    );
+    expect(mockSetWorkspaceTheme).not.toHaveBeenCalled();
+    unmount();
+    expect(mockPreviewWorkspaceTheme).toHaveBeenLastCalledWith(null);
+  });
+
+  it('saves and resets theme without touching AI settings even when AI fails', async () => {
+    mockClient.getWorkspaceAiSettings.mockRejectedValue(new Error('AI unavailable'));
+    mockClient.resetWorkspaceTheme.mockResolvedValue(null);
+    render(<WorkspaceSettingsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+    await screen.findByText('Settings saved successfully');
+    expect(mockClient.updateWorkspaceAiSettings).not.toHaveBeenCalled();
+    expect(mockClient.getWorkspaceAiSettings).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
+    await screen.findByText('Settings reset to defaults');
+    expect(mockClient.resetWorkspaceAiSettings).not.toHaveBeenCalled();
+    expect(mockSetWorkspaceTheme).toHaveBeenLastCalledWith(null);
+  });
+
+  it('preserves native defaults when editing a partial saved theme', async () => {
+    savedTheme = {
+      ...mockTheme,
+      primary_color_light: null,
+      secondary_color_light: null,
+      primary_color_dark: null,
+      secondary_color_dark: null,
+      font_family: null,
+      font_size_base: null,
+      border_radius: null,
+    };
+    render(<WorkspaceSettingsPage />);
+    fireEvent.change(await screen.findByLabelText('Font Family'), { target: { value: 'roboto' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() =>
+      expect(mockClient.updateWorkspaceTheme).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        {
+          primary_color_light: null,
+          secondary_color_light: null,
+          primary_color_dark: null,
+          secondary_color_dark: null,
+          font_family: 'roboto',
+          font_size_base: null,
+          border_radius: null,
+        }
+      )
+    );
+  });
+
+  it('resets form values without creating a preview when saved theme becomes null', async () => {
+    const { rerender } = render(<WorkspaceSettingsPage />);
+    expect(await screen.findByLabelText('Font Family')).toHaveValue('inter');
+    savedTheme = null;
+    mockPreviewWorkspaceTheme.mockClear();
+    rerender(<WorkspaceSettingsPage />);
+    expect(screen.getByLabelText('Font Family')).toHaveValue('system');
+    expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
+      0
+    );
+  });
+
+  it('ignores a pending save when switching workspaces', async () => {
+    let resolveSave!: (theme: WorkspaceTheme) => void;
+    mockClient.updateWorkspaceTheme.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSave = resolve;
+      })
+    );
+    const { rerender } = render(<WorkspaceSettingsPage />);
+    fireEvent.change(await screen.findByLabelText('Font Family'), { target: { value: 'roboto' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+    selectedWorkspace = 'workspace-2';
+    savedTheme = null;
+    mockPreviewWorkspaceTheme.mockClear();
+    rerender(<WorkspaceSettingsPage />);
+    expect(screen.getByLabelText('Font Family')).toHaveValue('system');
+    expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
+      0
+    );
+    resolveSave(mockTheme);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Save Changes' })).not.toBeDisabled()
+    );
+    expect(mockSetWorkspaceTheme).not.toHaveBeenCalled();
+    expect(screen.queryByText('Settings saved successfully')).not.toBeInTheDocument();
   });
 
   it('renders font family options', async () => {
@@ -338,7 +446,7 @@ describe('WorkspaceSettingsPage', () => {
 
     fireEvent.change(screen.getByLabelText('Font Family'), { target: { value: 'roboto' } });
 
-    expect(mockSetWorkspaceTheme).toHaveBeenCalled();
+    expect(mockSetWorkspaceTheme).not.toHaveBeenCalled();
   });
 
   it('changes font size', async () => {
@@ -360,7 +468,7 @@ describe('WorkspaceSettingsPage', () => {
 
     fireEvent.click(screen.getByLabelText('Large'));
 
-    expect(mockSetWorkspaceTheme).toHaveBeenCalled();
+    expect(mockSetWorkspaceTheme).not.toHaveBeenCalled();
   });
 
   it('renders preview buttons', async () => {
@@ -672,8 +780,9 @@ describe('WorkspaceSettingsPage', () => {
       });
     });
 
-    it('loads AI settings on mount', async () => {
+    it('loads AI settings when its tab opens', async () => {
       render(<WorkspaceSettingsPage />);
+      await openAiTab(userEvent.setup());
       await waitFor(() => {
         expect(mockClient.getWorkspaceAiSettings).toHaveBeenCalled();
         expect(mockClient.getEffectiveAiSettings).toHaveBeenCalled();

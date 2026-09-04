@@ -1,10 +1,11 @@
 import { Button, Tabs, TabsContent, TabsList, TabsTrigger } from '@zone/ui';
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useTheme } from '../../../../shared/context/ThemeContext';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
 import { WorkspaceMembersSection } from '../components';
+import { UpdateWorkspaceThemeRequestSchema } from '../schemas';
 import type {
   AiProvider,
   AiSettings,
@@ -70,13 +71,25 @@ const awsRegions = ['us-east-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-n
 
 export default function WorkspaceSettingsPage() {
   const { isAuthenticated } = useAuth();
-  const { workspaceTheme, setWorkspaceTheme } = useTheme();
+  const {
+    workspaceTheme,
+    workspaceThemeLoading,
+    workspaceThemeError,
+    setWorkspaceTheme,
+    previewWorkspaceTheme,
+  } = useTheme();
   const { currentOrganization, currentWorkspace } = useWorkspace();
   const orgId = currentOrganization?.id ?? null;
   const workspaceId = currentWorkspace?.id ?? null;
 
   const [activeTab, setActiveTab] = useState<Tab>('theme');
-  const [loading, setLoading] = useState(true);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const edited = useRef(false);
+  const scope = `${orgId}/${workspaceId}`;
+  const currentScope = useRef<string | null>(scope);
+  currentScope.current = scope;
+  const loading = activeTab === 'theme' ? workspaceThemeLoading : aiLoading;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -113,34 +126,7 @@ export default function WorkspaceSettingsPage() {
   const [hasBedrockCreds, setHasBedrockCreds] = useState(false);
   const [effectiveSettings, setEffectiveSettings] = useState<AiSettings | null>(null);
 
-  // Load current theme and AI settings
-  const loadTheme = useCallback(async () => {
-    if (!isAuthenticated || !orgId || !workspaceId) {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const [theme, wsAiSettings, effectiveAi] = await Promise.all([
-        client.getWorkspaceTheme(orgId, workspaceId),
-        client.getWorkspaceAiSettings(orgId, workspaceId),
-        client.getEffectiveAiSettings(orgId, workspaceId),
-      ]);
-      if (theme) {
-        applyThemeToForm(theme);
-      }
-      setWorkspaceTheme(theme);
-      applyAiSettingsToForm(wsAiSettings);
-      setEffectiveSettings(effectiveAi);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load settings');
-    } finally {
-      setLoading(false);
-    }
-  }, [isAuthenticated, orgId, workspaceId, setWorkspaceTheme]);
-
-  const applyAiSettingsToForm = (settings: AiSettings) => {
+  const applyAiSettingsToForm = useCallback((settings: AiSettings): void => {
     // Check if workspace has custom settings (provider != default means override)
     const hasCustomSettings = !!(
       settings.has_litellm_key ||
@@ -177,43 +163,82 @@ export default function WorkspaceSettingsPage() {
     setAnthropicApiKey('');
     setBedrockAccessKey('');
     setBedrockSecretKey('');
-  };
+  }, []);
 
-  const applyThemeToForm = (theme: WorkspaceTheme) => {
-    setPrimaryColorLight(theme.primary_color_light);
-    setSecondaryColorLight(theme.secondary_color_light);
-    setPrimaryColorDark(theme.primary_color_dark);
-    setSecondaryColorDark(theme.secondary_color_dark);
-    setFontFamily(theme.font_family);
-    setFontSize(theme.font_size_base.replace('px', ''));
-    setBorderRadius(theme.border_radius);
-  };
+  const applyThemeToForm = useCallback((theme: WorkspaceTheme | null): void => {
+    setPrimaryColorLight(theme?.primary_color_light ?? '#3b82f6');
+    setSecondaryColorLight(theme?.secondary_color_light ?? '#6366f1');
+    setPrimaryColorDark(theme?.primary_color_dark ?? '#3b82f6');
+    setSecondaryColorDark(theme?.secondary_color_dark ?? '#6366f1');
+    setFontFamily(theme?.font_family ?? 'system');
+    setFontSize((theme?.font_size_base ?? '16px').replace('px', ''));
+    setBorderRadius(theme?.border_radius ?? 'medium');
+  }, []);
 
   useEffect(() => {
-    loadTheme();
-  }, [loadTheme]);
+    applyThemeToForm(workspaceTheme?.workspace_id === workspaceId ? workspaceTheme : null);
+    edited.current = false;
+    setDirty(false);
+    previewWorkspaceTheme(null);
+  }, [workspaceTheme, workspaceId, previewWorkspaceTheme, applyThemeToForm]);
 
-  // Live preview - apply changes to workspaceTheme as user edits
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Intentionally exclude created_at/updated_at to prevent infinite loops after save
+  useEffect(() => () => previewWorkspaceTheme(null), [previewWorkspaceTheme]);
+
   useEffect(() => {
-    if (loading) return;
-
-    const previewTheme: WorkspaceTheme = {
-      id: workspaceTheme?.id || '',
-      workspace_id: workspaceTheme?.workspace_id || workspaceId || '',
-      primary_color_light: primaryColorLight,
-      secondary_color_light: secondaryColorLight,
-      primary_color_dark: primaryColorDark,
-      secondary_color_dark: secondaryColorDark,
-      font_family: fontFamily,
-      font_size_base: `${fontSize}px`,
-      border_radius: borderRadius,
-      created_at: workspaceTheme?.created_at || '',
-      updated_at: workspaceTheme?.updated_at || '',
+    currentScope.current = scope;
+    setSaving(false);
+    setError(null);
+    setSuccess(null);
+    return () => {
+      currentScope.current = null;
     };
-    setWorkspaceTheme(previewTheme);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Intentionally exclude created_at/updated_at to prevent infinite loops after save
+  }, [scope]);
+
+  useEffect(() => {
+    if (activeTab !== 'ai' || !isAuthenticated || !orgId || !workspaceId) return;
+    let cancelled = false;
+    setAiLoading(true);
+    setError(null);
+    Promise.all([
+      client.getWorkspaceAiSettings(orgId, workspaceId),
+      client.getEffectiveAiSettings(orgId, workspaceId),
+    ])
+      .then(([settings, effective]) => {
+        if (cancelled) return;
+        applyAiSettingsToForm(settings);
+        setEffectiveSettings(effective);
+      })
+      .catch((failure: unknown) => {
+        if (!cancelled)
+          setError(failure instanceof Error ? failure.message : 'Failed to load AI settings');
+      })
+      .finally(() => {
+        if (!cancelled) setAiLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, isAuthenticated, orgId, workspaceId, applyAiSettingsToForm]);
+
+  const createThemeRequest = useCallback((): Required<UpdateWorkspaceThemeRequest> => {
+    const saved = workspaceTheme?.workspace_id === workspaceId ? workspaceTheme : null;
+    const preserve = <T extends string>(
+      value: T,
+      previous: T | null | undefined,
+      fallback: T
+    ): T | null => (value === (previous ?? fallback) ? (previous ?? null) : value);
+    return {
+      primary_color_light: preserve(primaryColorLight, saved?.primary_color_light, '#3b82f6'),
+      secondary_color_light: preserve(secondaryColorLight, saved?.secondary_color_light, '#6366f1'),
+      primary_color_dark: preserve(primaryColorDark, saved?.primary_color_dark, '#3b82f6'),
+      secondary_color_dark: preserve(secondaryColorDark, saved?.secondary_color_dark, '#6366f1'),
+      font_family: preserve(fontFamily, saved?.font_family, 'system'),
+      font_size_base: preserve(`${fontSize}px`, saved?.font_size_base, '16px'),
+      border_radius: preserve(borderRadius, saved?.border_radius, 'medium'),
+    };
   }, [
+    workspaceTheme,
+    workspaceId,
     primaryColorLight,
     secondaryColorLight,
     primaryColorDark,
@@ -221,13 +246,22 @@ export default function WorkspaceSettingsPage() {
     fontFamily,
     fontSize,
     borderRadius,
-    loading,
-    setWorkspaceTheme,
-    workspaceTheme?.id,
-    workspaceTheme?.workspace_id,
   ]);
 
-  const handleSave = async (e: FormEvent) => {
+  useEffect(() => {
+    if (!dirty || !edited.current || workspaceThemeLoading || !workspaceId) return;
+    const request = createThemeRequest();
+    const result = UpdateWorkspaceThemeRequestSchema.safeParse(request);
+    if (!result.success) return;
+    previewWorkspaceTheme({
+      workspace_id: workspaceId,
+      ...request,
+      created_at: '',
+      updated_at: '',
+    });
+  }, [dirty, workspaceThemeLoading, workspaceId, createThemeRequest, previewWorkspaceTheme]);
+
+  const handleSave = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
     if (!isAuthenticated || !orgId || !workspaceId) return;
 
@@ -236,21 +270,22 @@ export default function WorkspaceSettingsPage() {
     setSuccess(null);
 
     try {
-      // Save theme
-      const themeRequest: UpdateWorkspaceThemeRequest = {
-        primary_color_light: primaryColorLight,
-        secondary_color_light: secondaryColorLight,
-        primary_color_dark: primaryColorDark,
-        secondary_color_dark: secondaryColorDark,
-        font_family: fontFamily,
-        font_size_base: `${fontSize}px`,
-        border_radius: borderRadius,
-      };
-      const theme = await client.updateWorkspaceTheme(orgId, workspaceId, themeRequest);
-      setWorkspaceTheme(theme);
+      if (activeTab === 'theme') {
+        const theme = await client.updateWorkspaceTheme(
+          orgId,
+          workspaceId,
+          UpdateWorkspaceThemeRequestSchema.parse(createThemeRequest())
+        );
+        if (currentScope.current !== scope) return;
+        setWorkspaceTheme(theme);
+        applyThemeToForm(theme);
+        edited.current = false;
+        setDirty(false);
+        previewWorkspaceTheme(null);
+      }
 
       // Save AI settings if overriding
-      if (overrideAiSettings) {
+      if (activeTab === 'ai' && overrideAiSettings) {
         const aiRequest: UpdateAiSettingsRequest = {
           provider: aiProvider,
           model_fast: modelFast || undefined,
@@ -276,21 +311,26 @@ export default function WorkspaceSettingsPage() {
           }
         }
         const aiSettings = await client.updateWorkspaceAiSettings(orgId, workspaceId, aiRequest);
+        if (currentScope.current !== scope) return;
         applyAiSettingsToForm(aiSettings);
         const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
+        if (currentScope.current !== scope) return;
         setEffectiveSettings(effective);
       }
 
       setSuccess('Settings saved successfully');
-      setTimeout(() => setSuccess(null), 3000);
+      setTimeout(() => {
+        if (currentScope.current === scope) setSuccess(null);
+      }, 3000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save settings');
+      if (currentScope.current === scope)
+        setError(err instanceof Error ? err.message : 'Failed to save settings');
     } finally {
-      setSaving(false);
+      if (currentScope.current === scope) setSaving(false);
     }
   };
 
-  const handleReset = async () => {
+  const handleReset = async (): Promise<void> => {
     if (!isAuthenticated || !orgId || !workspaceId) return;
 
     setSaving(true);
@@ -298,22 +338,32 @@ export default function WorkspaceSettingsPage() {
     setSuccess(null);
 
     try {
-      const [theme, aiSettings, effective] = await Promise.all([
-        client.resetWorkspaceTheme(orgId, workspaceId),
-        client.resetWorkspaceAiSettings(orgId, workspaceId),
-        client.getEffectiveAiSettings(orgId, workspaceId),
-      ]);
-      applyThemeToForm(theme);
-      setWorkspaceTheme(theme);
-      applyAiSettingsToForm(aiSettings);
-      setEffectiveSettings(effective);
-      setOverrideAiSettings(false);
+      if (activeTab === 'theme') {
+        await client.resetWorkspaceTheme(orgId, workspaceId);
+        if (currentScope.current !== scope) return;
+        setWorkspaceTheme(null);
+        applyThemeToForm(null);
+        edited.current = false;
+        setDirty(false);
+        previewWorkspaceTheme(null);
+      } else if (activeTab === 'ai') {
+        const settings = await client.resetWorkspaceAiSettings(orgId, workspaceId);
+        if (currentScope.current !== scope) return;
+        applyAiSettingsToForm(settings);
+        setOverrideAiSettings(false);
+        const effective = await client.getEffectiveAiSettings(orgId, workspaceId);
+        if (currentScope.current !== scope) return;
+        setEffectiveSettings(effective);
+      }
       setSuccess('Settings reset to defaults');
-      setTimeout(() => setSuccess(null), 3000);
+      setTimeout(() => {
+        if (currentScope.current === scope) setSuccess(null);
+      }, 3000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to reset settings');
+      if (currentScope.current === scope)
+        setError(err instanceof Error ? err.message : 'Failed to reset settings');
     } finally {
-      setSaving(false);
+      if (currentScope.current === scope) setSaving(false);
     }
   };
 
@@ -353,7 +403,9 @@ export default function WorkspaceSettingsPage() {
         <h1 className="page-title">Workspace Settings</h1>
       </header>
       <div className="settings-page-body">
-        {error && <div className="alert alert-error">{error}</div>}
+        {(error || (activeTab === 'theme' && workspaceThemeError)) && (
+          <div className="alert alert-error">{error || workspaceThemeError}</div>
+        )}
         {success && <div className="alert alert-success">{success}</div>}
 
         <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Tab)}>
@@ -368,7 +420,14 @@ export default function WorkspaceSettingsPage() {
           </TabsContent>
 
           <TabsContent value="theme">
-            <form onSubmit={handleSave} className="settings-form">
+            <form
+              onSubmit={handleSave}
+              onChange={() => {
+                edited.current = true;
+                setDirty(true);
+              }}
+              className="settings-form"
+            >
               <section className="settings-section">
                 <h2 className="section-title">Theme Configuration</h2>
 
@@ -389,7 +448,7 @@ export default function WorkspaceSettingsPage() {
                           type="text"
                           value={primaryColorLight}
                           onChange={(e) => setPrimaryColorLight(e.target.value)}
-                          pattern="^#[0-9A-Fa-f]{6}$"
+                          pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
                           className="color-text-input"
                         />
                       </div>
@@ -407,7 +466,7 @@ export default function WorkspaceSettingsPage() {
                           type="text"
                           value={secondaryColorLight}
                           onChange={(e) => setSecondaryColorLight(e.target.value)}
-                          pattern="^#[0-9A-Fa-f]{6}$"
+                          pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
                           className="color-text-input"
                         />
                       </div>
@@ -430,7 +489,7 @@ export default function WorkspaceSettingsPage() {
                           type="text"
                           value={primaryColorDark}
                           onChange={(e) => setPrimaryColorDark(e.target.value)}
-                          pattern="^#[0-9A-Fa-f]{6}$"
+                          pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
                           className="color-text-input"
                         />
                       </div>
@@ -448,7 +507,7 @@ export default function WorkspaceSettingsPage() {
                           type="text"
                           value={secondaryColorDark}
                           onChange={(e) => setSecondaryColorDark(e.target.value)}
-                          pattern="^#[0-9A-Fa-f]{6}$"
+                          pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$"
                           className="color-text-input"
                         />
                       </div>
