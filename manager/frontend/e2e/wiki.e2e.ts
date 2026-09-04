@@ -99,7 +99,7 @@ test.describe('Wiki Page', () => {
 
   test.describe('Page Actions', () => {
     test('shows search input', async ({ page }) => {
-      const searchInput = page.getByRole('textbox', { name: 'Search knowledge' });
+      const searchInput = page.getByRole('searchbox', { name: 'Search knowledge' });
       await expect(searchInput).toBeVisible();
       await expect(searchInput).toHaveAttribute('placeholder', 'Search knowledge...');
     });

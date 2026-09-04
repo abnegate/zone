@@ -206,7 +206,7 @@ test.describe('Chats Page', () => {
 
   test.describe('Create Chat', () => {
     test('opens new chat modal from sidebar button', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await page.getByRole('button', { name: /^New chat$/i }).click();
       await expect(page.getByRole('dialog', { name: 'New Chat' })).toBeVisible();
     });
 
@@ -216,7 +216,7 @@ test.describe('Chats Page', () => {
     });
 
     test('shows available models in dropdown', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await page.getByRole('button', { name: /^New chat$/i }).click();
 
       const selectTrigger = page.getByLabel('Select Model');
       await selectTrigger.click();
@@ -260,7 +260,7 @@ test.describe('Chats Page', () => {
         }
       });
 
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await page.getByRole('button', { name: /^New chat$/i }).click();
       await page.getByLabel('Select Model').click();
       await page.getByRole('option', { name: 'llama3.2' }).click();
       await page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
@@ -272,7 +272,7 @@ test.describe('Chats Page', () => {
     });
 
     test('disables create button when no model selected', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await page.getByRole('button', { name: /^New chat$/i }).click();
       await expect(
         page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
           name: 'Create Chat',
@@ -281,7 +281,7 @@ test.describe('Chats Page', () => {
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await page.getByRole('button', { name: /^New chat$/i }).click();
       await page
         .getByRole('dialog', { name: 'New Chat' })
         .getByRole('button', { name: 'Cancel' })
@@ -528,7 +528,7 @@ test.describe('Chats Page', () => {
     });
 
     test('modals can be closed with escape key', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await page.getByRole('button', { name: /^New chat$/i }).click();
       await expect(page.getByRole('dialog', { name: 'New Chat' })).toBeVisible();
 
       await page.keyboard.press('Escape');

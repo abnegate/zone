@@ -41,6 +41,22 @@ export const test = base.extend({
       });
     });
 
+    // Default chats list so Zod does not fail when a test lands on /
+    await context.route(/\/api\/chats($|\?|\/)/i, (route) => {
+      const type = route.request().resourceType();
+      if (type !== 'xhr' && type !== 'fetch') {
+        return route.continue();
+      }
+      if (route.request().method() === 'GET') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ chats: [] }),
+        });
+      }
+      return route.continue();
+    });
+
     // Auth refresh mock
     await context.route('**/api/auth/refresh', (route) => {
       const type = route.request().resourceType();

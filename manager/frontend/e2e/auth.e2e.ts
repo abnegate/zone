@@ -7,8 +7,8 @@ import type { Page } from '@playwright/test';
 function createMockJwt(payload: { sub: string; email: string; roles: string[]; permissions: string[]; exp: number }) {
   const header = { alg: 'HS256', typ: 'JWT' };
   const fullPayload = { ...payload, iat: Math.floor(Date.now() / 1000), jti: 'test-jti' };
-  const base64Header = Buffer.from(JSON.stringify(header)).toString('base64url');
-  const base64Payload = Buffer.from(JSON.stringify(fullPayload)).toString('base64url');
+  const base64Header = Buffer.from(JSON.stringify(header)).toString('base64');
+  const base64Payload = Buffer.from(JSON.stringify(fullPayload)).toString('base64');
   return `${base64Header}.${base64Payload}.mock-signature`;
 }
 

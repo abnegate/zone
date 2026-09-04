@@ -1,113 +1,115 @@
 import type { Page } from '@playwright/test';
-import { routeApi } from '../test-utils';
+import { createMockJwt, routeApi } from '../test-utils';
+
+function buildAuthState(isAdmin: boolean) {
+  const permissions = isAdmin
+    ? [
+        'models:read',
+        'models:create',
+        'models:update',
+        'models:delete',
+        'chats:read',
+        'chats:create',
+        'chats:update',
+        'chats:delete',
+        'projects:read',
+        'projects:create',
+        'projects:update',
+        'projects:delete',
+        'tasks:read',
+        'tasks:create',
+        'tasks:update',
+        'tasks:delete',
+        'sources:read',
+        'sources:create',
+        'sources:update',
+        'sources:delete',
+        'wiki:read',
+        'wiki:create',
+        'wiki:update',
+        'wiki:delete',
+        'workspaces:read',
+        'workspaces:update',
+        'workspaces:delete',
+        'organizations:read',
+        'organizations:update',
+        'organizations:delete',
+        'users:read',
+        'users:create',
+        'users:update',
+        'users:delete',
+      ]
+    : [
+        'models:read',
+        'models:create',
+        'chats:read',
+        'chats:create',
+        'chats:update',
+        'chats:delete',
+        'projects:read',
+        'projects:create',
+        'projects:update',
+        'projects:delete',
+        'tasks:read',
+        'tasks:create',
+        'tasks:update',
+        'tasks:delete',
+        'sources:read',
+        'sources:create',
+        'sources:update',
+        'sources:delete',
+        'wiki:read',
+        'wiki:create',
+        'wiki:update',
+        'workspaces:read',
+        'workspaces:update',
+      ];
+
+  const now = Math.floor(Date.now() / 1000);
+  const accessToken = createMockJwt({
+    sub: 'user-1',
+    email: 'test@example.com',
+    roles: isAdmin ? ['admin', 'user'] : ['user'],
+    permissions,
+    exp: now + 86400,
+  });
+
+  const user = {
+    id: 'user-1',
+    email: 'test@example.com',
+    display_name: 'Test User',
+    is_active: true,
+    is_admin: isAdmin,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    last_login_at: new Date().toISOString(),
+  };
+
+  return { accessToken, user };
+}
 
 /**
  * Sets up authenticated state for e2e tests by storing mock tokens in localStorage.
- * Call this after page.goto('/') and before any authenticated interactions.
+ * Registers an init script so the next navigation (or reload) boots already signed in.
+ * Prefer calling this before page.goto(target) so protected routes are not bounced to /login.
  */
 export async function setupAuth(page: Page, options: { isAdmin?: boolean } = {}): Promise<void> {
-  const isAdmin = options.isAdmin || false;
+  const authState = buildAuthState(options.isAdmin || false);
 
-  // Create JWT and set localStorage inside browser context where btoa is available
-  await page.evaluate(
-    ({ isAdmin }) => {
-      const permissions = isAdmin
-        ? [
-            'models:read',
-            'models:create',
-            'models:update',
-            'models:delete',
-            'chats:read',
-            'chats:create',
-            'chats:update',
-            'chats:delete',
-            'projects:read',
-            'projects:create',
-            'projects:update',
-            'projects:delete',
-            'tasks:read',
-            'tasks:create',
-            'tasks:update',
-            'tasks:delete',
-            'sources:read',
-            'sources:create',
-            'sources:update',
-            'sources:delete',
-            'wiki:read',
-            'wiki:create',
-            'wiki:update',
-            'wiki:delete',
-            'workspaces:read',
-            'workspaces:update',
-            'workspaces:delete',
-            'organizations:read',
-            'organizations:update',
-            'organizations:delete',
-            'users:read',
-            'users:create',
-            'users:update',
-            'users:delete',
-          ]
-        : [
-            'models:read',
-            'models:create',
-            'chats:read',
-            'chats:create',
-            'chats:update',
-            'chats:delete',
-            'projects:read',
-            'projects:create',
-            'projects:update',
-            'projects:delete',
-            'tasks:read',
-            'tasks:create',
-            'tasks:update',
-            'tasks:delete',
-            'sources:read',
-            'sources:create',
-            'sources:update',
-            'sources:delete',
-            'wiki:read',
-            'wiki:create',
-            'wiki:update',
-            'workspaces:read',
-            'workspaces:update',
-          ];
+  await page.addInitScript((state) => {
+    localStorage.setItem('manager_access_token', state.accessToken);
+    localStorage.setItem('manager_refresh_token', 'mock-refresh-token');
+    localStorage.setItem('manager_user', JSON.stringify(state.user));
+  }, authState);
 
-      // Create mock JWT
-      const header = { alg: 'HS256', typ: 'JWT' };
-      const now = Math.floor(Date.now() / 1000);
-      const payload = {
-        sub: 'user-1',
-        email: 'test@example.com',
-        roles: isAdmin ? ['admin', 'user'] : ['user'],
-        permissions,
-        iat: now,
-        exp: now + 86400,
-        jti: 'mock-jti',
-      };
-
-      const base64Header = btoa(JSON.stringify(header));
-      const base64Payload = btoa(JSON.stringify(payload));
-      const accessToken = `${base64Header}.${base64Payload}.mock-signature`;
-
-      const user = {
-        id: 'user-1',
-        email: 'test@example.com',
-        display_name: 'Test User',
-        is_active: true,
-        is_admin: isAdmin,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        last_login_at: new Date().toISOString(),
-      };
-
-      localStorage.setItem('manager_access_token', accessToken);
+  const url = page.url();
+  if (url && url !== 'about:blank') {
+    await page.evaluate((state) => {
+      localStorage.setItem('manager_access_token', state.accessToken);
       localStorage.setItem('manager_refresh_token', 'mock-refresh-token');
-      localStorage.setItem('manager_user', JSON.stringify(user));
-    },
-    { isAdmin }
-  );
+      localStorage.setItem('manager_user', JSON.stringify(state.user));
+    }, authState);
+  }
 }
 
 /**
