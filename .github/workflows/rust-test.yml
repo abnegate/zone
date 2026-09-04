@@ -88,8 +88,10 @@ jobs:
       - name: Run database migrations
         if: runner.os == 'Linux'
         run: |
-          cd zone_server
-          psql -h localhost -U postgres -d zone_test -f migrations/001_initial_schema.sql
+          for f in migrations/*.sql; do
+            psql -h localhost -U postgres -d zone_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+        working-directory: runner/zone_server
         env:
           PGPASSWORD: postgres
 

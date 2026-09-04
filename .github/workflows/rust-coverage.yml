@@ -86,7 +86,11 @@ jobs:
           tool: cargo-llvm-cov@0.9.0
 
       - name: Run database migrations
-        run: psql -h localhost -U postgres -d zone_test -f zone_server/migrations/001_initial_schema.sql
+        run: |
+          for f in migrations/*.sql; do
+            psql -h localhost -U postgres -d zone_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+        working-directory: runner/zone_server
         env:
           PGPASSWORD: postgres
 
