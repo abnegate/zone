@@ -318,7 +318,7 @@ echo "deb [signed-by=/usr/share/keyrings/abnegate.gpg] https://abnegate.github.i
 sudo apt update && sudo apt install zone
 ```
 
-Then open **Zone.app** (macOS) or run `zone-desktop` (Linux). First launch is a short configurator; after that the app serves the bundled manager frontend and proxies API traffic to the saved server (`host` in `~/.zone/config.toml`). Use **Change Server…** in the app menu to point at a different host.
+Then open **Zone.app** (macOS) or run `zone-desktop` (Linux). First launch is a short configurator; after that the app serves the bundled manager frontend and proxies API traffic to the saved server (`host` in `~/.zone/config.toml` on desktop, or the app config directory on Android/iOS). Use **Change Server…** in the app menu on desktop, or **Change Server** in the sidebar on mobile, to point at a different host.
 
 **From source:**
 
@@ -326,11 +326,23 @@ Then open **Zone.app** (macOS) or run `zone-desktop` (Linux). First launch is a 
 make install-cli
 ```
 
-Desktop app (after the manager frontend build):
+Desktop app (builds the manager frontend first):
 
 ```bash
-cd runner && cargo run --release --package zone_desktop
+make desktop
 ```
+
+Android and iOS use the same Tauri client. Prerequisites: Android Studio / Android SDK, Xcode, and CocoaPods. Then:
+
+```bash
+make setup-mobile
+make android-init   # once
+make ios-init       # once
+make android        # emulator or device
+make ios            # simulator or device
+```
+
+The first launch on every platform asks for your Zone server URL. Config is stored in `~/.zone/config.toml` on desktop and in the app config directory on mobile.
 
 ```bash
 # Login to your Zone server

@@ -129,6 +129,129 @@ describe('Sidebar', () => {
   });
 
   describe('rendering', () => {
+    it('hides Change Server unless the Zone client is serving the UI', () => {
+      renderSidebar();
+      expect(screen.queryByText('Change Server')).not.toBeInTheDocument();
+    });
+
+    it('shows Change Server when the Zone client reports itself', async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).includes('/__zone/info')) {
+          return new Response(JSON.stringify({ client: true }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(null, { status: 404 });
+      }) as typeof fetch;
+
+      try {
+        renderSidebar();
+        expect(await screen.findByText('Change Server')).toBeInTheDocument();
+        expect(screen.getByText('Change Server').closest('a')).toHaveAttribute(
+          'href',
+          '/__zone/change-server'
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('hides Change Server when the Zone client reports client:false', async () => {
+      const originalFetch = globalThis.fetch;
+      let resolved = false;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).includes('/__zone/info')) {
+          resolved = true;
+          return new Response(JSON.stringify({ client: false, host: 'https://zone.example.com' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(null, { status: 404 });
+      }) as typeof fetch;
+
+      try {
+        renderSidebar();
+        await waitFor(() => {
+          expect(resolved).toBe(true);
+        });
+        expect(screen.queryByText('Change Server')).not.toBeInTheDocument();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('hides Change Server when /__zone/info is missing', async () => {
+      const originalFetch = globalThis.fetch;
+      let resolved = false;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).includes('/__zone/info')) {
+          resolved = true;
+          return new Response(null, { status: 404 });
+        }
+        return new Response(null, { status: 404 });
+      }) as typeof fetch;
+
+      try {
+        renderSidebar();
+        await waitFor(() => {
+          expect(resolved).toBe(true);
+        });
+        expect(screen.queryByText('Change Server')).not.toBeInTheDocument();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('hides Change Server when /__zone/info fails', async () => {
+      const originalFetch = globalThis.fetch;
+      let resolved = false;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).includes('/__zone/info')) {
+          resolved = true;
+          throw new TypeError('Failed to fetch');
+        }
+        return new Response(null, { status: 404 });
+      }) as typeof fetch;
+
+      try {
+        renderSidebar();
+        await waitFor(() => {
+          expect(resolved).toBe(true);
+        });
+        expect(screen.queryByText('Change Server')).not.toBeInTheDocument();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('keeps Change Server available when the sidebar is collapsed', async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).includes('/__zone/info')) {
+          return new Response(JSON.stringify({ client: true }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(null, { status: 404 });
+      }) as typeof fetch;
+
+      try {
+        renderSidebar();
+        expect(await screen.findByText('Change Server')).toBeInTheDocument();
+        fireEvent.click(screen.getByLabelText('Collapse sidebar'));
+        await waitFor(() => {
+          expect(screen.queryByText('Change Server')).not.toBeInTheDocument();
+        });
+        expect(screen.getByTitle('Change Server')).toHaveAttribute('href', '/__zone/change-server');
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
     it('renders logo', () => {
       renderSidebar();
       expect(screen.getByText('Zone')).toBeInTheDocument();

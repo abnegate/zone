@@ -57,6 +57,7 @@ runner/coverage
 runner/lcov.info
 runner/coverage.json
 runner/zone_desktop/gen
+runner/zone_desktop/manager
 **/playwright-report
 **/frontend/test-results
 tools/dev-cli/target

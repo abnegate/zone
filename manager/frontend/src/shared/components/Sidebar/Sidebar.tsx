@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
 import { useTheme } from '../../context/ThemeContext';
@@ -62,6 +62,26 @@ export default function Sidebar() {
   const { pathname } = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === 'true');
+  const [zoneClient, setZoneClient] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/__zone/info')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: { client?: boolean } | null) => {
+        if (!cancelled) {
+          setZoneClient(Boolean(data?.client));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setZoneClient(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const isNavActive = (path: string, isActive: boolean) => {
     if (path === '/chats') {
@@ -186,6 +206,27 @@ export default function Sidebar() {
               )}
             </svg>
           </button>
+          {zoneClient && (
+            <a
+              className="logout-btn change-server-btn"
+              href="/__zone/change-server"
+              title={collapsed ? 'Change Server' : undefined}
+              onClick={() => setMobileOpen(false)}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M21 12a9 9 0 11-6.22-8.56M21 3v6h-6" />
+              </svg>
+              {!collapsed && <span>Change Server</span>}
+            </a>
+          )}
           <button
             className="logout-btn"
             onClick={logout}

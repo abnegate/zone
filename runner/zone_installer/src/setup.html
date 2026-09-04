@@ -74,7 +74,7 @@
     <main>
       <form id="setup" autocomplete="off">
         <h1>Zone</h1>
-        <p>Connect this app to your Zone server. You can change this later from the Zone menu.</p>
+        <p>Connect this app to your Zone server. You can change this later from the Zone menu on desktop, or Change Server in the sidebar on Android and iOS.</p>
         <label for="host">Server URL</label>
         <input
           id="host"
@@ -93,6 +93,14 @@
       const form = document.getElementById("setup");
       const host = document.getElementById("host");
       const error = document.getElementById("error");
+      fetch("/__zone/info")
+        .then((response) => (response.ok ? response.json() : null))
+        .then((data) => {
+          if (data && data.host) {
+            host.value = data.host;
+          }
+        })
+        .catch(() => {});
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         error.textContent = "";

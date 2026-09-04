@@ -9734,6 +9734,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.26.2",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",

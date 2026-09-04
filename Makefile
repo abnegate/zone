@@ -12,6 +12,8 @@
 	build-runner test-runner setup-runner-coverage test-runner-coverage \
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
 	install-runner install-cli \
+	desktop android-init ios-init android ios test-client \
+	sync-tauri-ui setup-mobile \
 	build-dev-cli install-dev-cli dev-format dev-format-check dev-lint dev-test dev-coverage dev-check \
 	kind-create kind-delete tilt-up tilt-down kind-status helm-lint \
 
@@ -475,6 +477,67 @@ install-cli: ## Install zone CLI to /usr/local/bin
 	cd runner && cargo build --release --package zone_cli
 	@sudo cp runner/target/release/zone /usr/local/bin/zone
 	@echo "$(GREEN)zone CLI installed! Run 'zone --help' to get started.$(NC)"
+
+##@ Desktop & Mobile
+
+sync-tauri-ui: ## Build the manager UI and copy it into the Tauri client
+	@echo "$(BLUE)Building manager frontend for the Zone client...$(NC)"
+	bun run --filter ./manager/frontend build
+	@rm -rf runner/zone_desktop/manager
+	@mkdir -p runner/zone_desktop/manager
+	@cp -R manager/frontend/build/. runner/zone_desktop/manager/
+	@if [ -d runner/zone_desktop/gen/android/app/src/main/assets ]; then \
+		rm -rf runner/zone_desktop/gen/android/app/src/main/assets/manager; \
+		mkdir -p runner/zone_desktop/gen/android/app/src/main/assets/manager; \
+		cp -R manager/frontend/build/. runner/zone_desktop/gen/android/app/src/main/assets/manager/; \
+	fi
+	@echo "$(GREEN)Manager UI copied to runner/zone_desktop/manager$(NC)"
+
+desktop: sync-tauri-ui ## Run the Zone desktop client
+	@echo "$(BLUE)Starting Zone desktop...$(NC)"
+	cd runner && cargo run --release --package zone_desktop
+
+setup-mobile: ## Install Rust Android/iOS targets for the Tauri client
+	@echo "$(BLUE)Adding mobile Rust targets...$(NC)"
+	rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+	rustup target add aarch64-apple-ios x86_64-apple-ios aarch64-apple-ios-sim
+	@echo "$(GREEN)Mobile Rust targets installed$(NC)"
+
+android-init: setup-mobile ## Generate the Android project for the Tauri client
+	@echo "$(BLUE)Initializing Tauri Android project...$(NC)"
+	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 android init --ci --skip-targets-install
+	@$(MAKE) sync-tauri-ui
+	@./scripts/patch-tauri-android.sh
+	@echo "$(GREEN)Android project ready. Run: make android$(NC)"
+
+ios-init: setup-mobile ## Generate the iOS project for the Tauri client
+	@echo "$(BLUE)Initializing Tauri iOS project...$(NC)"
+	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 ios init --ci --skip-targets-install
+	@$(MAKE) sync-tauri-ui
+	@echo "$(GREEN)iOS project ready. Run: make ios$(NC)"
+
+android: sync-tauri-ui ## Run the Zone client on an Android emulator or device
+	@if [ ! -d runner/zone_desktop/gen/android ]; then \
+		echo "$(YELLOW)Android project missing. Running make android-init...$(NC)"; \
+		$(MAKE) android-init; \
+	fi
+	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 android dev
+
+test-client: ## Run Zone desktop/Android/iOS client unit, integration, and e2e tests
+	@echo "$(BLUE)Running Zone client Rust tests...$(NC)"
+	cd runner && cargo test -p zone_installer --lib
+	cd runner && cargo test -p zone_installer --test '*'
+	@echo "$(BLUE)Running Zone client sidebar unit tests...$(NC)"
+	cd manager/frontend && bun test src/shared/components/Sidebar/Sidebar.test.tsx
+	@echo "$(BLUE)Running Zone client Playwright tests...$(NC)"
+	cd manager/frontend && bun run test:e2e e2e/zone-client.e2e.ts
+
+ios: sync-tauri-ui ## Run the Zone client on an iOS simulator or device
+	@if [ ! -d runner/zone_desktop/gen/apple ]; then \
+		echo "$(YELLOW)iOS project missing. Running make ios-init...$(NC)"; \
+		$(MAKE) ios-init; \
+	fi
+	cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 ios dev
 
 sqlx-prepare: ## Prepare sqlx offline query data (requires running postgres)
 	@echo "$(BLUE)Preparing sqlx offline query data...$(NC)"

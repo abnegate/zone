@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'manager/frontend/**'
+      - 'runner/zone_installer/src/setup.html'
       - '.github/workflows/frontend-tests.yml'
   pull_request:
     paths:
       - 'manager/frontend/**'
+      - 'runner/zone_installer/src/setup.html'
       - '.github/workflows/frontend-tests.yml'
 
 jobs:
