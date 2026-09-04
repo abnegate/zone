@@ -153,6 +153,10 @@ test.describe('Chat images', () => {
     await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
 
     await expect(page.getByRole('status')).toHaveText('Generating image…');
+    await expect(page.getByRole('timer')).toHaveText('0:00');
+    await expect(page.getByRole('timer')).not.toHaveText('0:00');
+    await expect(page.locator('.generation-spinner')).toBeVisible();
+    await expect(page.locator('.generation-spinner')).toHaveCSS('animation-name', 'generation-spin');
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toHaveCount(0);
     await expect(page.locator('.chat-header')).toBeVisible();
@@ -167,6 +171,13 @@ test.describe('Chat images', () => {
       path: testInfo.outputPath('generation-pending-dark.png'),
       fullPage: true,
       animations: 'disabled',
+    });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await expect(page.locator('.generation-spinner')).toHaveCSS('animation-name', 'none');
+    await expect(page.getByRole('timer')).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath('generation-pending-reduced-motion.png'),
+      fullPage: true,
     });
 
     await socket.emit({ type: 'message_start', message_id: 'msg-generated', role: 'assistant' });
@@ -184,6 +195,8 @@ test.describe('Chat images', () => {
     });
 
     await expect(page.getByRole('status')).toHaveCount(0);
+    await expect(page.getByRole('timer')).toHaveCount(0);
+    await expect(page.locator('.generation-spinner')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled();
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0);
     await expect(page.getByRole('img', { name: 'generated-image-1.png' })).toBeVisible();
