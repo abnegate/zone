@@ -3,21 +3,27 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
-import type { Task } from '../types';
+import type { Task, TaskRun, TaskRunLog } from '../types';
 import TasksPage from './TasksPage';
 
 // Create mock functions for tasks API
 const mockGetTasks = mock(() => Promise.resolve([] as Task[]));
 const mockCreateTask = mock(() => Promise.resolve({} as Task));
 const mockDeleteTask = mock(() => Promise.resolve());
-const mockRunTask = mock(() => Promise.resolve({ run_id: 'run-1' }));
-const mockCancelTaskRun = mock(() => Promise.resolve());
-const mockCreateTaskWebSocket = mock(() => ({
-  onmessage: null,
-  onclose: null,
-  onerror: null,
-  close: mock(() => {}),
-}));
+const running: TaskRun = {
+  id: 'run-1',
+  task_id: 'task-1',
+  status: 'running',
+  current_phase: 'thinking',
+  progress_percent: 0,
+  error_message: null,
+  started_at: '2026-09-05T00:00:00Z',
+  completed_at: null,
+};
+const mockRunTask = mock(() => Promise.resolve(running));
+const mockGetTaskRuns = mock(() => Promise.resolve([] as TaskRun[]));
+const mockGetTaskRun = mock(() => Promise.resolve(running));
+const mockGetTaskRunLogs = mock(() => Promise.resolve([] as TaskRunLog[]));
 
 // Create mock functions for projects API
 const mockGetProjects = mock(() => Promise.resolve([] as Project[]));
@@ -51,8 +57,9 @@ mock.module('../../../api/tasks', () => ({
     createTask: mockCreateTask,
     deleteTask: mockDeleteTask,
     runTask: mockRunTask,
-    cancelTaskRun: mockCancelTaskRun,
-    createTaskWebSocket: mockCreateTaskWebSocket,
+    getTaskRuns: mockGetTaskRuns,
+    getTaskRun: mockGetTaskRun,
+    getTaskRunLogs: mockGetTaskRunLogs,
   },
 }));
 
@@ -190,6 +197,13 @@ describe('TasksPage', () => {
     mockCreateTask.mockReset();
     mockDeleteTask.mockReset();
     mockRunTask.mockReset();
+    mockRunTask.mockImplementation(() => Promise.resolve(running));
+    mockGetTaskRuns.mockReset();
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([]));
+    mockGetTaskRun.mockReset();
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(running));
+    mockGetTaskRunLogs.mockReset();
+    mockGetTaskRunLogs.mockImplementation(() => Promise.resolve([]));
     mockGetProjects.mockReset();
     mockGetSources.mockReset();
     mockGetTasks.mockImplementation(() => Promise.resolve(mockTasks));
@@ -337,7 +351,8 @@ describe('TasksPage', () => {
   it('creates a new task via wizard', async () => {
     const newTask: Task = {
       id: 'task-3',
-      project_id: 'proj-1',
+      project_ids: ['proj-1'],
+      workspace_id: 'workspace-1',
       title: 'New Task',
       description: 'Task description',
       acceptance_criteria: null,
@@ -481,7 +496,7 @@ describe('TasksPage', () => {
     const executeButtons = screen.getAllByRole('button', { name: 'Execute' });
     fireEvent.click(executeButtons[0]);
 
-    expect(document.querySelector('.task-execution-overlay')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
   });
 
   it('closes task execution view', async () => {
@@ -493,11 +508,11 @@ describe('TasksPage', () => {
     const executeButtons = screen.getAllByRole('button', { name: 'Execute' });
     fireEvent.click(executeButtons[0]);
 
-    expect(document.querySelector('.task-execution-overlay')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
-      expect(document.querySelector('.task-execution-overlay')).not.toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'Implement login' })).not.toBeInTheDocument();
     });
   });
 
@@ -609,53 +624,104 @@ describe('TasksPage', () => {
     expect(statusSelect).toContainHTML('Complete');
   });
 
-  it('starts task execution', async () => {
-    const mockWs = {
-      onmessage: null as ((event: MessageEvent) => void) | null,
-      onclose: null as (() => void) | null,
-      onerror: null as ((error: Event) => void) | null,
-      close: mock(() => {}),
-    };
-    mockRunTask.mockImplementation(() => Promise.resolve({ run_id: 'run-1' }));
-    mockCreateTaskWebSocket.mockImplementation(() => mockWs as unknown as WebSocket);
-
+  it('does not show fictional phases or logs after a failed start', async () => {
+    mockRunTask.mockRejectedValueOnce(new Error('Worker unavailable'));
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
-
-    const executeButtons = screen.getAllByRole('button', { name: 'Execute' });
-    fireEvent.click(executeButtons[0]);
-
-    fireEvent.click(screen.getByRole('button', { name: 'Start Execution' }));
-
-    await waitFor(() => {
-      expect(mockRunTask).toHaveBeenCalledWith('task-1');
-    });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Start Execution' }));
+    expect(await screen.findByText('Worker unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Architect Planning')).not.toBeInTheDocument();
+    expect(screen.queryByText('Execution Logs')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeInTheDocument();
   });
 
-  it('creates task WebSocket connection on start', async () => {
-    const mockWs = {
-      onmessage: null as ((event: MessageEvent) => void) | null,
-      onclose: null as (() => void) | null,
-      onerror: null as ((error: Event) => void) | null,
-      close: mock(() => {}),
-    };
-    mockRunTask.mockImplementation(() => Promise.resolve({ run_id: 'run-1' }));
-    mockCreateTaskWebSocket.mockImplementation(() => mockWs as unknown as WebSocket);
-
+  it('restores an active run and its real activity on reopen', async () => {
+    mockGetTaskRuns.mockResolvedValue([running]);
+    mockGetTaskRunLogs.mockResolvedValue([
+      {
+        id: 'log-1',
+        run_id: 'run-1',
+        phase: 'thinking',
+        agent_type: 'worker',
+        level: 'info',
+        message: 'Reading project files',
+        created_at: '2026-09-05T00:00:00Z',
+      },
+    ]);
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    expect(await screen.findByText('Reading project files')).toBeInTheDocument();
+    expect(screen.getByText('Running')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop Execution' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Execute' })[0]);
+    expect(await screen.findByText('Reading project files')).toBeInTheDocument();
+    expect(mockRunTask).not.toHaveBeenCalled();
+  });
 
-    const executeButtons = screen.getAllByRole('button', { name: 'Execute' });
-    fireEvent.click(executeButtons[0]);
-    fireEvent.click(screen.getByRole('button', { name: 'Start Execution' }));
-
-    await waitFor(() => {
-      expect(mockCreateTaskWebSocket).toHaveBeenCalledWith('run-1');
+  it('polls real activity until completion without starting another run', async () => {
+    mockGetTaskRuns.mockResolvedValue([running]);
+    mockGetTaskRun.mockResolvedValueOnce(running);
+    mockGetTaskRun.mockResolvedValue({
+      ...running,
+      status: 'completed',
+      current_phase: 'complete',
     });
+    renderTasksPage();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    expect(await screen.findByText('Running')).toBeInTheDocument();
+    await waitFor(
+      () => expect(screen.getByText('Task completed successfully.')).toBeInTheDocument(),
+      { timeout: 4000 }
+    );
+    expect(mockGetTaskRun).toHaveBeenCalledTimes(2);
+    expect(mockRunTask).not.toHaveBeenCalled();
+  });
+
+  it('shows terminal worker failure separately from monitoring failure', async () => {
+    mockGetTaskRuns.mockResolvedValue([running]);
+    mockGetTaskRun.mockResolvedValue({
+      ...running,
+      status: 'failed',
+      error_message: 'Model rejected request',
+    });
+    renderTasksPage();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    expect(await screen.findByText('Model rejected request')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Run Again' })).toBeEnabled();
+    expect(screen.queryByText('Monitoring unavailable')).not.toBeInTheDocument();
+  });
+
+  it('blocks duplicate starts when the initial history cannot be verified', async () => {
+    mockGetTaskRuns.mockRejectedValue(new Error('Network offline'));
+    renderTasksPage();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    expect(await screen.findByText('Monitoring unavailable')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start Execution' })).toBeDisabled();
+    expect(screen.queryByText('Task failed')).not.toBeInTheDocument();
+  });
+
+  it('aborts a pending start on close and ignores its late completion', async () => {
+    let resolve!: (run: TaskRun) => void;
+    mockRunTask.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        })
+    );
+    renderTasksPage();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    const button = await screen.findByRole('button', { name: 'Start Execution' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(mockRunTask).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect((mockRunTask.mock.calls[0] as unknown as [string, AbortSignal])[1].aborted).toBe(true);
+    resolve(running);
+    await Promise.resolve();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockGetTaskRun).not.toHaveBeenCalled();
   });
 
   it('shows create error in wizard', async () => {

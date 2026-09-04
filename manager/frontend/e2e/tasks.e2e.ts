@@ -1,5 +1,5 @@
-import { test, expect } from './fixtures';
-import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { expect, test } from './fixtures';
+import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { blockServiceWorker, routeApi, routeApiContext } from './test-utils';
 
 const tasksRoutePattern = /\/api\/workspaces\/[^/]+\/tasks/;
@@ -223,9 +223,7 @@ test.describe('Tasks Page', () => {
 
   test.describe('Page Header', () => {
     test('displays page title and subtitle', async ({ page }) => {
-      await expect(
-        page.getByRole('heading', { name: 'Tasks', exact: true })
-      ).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
       await expect(page.getByText('Autonomous agent workflows')).toBeVisible();
     });
 
@@ -535,114 +533,95 @@ test.describe('Tasks Page', () => {
   });
 
   test.describe('Task Execution', () => {
-    test.beforeEach(async ({ context, page }) => {
-      await context.unroute(tasksRoutePattern);
-      await page.unroute(tasksRoutePattern);
-      await routeApiContext(context, tasksRoutePattern, (route) => {
-        if (route.request().method() === 'GET') {
+    const run = {
+      id: 'run-123',
+      task_id: 'task-1',
+      status: 'running',
+      current_phase: 'thinking',
+      progress_percent: null,
+      error_message: null,
+    };
+    test.beforeEach(async ({ page }) => {
+      await routeApi(page, '**/api/tasks/task-1/runs', (route) =>
+        route.fulfill({ json: { runs: [] } })
+      );
+    });
+
+    test('opens an accessible idle dialog and closes with Escape', async ({ page }) => {
+      await page.getByRole('button', { name: 'Execute', exact: true }).first().click();
+      const dialog = page.getByRole('dialog', { name: 'Implement login page' });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole('button', { name: 'Start Execution' })).toBeEnabled();
+      await expect(dialog.locator('.execution-logs')).toHaveCount(0);
+      await page.keyboard.press('Escape');
+      await expect(dialog).not.toBeVisible();
+    });
+
+    test('starts a real run and restores it on reopen', async ({ page }) => {
+      let started = false;
+      await routeApi(page, '**/api/tasks/task-1/runs', (route) =>
+        route.fulfill({ json: { runs: started ? [run] : [] } })
+      );
+      await routeApi(page, '**/api/tasks/task-1/run', (route) => {
+        started = true;
+        return route.fulfill({ json: { run: { ...run, status: 'pending' } } });
+      });
+      await routeApi(page, '**/api/task-runs/run-123', (route) => route.fulfill({ json: { run } }));
+      await routeApi(page, '**/api/task-runs/run-123/logs', (route) =>
+        route.fulfill({
+          json: {
+            logs: [
+              {
+                id: 'log-1',
+                phase: 'thinking',
+                agent_type: 'worker',
+                log_level: 'info',
+                message: 'Reading project files',
+                created_at: '2026-09-05T00:00:00Z',
+              },
+            ],
+          },
+        })
+      );
+      await page.getByRole('button', { name: 'Execute', exact: true }).first().click();
+      await page.getByRole('button', { name: 'Start Execution' }).click();
+      await expect(page.getByText('Reading project files')).toBeVisible();
+      await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Stop Execution' })).toHaveCount(0);
+      await page.getByRole('button', { name: 'Close', exact: true }).click();
+      await page.getByRole('button', { name: 'Execute', exact: true }).first().click();
+      await expect(page.getByText('Reading project files')).toBeVisible();
+    });
+
+    for (const theme of ['dark', 'light']) {
+      test(`startup failure remains readable in ${theme}`, async ({ page }, testInfo) => {
+        await page.evaluate((value) => {
+          document.documentElement.setAttribute('data-theme', value);
+          document.documentElement.classList.toggle('dark', value === 'dark');
+        }, theme);
+        await routeApi(page, '**/api/tasks/task-1/run', (route) =>
           route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ tasks: mockTasks }),
-          });
-        }
-      });
-
-      await page.goto('/');
-      await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
-      await page.goto('/tasks');
-      await expect(page).toHaveURL('/tasks');
-      await expect(page.locator('.task-card')).toHaveCount(3);
-    });
-
-    test('opens execution modal when Execute clicked', async ({ page }) => {
-      await page.click('.task-card:first-child button:has-text("Execute")');
-
-      await expect(page.locator('.task-execution-modal')).toBeVisible();
-      await expect(page.locator('.task-execution-header h2')).toContainText('Implement login page');
-    });
-
-    test('shows Start Execution button in idle state', async ({ page }) => {
-      await page.click('.task-card:first-child button:has-text("Execute")');
-
-      await expect(page.locator('.execution-controls button:has-text("Start Execution")')).toBeVisible();
-    });
-
-    test('closes execution modal with close button', async ({ page }) => {
-      await page.click('.task-card:first-child button:has-text("Execute")');
-      await expect(page.locator('.task-execution-modal')).toBeVisible();
-
-      await page
-        .locator('.task-execution-modal')
-        .getByRole('button', { name: 'Close' })
-        .click();
-
-      await expect(page.locator('.task-execution-modal')).not.toBeVisible();
-    });
-
-    test('starts execution and shows progress', async ({ page }) => {
-      await routeApi(page, '**/api/tasks/task-1/start', (route) => {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ run_id: 'run-123' }),
+            status: 503,
+            json: { error: 'Worker unavailable. Try again when a worker is connected.' },
+          })
+        );
+        await page.getByRole('button', { name: 'Execute', exact: true }).first().click();
+        await page.getByRole('button', { name: 'Start Execution' }).click();
+        await expect(page.getByText('Could not start task')).toBeVisible();
+        await expect(page.locator('.execution-logs')).toHaveCount(0);
+        await expect(page.locator('.task-progress-bar-container')).toHaveCount(0);
+        await page.screenshot({
+          path: testInfo.outputPath(`task-error-${theme}.png`),
+          fullPage: true,
+        });
+        await page.setViewportSize({ width: 390, height: 844 });
+        await expect(page.getByRole('button', { name: 'Try Again' })).toBeInViewport();
+        await page.screenshot({
+          path: testInfo.outputPath(`task-error-${theme}-mobile.png`),
+          fullPage: true,
         });
       });
-
-      // Mock WebSocket - Playwright doesn't support WebSocket mocking directly,
-      // so we test that the UI updates correctly when start is called
-      await page.click('.task-card:first-child button:has-text("Execute")');
-      await page.click('.execution-controls button:has-text("Start Execution")');
-
-      // After starting, should show Stop Execution button
-      await expect(page.locator('.execution-controls button:has-text("Stop Execution")')).toBeVisible();
-    });
-
-    test('shows progress bar after starting', async ({ page }) => {
-      await routeApi(page, '**/api/tasks/task-1/start', (route) => {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ run_id: 'run-123' }),
-        });
-      });
-
-      await page.click('.task-card:first-child button:has-text("Execute")');
-      await page.click('.execution-controls button:has-text("Start Execution")');
-
-      await expect(page.locator('.task-progress-bar-container')).toBeVisible();
-    });
-
-    test('shows execution phases', async ({ page }) => {
-      await routeApi(page, '**/api/tasks/task-1/start', (route) => {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ run_id: 'run-123' }),
-        });
-      });
-
-      await page.click('.task-card:first-child button:has-text("Execute")');
-      await page.click('.execution-controls button:has-text("Start Execution")');
-
-      await expect(page.locator('.execution-phases')).toBeVisible();
-      await expect(page.locator('.phase-item')).toHaveCount(7);
-    });
-
-    test('shows logs section after starting', async ({ page }) => {
-      await routeApi(page, '**/api/tasks/task-1/start', (route) => {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ run_id: 'run-123' }),
-        });
-      });
-
-      await page.click('.task-card:first-child button:has-text("Execute")');
-      await page.click('.execution-controls button:has-text("Start Execution")');
-
-      await expect(page.locator('.execution-logs h3')).toContainText('Execution Logs');
-    });
+    }
   });
 
   test.describe('Delete Task', () => {
@@ -670,8 +649,6 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
       await expect(page.locator('.task-card')).toHaveCount(3);
 
-      // Track if confirm was called
-      let confirmCalled = false;
       await page.evaluate(() => {
         (window as unknown as { originalConfirm: typeof window.confirm }).originalConfirm =
           window.confirm;

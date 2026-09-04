@@ -1,28 +1,14 @@
 import { useQuery } from '@tanstack/react-query';
 import { Badge, Button, EmptyState } from '@zone/ui';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { client } from '../../../api/client';
-import { tasksApi } from '../../../api/tasks';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard } from '../components';
 import { useTasks } from '../hooks';
-import type { Task, TaskProgressMessage } from '../types';
+import type { Task } from '../types';
+import { TaskExecutionView } from './TaskExecutionView';
 import './TasksPage.css';
 import { useWorkspace } from '../../../shared/context';
-
-// Note: Using client.getSources() since there's no sources feature API yet.
-// When a sources feature is created, import from there instead.
-
-// Phase display names for progress visualization
-const PHASES: Record<string, { name: string; progress: number }> = {
-  architect_planning: { name: 'Architect Planning', progress: 15 },
-  developer_tests: { name: 'Writing Tests', progress: 30 },
-  developer_implementation: { name: 'Implementing', progress: 50 },
-  griller_review: { name: 'Code Review', progress: 65 },
-  developer_fixes: { name: 'Fixing Issues', progress: 80 },
-  architect_review: { name: 'Final Review', progress: 90 },
-  developer_final: { name: 'Finalizing', progress: 100 },
-};
 
 function TaskStatusBadge({ status }: { status: string }) {
   const variants: Record<
@@ -47,205 +33,6 @@ function PrStatusBadge({ status }: { status: 'pending' | 'open' | 'merged' | 'cl
     closed: 'destructive',
   };
   return <Badge variant={variants[status] || 'secondary'}>PR: {status}</Badge>;
-}
-
-function TaskProgressBar({ progress, phase }: { progress: number; phase: string | null }) {
-  return (
-    <div className="task-progress-bar-container">
-      <div className="task-progress-bar" style={{ width: `${progress}%` }} />
-      {phase && (
-        <span className="task-progress-label">
-          {PHASES[phase]?.name || phase} ({progress}%)
-        </span>
-      )}
-    </div>
-  );
-}
-
-interface TaskExecutionViewProps {
-  task: Task;
-  onClose: () => void;
-}
-
-function TaskExecutionView({ task, onClose }: TaskExecutionViewProps) {
-  const [progress, setProgress] = useState(0);
-  const [currentPhase, setCurrentPhase] = useState<string | null>(null);
-  const [logs, setLogs] = useState<
-    { phase: string; agent: string; level: string; message: string }[]
-  >([]);
-  const [status, setStatus] = useState<'idle' | 'running' | 'complete' | 'error'>('idle');
-  const [error, setError] = useState<string | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-
-  const startExecution = useCallback(async () => {
-    try {
-      setStatus('running');
-      setError(null);
-      setLogs([]);
-      setProgress(0);
-
-      const result = await tasksApi.runTask(task.id);
-
-      // Connect to WebSocket for progress updates
-      const ws = tasksApi.createTaskWebSocket(result.run_id);
-      wsRef.current = ws;
-
-      ws.onmessage = (event) => {
-        const msg: TaskProgressMessage = JSON.parse(event.data);
-
-        switch (msg.type) {
-          case 'phase_started':
-          case 'phase_completed':
-            if (msg.progress_percent !== undefined) {
-              setProgress(msg.progress_percent);
-            }
-            if (msg.phase) {
-              setCurrentPhase(msg.phase);
-            }
-            break;
-          case 'log':
-            setLogs((prev) => [
-              ...prev,
-              {
-                phase: msg.phase || '',
-                agent: msg.agent_type || '',
-                level: msg.log_level || 'info',
-                message: msg.message || '',
-              },
-            ]);
-            break;
-          case 'complete':
-            setStatus('complete');
-            setProgress(100);
-            ws.close();
-            break;
-          case 'error':
-            setStatus('error');
-            setError(msg.error || 'Unknown error');
-            ws.close();
-            break;
-        }
-      };
-
-      ws.onerror = () => {
-        setStatus('error');
-        setError('WebSocket connection failed');
-      };
-    } catch (err) {
-      setStatus('error');
-      setError(err instanceof Error ? err.message : 'Failed to start task');
-    }
-  }, [task.id]);
-
-  const stopExecution = useCallback(async () => {
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
-    try {
-      await tasksApi.cancelTaskRun(task.id);
-      setStatus('idle');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to stop task');
-    }
-  }, [task.id]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: logs.length triggers auto-scroll when new logs arrive
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs.length]);
-
-  useEffect(() => {
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
-  }, []);
-
-  return (
-    <div className="task-execution-overlay">
-      <div className="task-execution-modal">
-        <header className="task-execution-header">
-          <h2>{task.title}</h2>
-          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              width="20"
-              height="20"
-            >
-              <path d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </Button>
-        </header>
-
-        <div className="task-execution-content">
-          <div className="task-meta">
-            <TaskStatusBadge status={task.status} />
-            <p className="task-description">{task.description}</p>
-          </div>
-
-          <div className="execution-controls">
-            {status === 'idle' && <Button onClick={startExecution}>Start Execution</Button>}
-            {status === 'running' && (
-              <Button variant="destructive" onClick={stopExecution}>
-                Stop Execution
-              </Button>
-            )}
-            {(status === 'complete' || status === 'error') && (
-              <Button onClick={startExecution}>Run Again</Button>
-            )}
-          </div>
-
-          {status !== 'idle' && (
-            <>
-              <TaskProgressBar progress={progress} phase={currentPhase} />
-
-              <div className="execution-phases">
-                {Object.entries(PHASES).map(([key, { name, progress: phaseProgress }]) => (
-                  <div
-                    key={key}
-                    className={`phase-item ${
-                      progress >= phaseProgress
-                        ? 'phase-complete'
-                        : currentPhase === key
-                          ? 'phase-active'
-                          : 'phase-pending'
-                    }`}
-                  >
-                    <span className="phase-indicator" />
-                    <span className="phase-name">{name}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="execution-logs">
-                <h3>Execution Logs</h3>
-                <div className="logs-container">
-                  {logs.map((log, index) => (
-                    <div key={`${log.phase}-${index}`} className={`log-entry log-${log.level}`}>
-                      <span className="log-phase">[{PHASES[log.phase]?.name || log.phase}]</span>
-                      <span className="log-agent">{log.agent}</span>
-                      <span className="log-message">{log.message}</span>
-                    </div>
-                  ))}
-                  <div ref={logsEndRef} />
-                </div>
-              </div>
-
-              {status === 'complete' && (
-                <div className="execution-result success">Task completed successfully!</div>
-              )}
-              {status === 'error' && <div className="execution-result error">Error: {error}</div>}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 export default function TasksPage() {
@@ -451,7 +238,11 @@ export default function TasksPage() {
       />
 
       {selectedTask && (
-        <TaskExecutionView task={selectedTask} onClose={() => setSelectedTask(null)} />
+        <TaskExecutionView
+          key={selectedTask.id}
+          task={selectedTask}
+          onClose={() => setSelectedTask(null)}
+        />
       )}
     </div>
   );
