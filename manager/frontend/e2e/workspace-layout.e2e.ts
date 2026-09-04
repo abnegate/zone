@@ -60,7 +60,12 @@ async function fitsViewport(page: Page): Promise<void> {
   expect(width.content).toBeLessThanOrEqual(width.viewport);
 }
 
-async function capture(page: Page, name: string): Promise<void> {
+async function capture(
+  page: Page,
+  name: string,
+  theme: 'light' | 'dark'
+): Promise<void> {
+  await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   if (process.env.RUN_SCREENSHOTS === 'true')
     await page.screenshot({
       path: `screenshots/layout/${name}.png`,
@@ -69,12 +74,13 @@ async function capture(page: Page, name: string): Promise<void> {
     });
 }
 
-async function ready(page: Page, path: string, theme: string): Promise<void> {
+async function ready(
+  page: Page,
+  path: string,
+  theme: 'light' | 'dark'
+): Promise<void> {
   await page.goto(`/${path}`, { waitUntil: 'domcontentloaded' });
-  await page.evaluate(
-    (value) => document.documentElement.setAttribute('data-theme', value),
-    theme
-  );
+  await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   await page.evaluate(() => document.fonts.ready);
 }
 
@@ -82,15 +88,22 @@ for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 390, height: 844 },
 ]) {
-  for (const theme of ['light', 'dark']) {
+  for (const theme of ['light', 'dark'] as const) {
     const profile = `${viewport.width}-${theme}`;
     test.describe(`Workspace layout ${profile}`, () => {
       test.use({ viewport });
       test.beforeEach(async ({ page, context }) => {
         await blockServiceWorker(context);
+        await page.addInitScript(
+          (value) => localStorage.setItem('manager_theme', value),
+          theme
+        );
         await setupCommonRoutes(page, true);
         await page.goto('/login', { waitUntil: 'domcontentloaded' });
         await setupAdminAuth(page);
+      });
+      test.afterEach(async ({ page }) => {
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       });
 
       test('populated screens share title and list typography without horizontal overflow', async ({
@@ -127,7 +140,7 @@ for (const viewport of [
             );
           }
           await fitsViewport(page);
-          await capture(page, `${profile}-${screen.path}`);
+          await capture(page, `${profile}-${screen.path}`, theme);
         }
       });
 
@@ -171,7 +184,7 @@ for (const viewport of [
           expect(bounds!.width).toBeLessThanOrEqual(viewport.width - 32);
           expect(bounds!.height).toBeLessThanOrEqual(viewport.height - 32);
           await fitsViewport(page);
-          await capture(page, `${profile}-${wizard.path}-wizard`);
+          await capture(page, `${profile}-${wizard.path}-wizard`, theme);
           if (wizard.path === 'projects') {
             await dialog.getByLabel('Project Name').fill('Layout review');
           } else if (wizard.path === 'tasks') {
@@ -188,7 +201,11 @@ for (const viewport of [
           await expect(dialog.locator('[aria-current="step"]')).toContainText(
             '2'
           );
-          await capture(page, `${profile}-${wizard.path}-wizard-content`);
+          await capture(
+            page,
+            `${profile}-${wizard.path}-wizard-content`,
+            theme
+          );
           if (wizard.path === 'tasks') {
             await dialog
               .getByLabel('Title', { exact: true })
@@ -247,7 +264,11 @@ for (const viewport of [
           expect(footer!.y + footer!.height).toBeLessThanOrEqual(
             viewport.height
           );
-          await capture(page, `${profile}-${wizard.path}-wizard-details`);
+          await capture(
+            page,
+            `${profile}-${wizard.path}-wizard-details`,
+            theme
+          );
         }
       });
 
@@ -326,7 +347,7 @@ for (const viewport of [
         await expect(
           page.getByText('Chat connection failed')
         ).not.toBeVisible();
-        await capture(page, `${profile}-conversation`);
+        await capture(page, `${profile}-conversation`, theme);
         if (viewport.width < 768) {
           await expect(page.locator('.chats-sidebar')).not.toBeVisible();
           const reading = await page.locator('.chats-main').boundingBox();
@@ -354,7 +375,7 @@ for (const viewport of [
           viewport.width > 768 ? '24px' : '16px'
         );
         await expect(page.locator('.sync-config-section')).toBeVisible();
-        await capture(page, `${profile}-project-details`);
+        await capture(page, `${profile}-project-details`, theme);
         await fitsViewport(page);
         await ready(page, 'wiki', theme);
         await page.locator('.knowledge-card').first().click();
@@ -365,7 +386,7 @@ for (const viewport of [
           'font-size',
           '16px'
         );
-        await capture(page, `${profile}-wiki-details`);
+        await capture(page, `${profile}-wiki-details`, theme);
         await fitsViewport(page);
         await ready(page, 'tasks', theme);
         await page
@@ -379,7 +400,7 @@ for (const viewport of [
           'font-size',
           '20px'
         );
-        await capture(page, `${profile}-execution`);
+        await capture(page, `${profile}-execution`, theme);
         await fitsViewport(page);
         await routeApi(page, /\/api\/context\/search/, (route) =>
           route.fulfill({
@@ -405,7 +426,7 @@ for (const viewport of [
           .fill('design');
         await page.getByRole('button', { name: 'Search', exact: true }).click();
         await expect(page.locator('.result-card')).toBeVisible();
-        await capture(page, `${profile}-search-results`);
+        await capture(page, `${profile}-search-results`, theme);
         await fitsViewport(page);
       });
 
@@ -460,7 +481,7 @@ for (const viewport of [
             rows[index + 1].top + 1
           );
         await fitsViewport(page);
-        await capture(page, `${profile}-browse`);
+        await capture(page, `${profile}-browse`, theme);
       });
     });
   }
