@@ -55,7 +55,8 @@ runner/
 ├── zone_context/    # Context gathering, embeddings, heuristics
 ├── zone_runner/     # CLI daemon/one-shot execution
 ├── zone_cli/        # User-facing CLI tool
-├── zone_installer/  # Installation utilities
+├── zone_installer/  # Installation utilities and client HTTP shell
+├── zone_desktop/    # Tauri desktop, Android, and iOS client
 └── tool_runner/     # Sandboxed command execution
 ```
 

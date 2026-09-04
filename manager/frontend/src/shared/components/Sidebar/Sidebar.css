@@ -317,6 +317,15 @@
   flex-shrink: 0;
 }
 
+a.change-server-btn {
+  text-decoration: none;
+}
+
+a.change-server-btn:hover {
+  color: var(--ui-text-primary);
+  background: var(--ui-bg-hover);
+}
+
 /* Mobile Menu Button */
 .mobile-menu-btn {
   display: none;

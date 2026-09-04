@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'runner/**'
+      - 'scripts/patch-tauri-android.sh'
       - '.github/workflows/rust-test.yml'
   pull_request:
     paths:
       - 'runner/**'
+      - 'scripts/patch-tauri-android.sh'
       - '.github/workflows/rust-test.yml'
 
 env:

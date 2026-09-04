@@ -6,6 +6,7 @@ pub const FRONTEND_DIR_ENV: &str = "ZONE_FRONTEND_DIR";
 pub const BIND_ENV: &str = "ZONE_BIND";
 pub const MODE_ENV: &str = "ZONE_MODE";
 pub const PROXY_TARGET_ENV: &str = "ZONE_PROXY_TARGET";
+pub const CONFIG_PATH_ENV: &str = "ZONE_CONFIG_PATH";
 
 const DEFAULT_BIND: &str = "0.0.0.0:8000";
 const DEFAULT_INSTALLER_DIR: &str = "frontend/build";
@@ -43,11 +44,37 @@ pub fn bind_addr() -> String {
 }
 
 pub fn proxy_target() -> String {
-    configured_host().unwrap_or_else(|| DEFAULT_PROXY_TARGET.to_string())
+    proxy_target_from(&config_file())
+}
+
+pub fn proxy_target_from(path: &Path) -> String {
+    configured_host_from(path).unwrap_or_else(|| DEFAULT_PROXY_TARGET.to_string())
 }
 
 pub fn is_configured() -> bool {
-    env_proxy_target().is_some() || read_host_from_config().is_some()
+    is_configured_at(&config_file())
+}
+
+pub fn is_configured_at(path: &Path) -> bool {
+    env_proxy_target().is_some() || read_host_from_path(path).is_some()
+}
+
+pub fn config_file() -> PathBuf {
+    config_file_from(
+        std::env::var(CONFIG_PATH_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        dirs::home_dir(),
+    )
+}
+
+pub fn config_file_from(env_path: Option<String>, home: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = env_path {
+        return PathBuf::from(path);
+    }
+    home.unwrap_or_else(|| PathBuf::from("."))
+        .join(".zone/config.toml")
 }
 
 fn env_proxy_target() -> Option<String> {
@@ -61,7 +88,11 @@ fn env_proxy_target() -> Option<String> {
 }
 
 pub fn configured_host() -> Option<String> {
-    env_proxy_target().or_else(read_host_from_config)
+    configured_host_from(&config_file())
+}
+
+pub fn configured_host_from(path: &Path) -> Option<String> {
+    env_proxy_target().or_else(|| read_host_from_path(path))
 }
 
 pub fn normalize_host(raw: &str) -> Result<String, String> {
@@ -86,10 +117,7 @@ pub fn normalize_host(raw: &str) -> Result<String, String> {
 }
 
 pub fn write_host(host: &str) -> std::io::Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found")
-    })?;
-    write_host_to(&home.join(".zone/config.toml"), host)
+    write_host_to(&config_file(), host)
 }
 
 pub fn write_host_to(path: &Path, host: &str) -> std::io::Result<()> {
@@ -185,9 +213,8 @@ fn bundled_candidates(exe_dir: &Path, kind: FrontendKind) -> Vec<PathBuf> {
     }
 }
 
-fn read_host_from_config() -> Option<String> {
-    let home = dirs::home_dir()?;
-    let content = std::fs::read_to_string(home.join(".zone/config.toml")).ok()?;
+fn read_host_from_path(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
     host_from_toml(&content)
 }
 
@@ -299,6 +326,67 @@ mod tests {
     fn normalize_host_rejects_quotes() {
         assert!(normalize_host(r#"https://a"b.example"#).is_err());
         assert!(normalize_host(r"https://a\b.example").is_err());
+    }
+
+    #[test]
+    fn config_file_prefers_env_path() {
+        assert_eq!(
+            config_file_from(
+                Some("/tmp/zone-client.toml".into()),
+                Some(PathBuf::from("/home/zone"))
+            ),
+            PathBuf::from("/tmp/zone-client.toml")
+        );
+    }
+
+    #[test]
+    fn config_file_defaults_to_home_zone() {
+        assert_eq!(
+            config_file_from(None, Some(PathBuf::from("/home/zone"))),
+            PathBuf::from("/home/zone/.zone/config.toml")
+        );
+    }
+
+    #[test]
+    fn proxy_target_from_reads_saved_host() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        assert_eq!(proxy_target_from(&path), DEFAULT_PROXY_TARGET);
+        fs::write(&path, "host = \"https://zone.example.com\"\n").unwrap();
+        assert_eq!(proxy_target_from(&path), "https://zone.example.com");
+    }
+
+    #[test]
+    fn reads_host_from_config_path() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        assert!(read_host_from_path(&path).is_none());
+        fs::write(&path, "host = \"https://zone.example.com\"\n").unwrap();
+        assert_eq!(
+            read_host_from_path(&path).as_deref(),
+            Some("https://zone.example.com")
+        );
+    }
+
+    #[test]
+    fn is_configured_at_platform_config_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let desktop = root.path().join("home/.zone/config.toml");
+        let android = root
+            .path()
+            .join("data/user/0/com.abnegate.zone/files/config.toml");
+        let ios = root
+            .path()
+            .join("Library/Application Support/com.abnegate.zone/config.toml");
+        for path in [&desktop, &android, &ios] {
+            assert!(!is_configured_at(path));
+            write_host_to(path, "https://zone.example.com").unwrap();
+            assert!(is_configured_at(path));
+            assert_eq!(
+                configured_host_from(path).as_deref(),
+                Some("https://zone.example.com")
+            );
+        }
     }
 
     #[test]

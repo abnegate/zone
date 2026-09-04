@@ -37,8 +37,8 @@ pub async fn handle_setup(
         }
     };
 
-    if let Err(err) = frontend::write_host(&host) {
-        tracing::error!(error = %err, "Failed to write Zone host");
+    if let Err(err) = frontend::write_host_to(&state.config_path, &host) {
+        tracing::error!(error = %err, path = %state.config_path.display(), "Failed to write Zone host");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "Could not save server URL" })),
@@ -49,4 +49,40 @@ pub async fn handle_setup(
     state.set_proxy_target(host);
     state.set_mode(AppMode::Console);
     Json(json!({ "ok": true })).into_response()
+}
+
+pub async fn client_info(State(state): State<AppState>) -> Response {
+    Json(json!({
+        "client": true,
+        "host": state.proxy_target(),
+    }))
+    .into_response()
+}
+
+pub async fn handle_change_server(State(state): State<AppState>) -> Response {
+    state.set_mode(AppMode::Setup);
+    page()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn setup_page_covers_desktop_and_mobile() {
+        let response = page();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("width=device-width"));
+        assert!(html.contains("/api/setup"));
+        assert!(html.contains("/__zone/info"));
+        assert!(html.contains("const initialHost"));
+        assert!(html.contains("host.value === initialHost"));
+        assert!(html.contains("Change Server"));
+        assert!(html.contains("Android and iOS"));
+        assert!(html.contains("Zone menu on desktop"));
+        assert!(html.contains(r#"id="host""#));
+    }
 }

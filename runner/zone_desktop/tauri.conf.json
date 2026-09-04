@@ -21,11 +21,18 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/icon.ico",
+      "icons/icon.png"
     ],
     "category": "DeveloperTool",
     "shortDescription": "Self-hosted AI platform",
-    "longDescription": "Zone desktop client: manager console, installer wizard, and CLI.",
+    "longDescription": "Zone client: manager console on desktop, Android, and iOS.",
+    "android": {
+      "minSdkVersion": 24
+    },
+    "iOS": {
+      "minimumSystemVersion": "14.0"
+    },
     "macOS": {
       "minimumSystemVersion": "13.0"
     },

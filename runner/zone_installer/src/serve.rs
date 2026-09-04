@@ -26,6 +26,7 @@ pub struct AppState {
     pub manager_dir: PathBuf,
     pub mode: Arc<RwLock<AppMode>>,
     pub proxy_target: Arc<RwLock<String>>,
+    pub config_path: PathBuf,
     pub http: reqwest::Client,
 }
 
@@ -41,6 +42,7 @@ impl AppState {
             frontend_dir,
             mode: Arc::new(RwLock::new(mode)),
             proxy_target: Arc::new(RwLock::new(proxy_target)),
+            config_path: crate::frontend::config_file(),
             http: proxy::http_client()?,
         })
     }
@@ -52,8 +54,14 @@ impl AppState {
             installer_dir: PathBuf::new(),
             mode: Arc::new(RwLock::new(AppMode::Console)),
             proxy_target: Arc::new(RwLock::new(proxy_target)),
+            config_path: crate::frontend::config_file(),
             http: proxy::http_client()?,
         })
+    }
+
+    pub fn with_config_path(mut self, config_path: PathBuf) -> Self {
+        self.config_path = config_path;
+        self
     }
 
     pub fn mode(&self) -> AppMode {
@@ -114,6 +122,8 @@ pub fn router(kind: ServeKind, state: AppState) -> Router {
             .fallback(serve_spa)
             .with_state(state),
         ServeKind::Desktop => Router::new()
+            .route("/__zone/info", get(setup::client_info))
+            .route("/__zone/change-server", get(setup::handle_change_server))
             .route("/api/setup", post(setup::handle_setup))
             .route("/api/{*rest}", any(proxy::proxy_http))
             .route("/ws", get(proxy::proxy_ws))
@@ -236,6 +246,8 @@ mod tests {
         assert_eq!(state.mode(), AppMode::Setup);
         state.set_proxy_target("https://other.example".into());
         assert_eq!(state.proxy_target(), "https://other.example");
+        let state = state.with_config_path(PathBuf::from("/tmp/zone-mobile.toml"));
+        assert_eq!(state.config_path, PathBuf::from("/tmp/zone-mobile.toml"));
     }
 
     #[test]
