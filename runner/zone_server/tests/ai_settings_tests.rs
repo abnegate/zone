@@ -740,7 +740,8 @@ async fn test_ai_settings_with_all_models() {
                 "openai_api_key": "test-key",
                 "model_fast": "gpt-4o-mini",
                 "model_reasoning": "o1-preview",
-                "model_embedding": "text-embedding-3-large"
+                "model_embedding": "text-embedding-3-large",
+                "model_image": "custom-image.safetensors"
             }),
             &token,
         )
@@ -751,6 +752,7 @@ async fn test_ai_settings_with_all_models() {
     assert_eq!(body["model_fast"], "gpt-4o-mini");
     assert_eq!(body["model_reasoning"], "o1-preview");
     assert_eq!(body["model_embedding"], "text-embedding-3-large");
+    assert_eq!(body["model_image"], "custom-image.safetensors");
 }
 
 #[tokio::test]

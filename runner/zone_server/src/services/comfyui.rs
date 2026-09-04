@@ -380,8 +380,12 @@ mod tests {
 
     #[test]
     fn workflow_mutates_only_approved_inputs() {
-        let workflow = build_flux_schnell_workflow("a blue fox", "flux.safetensors", 42).unwrap();
-        assert_eq!(workflow["4"]["inputs"]["ckpt_name"], "flux.safetensors");
+        let workflow =
+            build_flux_schnell_workflow("a blue fox", "custom-image.safetensors", 42).unwrap();
+        assert_eq!(
+            workflow["4"]["inputs"]["ckpt_name"],
+            "custom-image.safetensors"
+        );
         assert_eq!(workflow["6"]["inputs"]["text"], "a blue fox");
         assert_eq!(workflow["3"]["inputs"]["seed"], 42);
         assert_eq!(workflow["3"]["inputs"]["steps"], 4);

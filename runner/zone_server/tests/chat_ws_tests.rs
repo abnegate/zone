@@ -400,6 +400,9 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/prompt"))
+        .and(wiremock::matchers::body_string_contains(
+            "custom-image.safetensors",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "flux-1"})))
         .expect(1)
         .mount(&comfy)
@@ -438,6 +441,7 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
     config.comfyui.base_url = comfy.uri();
     config.comfyui.poll_interval_ms = 50;
     config.comfyui.artifact_root = artifact_root.clone();
+    config.comfyui.checkpoint = "custom-image.safetensors".to_string();
     let addr = spawn_server_with_config(config).await;
 
     let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))

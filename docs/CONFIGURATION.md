@@ -148,8 +148,9 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `COMFYUI_CHECKPOINT`
 - **Default**: `flux1-schnell-fp8.safetensors`
-- **Description**: Checkpoint filename under ComfyUI's `models/checkpoints`
-  directory; path separators and traversal are rejected
+- **Description**: Fallback ComfyUI checkpoint when org/workspace AI settings
+  do not set `model_image`. Path separators and traversal are rejected.
+  Chat image generation uses the effective `model_image` setting when present.
 
 ### `COMFYUI_COMMIT`
 - **Default**: `30bdda1ef13a3a34fce2cd2fec633f15d832122a`
