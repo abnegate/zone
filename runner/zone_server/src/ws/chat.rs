@@ -34,6 +34,7 @@ use zone_core::llm::{
 use crate::agent::{self, AgentEvent, AgentRun, ToolCallRecord};
 use crate::auth::validate_token;
 use crate::db::{ai_settings, chats, workspace_members, workspaces};
+use crate::services::searxng::{SearchContext, SearxngClient, sanitize_query};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 
@@ -1257,9 +1258,12 @@ async fn prepare_chat(
         );
     }
 
-    if agentic {
-        context_messages.insert(0, LlmMessage::system(agent::system_prompt(&tools)));
-    } else if let Some(context_service) = state.context_service() {
+    let mut prompt = if agentic {
+        agent::system_prompt(&tools)
+    } else {
+        "You are Zone's assistant, answering inside one of the user's workspaces.".to_string()
+    };
+    if !agentic && let Some(context_service) = state.context_service() {
         // MAJOR-6: Inject knowledge base context scoped to workspace if context service available
         // Create workspace-scoped search filters
         let filters = zone_context::embeddings::SearchFilters {
@@ -1280,8 +1284,8 @@ async fn prepare_chat(
                     context_text.push_str(&format!("- {}\n", result.chunk_text));
                 }
 
-                // Insert context as system message before user message
-                context_messages.insert(0, LlmMessage::system(context_text));
+                prompt.push_str("\n\n");
+                prompt.push_str(&context_text);
             }
             Ok(_) => {
                 // No relevant context found
@@ -1294,42 +1298,48 @@ async fn prepare_chat(
     }
 
     // Inject live web search via SearXNG (reached through Gluetun in Docker).
+    let mut search = SearchContext::new(&state.config().web_search);
     if web_search_requested {
-        let query = crate::services::searxng::sanitize_query(content);
+        let query = sanitize_query(content);
         if !query.is_empty() {
             let status_msg = ServerMessage::Status {
                 message: "Searching the web...".to_string(),
             };
             let _ = send_server(sender, status_msg).await;
 
-            match crate::services::searxng::SearxngClient::new(state.config().web_search.clone()) {
+            match SearxngClient::new(state.config().web_search.clone()) {
                 Ok(client) => match client.search(&query).await {
                     Ok(hits) if !hits.is_empty() => {
-                        context_messages.insert(
-                            0,
-                            LlmMessage::system(crate::services::searxng::format_search_context(
-                                &hits,
-                            )),
-                        );
                         tracing::debug!(
                             "Injected {} web search results for chat {}",
                             hits.len(),
                             chat_id
                         );
+                        search = SearchContext::Results(hits);
                     }
                     Ok(_) => {
                         tracing::debug!("Web search returned no results for chat {}", chat_id);
+                        search = SearchContext::Empty;
                     }
                     Err(e) => {
                         tracing::warn!("Web search failed for chat {}: {}", chat_id, e);
+                        search = SearchContext::Failed;
                     }
                 },
                 Err(e) => {
                     tracing::warn!("Failed to create web search client: {}", e);
+                    search = SearchContext::Failed;
                 }
             }
         }
     }
+    prompt.push_str("\n\n");
+    prompt.push_str(&search.capability());
+    context_messages.insert(0, LlmMessage::system(prompt));
+    // Ollama's Qwen3.8 renderer hoists system messages ahead of history. A
+    // supplemental user-role context message keeps current evidence nearby.
+    // This message is sent only to the model, never stored as a user message.
+    context_messages.push(LlmMessage::user(search.prompt()));
 
     ChatPreparation {
         model: model_name.to_string(),

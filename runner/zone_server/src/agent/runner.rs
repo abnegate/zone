@@ -75,7 +75,7 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
             }
             if finalizing {
                 messages.push(LlmMessage::system(
-                    "Tool use has ended for this turn. Answer the user in ordinary text using the results already available. \
+                    "Callable tool use has ended for this turn. Answer the user in ordinary text using the results already available. \
                      Do not request more tools or return function JSON. If the results are insufficient, explain what remains unknown. \
                      For a greeting or general conversation, reply directly without claiming workspace facts."
                 ));
@@ -89,9 +89,11 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                     tracing::error!("Agent completion failed on iteration {}: {}", iteration, e);
                     if !finalizing && e.unsupported_tools() {
                         messages.push(LlmMessage::system(
-                            "This model does not support the available tools. No tools were executed from this request. \
-                             Answer directly when tools are unnecessary. If the user's request requires tools, explain that \
-                             they need to choose a model with tool support; do not invent tool results."
+                            "This completion request could not use callable tools because the model does not support them. \
+                             Previously supplied context, including any server-provided web search results, remains available. \
+                             Use that evidence to answer when sufficient; server-side web search does not require model tool support. \
+                             If the request still requires a callable tool, explain that the user needs to choose a model with tool support. \
+                             Do not invent tool results or deny web search results already supplied."
                         ));
                         finalizing = true;
                         continue;

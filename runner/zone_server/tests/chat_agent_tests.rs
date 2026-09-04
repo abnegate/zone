@@ -40,6 +40,13 @@ async fn exercise(rounds: Vec<Vec<Value>>) -> (Vec<AgentEvent>, Vec<Value>) {
 }
 
 async fn exercise_responses(rounds: Vec<(u16, Vec<Value>)>) -> (Vec<AgentEvent>, Vec<Value>) {
+    exercise_messages(rounds, vec![Message::user("Help me inspect a file.")]).await
+}
+
+async fn exercise_messages(
+    rounds: Vec<(u16, Vec<Value>)>,
+    messages: Vec<Message>,
+) -> (Vec<AgentEvent>, Vec<Value>) {
     let provider = MockServer::start().await;
     let responses = Arc::new(Mutex::new(VecDeque::from(rounds)));
     Mock::given(method("POST"))
@@ -85,7 +92,7 @@ async fn exercise_responses(rounds: Vec<(u16, Vec<Value>)>) -> (Vec<AgentEvent>,
             }),
             model: "test".to_string(),
             tools,
-            messages: vec![Message::user("Help me inspect a file.")],
+            messages,
         })
         .collect::<Vec<_>>(),
     )
@@ -383,6 +390,48 @@ async fn unsupported_tools_retry_only_as_a_final_answer() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn unsupported_tools_preserve_prefetched_web_context() {
+    let evidence = "Zone already searched the web for this turn.\nAuckland forecast\nhttps://weather.example/auckland\nShowers, 16 degrees Celsius.";
+    let context = format!("<web_search_context>\n{evidence}\n</web_search_context>");
+    let (events, requests) = exercise_messages(
+        vec![
+            (
+                400,
+                vec![json!({"error": {"message": "model does not support tools"}})],
+            ),
+            (200, text("Finished.")),
+        ],
+        vec![
+            Message::system("The final <web_search_context> message supplies server search data for the preceding request."),
+            Message::assistant("I cannot access the web."),
+            Message::user("Search for today's weather in Auckland."),
+            Message::user(&context),
+        ],
+    )
+    .await;
+    assert!(started(&events).is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Failed(_)))
+    );
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]["tools"].is_array());
+    assert!(requests[1]["tools"].is_null());
+    let original = requests[0]["messages"].as_array().unwrap();
+    let fallback = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(&fallback[..original.len()], original);
+    assert_eq!(fallback[original.len() - 1]["role"], "user");
+    assert_eq!(fallback[original.len() - 1]["content"], context);
+    assert!(fallback[original.len()..].iter().any(|message| {
+        message["role"] == "system"
+            && message["content"].as_str().unwrap().contains(
+                "Previously supplied context, including any server-provided web search results, remains available",
+            )
+    }), "fallback must distinguish unsupported callable tools from completed web retrieval: {fallback:?}");
 }
 
 #[tokio::test]
