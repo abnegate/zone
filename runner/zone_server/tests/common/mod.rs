@@ -47,6 +47,7 @@ pub fn test_config() -> Config {
         litellm_key: std::env::var("LITELLM_KEY").unwrap_or_else(|_| "test-key".to_string()),
         ollama_host: std::env::var("OLLAMA_HOST")
             .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+        gpt4all_models_url: zone_server::config::DEFAULT_GPT4ALL_MODELS_URL.to_string(),
         encryption_key: "12345678901234567890123456789012".to_string(),
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,
@@ -267,6 +268,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         litellm_host: ollama_host.to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: ollama_host.to_string(),
+        gpt4all_models_url: zone_server::config::DEFAULT_GPT4ALL_MODELS_URL.to_string(),
         encryption_key: "12345678901234567890123456789012".to_string(),
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,

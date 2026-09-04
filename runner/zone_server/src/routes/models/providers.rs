@@ -5,8 +5,9 @@ use axum::{Json, http::StatusCode, response::IntoResponse};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use scraper::{Html, Selector};
-use std::sync::OnceLock;
 use std::time::Duration;
+
+use crate::config::DEFAULT_GPT4ALL_MODELS_URL;
 
 use super::types::{
     BrowseQuery, BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSize,
@@ -106,7 +107,7 @@ pub fn get_provider(name: &str) -> Result<Box<dyn ModelProvider>, ProviderError>
     match name {
         "ollama" => Ok(Box::new(OllamaLibraryProvider)),
         "huggingface" => Ok(Box::new(HuggingFaceProvider)),
-        "gpt4all" => Ok(Box::new(Gpt4AllProvider)),
+        "gpt4all" => Ok(Box::new(Gpt4AllProvider::default())),
         "openrouter" => Ok(Box::new(OpenRouterProvider)),
         _ => Err(ProviderError::Unavailable(format!(
             "Unknown provider: {}",
@@ -876,25 +877,22 @@ fn huggingface_description(
 // GPT4All Provider
 // =============================================================================
 
-pub struct Gpt4AllProvider;
-
-const GPT4ALL_MODELS_URL: &str =
-    "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
-
-static GPT4ALL_MODELS_URL_OVERRIDE: OnceLock<String> = OnceLock::new();
-
-/// Override the GPT4All catalog URL. Tests should use this instead of
-/// `std::env::set_var`, which is racy after the cargo test runtime starts.
-pub fn set_gpt4all_models_url(url: impl Into<String>) {
-    let _ = GPT4ALL_MODELS_URL_OVERRIDE.set(url.into());
+pub struct Gpt4AllProvider {
+    catalog_url: String,
 }
 
-fn gpt4all_models_url() -> String {
-    GPT4ALL_MODELS_URL_OVERRIDE
-        .get()
-        .cloned()
-        .or_else(|| std::env::var("GPT4ALL_MODELS_URL").ok())
-        .unwrap_or_else(|| GPT4ALL_MODELS_URL.to_string())
+impl Default for Gpt4AllProvider {
+    fn default() -> Self {
+        Self::new(DEFAULT_GPT4ALL_MODELS_URL)
+    }
+}
+
+impl Gpt4AllProvider {
+    pub fn new(catalog_url: impl Into<String>) -> Self {
+        Self {
+            catalog_url: catalog_url.into(),
+        }
+    }
 }
 
 #[async_trait]
@@ -907,7 +905,7 @@ impl ModelProvider for Gpt4AllProvider {
         // GPT4All uses a static JSON catalog, so we fetch all and paginate client-side
         let offset = parse_cursor_offset(opts.cursor)?;
 
-        let response = HTTP_CLIENT.get(gpt4all_models_url()).send().await?;
+        let response = HTTP_CLIENT.get(&self.catalog_url).send().await?;
 
         if !response.status().is_success() {
             return Err(ProviderError::Unavailable(format!(
@@ -2210,6 +2208,61 @@ mod tests {
         let json = r#"[{"name":"Test","filename":"test.gguf","filesize":12345}]"#;
         let models: Vec<Gpt4AllModel> = serde_json::from_str(json).unwrap();
         assert_eq!(models[0].filesize, 12345);
+    }
+
+    #[tokio::test]
+    async fn test_gpt4all_search_uses_injected_catalog() {
+        let router = axum::Router::new().route(
+            "/models3.json",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!([{
+                    "name": "Llama 3 Instruct",
+                    "filename": "llama-3-8b-instruct.Q4_0.gguf",
+                    "filesize": "4000000000",
+                    "parameters": "8B",
+                    "type": "LLaMA",
+                    "description": "A compact Llama 3 chat model",
+                    "quant": "q4_0"
+                }]))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/models3.json");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for _ in 0..50 {
+            if client
+                .get(&url)
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let provider = Gpt4AllProvider::new(url);
+        let result = provider
+            .search(BrowseQuery {
+                query: None,
+                cursor: None,
+                limit: DEFAULT_PAGE_SIZE,
+                sort: ModelSort::default(),
+                family: None,
+                size: ModelSizeFilter::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].name, "Llama 3 Instruct");
     }
 
     #[test]

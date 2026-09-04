@@ -6,8 +6,7 @@ mod providers;
 mod types;
 
 pub use providers::{
-    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ModelProvider, ProviderError, get_provider,
-    set_gpt4all_models_url,
+    DEFAULT_PAGE_SIZE, Gpt4AllProvider, MAX_PAGE_SIZE, ModelProvider, ProviderError, get_provider,
 };
 pub use types::{
     BrowseQuery, BrowseResponse, ErrorResponse, ListModelsQuery, ModelDetails, ModelResponse,
@@ -95,7 +94,14 @@ pub async fn list(
                 list_ollama_models(state).await
             }
         }
-        "huggingface" | "gpt4all" | "openrouter" => match get_provider(source) {
+        "gpt4all" => {
+            let provider = Gpt4AllProvider::new(state.config().gpt4all_models_url.clone());
+            match provider.search(query.to_browse_query(limit)).await {
+                Ok(response) => Json(response).into_response(),
+                Err(e) => e.into_response(),
+            }
+        }
+        "huggingface" | "openrouter" => match get_provider(source) {
             Ok(provider) => match provider.search(query.to_browse_query(limit)).await {
                 Ok(response) => Json(response).into_response(),
                 Err(e) => e.into_response(),

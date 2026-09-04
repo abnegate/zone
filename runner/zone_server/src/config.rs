@@ -2,6 +2,10 @@
 
 use std::env;
 
+/// Upstream GPT4All model catalog. Tests should override `Config::gpt4all_models_url`.
+pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
+    "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
+
 /// Server configuration loaded from environment variables
 #[derive(Clone)]
 pub struct Config {
@@ -25,6 +29,8 @@ pub struct Config {
     pub litellm_key: String,
     /// Ollama host URL (for model management)
     pub ollama_host: String,
+    /// GPT4All browse catalog. Override in tests so CI does not hit GitHub raw.
+    pub gpt4all_models_url: String,
     /// Encryption key for source credentials (must be at least 32 characters)
     pub encryption_key: String,
     /// CORS allowed origins (comma-separated, default: *)
@@ -268,6 +274,8 @@ impl Config {
                 .map_err(|_| ConfigError::Missing("LITELLM_KEY"))?,
             ollama_host: env::var("OLLAMA_HOST")
                 .unwrap_or_else(|_| "http://ollama:11434".to_string()),
+            gpt4all_models_url: env::var("GPT4ALL_MODELS_URL")
+                .unwrap_or_else(|_| DEFAULT_GPT4ALL_MODELS_URL.to_string()),
             encryption_key,
             cors_origins,
             cors_allow_credentials,
@@ -292,6 +300,7 @@ impl std::fmt::Debug for Config {
             .field("litellm_host", &self.litellm_host)
             .field("litellm_key", &"[REDACTED]")
             .field("ollama_host", &self.ollama_host)
+            .field("gpt4all_models_url", &self.gpt4all_models_url)
             .field("encryption_key", &"[REDACTED]")
             .field("cors_origins", &self.cors_origins)
             .field("cors_allow_credentials", &self.cors_allow_credentials)
@@ -331,6 +340,7 @@ mod tests {
             litellm_host: "http://localhost:4000".to_string(),
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
+            gpt4all_models_url: DEFAULT_GPT4ALL_MODELS_URL.to_string(),
             encryption_key: "12345678901234567890123456789012".to_string(),
             cors_origins: vec!["*".to_string()],
             cors_allow_credentials: false,

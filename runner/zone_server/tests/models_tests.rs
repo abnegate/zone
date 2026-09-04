@@ -217,25 +217,26 @@ async fn start_gpt4all_catalog_server() -> String {
         .build()
         .unwrap();
     for _ in 0..50 {
-        if let Ok(response) = client.get(&url).send().await {
-            if response.status().is_success() {
-                return url;
-            }
+        if client
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            return url;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     panic!("GPT4All catalog mock did not become ready at {url}");
 }
 
-static GPT4ALL_MOCK_READY: OnceCell<()> = OnceCell::const_new();
+static GPT4ALL_MOCK_URL: OnceCell<String> = OnceCell::const_new();
 
-async fn use_local_gpt4all_catalog() {
-    GPT4ALL_MOCK_READY
-        .get_or_init(|| async {
-            let url = start_gpt4all_catalog_server().await;
-            zone_server::routes::models::set_gpt4all_models_url(url);
-        })
-        .await;
+async fn local_gpt4all_catalog_url() -> String {
+    GPT4ALL_MOCK_URL
+        .get_or_init(|| async { start_gpt4all_catalog_server().await })
+        .await
+        .clone()
 }
 
 // =============================================================================
@@ -270,7 +271,17 @@ async fn get_auth_token(router: &Router) -> String {
 
 /// Create a test router with custom Ollama host
 async fn create_test_router_with_ollama(ollama_host: &str) -> Router {
-    let config = common::test_config_with_ollama_host(ollama_host);
+    create_test_router_with_hosts(ollama_host, None).await
+}
+
+async fn create_test_router_with_hosts(
+    ollama_host: &str,
+    gpt4all_models_url: Option<&str>,
+) -> Router {
+    let mut config = common::test_config_with_ollama_host(ollama_host);
+    if let Some(url) = gpt4all_models_url {
+        config.gpt4all_models_url = url.to_string();
+    }
     let pool = common::create_test_pool().await;
     let state = common::create_test_state(config, pool);
     common::create_test_router(state)
@@ -374,8 +385,8 @@ async fn test_list_models_huggingface_with_search() {
 
 #[tokio::test]
 async fn test_list_models_gpt4all() {
-    use_local_gpt4all_catalog().await;
-    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let catalog = local_gpt4all_catalog_url().await;
+    let router = create_test_router_with_hosts("http://localhost:9999", Some(&catalog)).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
@@ -400,8 +411,8 @@ async fn test_list_models_gpt4all() {
 
 #[tokio::test]
 async fn test_list_models_gpt4all_with_search() {
-    use_local_gpt4all_catalog().await;
-    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let catalog = local_gpt4all_catalog_url().await;
+    let router = create_test_router_with_hosts("http://localhost:9999", Some(&catalog)).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
@@ -417,8 +428,8 @@ async fn test_list_models_gpt4all_with_search() {
 
 #[tokio::test]
 async fn test_list_models_accepts_sort_and_filter_params() {
-    use_local_gpt4all_catalog().await;
-    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let catalog = local_gpt4all_catalog_url().await;
+    let router = create_test_router_with_hosts("http://localhost:9999", Some(&catalog)).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
