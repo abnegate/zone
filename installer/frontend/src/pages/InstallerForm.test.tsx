@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 const mockGenerateSecret = mock(() => 'generated-secret');
 const mockInstall = mock();
@@ -163,7 +163,9 @@ describe('InstallerForm', () => {
     fireEvent.click(screen.getByText('Models'));
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'AI Provider Configuration' })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: 'AI Provider Configuration' })
+      ).toBeInTheDocument();
     });
   });
 
@@ -179,7 +181,9 @@ describe('InstallerForm', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'AI Provider Configuration' })).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { name: 'AI Provider Configuration' })
+      ).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole('button', { name: /next/i }));

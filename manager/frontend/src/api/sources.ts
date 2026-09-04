@@ -3,13 +3,13 @@
  * API client methods for source management.
  */
 
+import type { SourceTypesResponse, SourceVerifyResponse } from '../features/sources/schemas';
 import {
   SourceResponseSchema,
+  SourcesResponseSchema,
   SourceTypesResponseSchema,
   SourceVerifyResponseSchema,
-  SourcesResponseSchema,
 } from '../features/sources/schemas';
-import type { SourceTypesResponse, SourceVerifyResponse } from '../features/sources/schemas';
 import type {
   CreateSourceRequest,
   Source,

@@ -110,7 +110,9 @@ test.describe('Installation Process', () => {
     await expect(page.getByRole('dialog')).toBeVisible({ timeout: 5000 });
     await expect(page.getByRole('heading', { name: 'Installation Complete', exact: true })).toBeVisible({ timeout: 10000 });
 
-    await page.click('button:has-text("Close")');
+    // Dialog chrome also exposes a Close control; target the footer action.
+    await page.getByRole('dialog').locator('button.w-full', { hasText: 'Close' }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Installation complete' })).toBeVisible();
   });
 });

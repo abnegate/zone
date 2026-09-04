@@ -11,11 +11,11 @@ import {
   attachmentMetadata,
   buildMessageWithAttachments,
   formatBytes,
+  formatDate,
   imageAttachments,
   isSendable,
   readAttachment,
 } from '../utils';
-import { formatDate } from '../utils';
 import './ChatsPage.css';
 
 export default function ChatsPage() {

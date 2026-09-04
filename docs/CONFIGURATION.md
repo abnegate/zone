@@ -298,15 +298,13 @@ Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases
 ## 🐳 Docker Image Versions
 
 ### `DOCKER_VERSION_TRAEFIK`
-- **Default**: `v3.6`
+- **Default**: `v3.7.12`
 - **Description**: Traefik reverse proxy version
-- **Example**: `v3.6`, `v3.5`, `latest`
-- **Note**: Pin to specific versions for production stability
+- **Note**: Paired with `DOCKER_DIGEST_TRAEFIK` for immutable resolution
 
 ### `DOCKER_VERSION_OLLAMA`
-- **Default**: `0.13.5`
+- **Default**: `0.33.2`
 - **Description**: Ollama AI model runtime version
-- **Example**: `0.13.5`, `0.13.0`, `latest`
 - **Note**: Used by both ollama and ollama-init services
 
 ### `DOCKER_VERSION_POSTGRES`
@@ -316,28 +314,27 @@ Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases
 - **Note**: Uses pgvector tags (e.g., `pg16`)
 
 ### `DOCKER_VERSION_LITELLM`
-- **Default**: `main-stable`
+- **Default**: `v1.99.1`
 - **Description**: LiteLLM proxy version
-- **Example**: `main-stable`, `main-latest`, specific commit SHA
-- **Note**: `main-stable` recommended for production
+- **Note**: Paired with `DOCKER_DIGEST_LITELLM` for immutable resolution
 
-### `DOCKER_VERSION_GLUETUN`
-- **Default**: `v3.41`
-- **Description**: Gluetun VPN client version
-- **Example**: `v3.41`, `v3.40`, `latest`
+### `DOCKER_VERSION_GLUETUN_BUNDLED`
+- **Default**: `0.1.1-bundled`
+- **Description**: Bundled Gluetun exporter image version
 - **Note**: Only used when VPN profile is enabled
 
 ### `DOCKER_VERSION_SEARXNG`
-- **Default**: `latest`
+- **Default**: `2026.9.3-a1144dda3`
 - **Description**: SearXNG metasearch engine version
-- **Example**: `latest`, specific tag
 - **Note**: Only used when VPN profile is enabled
 
 ### `DOCKER_VERSION_OPENWEBUI`
-- **Default**: `latest`
+- **Default**: `v0.11.3`
 - **Description**: Open WebUI chat interface version
-- **Example**: `latest`, `main`, specific tag
-- **Note**: Update regularly for latest features
+- **Note**: Paired with `DOCKER_DIGEST_OPENWEBUI` for immutable resolution
+
+Every external image version has a matching `DOCKER_DIGEST_*` variable in
+`.env.example`. Keep each tag and digest together when overriding an image.
 
 ---
 

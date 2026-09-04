@@ -6,7 +6,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::json;
 use sha2::Sha256;
 use sqlx::Executor;
@@ -43,6 +43,8 @@ async fn setup_test_state() -> AppState {
         litellm_host: "http://localhost:4000".to_string(),
         litellm_key: "test-key".to_string(),
         ollama_host: "http://localhost:11434".to_string(),
+        gpt4all_models_url: zone_server::config::DEFAULT_GPT4ALL_MODELS_URL.to_string(),
+        huggingface_models_url: zone_server::config::DEFAULT_HUGGINGFACE_MODELS_URL.to_string(),
         encryption_key: "12345678901234567890123456789012".to_string(),
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,

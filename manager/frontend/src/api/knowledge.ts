@@ -107,7 +107,9 @@ class KnowledgeApi {
     params.set('q', options.query);
     if (options.mode) params.set('mode', options.mode);
     if (options.source_ids && options.source_ids.length > 0) {
-      options.source_ids.forEach((id) => params.append('source_ids', id));
+      options.source_ids.forEach((id) => {
+        params.append('source_ids', id);
+      });
     }
     if (options.limit !== undefined) params.set('limit', options.limit.toString());
 

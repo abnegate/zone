@@ -1,4 +1,15 @@
 // Re-export shared components from @zone/ui
+
+export type {
+  ButtonProps,
+  CheckboxProps,
+  InfoBoxProps,
+  InputProps,
+  ModalProps,
+  ProgressBarProps,
+  SectionHeaderProps,
+  SelectProps,
+} from '@zone/ui';
 export {
   Alert,
   AlertDescription,
@@ -16,25 +27,15 @@ export {
   Label,
   Modal,
   ProgressBar,
+  SectionHeader,
   Select,
   Separator,
-  SectionHeader,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableHeader,
   TableRow,
-} from '@zone/ui';
-export type {
-  ButtonProps,
-  CheckboxProps,
-  InputProps,
-  InfoBoxProps,
-  ModalProps,
-  ProgressBarProps,
-  SectionHeaderProps,
-  SelectProps,
 } from '@zone/ui';
 
 // App-specific components

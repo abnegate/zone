@@ -7,7 +7,28 @@ mod common;
 use axum::http::StatusCode;
 use common::{TestClient, create_test_pool, test_email, test_password};
 use serde_json::json;
+use sqlx::PgPool;
+use std::time::Duration;
 use uuid::Uuid;
+
+async fn gathering_count(pool: &PgPool, source_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
+        .bind(source_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn wait_for_gatherings(pool: &PgPool, source_id: Uuid, min: i64) -> i64 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let count = gathering_count(pool, source_id).await;
+        if count >= min || tokio::time::Instant::now() >= deadline {
+            return count;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
 
 /// Helper to create a test user with org and workspace
 async fn setup_user_and_workspace(client: &TestClient) -> (String, String, String) {
@@ -235,15 +256,11 @@ async fn test_update_name_no_reindex() {
     let source_id =
         Uuid::parse_str(response.json_value()["source"]["id"].as_str().unwrap()).unwrap();
 
-    // Wait for initial index
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    let initial_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
-            .bind(source_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let initial_count = wait_for_gatherings(&pool, source_id, 1).await;
+    assert!(
+        initial_count >= 1,
+        "initial index should complete before asserting name updates do not re-index"
+    );
 
     // Update only name
     let new_name = format!("Updated Name {}", Uuid::new_v4());
@@ -258,15 +275,9 @@ async fn test_update_name_no_reindex() {
         .await
         .assert_status(StatusCode::OK);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let final_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
-            .bind(source_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
+    let final_count = gathering_count(&pool, source_id).await;
     assert_eq!(
         initial_count, final_count,
         "Name change should not trigger re-index"

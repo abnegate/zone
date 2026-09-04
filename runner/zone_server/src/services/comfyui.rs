@@ -252,13 +252,15 @@ impl ComfyUiClient {
     ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
         let mut generated = Vec::with_capacity(outputs.len());
         for output in outputs {
-            let request = self
-                .authorize(self.client.get(format!("{}/view", self.config.base_url)))
-                .query(&[
-                    ("filename", output.filename.as_str()),
-                    ("subfolder", output.subfolder.as_str()),
-                    ("type", output.r#type.as_str()),
-                ]);
+            // reqwest 0.13 dropped RequestBuilder::query; encode onto the URL.
+            let url = format!(
+                "{}/view?filename={}&subfolder={}&type={}",
+                self.config.base_url,
+                urlencoding::encode(output.filename.as_str()),
+                urlencoding::encode(output.subfolder.as_str()),
+                urlencoding::encode(output.r#type.as_str()),
+            );
+            let request = self.authorize(self.client.get(url));
             let (bytes, mime) = self
                 .bounded(cancel, deadline, async move {
                     let response = request.send().await?.error_for_status()?;

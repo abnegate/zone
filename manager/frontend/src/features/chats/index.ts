@@ -1,38 +1,35 @@
 // Types
-export type {
-  MessageRole,
-  Message,
-  Chat,
-  ChatWithMessages,
-  CreateChatRequest,
-  SendMessageRequest,
-  ChatSearchResult,
-  ChatSearchOptions,
-  ChatSearchResponse,
-} from './types';
-
-// Hooks
-export { useChats, useChat, useChatSearch } from './hooks';
-export type { UseChatsOptions } from './hooks';
 
 // Components
 export * from './components';
-
+export type { UseChatsOptions } from './hooks';
+// Hooks
+export { useChat, useChatSearch, useChats } from './hooks';
 // Pages
 export { ChatsPage } from './pages';
-
 // Schemas (for external validation needs)
 export {
-  MessageRoleSchema,
-  MessageSchema,
+  ChatResponseSchema,
   ChatSchema,
+  ChatSearchResponseSchema,
+  ChatSearchResultSchema,
+  ChatsResponseSchema,
   ChatWithMessagesSchema,
   CreateChatRequestSchema,
-  SendMessageRequestSchema,
-  ChatsResponseSchema,
-  ChatResponseSchema,
-  MessagesResponseSchema,
   MessageResponseSchema,
-  ChatSearchResultSchema,
-  ChatSearchResponseSchema,
+  MessageRoleSchema,
+  MessageSchema,
+  MessagesResponseSchema,
+  SendMessageRequestSchema,
 } from './schemas';
+export type {
+  Chat,
+  ChatSearchOptions,
+  ChatSearchResponse,
+  ChatSearchResult,
+  ChatWithMessages,
+  CreateChatRequest,
+  Message,
+  MessageRole,
+  SendMessageRequest,
+} from './types';

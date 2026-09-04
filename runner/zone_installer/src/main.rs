@@ -12,7 +12,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use rand::Rng;
+use rand::RngExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
@@ -336,11 +336,11 @@ async fn create_auth_file() -> Result<(), Box<dyn std::error::Error + Send + Syn
 /// Generate a cryptographically secure random password
 fn generate_secure_password() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     (0..24)
         .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
+            let idx = rng.random_range(0..CHARSET.len());
             CHARSET[idx] as char
         })
         .collect()
@@ -460,7 +460,7 @@ fn ensure_env_secret(content: &str, key: &str) -> String {
 
 fn generate_secret() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill(&mut bytes);
+    rand::rng().fill(&mut bytes);
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push_str(&format!("{:02x}", byte));

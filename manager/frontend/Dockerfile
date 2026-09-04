@@ -1,57 +1,28 @@
 # =============================================================================
-# Stage 1: Build shared UI package
+# Stage 1: Install the locked workspace and build the frontend
 # =============================================================================
-FROM oven/bun:1-alpine AS ui-builder
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS builder
 
-WORKDIR /ui
+WORKDIR /workspace
 
-COPY --chown=bun:bun packages/ui/package.json ./
-RUN bun install --frozen-lockfile || bun install
+COPY --chown=bun:bun package.json bun.lock ./
+COPY --chown=bun:bun packages/ui/package.json packages/ui/package.json
+COPY --chown=bun:bun installer/frontend/package.json installer/frontend/package.json
+COPY --chown=bun:bun manager/frontend/package.json manager/frontend/package.json
+RUN bun install --frozen-lockfile
 
-COPY --chown=bun:bun packages/ui/ ./
-RUN bun run build
+COPY --chown=bun:bun packages/ui packages/ui
+COPY --chown=bun:bun manager/frontend manager/frontend
+RUN bun run --filter @zone/ui build && bun run --filter zone build
 
 # =============================================================================
-# Stage 2: Install dependencies (cached layer)
+# Stage 2: Production runtime with bun
 # =============================================================================
-FROM oven/bun:1-alpine AS deps
+FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb AS runtime
 
 WORKDIR /app
 
-COPY --chown=bun:bun manager/frontend/package.json ./package.json.orig
-RUN sed 's/"@zone\/ui": "\*",//' package.json.orig > package.json && \
-    bun install --frozen-lockfile || bun install
-
-# =============================================================================
-# Stage 3: Build frontend application
-# =============================================================================
-FROM oven/bun:1-alpine AS builder
-
-WORKDIR /app
-
-COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
-COPY --from=deps --chown=bun:bun /app/package.json ./
-
-COPY --from=ui-builder /ui/dist /ui/dist
-COPY --from=ui-builder /ui/package.json /ui/package.json
-COPY --from=ui-builder /ui/node_modules /ui/node_modules
-
-RUN bun add /ui
-
-COPY --chown=bun:bun manager/frontend/tsconfig.json manager/frontend/vite.config.ts manager/frontend/index.html ./
-
-COPY --chown=bun:bun manager/frontend/src ./src
-
-RUN bun run build
-
-# =============================================================================
-# Stage 4: Production runtime with bun
-# =============================================================================
-FROM oven/bun:1-alpine AS runtime
-
-WORKDIR /app
-
-COPY --from=builder /app/build ./build
+COPY --from=builder /workspace/manager/frontend/build ./build
 
 RUN chown -R bun:bun /app
 
@@ -62,4 +33,4 @@ EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:3001/ || exit 1
 
-CMD ["bun", "x", "serve", "-s", "build", "-l", "3001"]
+CMD ["bun", "x", "serve@14.2.6", "-s", "build", "-l", "3001"]

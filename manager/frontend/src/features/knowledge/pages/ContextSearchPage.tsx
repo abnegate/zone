@@ -167,7 +167,12 @@ export default function ContextSearchPage() {
 
   const highlightText = (text: string) => {
     const queryTerms = query.toLowerCase().split(/\s+/);
-    let highlighted = text;
+    let highlighted = text
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
 
     queryTerms.forEach((term) => {
       if (term.length > 2) {

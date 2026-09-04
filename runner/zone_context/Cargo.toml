@@ -30,50 +30,50 @@ tokio-stream = { workspace = true }
 sqlx = { workspace = true }
 
 # Token counting
-tiktoken-rs = "0.6"
+tiktoken-rs = "=0.12.0"
 
 # Streaming
-async-stream = "0.3"
+async-stream = "=0.3.6"
 
 # HTTP clients for adapters
-octocrab = "0.44"
+octocrab = "=0.54.1"
 
 # Content parsing
-scraper = "0.22"
+scraper = "=0.27.0"
 
 # Text processing
-regex = "1"
-sha2 = "0.10"
+regex = "=1.13.1"
+sha2 = "=0.11.0"
 
 # Code parsing
-tree-sitter = "0.24"
-tree-sitter-rust = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-javascript = "0.23"
-tree-sitter-typescript = "0.23"
-tree-sitter-go = "0.23"
-tree-sitter-java = "0.23"
-tree-sitter-c = "0.23"
-tree-sitter-cpp = "0.23"
-tree-sitter-json = "0.24"
-tree-sitter-yaml = "0.7"
-tree-sitter-kotlin-sg = "0.4"
-tree-sitter-swift = "0.7"
-tree-sitter-sequel = "0.3"
+tree-sitter = "=0.27.0"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-python = "=0.25.0"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-go = "=0.25.0"
+tree-sitter-java = "=0.23.5"
+tree-sitter-c = "=0.24.2"
+tree-sitter-cpp = "=0.23.4"
+tree-sitter-json = "=0.24.8"
+tree-sitter-yaml = "=0.7.2"
+tree-sitter-kotlin-sg = "=0.4.1"
+tree-sitter-swift = "=0.7.3"
+tree-sitter-sequel = "=0.3.11"
 
 # Filesystem traversal
-walkdir = "2"
-glob = "0.3"
+walkdir = "=2.5.0"
+glob = "=0.3.4"
 
 # Base64 encoding/decoding
-base64 = "0.22"
+base64 = "=0.23.1"
 
 # URL encoding
-percent-encoding = "2"
-url = "2"
+percent-encoding = "=2.3.2"
+url = "=2.5.8"
 
 # In-process embeddings (feature: local-embeddings)
-fastembed = { version = "6", optional = true }
+fastembed = { version = "=6.0.2", optional = true }
 dirs = { workspace = true, optional = true }
 
 # Internal
@@ -81,5 +81,5 @@ zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
-tempfile = "3"
-wiremock = "0.6"
+tempfile = "=3.27.0"
+wiremock = "=0.6.5"

@@ -78,7 +78,9 @@ export function AdvancedStep() {
           label="Enable Prometheus + Grafana monitoring"
           checked={monitoringEnabled}
           helpText="Adds metrics collection and dashboards"
-          onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleMonitoringToggle(e.target.checked)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            handleMonitoringToggle(e.target.checked)
+          }
         />
 
         {monitoringEnabled && (
@@ -135,7 +137,9 @@ export function AdvancedStep() {
                 label="Enable email alerts for critical events"
                 checked={alertingEnabled}
                 helpText="Get notified when services go down or performance degrades"
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleAlertingToggle(e.target.checked)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  handleAlertingToggle(e.target.checked)
+                }
               />
 
               {alertingEnabled && (

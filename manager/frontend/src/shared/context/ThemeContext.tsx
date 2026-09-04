@@ -1,4 +1,4 @@
-import { type ReactNode, createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from 'react';
 import type { BorderRadius, FontFamily, WorkspaceTheme } from '../../types';
 
 type Theme = 'light' | 'dark';

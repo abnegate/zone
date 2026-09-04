@@ -225,13 +225,13 @@ test.describe('Navigation', () => {
     await page.waitForSelector('.nav-item:has-text("Organization")');
     await page.click('a[href="/org-settings"]');
     await page.waitForURL('/org-settings', { timeout: 10000 });
-    await expect(page.locator('.page-header .page-title')).toHaveText('Organization Settings');
+    await expect(page.getByRole('heading', { name: 'Organization Settings' })).toBeVisible();
   });
 
   test('navigates to Workspace settings page', async ({ page }) => {
     await page.click('a[href="/settings"]');
     await page.waitForURL('/settings', { timeout: 10000 });
-    await expect(page.locator('.page-header .page-title')).toHaveText('Workspace Settings');
+    await expect(page.getByRole('heading', { name: 'Workspace Settings' })).toBeVisible();
   });
 
   test('active nav item updates on navigation', async ({ page }) => {

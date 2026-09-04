@@ -18,12 +18,20 @@ fn get_test_db_url() -> String {
 
 // Setup test data helper
 async fn setup_test_data(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid), sqlx::Error> {
-    // Create test workspace
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, $2, $3)")
+        .bind(org_id)
+        .bind("Test Org")
+        .bind(format!("test-org-{}", org_id.as_simple()))
+        .execute(pool)
+        .await?;
+
     let workspace_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO workspaces (id, name, created_by) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, $3, $4)")
         .bind(workspace_id)
+        .bind(org_id)
         .bind("Test Workspace")
-        .bind(Uuid::new_v4())
+        .bind(format!("test-ws-{}", workspace_id.as_simple()))
         .execute(pool)
         .await?;
 
@@ -31,16 +39,15 @@ async fn setup_test_data(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid), sqlx::Erro
     let source_id = Uuid::new_v4();
     sqlx::query(
         r#"
-        INSERT INTO sources (id, workspace_id, name, source_type, config, status)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO sources (id, workspace_id, name, source_type, config)
+        VALUES ($1, $2, $3, $4, $5)
         "#,
     )
     .bind(source_id)
     .bind(workspace_id)
-    .bind("Test Source")
+    .bind(format!("Test Source {}", source_id.as_simple()))
     .bind("text")
     .bind(serde_json::json!({}))
-    .bind("active")
     .execute(pool)
     .await?;
 

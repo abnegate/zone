@@ -189,6 +189,98 @@ async fn start_invalid_json_ollama_server() -> SocketAddr {
     addr
 }
 
+fn mock_gpt4all_catalog() -> Json<serde_json::Value> {
+    Json(json!([{
+        "name": "Llama 3 Instruct",
+        "filename": "llama-3-8b-instruct.Q4_0.gguf",
+        "filesize": "4000000000",
+        "parameters": "8B",
+        "type": "LLaMA",
+        "description": "A compact Llama 3 chat model",
+        "quant": "q4_0"
+    }]))
+}
+
+async fn start_gpt4all_catalog_server() -> String {
+    let router = Router::new().route("/models3.json", get(|| async { mock_gpt4all_catalog() }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}/models3.json");
+
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap();
+    for _ in 0..50 {
+        if client
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            return url;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("GPT4All catalog mock did not become ready at {url}");
+}
+
+async fn local_gpt4all_catalog_url() -> String {
+    start_gpt4all_catalog_server().await
+}
+
+fn mock_huggingface_catalog() -> Json<serde_json::Value> {
+    Json(json!([{
+        "id": "meta-llama/Llama-3-8B",
+        "modelId": "meta-llama/Llama-3-8B",
+        "downloads": 1000,
+        "likes": 10,
+        "tags": ["gguf", "llama"],
+        "pipeline_tag": "text-generation",
+        "gguf": {"totalFileSize": 4000000000_u64, "architecture": "llama"}
+    }]))
+}
+
+async fn start_huggingface_catalog_server() -> String {
+    let router = Router::new().route("/api/models", get(|| async { mock_huggingface_catalog() }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}/api/models");
+
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap();
+    for _ in 0..50 {
+        if client
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            return url;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("HuggingFace catalog mock did not become ready at {url}");
+}
+
+async fn create_test_router_with_huggingface(catalog: &str) -> Router {
+    let mut config = common::test_config_with_ollama_host("http://localhost:9999");
+    config.huggingface_models_url = catalog.to_string();
+    let pool = common::create_test_pool().await;
+    let state = common::create_test_state(config, pool);
+    common::create_test_router(state)
+}
+
 // =============================================================================
 // Test Helpers
 // =============================================================================
@@ -221,7 +313,17 @@ async fn get_auth_token(router: &Router) -> String {
 
 /// Create a test router with custom Ollama host
 async fn create_test_router_with_ollama(ollama_host: &str) -> Router {
-    let config = common::test_config_with_ollama_host(ollama_host);
+    create_test_router_with_hosts(ollama_host, None).await
+}
+
+async fn create_test_router_with_hosts(
+    ollama_host: &str,
+    gpt4all_models_url: Option<&str>,
+) -> Router {
+    let mut config = common::test_config_with_ollama_host(ollama_host);
+    if let Some(url) = gpt4all_models_url {
+        config.gpt4all_models_url = url.to_string();
+    }
     let pool = common::create_test_pool().await;
     let state = common::create_test_state(config, pool);
     common::create_test_router(state)
@@ -284,7 +386,8 @@ async fn test_list_models_ollama_with_source_param() {
 
 #[tokio::test]
 async fn test_list_models_huggingface() {
-    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let catalog = start_huggingface_catalog_server().await;
+    let router = create_test_router_with_huggingface(&catalog).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
@@ -309,7 +412,8 @@ async fn test_list_models_huggingface() {
 
 #[tokio::test]
 async fn test_list_models_huggingface_with_search() {
-    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let catalog = start_huggingface_catalog_server().await;
+    let router = create_test_router_with_huggingface(&catalog).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
@@ -325,7 +429,8 @@ async fn test_list_models_huggingface_with_search() {
 
 #[tokio::test]
 async fn test_list_models_gpt4all() {
-    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let catalog = local_gpt4all_catalog_url().await;
+    let router = create_test_router_with_hosts("http://localhost:9999", Some(&catalog)).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
@@ -350,7 +455,8 @@ async fn test_list_models_gpt4all() {
 
 #[tokio::test]
 async fn test_list_models_gpt4all_with_search() {
-    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let catalog = local_gpt4all_catalog_url().await;
+    let router = create_test_router_with_hosts("http://localhost:9999", Some(&catalog)).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()
@@ -366,7 +472,8 @@ async fn test_list_models_gpt4all_with_search() {
 
 #[tokio::test]
 async fn test_list_models_accepts_sort_and_filter_params() {
-    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let catalog = local_gpt4all_catalog_url().await;
+    let router = create_test_router_with_hosts("http://localhost:9999", Some(&catalog)).await;
     let token = get_auth_token(&router).await;
 
     let request = Request::builder()

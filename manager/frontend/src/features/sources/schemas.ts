@@ -70,7 +70,7 @@ export const SlackConfigSchema = z.object({
 
 export const WebConfigSchema = z.object({
   url: z.string().url('Invalid URL'),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
 });
 
 export const TextConfigSchema = z.object({
@@ -268,7 +268,7 @@ export const ChatMetadataSchema = z.object({
 export const WebMetadataSchema = z.object({
   type: z.literal('web'),
   status_code: z.number(),
-  headers: z.record(z.string()),
+  headers: z.record(z.string(), z.string()),
   fetched_at: z.string(),
 });
 

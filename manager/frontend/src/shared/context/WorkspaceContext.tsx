@@ -1,4 +1,4 @@
-import { type ReactNode, createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from 'react';
 import { client } from '../../api/client';
 import { useAuth } from '../../features/auth';
 import type { Organization, Workspace } from '../../types';

@@ -888,7 +888,9 @@ async fn run_task(task_idx: usize, task: Arc<Mutex<TaskState>>, tx: mpsc::Sender
     // Get current PATH and prepend node_modules/.bin directories
     let path_var = std::env::var("PATH").unwrap_or_default();
     let root_bin = config.working_dir.join("node_modules/.bin");
-    let root_root_bin = config.working_dir.parent()
+    let root_root_bin = config
+        .working_dir
+        .parent()
         .and_then(|p| p.parent())
         .map(|p| p.join("node_modules/.bin"));
 
@@ -1660,14 +1662,21 @@ async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> 
             }
 
             // Check if cargo-sqlx is installed
-            let check = Command::new("cargo")
-                .args(["sqlx", "--version"])
-                .output()?;
+            let check = Command::new("cargo").args(["sqlx", "--version"]).output()?;
 
             if !check.status.success() {
                 println!("{} cargo-sqlx not found, installing...", "→".yellow());
                 let install = Command::new("cargo")
-                    .args(["install", "sqlx-cli", "--no-default-features", "--features", "postgres"])
+                    .args([
+                        "install",
+                        "sqlx-cli",
+                        "--version",
+                        "0.8.6",
+                        "--locked",
+                        "--no-default-features",
+                        "--features",
+                        "postgres",
+                    ])
                     .status()?;
 
                 if !install.success() {
@@ -1684,8 +1693,14 @@ async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> 
                 return Err(anyhow::anyhow!("cargo sqlx prepare failed"));
             }
 
-            println!("{} SQLx offline cache regenerated successfully", "✓".green().bold());
-            println!("{}", "  Don't forget to commit the .sqlx directory!".dimmed());
+            println!(
+                "{} SQLx offline cache regenerated successfully",
+                "✓".green().bold()
+            );
+            println!(
+                "{}",
+                "  Don't forget to commit the .sqlx directory!".dimmed()
+            );
         }
         DbCommands::Migrate => {
             println!("{} Applying database migrations...", "→".cyan());
@@ -1699,7 +1714,9 @@ async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> 
             }
 
             let status = Command::new("docker")
-                .args(["exec", "-i", "postgres", "psql", "-U", "litellm", "-d", "manager"])
+                .args([
+                    "exec", "-i", "postgres", "psql", "-U", "litellm", "-d", "manager",
+                ])
                 .stdin(std::fs::File::open(&migration_file)?)
                 .status()?;
 
@@ -1714,12 +1731,28 @@ async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> 
 
             // Drop database
             let _ = Command::new("docker")
-                .args(["exec", "postgres", "psql", "-U", "litellm", "-c", "DROP DATABASE IF EXISTS manager;"])
+                .args([
+                    "exec",
+                    "postgres",
+                    "psql",
+                    "-U",
+                    "litellm",
+                    "-c",
+                    "DROP DATABASE IF EXISTS manager;",
+                ])
                 .status();
 
             // Create database
             let create = Command::new("docker")
-                .args(["exec", "postgres", "psql", "-U", "litellm", "-c", "CREATE DATABASE manager;"])
+                .args([
+                    "exec",
+                    "postgres",
+                    "psql",
+                    "-U",
+                    "litellm",
+                    "-c",
+                    "CREATE DATABASE manager;",
+                ])
                 .status()?;
 
             if !create.success() {
@@ -1729,7 +1762,9 @@ async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> 
             // Apply migrations
             let migration_file = root.join("runner/zone_server/migrations/001_initial_schema.sql");
             let status = Command::new("docker")
-                .args(["exec", "-i", "postgres", "psql", "-U", "litellm", "-d", "manager"])
+                .args([
+                    "exec", "-i", "postgres", "psql", "-U", "litellm", "-d", "manager",
+                ])
                 .stdin(std::fs::File::open(&migration_file)?)
                 .status()?;
 

@@ -112,7 +112,8 @@ export function useInstallation() {
                 const data = JSON.parse(line);
 
                 if (data.status) {
-                  const statusText = typeof data.status === 'string' ? data.status : String(data.status);
+                  const statusText =
+                    typeof data.status === 'string' ? data.status : String(data.status);
                   const cleanStatus = statusText.replace(/^[\u2713\u2717]\s*/, '');
                   const stateValue = typeof data.state === 'string' ? data.state : undefined;
                   let lineType: StatusLine['type'] = 'success';

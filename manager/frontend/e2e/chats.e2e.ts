@@ -35,6 +35,32 @@ const generateMockModel = (name: string) => ({
   modified_at: new Date().toISOString(),
 });
 
+const openNewChatFromSidebar = (page: Page) =>
+  page.getByRole('button', { name: 'New chat', exact: true }).click();
+
+const mockOpenChatSocket = async (page: Page, chatId = 'chat-1') => {
+  await page.routeWebSocket(new RegExp(`/ws/chats/${chatId}`), (ws) => {
+    ws.onMessage((message) => {
+      const payload = JSON.parse(typeof message === 'string' ? message : message.toString());
+      if (payload.type === 'auth') {
+        ws.send(JSON.stringify({ type: 'init', chat_id: chatId, status: 'connected' }));
+        return;
+      }
+      if (payload.type !== 'send') {
+        return;
+      }
+      ws.send(
+        JSON.stringify({
+          type: 'message_saved',
+          message_id: `saved-${Date.now()}`,
+          role: 'user',
+          content: payload.content,
+        })
+      );
+    });
+  });
+};
+
 test.describe('Chats Page', () => {
   test.beforeEach(async ({ context, page }) => {
     // Block service worker to allow route interception to work
@@ -215,7 +241,7 @@ test.describe('Chats Page', () => {
 
   test.describe('Create Chat', () => {
     test('opens new chat modal from sidebar button', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await openNewChatFromSidebar(page);
       await expect(page.getByRole('dialog', { name: 'New Chat' })).toBeVisible();
     });
 
@@ -225,7 +251,7 @@ test.describe('Chats Page', () => {
     });
 
     test('shows available models in dropdown', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await openNewChatFromSidebar(page);
 
       const selectTrigger = page.getByLabel('Select Model');
       await selectTrigger.click();
@@ -269,7 +295,7 @@ test.describe('Chats Page', () => {
         }
       });
 
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await openNewChatFromSidebar(page);
       await page.getByLabel('Select Model').click();
       await page.getByRole('option', { name: 'llama3.2' }).click();
       await page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
@@ -281,7 +307,7 @@ test.describe('Chats Page', () => {
     });
 
     test('disables create button when no model selected', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await openNewChatFromSidebar(page);
       await expect(
         page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
           name: 'Create Chat',
@@ -290,7 +316,7 @@ test.describe('Chats Page', () => {
     });
 
     test('closes modal on cancel', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await openNewChatFromSidebar(page);
       await page
         .getByRole('dialog', { name: 'New Chat' })
         .getByRole('button', { name: 'Cancel' })
@@ -327,6 +353,7 @@ test.describe('Chats Page', () => {
         }
       });
 
+      await mockOpenChatSocket(page);
       await page.reload();
       await page.click('a[href="/chats"]');
       // Wait for chat list to load
@@ -537,7 +564,7 @@ test.describe('Chats Page', () => {
     });
 
     test('modals can be closed with escape key', async ({ page }) => {
-      await page.getByRole('button', { name: /\+ New/i }).click();
+      await openNewChatFromSidebar(page);
       await expect(page.getByRole('dialog', { name: 'New Chat' })).toBeVisible();
 
       await page.keyboard.press('Escape');

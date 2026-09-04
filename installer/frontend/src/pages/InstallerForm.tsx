@@ -1,37 +1,37 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useForm, FormProvider } from 'react-hook-form';
+import { FormProvider, useForm } from 'react-hook-form';
 import {
   AlertDescription,
   AlertTitle,
   Button,
   Card,
+  CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
-  CardContent,
-  CardFooter,
   InfoBox,
-  Separator,
   Modal,
   ProgressBar,
+  Separator,
   StatusLog,
   StepPills,
   ZoneLogo,
 } from '../components';
+import { InstallSummary } from '../components/InstallSummary';
 import { useInstallation } from '../hooks/useInstallation';
 import { useKeyboardNavigation } from '../hooks/useKeyboardNavigation';
-import { DomainStep } from '../steps/DomainStep';
-import { SecurityStep } from '../steps/SecurityStep';
-import { ModelsStep } from '../steps/ModelsStep';
-import { InterfaceStep } from '../steps/InterfaceStep';
-import { SearchStep } from '../steps/SearchStep';
-import { VPNStep } from '../steps/VPNStep';
 import { AdvancedStep } from '../steps/AdvancedStep';
-import { InstallSummary } from '../components/InstallSummary';
+import { DomainStep } from '../steps/DomainStep';
+import { InterfaceStep } from '../steps/InterfaceStep';
+import { ModelsStep } from '../steps/ModelsStep';
+import { SearchStep } from '../steps/SearchStep';
+import { SecurityStep } from '../steps/SecurityStep';
+import { VPNStep } from '../steps/VPNStep';
 import type { InstallerConfig } from '../types';
 import { STEPS } from '../types';
-import type { StepSchemaKey } from '../validation/schemas';
 import { loadConfig, saveConfig } from '../utils/crypto';
+import type { StepSchemaKey } from '../validation/schemas';
 
 const loadStepSchema = async (stepId: StepSchemaKey) => {
   const module = await import('../validation/schemas');
@@ -180,8 +180,8 @@ export default function InstallerForm() {
 
     setCompletedAt(completionTime);
     setSummaryRows(summary);
-    setCompletionSnapshot((prev) =>
-      prev ?? { completedAt: completionTime, summaryRows: summary, webUiHost }
+    setCompletionSnapshot(
+      (prev) => prev ?? { completedAt: completionTime, summaryRows: summary, webUiHost }
     );
   }, [completedAt, isComplete, methods]);
 
@@ -301,7 +301,8 @@ export default function InstallerForm() {
           },
           {
             label: 'Web Search',
-            value: methods.getValues('SEARCH_ENABLE_WEB_SEARCH') === 'true' ? 'Enabled' : 'Disabled',
+            value:
+              methods.getValues('SEARCH_ENABLE_WEB_SEARCH') === 'true' ? 'Enabled' : 'Disabled',
           },
           { label: 'VPN Provider', value: methods.getValues('VPN_SERVICE_PROVIDER') || '—' },
         ];
@@ -313,9 +314,6 @@ export default function InstallerForm() {
       });
     }
     reset();
-    if (typeof window !== 'undefined') {
-      window.close();
-    }
   }, [completedAt, isComplete, methods, reset]);
 
   useKeyboardNavigation({
@@ -444,9 +442,7 @@ export default function InstallerForm() {
                     />
                   </div>
                 </CardHeader>
-                <CardContent className="space-y-6 pt-6">
-                  {renderStep()}
-                </CardContent>
+                <CardContent className="space-y-6 pt-6">{renderStep()}</CardContent>
 
                 <CardFooter className="justify-between border-t px-6 py-4">
                   <Button variant="secondary" onClick={handlePrevious} disabled={currentStep === 1}>
@@ -468,7 +464,13 @@ export default function InstallerForm() {
       <Modal
         isOpen={showModal}
         onClose={isComplete || error ? handleCloseModal : undefined}
-        title={isComplete ? 'Installation complete' : isInstalling ? 'Installing Zone...' : 'Installing Zone'}
+        title={
+          isComplete
+            ? 'Installation complete'
+            : isInstalling
+              ? 'Installing Zone...'
+              : 'Installing Zone'
+        }
         size="xl"
         className="max-h-[90vh] w-[90vw] max-w-[900px] overflow-y-auto"
       >

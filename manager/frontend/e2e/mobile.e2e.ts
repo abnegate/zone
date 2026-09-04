@@ -49,7 +49,13 @@ test.describe('Mobile Responsiveness', () => {
       await page.click('.mobile-menu-btn');
       await expect(page.locator('.sidebar.open')).toBeVisible();
 
-      await page.click('.sidebar-overlay');
+      const overlay = page.locator('.sidebar-overlay');
+      const box = await overlay.boundingBox();
+      expect(box).toBeTruthy();
+      // Sidebar is 240px and stacked above the overlay; avoid the covered center.
+      await overlay.click({
+        position: { x: box!.width - 16, y: Math.round(box!.height / 2) },
+      });
 
       await expect(page.locator('.sidebar.open')).not.toBeVisible();
     });

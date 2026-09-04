@@ -21,9 +21,8 @@ use sha2::{Digest, Sha256};
 /// assert_eq!(token.len(), 64);
 /// ```
 pub fn generate_token() -> String {
-    use rand::RngCore;
     let mut random_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut random_bytes);
+    rand::fill(&mut random_bytes);
     hex::encode(random_bytes)
 }
 
