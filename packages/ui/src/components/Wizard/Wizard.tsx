@@ -23,10 +23,10 @@ const wizardVariants = cva(
   {
     variants: {
       size: {
-        sm: 'w-full max-w-lg',
-        md: 'w-full max-w-2xl',
-        lg: 'w-full max-w-4xl',
-        xl: 'w-full max-w-6xl',
+        sm: 'ui-wizard--sm',
+        md: 'ui-wizard--md',
+        lg: 'ui-wizard--lg',
+        xl: 'ui-wizard--xl',
       },
     },
     defaultVariants: {
@@ -37,12 +37,12 @@ const wizardVariants = cva(
 
 const headerVariants = cva([
   'flex items-start justify-between gap-[var(--ui-space-4)]',
-  'p-[var(--ui-space-6)]',
+  'p-[var(--ui-panel-padding)]',
   'border-b border-[var(--ui-border)]',
 ]);
 
 const titleVariants = cva([
-  'text-[var(--ui-text-xl)] font-semibold',
+  'text-[var(--ui-heading-size)] font-display font-semibold leading-tight tracking-tight',
   'text-[var(--ui-text-primary)]',
 ]);
 
@@ -63,7 +63,7 @@ const closeButtonVariants = cva([
 ]);
 
 const stepsNavVariants = cva([
-  'px-[var(--ui-space-6)] py-[var(--ui-space-4)]',
+  'px-[var(--ui-panel-padding)] py-[var(--ui-space-3)]',
   'border-b border-[var(--ui-border)]',
   'bg-[var(--ui-bg-surface)]',
 ]);
@@ -88,30 +88,27 @@ const stepListVariants = cva([
   'list-none m-0 p-0',
 ]);
 
-const stepItemVariants = cva(
-  ['flex-1'],
-  {
-    variants: {
-      state: {
-        completed: '',
-        current: '',
-        upcoming: '',
-      },
-      clickable: {
-        true: 'cursor-pointer',
-        false: '',
-      },
+const stepItemVariants = cva(['flex-1'], {
+  variants: {
+    state: {
+      completed: '',
+      current: '',
+      upcoming: '',
     },
-    defaultVariants: {
-      state: 'upcoming',
-      clickable: false,
+    clickable: {
+      true: 'cursor-pointer',
+      false: '',
     },
-  }
-);
+  },
+  defaultVariants: {
+    state: 'upcoming',
+    clickable: false,
+  },
+});
 
 const stepButtonVariants = cva(
   [
-    'flex items-center gap-[var(--ui-space-3)] w-full',
+    'flex items-center gap-[var(--ui-space-2)] w-full',
     'p-[var(--ui-space-2)]',
     'rounded-[var(--ui-radius-md)]',
     'transition-colors duration-[var(--ui-duration-fast)]',
@@ -158,33 +155,23 @@ const stepIndicatorVariants = cva(
   }
 );
 
-const stepTitleVariants = cva(
-  ['text-[var(--ui-text-sm)] font-medium'],
-  {
-    variants: {
-      state: {
-        completed: 'text-[var(--ui-text-primary)]',
-        current: 'text-[var(--ui-text-primary)]',
-        upcoming: 'text-[var(--ui-text-muted)]',
-      },
+const stepTitleVariants = cva(['text-[var(--ui-text-sm)] font-medium'], {
+  variants: {
+    state: {
+      completed: 'text-[var(--ui-text-primary)]',
+      current: 'text-[var(--ui-text-primary)]',
+      upcoming: 'text-[var(--ui-text-muted)]',
     },
-    defaultVariants: {
-      state: 'upcoming',
-    },
-  }
-);
+  },
+  defaultVariants: {
+    state: 'upcoming',
+  },
+});
 
-const stepDescriptionVariants = cva([
-  'text-[var(--ui-text-xs)]',
-  'text-[var(--ui-text-muted)]',
-]);
+const stepDescriptionVariants = cva(['text-[var(--ui-text-xs)]', 'text-[var(--ui-text-muted)]']);
 
 const contentVariants = cva(
-  [
-    'overflow-auto',
-    'p-[var(--ui-space-6)]',
-    'transition-all duration-150 ease-out',
-  ],
+  ['overflow-auto', 'p-[var(--ui-panel-padding)]', 'transition-all duration-150 ease-out'],
   {
     variants: {
       animating: {
@@ -200,8 +187,8 @@ const contentVariants = cva(
 );
 
 const footerVariants = cva([
-  'flex items-center justify-between',
-  'p-[var(--ui-space-6)]',
+  'flex flex-wrap items-center justify-between gap-2',
+  'px-[var(--ui-panel-padding)] py-[var(--ui-space-4)]',
   'border-t border-[var(--ui-border)]',
   'bg-[var(--ui-bg-surface)]',
 ]);
@@ -356,11 +343,21 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
     };
 
     const dialog = (
-      <div className={cn('ui-wizard-overlay', overlayVariants())} onClick={onClose}>
+      <div className={cn('ui-wizard-overlay', overlayVariants())}>
+        <button
+          type="button"
+          className="ui-wizard-dismiss"
+          aria-label="Close wizard"
+          tabIndex={-1}
+          onClick={onClose}
+        />
         <div
           ref={ref}
-          className={cn('ui-wizard', `ui-wizard--${size ?? 'md'}`, wizardVariants({ size, className }))}
-          onClick={(e) => e.stopPropagation()}
+          className={cn(
+            'ui-wizard',
+            `ui-wizard--${size ?? 'md'}`,
+            wizardVariants({ size, className })
+          )}
           role="dialog"
           aria-modal="true"
           aria-labelledby="wizard-title"
@@ -372,7 +369,9 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
               <h2 id="wizard-title" className={cn(titleVariants())}>
                 {title}
               </h2>
-              {subtitle && <p className={cn('ui-wizard-subtitle', subtitleVariants())}>{subtitle}</p>}
+              {subtitle && (
+                <p className={cn('ui-wizard-subtitle', subtitleVariants())}>{subtitle}</p>
+              )}
             </div>
             {onClose && (
               <button
@@ -383,6 +382,7 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
                 disabled={loading}
               >
                 <svg
+                  aria-hidden="true"
                   className="w-5 h-5"
                   viewBox="0 0 24 24"
                   fill="none"
@@ -408,7 +408,9 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
             <ol className={cn(stepListVariants())}>
               {steps.map((step, index) => {
                 const state = getStepState(index);
-                const isClickable = allowStepClick && (state === 'completed' || (canProceed && index === currentStep + 1));
+                const isClickable =
+                  allowStepClick &&
+                  (state === 'completed' || (canProceed && index === currentStep + 1));
 
                 return (
                   <li
@@ -425,6 +427,7 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
                       <span className={cn(stepIndicatorVariants({ state }))}>
                         {state === 'completed' ? (
                           <svg
+                            aria-hidden="true"
                             className="w-4 h-4"
                             viewBox="0 0 24 24"
                             fill="none"
@@ -444,9 +447,15 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
                         )}
                       </span>
                       <span className="ui-wizard-step-copy flex flex-col items-start">
-                        <span className={cn('ui-wizard-step-title', stepTitleVariants({ state }))}>{step.title}</span>
+                        <span className={cn('ui-wizard-step-title', stepTitleVariants({ state }))}>
+                          {step.title}
+                        </span>
                         {step.description && (
-                          <span className={cn('ui-wizard-step-description', stepDescriptionVariants())}>{step.description}</span>
+                          <span
+                            className={cn('ui-wizard-step-description', stepDescriptionVariants())}
+                          >
+                            {step.description}
+                          </span>
                         )}
                       </span>
                     </button>
@@ -458,7 +467,10 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
 
           {/* Content */}
           <div
-            className={cn('ui-wizard-content', contentVariants({ animating: animatingStep || 'none' }))}
+            className={cn(
+              'ui-wizard-content',
+              contentVariants({ animating: animatingStep || 'none' })
+            )}
           >
             {children}
           </div>
@@ -466,21 +478,13 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
           {/* Footer */}
           <footer className={cn('ui-wizard-footer', footerVariants())}>
             <div>
-              <Button
-                variant="ghost"
-                onClick={handleCancel}
-                disabled={loading}
-              >
+              <Button variant="ghost" onClick={handleCancel} disabled={loading}>
                 {cancelLabel}
               </Button>
             </div>
             <div className="flex items-center gap-[var(--ui-space-3)]">
               {!isFirstStep && (
-                <Button
-                  variant="secondary"
-                  onClick={handlePrevious}
-                  disabled={loading}
-                >
+                <Button variant="secondary" onClick={handlePrevious} disabled={loading}>
                   {previousLabel}
                 </Button>
               )}
@@ -494,11 +498,7 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
                   {completeLabel}
                 </Button>
               ) : (
-                <Button
-                  variant="primary"
-                  onClick={handleNext}
-                  disabled={!canProceed || loading}
-                >
+                <Button variant="primary" onClick={handleNext} disabled={!canProceed || loading}>
                   {nextLabel}
                 </Button>
               )}

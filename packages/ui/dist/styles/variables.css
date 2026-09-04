@@ -1,29 +1,39 @@
-/* =============================================================================
-   Zone UI - Workshop tokens
-   Warm paper / ink surfaces, a single copper accent, optical serif headings.
-   ============================================================================= */
-
 :root {
-  /* ═══════════════════════════════════════════════════════════════════════════
-     TYPOGRAPHY
-     ═══════════════════════════════════════════════════════════════════════════ */
-
   --ui-font-display: 'Newsreader', 'Source Serif 4', Georgia, 'Times New Roman', serif;
   --ui-font-body: 'Source Sans 3', 'Source Sans Pro', ui-sans-serif, system-ui, sans-serif;
-  --ui-font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    'Liberation Mono', monospace;
+  --ui-font-mono:
+    'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    monospace;
+
+  --ui-title-size: 1.25rem;
+  --ui-heading-size: 1.25rem;
+  --ui-auth-title-size: 1.875rem;
+  --ui-control-height: 2.25rem;
+  --ui-control-height-sm: 2rem;
+  --ui-control-height-lg: 2.5rem;
+  --ui-header-height: 3.5rem;
+  --ui-gutter: 1.5rem;
+  --ui-panel-padding: 1.5rem;
+  --ui-field-gap: 1rem;
+  --ui-label-gap: 0.5rem;
+  --ui-section-gap: 1.5rem;
+  --ui-content-width: 56rem;
+  --ui-icon-size: 1.25rem;
+  --ui-icon-size-sm: 1rem;
+  --ui-empty-icon-size: 2.5rem;
+  --ui-row-padding: 0.75rem 1rem;
 
   /* Type Scale */
-  --ui-text-xs: 0.75rem;      /* 12px */
-  --ui-text-sm: 0.875rem;     /* 14px */
-  --ui-text-base: 1rem;       /* 16px */
-  --ui-text-md: 1rem;         /* 16px */
-  --ui-text-lg: 1.125rem;     /* 18px */
-  --ui-text-xl: 1.25rem;      /* 20px */
-  --ui-text-2xl: 1.5rem;      /* 24px */
-  --ui-text-3xl: 1.875rem;    /* 30px */
-  --ui-text-4xl: 2.25rem;     /* 36px */
-  --ui-text-5xl: 3rem;        /* 48px */
+  --ui-text-xs: 0.75rem; /* 12px */
+  --ui-text-sm: 0.875rem; /* 14px */
+  --ui-text-base: 1rem; /* 16px */
+  --ui-text-md: 1rem; /* 16px */
+  --ui-text-lg: 1.125rem; /* 18px */
+  --ui-text-xl: 1.25rem; /* 20px */
+  --ui-text-2xl: 1.5rem; /* 24px */
+  --ui-text-3xl: 1.875rem; /* 30px */
+  --ui-text-4xl: 2.25rem; /* 36px */
+  --ui-text-5xl: 3rem; /* 48px */
 
   /* Line Heights */
   --ui-leading-none: 1;
@@ -41,27 +51,23 @@
   --ui-tracking-wider: 0.05em;
   --ui-tracking-widest: 0.1em;
 
-  /* ═══════════════════════════════════════════════════════════════════════════
-     SPACING SYSTEM - Tailwind defaults
-     ═══════════════════════════════════════════════════════════════════════════ */
-
   --ui-space-0: 0;
   --ui-space-px: 1px;
-  --ui-space-0-5: 0.125rem;  /* 2px */
-  --ui-space-1: 0.25rem;     /* 4px */
-  --ui-space-1-5: 0.375rem;  /* 6px */
-  --ui-space-2: 0.5rem;      /* 8px */
-  --ui-space-2-5: 0.625rem;  /* 10px */
-  --ui-space-3: 0.75rem;     /* 12px */
-  --ui-space-4: 1rem;        /* 16px */
-  --ui-space-5: 1.25rem;     /* 20px */
-  --ui-space-6: 1.5rem;      /* 24px */
-  --ui-space-8: 2rem;        /* 32px */
-  --ui-space-10: 2.5rem;     /* 40px */
-  --ui-space-12: 3rem;       /* 48px */
-  --ui-space-16: 4rem;       /* 64px */
-  --ui-space-20: 5rem;       /* 80px */
-  --ui-space-24: 6rem;       /* 96px */
+  --ui-space-0-5: 0.125rem; /* 2px */
+  --ui-space-1: 0.25rem; /* 4px */
+  --ui-space-1-5: 0.375rem; /* 6px */
+  --ui-space-2: 0.5rem; /* 8px */
+  --ui-space-2-5: 0.625rem; /* 10px */
+  --ui-space-3: 0.75rem; /* 12px */
+  --ui-space-4: 1rem; /* 16px */
+  --ui-space-5: 1.25rem; /* 20px */
+  --ui-space-6: 1.5rem; /* 24px */
+  --ui-space-8: 2rem; /* 32px */
+  --ui-space-10: 2.5rem; /* 40px */
+  --ui-space-12: 3rem; /* 48px */
+  --ui-space-16: 4rem; /* 64px */
+  --ui-space-20: 5rem; /* 80px */
+  --ui-space-24: 6rem; /* 96px */
 
   /* Legacy spacing aliases */
   --ui-space-xs: var(--ui-space-1);
@@ -72,22 +78,14 @@
   --ui-space-2xl: var(--ui-space-6);
   --ui-space-3xl: var(--ui-space-10);
 
-  /* ═══════════════════════════════════════════════════════════════════════════
-     BORDER RADIUS
-     ═══════════════════════════════════════════════════════════════════════════ */
-
   --ui-radius-none: 0;
-  --ui-radius-sm: 0.25rem;   /* 4px */
-  --ui-radius-md: 0.375rem;  /* 6px */
-  --ui-radius-lg: 0.5rem;    /* 8px */
-  --ui-radius-xl: 0.75rem;   /* 12px */
-  --ui-radius-2xl: 1rem;     /* 16px */
-  --ui-radius-3xl: 1.5rem;   /* 24px */
+  --ui-radius-sm: 0.25rem; /* 4px */
+  --ui-radius-md: 0.375rem; /* 6px */
+  --ui-radius-lg: 0.5rem; /* 8px */
+  --ui-radius-xl: 0.75rem; /* 12px */
+  --ui-radius-2xl: 1rem; /* 16px */
+  --ui-radius-3xl: 1.5rem; /* 24px */
   --ui-radius-full: 9999px;
-
-  /* ═══════════════════════════════════════════════════════════════════════════
-     TIMING & EASING
-     ═══════════════════════════════════════════════════════════════════════════ */
 
   --ui-duration-instant: 50ms;
   --ui-duration-fast: 150ms;
@@ -106,10 +104,6 @@
   --ui-transition-slow: var(--ui-duration-slow) var(--ui-ease-in-out);
   --ui-transition-bounce: var(--ui-duration-normal) var(--ui-ease-bounce);
 
-  /* ═══════════════════════════════════════════════════════════════════════════
-     SHADOWS
-     ═══════════════════════════════════════════════════════════════════════════ */
-
   --ui-shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --ui-shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
   --ui-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
@@ -119,10 +113,6 @@
   --ui-shadow-inner: inset 0 2px 4px 0 rgb(0 0 0 / 0.05);
   --ui-shadow-card: var(--ui-shadow-sm);
   --ui-shadow-glow: 0 0 0 rgb(0 0 0 / 0);
-
-  /* ═══════════════════════════════════════════════════════════════════════════
-     SEMANTIC STATUS COLORS (keep defaults)
-     ═══════════════════════════════════════════════════════════════════════════ */
 
   /* Success - Emerald */
   --ui-success-50: #ecfdf5;
@@ -169,10 +159,6 @@
   --ui-info-muted: rgba(59, 130, 246, 0.12);
 }
 
-/* =============================================================================
-   LIGHT THEME (Default)
-   ============================================================================= */
-
 :root,
 :root[data-theme='light'] {
   /* Backgrounds — warm paper, not sterile white */
@@ -205,10 +191,6 @@
   --ui-overlay-heavy: rgb(14 12 10 / 0.62);
 }
 
-/* =============================================================================
-   DARK THEME
-   ============================================================================= */
-
 :root[data-theme='dark'] {
   /* Backgrounds — warm near-black, not navy-slate */
   --ui-bg-base: #0e0c0a;
@@ -239,10 +221,6 @@
   --ui-overlay-medium: rgb(0 0 0 / 0.55);
   --ui-overlay-heavy: rgb(0 0 0 / 0.78);
 }
-
-/* =============================================================================
-   ACCENT PRESETS (configurable via data-accent)
-   ============================================================================= */
 
 :root:not([data-accent]),
 :root[data-theme='light']:not([data-accent]),
@@ -386,13 +364,13 @@
   --ui-secondary-600: var(--ui-accent-600);
 }
 
-/* =============================================================================
-   ANIMATIONS
-   ============================================================================= */
-
 @keyframes ui-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes ui-fade-up {
@@ -440,21 +418,33 @@
 }
 
 @keyframes ui-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 @keyframes ui-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes ui-shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
 }
 
 @keyframes ui-glow-pulse {
-  0%, 100% {
+  0%,
+  100% {
     box-shadow: 0 0 20px rgb(0 0 0 / 0.1);
   }
   50% {
@@ -470,5 +460,12 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 639px) {
+  :root {
+    --ui-gutter: 1rem;
+    --ui-panel-padding: 1rem;
   }
 }

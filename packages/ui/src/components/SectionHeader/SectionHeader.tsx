@@ -9,11 +9,11 @@ export interface SectionHeaderProps extends React.HTMLAttributes<HTMLDivElement>
 
 const SectionHeader = React.forwardRef<HTMLDivElement, SectionHeaderProps>(
   ({ title, size = 'md', className, ...props }, ref) => {
-    const textSize = size === 'sm' ? 'text-sm' : 'text-base';
+    const textSize = size === 'sm' ? 'ui-section-title-sm' : undefined;
 
     return (
-      <div ref={ref} className={cn('flex items-center gap-3', className)} {...props}>
-        <h3 className={cn('font-display font-semibold text-foreground', textSize)}>{title}</h3>
+      <div ref={ref} className={cn('ui-section-header', className)} {...props}>
+        <h3 className={cn('ui-section-title', textSize)}>{title}</h3>
         <Separator className="flex-1" />
       </div>
     );

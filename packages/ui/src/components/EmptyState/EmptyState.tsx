@@ -17,25 +17,13 @@ export interface EmptyStateProps {
  * EmptyState component for displaying placeholder content when a list or section is empty.
  * Provides a consistent layout with icon, title, description, and optional action button.
  */
-export function EmptyState({
-  icon,
-  title,
-  description,
-  action,
-  className = '',
-}: EmptyStateProps) {
+export function EmptyState({ icon, title, description, action, className = '' }: EmptyStateProps) {
   return (
-    <div
-      className={`flex flex-col items-center justify-center py-16 text-center ${className}`}
-    >
-      {icon && (
-        <div className="text-muted-foreground/50 mb-4">{icon}</div>
-      )}
-      <h3 className="text-lg font-medium text-foreground mb-1">{title}</h3>
-      {description && (
-        <p className="text-muted-foreground mb-4">{description}</p>
-      )}
-      {action}
+    <div className={`ui-empty ${className}`}>
+      {icon && <div className="ui-empty-icon">{icon}</div>}
+      <h3 className="ui-empty-title">{title}</h3>
+      {description && <p className="ui-empty-description">{description}</p>}
+      {action && <div className="ui-empty-action">{action}</div>}
     </div>
   );
 }

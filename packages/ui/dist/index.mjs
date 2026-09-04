@@ -493,12 +493,10 @@ var alertVariants = cva2(
 var Alert = React8.forwardRef(({ className, variant, ...props }, ref) => /* @__PURE__ */ jsx8("div", { ref, role: "alert", className: cn(alertVariants({ variant }), className), ...props }));
 Alert.displayName = "Alert";
 var AlertTitle = React8.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx8("h5", { ref, className: cn("mb-1 font-medium leading-none tracking-tight", className), ...props })
+  ({ className, ...props }, ref) => /* @__PURE__ */ jsx8("h5", { ref, className: cn("ui-alert-title", className), ...props })
 );
 AlertTitle.displayName = "AlertTitle";
-var AlertDescription = React8.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx8("div", { ref, className: cn("text-sm [&_p]:leading-relaxed", className), ...props })
-);
+var AlertDescription = React8.forwardRef(({ className, ...props }, ref) => /* @__PURE__ */ jsx8("div", { ref, className: cn("ui-alert-description", className), ...props }));
 AlertDescription.displayName = "AlertDescription";
 
 // src/components/InfoBox/InfoBox.tsx
@@ -585,10 +583,10 @@ var wizardVariants = cva3(
   {
     variants: {
       size: {
-        sm: "w-full max-w-lg",
-        md: "w-full max-w-2xl",
-        lg: "w-full max-w-4xl",
-        xl: "w-full max-w-6xl"
+        sm: "ui-wizard--sm",
+        md: "ui-wizard--md",
+        lg: "ui-wizard--lg",
+        xl: "ui-wizard--xl"
       }
     },
     defaultVariants: {
@@ -598,11 +596,11 @@ var wizardVariants = cva3(
 );
 var headerVariants = cva3([
   "flex items-start justify-between gap-[var(--ui-space-4)]",
-  "p-[var(--ui-space-6)]",
+  "p-[var(--ui-panel-padding)]",
   "border-b border-[var(--ui-border)]"
 ]);
 var titleVariants = cva3([
-  "text-[var(--ui-text-xl)] font-semibold",
+  "text-[var(--ui-heading-size)] font-display font-semibold leading-tight tracking-tight",
   "text-[var(--ui-text-primary)]"
 ]);
 var subtitleVariants = cva3([
@@ -620,7 +618,7 @@ var closeButtonVariants = cva3([
   "disabled:opacity-50 disabled:cursor-not-allowed"
 ]);
 var stepsNavVariants = cva3([
-  "px-[var(--ui-space-6)] py-[var(--ui-space-4)]",
+  "px-[var(--ui-panel-padding)] py-[var(--ui-space-3)]",
   "border-b border-[var(--ui-border)]",
   "bg-[var(--ui-bg-surface)]"
 ]);
@@ -641,29 +639,26 @@ var stepListVariants = cva3([
   "flex items-center justify-between gap-[var(--ui-space-2)]",
   "list-none m-0 p-0"
 ]);
-var stepItemVariants = cva3(
-  ["flex-1"],
-  {
-    variants: {
-      state: {
-        completed: "",
-        current: "",
-        upcoming: ""
-      },
-      clickable: {
-        true: "cursor-pointer",
-        false: ""
-      }
+var stepItemVariants = cva3(["flex-1"], {
+  variants: {
+    state: {
+      completed: "",
+      current: "",
+      upcoming: ""
     },
-    defaultVariants: {
-      state: "upcoming",
-      clickable: false
+    clickable: {
+      true: "cursor-pointer",
+      false: ""
     }
+  },
+  defaultVariants: {
+    state: "upcoming",
+    clickable: false
   }
-);
+});
 var stepButtonVariants = cva3(
   [
-    "flex items-center gap-[var(--ui-space-3)] w-full",
+    "flex items-center gap-[var(--ui-space-2)] w-full",
     "p-[var(--ui-space-2)]",
     "rounded-[var(--ui-radius-md)]",
     "transition-colors duration-[var(--ui-duration-fast)]",
@@ -708,31 +703,21 @@ var stepIndicatorVariants = cva3(
     }
   }
 );
-var stepTitleVariants = cva3(
-  ["text-[var(--ui-text-sm)] font-medium"],
-  {
-    variants: {
-      state: {
-        completed: "text-[var(--ui-text-primary)]",
-        current: "text-[var(--ui-text-primary)]",
-        upcoming: "text-[var(--ui-text-muted)]"
-      }
-    },
-    defaultVariants: {
-      state: "upcoming"
+var stepTitleVariants = cva3(["text-[var(--ui-text-sm)] font-medium"], {
+  variants: {
+    state: {
+      completed: "text-[var(--ui-text-primary)]",
+      current: "text-[var(--ui-text-primary)]",
+      upcoming: "text-[var(--ui-text-muted)]"
     }
+  },
+  defaultVariants: {
+    state: "upcoming"
   }
-);
-var stepDescriptionVariants = cva3([
-  "text-[var(--ui-text-xs)]",
-  "text-[var(--ui-text-muted)]"
-]);
+});
+var stepDescriptionVariants = cva3(["text-[var(--ui-text-xs)]", "text-[var(--ui-text-muted)]"]);
 var contentVariants = cva3(
-  [
-    "overflow-auto",
-    "p-[var(--ui-space-6)]",
-    "transition-all duration-150 ease-out"
-  ],
+  ["overflow-auto", "p-[var(--ui-panel-padding)]", "transition-all duration-150 ease-out"],
   {
     variants: {
       animating: {
@@ -747,8 +732,8 @@ var contentVariants = cva3(
   }
 );
 var footerVariants = cva3([
-  "flex items-center justify-between",
-  "p-[var(--ui-space-6)]",
+  "flex flex-wrap items-center justify-between gap-2",
+  "px-[var(--ui-panel-padding)] py-[var(--ui-space-4)]",
   "border-t border-[var(--ui-border)]",
   "bg-[var(--ui-bg-surface)]"
 ]);
@@ -855,145 +840,147 @@ var Wizard = forwardRef5(
       if (index === currentStep) return "current";
       return "upcoming";
     };
-    const dialog = /* @__PURE__ */ jsx12("div", { className: cn("ui-wizard-overlay", overlayVariants()), onClick: onClose, children: /* @__PURE__ */ jsxs8(
-      "div",
-      {
-        ref,
-        className: cn("ui-wizard", `ui-wizard--${size ?? "md"}`, wizardVariants({ size, className })),
-        onClick: (e) => e.stopPropagation(),
-        role: "dialog",
-        "aria-modal": "true",
-        "aria-labelledby": "wizard-title",
-        ...props,
-        children: [
-          /* @__PURE__ */ jsxs8("header", { className: cn("ui-wizard-header", headerVariants()), children: [
-            /* @__PURE__ */ jsxs8("div", { children: [
-              /* @__PURE__ */ jsx12("h2", { id: "wizard-title", className: cn(titleVariants()), children: title }),
-              subtitle && /* @__PURE__ */ jsx12("p", { className: cn("ui-wizard-subtitle", subtitleVariants()), children: subtitle })
-            ] }),
-            onClose && /* @__PURE__ */ jsx12(
-              "button",
-              {
-                type: "button",
-                className: cn("ui-wizard-close", closeButtonVariants()),
-                onClick: onClose,
-                "aria-label": "Close wizard",
-                disabled: loading,
-                children: /* @__PURE__ */ jsx12(
-                  "svg",
-                  {
-                    className: "w-5 h-5",
-                    viewBox: "0 0 24 24",
-                    fill: "none",
-                    stroke: "currentColor",
-                    strokeWidth: "2",
-                    strokeLinecap: "round",
-                    strokeLinejoin: "round",
-                    children: /* @__PURE__ */ jsx12("path", { d: "M18 6L6 18M6 6l12 12" })
-                  }
-                )
-              }
-            )
-          ] }),
-          /* @__PURE__ */ jsxs8("nav", { className: cn("ui-wizard-steps", stepsNavVariants()), "aria-label": "Wizard steps", children: [
-            /* @__PURE__ */ jsx12("div", { className: cn("ui-wizard-progress", progressTrackVariants()), children: /* @__PURE__ */ jsx12(
-              "div",
-              {
-                className: cn(progressFillVariants()),
-                style: { width: `${progressPercent}%` }
-              }
-            ) }),
-            /* @__PURE__ */ jsx12("ol", { className: cn(stepListVariants()), children: steps.map((step, index) => {
-              const state = getStepState(index);
-              const isClickable = allowStepClick && (state === "completed" || canProceed && index === currentStep + 1);
-              return /* @__PURE__ */ jsx12(
-                "li",
+    const dialog = /* @__PURE__ */ jsxs8("div", { className: cn("ui-wizard-overlay", overlayVariants()), children: [
+      /* @__PURE__ */ jsx12(
+        "button",
+        {
+          type: "button",
+          className: "ui-wizard-dismiss",
+          "aria-label": "Close wizard",
+          tabIndex: -1,
+          onClick: onClose
+        }
+      ),
+      /* @__PURE__ */ jsxs8(
+        "div",
+        {
+          ref,
+          className: cn(
+            "ui-wizard",
+            `ui-wizard--${size ?? "md"}`,
+            wizardVariants({ size, className })
+          ),
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": "wizard-title",
+          ...props,
+          children: [
+            /* @__PURE__ */ jsxs8("header", { className: cn("ui-wizard-header", headerVariants()), children: [
+              /* @__PURE__ */ jsxs8("div", { children: [
+                /* @__PURE__ */ jsx12("h2", { id: "wizard-title", className: cn(titleVariants()), children: title }),
+                subtitle && /* @__PURE__ */ jsx12("p", { className: cn("ui-wizard-subtitle", subtitleVariants()), children: subtitle })
+              ] }),
+              onClose && /* @__PURE__ */ jsx12(
+                "button",
                 {
-                  className: cn(stepItemVariants({ state, clickable: isClickable })),
-                  children: /* @__PURE__ */ jsxs8(
-                    "button",
+                  type: "button",
+                  className: cn("ui-wizard-close", closeButtonVariants()),
+                  onClick: onClose,
+                  "aria-label": "Close wizard",
+                  disabled: loading,
+                  children: /* @__PURE__ */ jsx12(
+                    "svg",
                     {
-                      type: "button",
-                      className: cn(stepButtonVariants({ state, clickable: isClickable })),
-                      onClick: () => handleStepClick(index),
-                      disabled: !isClickable || loading,
-                      "aria-current": state === "current" ? "step" : void 0,
-                      children: [
-                        /* @__PURE__ */ jsx12("span", { className: cn(stepIndicatorVariants({ state })), children: state === "completed" ? /* @__PURE__ */ jsx12(
-                          "svg",
-                          {
-                            className: "w-4 h-4",
-                            viewBox: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            strokeWidth: "3",
-                            strokeLinecap: "round",
-                            strokeLinejoin: "round",
-                            children: /* @__PURE__ */ jsx12("polyline", { points: "20 6 9 17 4 12" })
-                          }
-                        ) : step.icon ? step.icon : showStepNumbers ? index + 1 : /* @__PURE__ */ jsx12("span", { className: "w-2 h-2 rounded-full bg-current" }) }),
-                        /* @__PURE__ */ jsxs8("span", { className: "ui-wizard-step-copy flex flex-col items-start", children: [
-                          /* @__PURE__ */ jsx12("span", { className: cn("ui-wizard-step-title", stepTitleVariants({ state })), children: step.title }),
-                          step.description && /* @__PURE__ */ jsx12("span", { className: cn("ui-wizard-step-description", stepDescriptionVariants()), children: step.description })
-                        ] })
-                      ]
+                      "aria-hidden": "true",
+                      className: "w-5 h-5",
+                      viewBox: "0 0 24 24",
+                      fill: "none",
+                      stroke: "currentColor",
+                      strokeWidth: "2",
+                      strokeLinecap: "round",
+                      strokeLinejoin: "round",
+                      children: /* @__PURE__ */ jsx12("path", { d: "M18 6L6 18M6 6l12 12" })
                     }
                   )
-                },
-                step.id
-              );
-            }) })
-          ] }),
-          /* @__PURE__ */ jsx12(
-            "div",
-            {
-              className: cn("ui-wizard-content", contentVariants({ animating: animatingStep || "none" })),
-              children
-            }
-          ),
-          /* @__PURE__ */ jsxs8("footer", { className: cn("ui-wizard-footer", footerVariants()), children: [
-            /* @__PURE__ */ jsx12("div", { children: /* @__PURE__ */ jsx12(
-              Button,
-              {
-                variant: "ghost",
-                onClick: handleCancel,
-                disabled: loading,
-                children: cancelLabel
-              }
-            ) }),
-            /* @__PURE__ */ jsxs8("div", { className: "flex items-center gap-[var(--ui-space-3)]", children: [
-              !isFirstStep && /* @__PURE__ */ jsx12(
-                Button,
-                {
-                  variant: "secondary",
-                  onClick: handlePrevious,
-                  disabled: loading,
-                  children: previousLabel
-                }
-              ),
-              isLastStep ? /* @__PURE__ */ jsx12(
-                Button,
-                {
-                  variant: "primary",
-                  onClick: handleComplete,
-                  disabled: !canProceed || loading,
-                  loading,
-                  children: completeLabel
-                }
-              ) : /* @__PURE__ */ jsx12(
-                Button,
-                {
-                  variant: "primary",
-                  onClick: handleNext,
-                  disabled: !canProceed || loading,
-                  children: nextLabel
                 }
               )
+            ] }),
+            /* @__PURE__ */ jsxs8("nav", { className: cn("ui-wizard-steps", stepsNavVariants()), "aria-label": "Wizard steps", children: [
+              /* @__PURE__ */ jsx12("div", { className: cn("ui-wizard-progress", progressTrackVariants()), children: /* @__PURE__ */ jsx12(
+                "div",
+                {
+                  className: cn(progressFillVariants()),
+                  style: { width: `${progressPercent}%` }
+                }
+              ) }),
+              /* @__PURE__ */ jsx12("ol", { className: cn(stepListVariants()), children: steps.map((step, index) => {
+                const state = getStepState(index);
+                const isClickable = allowStepClick && (state === "completed" || canProceed && index === currentStep + 1);
+                return /* @__PURE__ */ jsx12(
+                  "li",
+                  {
+                    className: cn(stepItemVariants({ state, clickable: isClickable })),
+                    children: /* @__PURE__ */ jsxs8(
+                      "button",
+                      {
+                        type: "button",
+                        className: cn(stepButtonVariants({ state, clickable: isClickable })),
+                        onClick: () => handleStepClick(index),
+                        disabled: !isClickable || loading,
+                        "aria-current": state === "current" ? "step" : void 0,
+                        children: [
+                          /* @__PURE__ */ jsx12("span", { className: cn(stepIndicatorVariants({ state })), children: state === "completed" ? /* @__PURE__ */ jsx12(
+                            "svg",
+                            {
+                              "aria-hidden": "true",
+                              className: "w-4 h-4",
+                              viewBox: "0 0 24 24",
+                              fill: "none",
+                              stroke: "currentColor",
+                              strokeWidth: "3",
+                              strokeLinecap: "round",
+                              strokeLinejoin: "round",
+                              children: /* @__PURE__ */ jsx12("polyline", { points: "20 6 9 17 4 12" })
+                            }
+                          ) : step.icon ? step.icon : showStepNumbers ? index + 1 : /* @__PURE__ */ jsx12("span", { className: "w-2 h-2 rounded-full bg-current" }) }),
+                          /* @__PURE__ */ jsxs8("span", { className: "ui-wizard-step-copy flex flex-col items-start", children: [
+                            /* @__PURE__ */ jsx12("span", { className: cn("ui-wizard-step-title", stepTitleVariants({ state })), children: step.title }),
+                            step.description && /* @__PURE__ */ jsx12(
+                              "span",
+                              {
+                                className: cn("ui-wizard-step-description", stepDescriptionVariants()),
+                                children: step.description
+                              }
+                            )
+                          ] })
+                        ]
+                      }
+                    )
+                  },
+                  step.id
+                );
+              }) })
+            ] }),
+            /* @__PURE__ */ jsx12(
+              "div",
+              {
+                className: cn(
+                  "ui-wizard-content",
+                  contentVariants({ animating: animatingStep || "none" })
+                ),
+                children
+              }
+            ),
+            /* @__PURE__ */ jsxs8("footer", { className: cn("ui-wizard-footer", footerVariants()), children: [
+              /* @__PURE__ */ jsx12("div", { children: /* @__PURE__ */ jsx12(Button, { variant: "ghost", onClick: handleCancel, disabled: loading, children: cancelLabel }) }),
+              /* @__PURE__ */ jsxs8("div", { className: "flex items-center gap-[var(--ui-space-3)]", children: [
+                !isFirstStep && /* @__PURE__ */ jsx12(Button, { variant: "secondary", onClick: handlePrevious, disabled: loading, children: previousLabel }),
+                isLastStep ? /* @__PURE__ */ jsx12(
+                  Button,
+                  {
+                    variant: "primary",
+                    onClick: handleComplete,
+                    disabled: !canProceed || loading,
+                    loading,
+                    children: completeLabel
+                  }
+                ) : /* @__PURE__ */ jsx12(Button, { variant: "primary", onClick: handleNext, disabled: !canProceed || loading, children: nextLabel })
+              ] })
             ] })
-          ] })
-        ]
-      }
-    ) });
+          ]
+        }
+      )
+    ] });
     if (typeof document === "undefined") {
       return dialog;
     }
@@ -1055,9 +1042,9 @@ import React15 from "react";
 import { jsx as jsx15, jsxs as jsxs9 } from "react/jsx-runtime";
 var SectionHeader = React15.forwardRef(
   ({ title, size = "md", className, ...props }, ref) => {
-    const textSize = size === "sm" ? "text-sm" : "text-base";
-    return /* @__PURE__ */ jsxs9("div", { ref, className: cn("flex items-center gap-3", className), ...props, children: [
-      /* @__PURE__ */ jsx15("h3", { className: cn("font-display font-semibold text-foreground", textSize), children: title }),
+    const textSize = size === "sm" ? "ui-section-title-sm" : void 0;
+    return /* @__PURE__ */ jsxs9("div", { ref, className: cn("ui-section-header", className), ...props, children: [
+      /* @__PURE__ */ jsx15("h3", { className: cn("ui-section-title", textSize), children: title }),
       /* @__PURE__ */ jsx15(Separator2, { className: "flex-1" })
     ] });
   }
@@ -1071,47 +1058,55 @@ var Table = React16.forwardRef(
   ({ className, ...props }, ref) => /* @__PURE__ */ jsx16("div", { className: "w-full overflow-auto", children: /* @__PURE__ */ jsx16("table", { ref, className: cn("w-full caption-bottom text-sm", className), ...props }) })
 );
 Table.displayName = "Table";
-var TableHeader = React16.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx16("thead", { ref, className: cn("[&_tr]:border-b", className), ...props })
-);
+var TableHeader = React16.forwardRef(({ className, ...props }, ref) => /* @__PURE__ */ jsx16("thead", { ref, className: cn("[&_tr]:border-b", className), ...props }));
 TableHeader.displayName = "TableHeader";
-var TableBody = React16.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx16("tbody", { ref, className: cn("[&_tr:last-child]:border-0", className), ...props })
-);
+var TableBody = React16.forwardRef(({ className, ...props }, ref) => /* @__PURE__ */ jsx16("tbody", { ref, className: cn("[&_tr:last-child]:border-0", className), ...props }));
 TableBody.displayName = "TableBody";
-var TableFooter = React16.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx16("tfoot", { ref, className: cn("border-t bg-muted/50 font-medium [&>tr]:last:border-b-0", className), ...props })
-);
+var TableFooter = React16.forwardRef(({ className, ...props }, ref) => /* @__PURE__ */ jsx16(
+  "tfoot",
+  {
+    ref,
+    className: cn("border-t bg-muted/50 font-medium [&>tr]:last:border-b-0", className),
+    ...props
+  }
+));
 TableFooter.displayName = "TableFooter";
 var TableRow = React16.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx16("tr", { ref, className: cn("border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted", className), ...props })
+  ({ className, ...props }, ref) => /* @__PURE__ */ jsx16(
+    "tr",
+    {
+      ref,
+      className: cn(
+        "border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted",
+        className
+      ),
+      ...props
+    }
+  )
 );
 TableRow.displayName = "TableRow";
-var TableHead = React16.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx16(
-    "th",
-    {
-      ref,
-      className: cn("h-10 px-2 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0", className),
-      ...props
-    }
-  )
-);
+var TableHead = React16.forwardRef(({ className, ...props }, ref) => /* @__PURE__ */ jsx16(
+  "th",
+  {
+    ref,
+    className: cn(
+      "ui-table-head text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0",
+      className
+    ),
+    ...props
+  }
+));
 TableHead.displayName = "TableHead";
-var TableCell = React16.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx16(
-    "td",
-    {
-      ref,
-      className: cn("p-2 align-middle [&:has([role=checkbox])]:pr-0", className),
-      ...props
-    }
-  )
-);
+var TableCell = React16.forwardRef(({ className, ...props }, ref) => /* @__PURE__ */ jsx16(
+  "td",
+  {
+    ref,
+    className: cn("ui-table-cell align-middle [&:has([role=checkbox])]:pr-0", className),
+    ...props
+  }
+));
 TableCell.displayName = "TableCell";
-var TableCaption = React16.forwardRef(
-  ({ className, ...props }, ref) => /* @__PURE__ */ jsx16("caption", { ref, className: cn("mt-4 text-sm text-muted-foreground", className), ...props })
-);
+var TableCaption = React16.forwardRef(({ className, ...props }, ref) => /* @__PURE__ */ jsx16("caption", { ref, className: cn("mt-4 text-sm text-muted-foreground", className), ...props }));
 TableCaption.displayName = "TableCaption";
 
 // src/components/Badge/Badge.tsx
@@ -1175,25 +1170,13 @@ TabsContent.displayName = TabsPrimitive.Content.displayName;
 
 // src/components/EmptyState/EmptyState.tsx
 import { jsx as jsx19, jsxs as jsxs10 } from "react/jsx-runtime";
-function EmptyState({
-  icon,
-  title,
-  description,
-  action,
-  className = ""
-}) {
-  return /* @__PURE__ */ jsxs10(
-    "div",
-    {
-      className: `flex flex-col items-center justify-center py-16 text-center ${className}`,
-      children: [
-        icon && /* @__PURE__ */ jsx19("div", { className: "text-muted-foreground/50 mb-4", children: icon }),
-        /* @__PURE__ */ jsx19("h3", { className: "text-lg font-medium text-foreground mb-1", children: title }),
-        description && /* @__PURE__ */ jsx19("p", { className: "text-muted-foreground mb-4", children: description }),
-        action
-      ]
-    }
-  );
+function EmptyState({ icon, title, description, action, className = "" }) {
+  return /* @__PURE__ */ jsxs10("div", { className: `ui-empty ${className}`, children: [
+    icon && /* @__PURE__ */ jsx19("div", { className: "ui-empty-icon", children: icon }),
+    /* @__PURE__ */ jsx19("h3", { className: "ui-empty-title", children: title }),
+    description && /* @__PURE__ */ jsx19("p", { className: "ui-empty-description", children: description }),
+    action && /* @__PURE__ */ jsx19("div", { className: "ui-empty-action", children: action })
+  ] });
 }
 export {
   Alert,
