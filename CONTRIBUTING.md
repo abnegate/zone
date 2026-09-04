@@ -227,10 +227,20 @@ Describe how you tested your changes
 
 ### Review Process
 
-1. Maintainer reviews code
-2. Automated checks run (if configured)
-3. Address review feedback
-4. Approval and merge
+1. [CodeRabbit](https://coderabbit.ai) posts an AI review on the pull request
+   (free for this public repository). On repositories with fewer than 10 stars,
+   trigger it with `@coderabbitai review` or `@coderabbitai full review`.
+2. GitHub Actions CI runs lint, tests, and other checks
+3. A maintainer reviews the change
+4. Address review feedback
+5. Approval and merge
+
+Common CodeRabbit commands:
+
+- `@coderabbitai review` — incremental review of new commits
+- `@coderabbitai full review` — review the entire pull request again
+- `@coderabbitai summary` — regenerate the PR summary
+- `@coderabbitai ignore` — skip further reviews on this PR
 
 ## Coding Standards
 
