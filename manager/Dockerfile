@@ -47,6 +47,8 @@ COPY runner/zone_installer ./zone_installer/
 COPY runner/.sqlx ./.sqlx
 
 COPY runner/zone_server/migrations ./zone_server/migrations/
+# Packaged workflow is compiled into zone_server via include_str! from repo root.
+COPY comfyui/workflows /build/comfyui/workflows
 
 # Touch all source files to ensure Cargo detects changes from dummy files
 RUN find . -name "*.rs" -exec touch {} +
@@ -73,20 +75,22 @@ WORKDIR /app
 COPY --from=builder /build/runner/target/release/zone-server /app/zone-server
 COPY --from=builder /build/runner/target/release/zone-runner /app/zone-runner
 COPY --from=builder /build/runner/zone_server/migrations /app/migrations
+COPY --from=builder /build/comfyui/workflows /app/comfyui/workflows
 
 RUN chmod +x /app/zone-server /app/zone-runner
 
-# Docker seeds a new named volume from the image directory, so create the
-# embedding model cache up front to give the volume zone's ownership.
-RUN mkdir -p /app/embed-cache
+# Docker seeds a new named volume from the image directory, so create these
+# paths up front to give first-time volumes zone's ownership.
+RUN mkdir -p /app/embed-cache /app/artifacts
 
-RUN chown -R zone:zone /app
-
-USER zone
+COPY manager/docker-entrypoint.sh /usr/local/bin/manager-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/manager-entrypoint.sh \
+    && chown -R zone:zone /app
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
+ENTRYPOINT ["/usr/local/bin/manager-entrypoint.sh"]
 CMD ["/app/zone-server"]

@@ -56,6 +56,8 @@ const modelOptions = {
   },
 };
 
+const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
+
 const awsRegions = [
   'us-east-1',
   'us-west-2',
@@ -92,6 +94,7 @@ export default function OrgSettingsPage() {
   const [modelFast, setModelFast] = useState('');
   const [modelReasoning, setModelReasoning] = useState('');
   const [modelEmbedding, setModelEmbedding] = useState('');
+  const [modelImage, setModelImage] = useState('');
 
   // Track which credentials are set on server
   const [hasLitellmKey, setHasLitellmKey] = useState(false);
@@ -127,6 +130,7 @@ export default function OrgSettingsPage() {
     setModelFast(settings.model_fast || '');
     setModelReasoning(settings.model_reasoning || '');
     setModelEmbedding(settings.model_embedding || '');
+    setModelImage(settings.model_image || '');
     setHasLitellmKey(settings.has_litellm_key);
     setHasOpenaiKey(settings.has_openai_api_key);
     setHasAnthropicKey(settings.has_anthropic_api_key);
@@ -157,6 +161,7 @@ export default function OrgSettingsPage() {
         model_fast: modelFast || undefined,
         model_reasoning: modelReasoning || undefined,
         model_embedding: modelEmbedding || undefined,
+        model_image: modelImage || undefined,
       };
 
       // Only include credentials if they were entered
@@ -563,6 +568,28 @@ export default function OrgSettingsPage() {
                         className="form-input"
                       />
                     )}
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="model-image">Image Model</label>
+                    <select
+                      id="model-image"
+                      value={modelImage}
+                      onChange={(e) => setModelImage(e.target.value)}
+                      className="form-select"
+                    >
+                      <option value="">Use server default</option>
+                      {Array.from(new Set([...IMAGE_MODEL_OPTIONS, modelImage].filter(Boolean))).map(
+                        (model) => (
+                          <option key={model} value={model}>
+                            {model}
+                          </option>
+                        )
+                      )}
+                    </select>
+                    <p className="form-hint">
+                      ComfyUI checkpoint used when a message asks for an image. Leave empty to use
+                      COMFYUI_CHECKPOINT.
+                    </p>
                   </div>
                 </div>
               </section>

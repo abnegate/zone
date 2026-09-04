@@ -103,6 +103,7 @@ const mockAiSettings: AiSettings = {
   model_fast: 'llama3.1:8b',
   model_reasoning: 'deepseek-r1:7b',
   model_embedding: 'nomic-embed-text',
+  model_image: 'flux1-schnell-fp8.safetensors',
 };
 
 describe('OrgSettingsPage', () => {

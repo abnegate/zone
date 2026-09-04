@@ -1,5 +1,6 @@
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { AuthenticatedImage } from './AuthenticatedImage';
 
 interface MessageContentProps {
   content: string;
@@ -13,9 +14,15 @@ export function MessageContent({ content }: MessageContentProps) {
       <Markdown
         remarkPlugins={[remarkGfm]}
         components={{
-          img: ({ src, alt, title }) => (
-            <img src={src} alt={alt ?? ''} title={title} className="message-md-image" />
-          ),
+          img: ({ src, alt, title }) =>
+            src ? (
+              <AuthenticatedImage
+                src={src}
+                alt={alt ?? ''}
+                title={title}
+                className="message-md-image"
+              />
+            ) : null,
         }}
       >
         {content}

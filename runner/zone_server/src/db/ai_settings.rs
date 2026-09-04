@@ -26,6 +26,7 @@ pub struct OrgAiSettingsRow {
     pub model_fast: Option<String>,
     pub model_reasoning: Option<String>,
     pub model_embedding: Option<String>,
+    pub model_image: Option<String>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
 }
@@ -49,6 +50,7 @@ pub struct WorkspaceAiSettingsRow {
     pub model_fast: Option<String>,
     pub model_reasoning: Option<String>,
     pub model_embedding: Option<String>,
+    pub model_image: Option<String>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
 }
@@ -70,6 +72,27 @@ pub struct EffectiveAiSettings {
     pub model_fast: Option<String>,
     pub model_reasoning: Option<String>,
     pub model_embedding: Option<String>,
+    pub model_image: Option<String>,
+}
+
+impl EffectiveAiSettings {
+    /// Overlay workspace/org image settings onto the process ComfyUI defaults.
+    ///
+    /// `model_fast` classifies ambiguous image intent. `model_image` is the
+    /// ComfyUI checkpoint used for generation; an empty value keeps
+    /// `COMFYUI_CHECKPOINT`.
+    pub fn apply_to_comfyui(&self, config: &mut crate::config::ComfyUiConfig) {
+        if let Some(model) = nonempty(self.model_fast.as_deref()) {
+            config.classifier_model = model.to_string();
+        }
+        if let Some(model) = nonempty(self.model_image.as_deref()) {
+            config.checkpoint = model.to_string();
+        }
+    }
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 // ============================================================================
@@ -86,7 +109,7 @@ pub async fn get_org_ai_settings(
         SELECT id, organization_id, provider, litellm_host, litellm_key,
                openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-               model_fast, model_reasoning, model_embedding, created_at, updated_at
+               model_fast, model_reasoning, model_embedding, model_image, created_at, updated_at
         FROM organization_ai_settings
         WHERE organization_id = $1
         "#,
@@ -116,6 +139,7 @@ pub async fn upsert_org_ai_settings(
     model_fast: Option<&str>,
     model_reasoning: Option<&str>,
     model_embedding: Option<&str>,
+    model_image: Option<&str>,
 ) -> DbResult<OrgAiSettingsRow> {
     let row: OrgAiSettingsRow = sqlx::query_as(
         r#"
@@ -123,8 +147,8 @@ pub async fn upsert_org_ai_settings(
             organization_id, provider, litellm_host, litellm_key,
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-            model_fast, model_reasoning, model_embedding
-        ) VALUES ($1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            model_fast, model_reasoning, model_embedding, model_image
+        ) VALUES ($1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (organization_id) DO UPDATE SET
             provider = COALESCE($2, organization_ai_settings.provider),
             litellm_host = COALESCE($3, organization_ai_settings.litellm_host),
@@ -140,11 +164,12 @@ pub async fn upsert_org_ai_settings(
             model_fast = COALESCE($13, organization_ai_settings.model_fast),
             model_reasoning = COALESCE($14, organization_ai_settings.model_reasoning),
             model_embedding = COALESCE($15, organization_ai_settings.model_embedding),
+            model_image = COALESCE($16, organization_ai_settings.model_image),
             updated_at = NOW()
         RETURNING id, organization_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                   bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-                  model_fast, model_reasoning, model_embedding, created_at, updated_at
+                  model_fast, model_reasoning, model_embedding, model_image, created_at, updated_at
         "#
     )
     .bind(organization_id)
@@ -162,6 +187,7 @@ pub async fn upsert_org_ai_settings(
     .bind(model_fast)
     .bind(model_reasoning)
     .bind(model_embedding)
+    .bind(model_image)
     .fetch_one(pool)
     .await?;
 
@@ -192,7 +218,7 @@ pub async fn get_workspace_ai_settings(
         SELECT id, workspace_id, provider, litellm_host, litellm_key,
                openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-               model_fast, model_reasoning, model_embedding, created_at, updated_at
+               model_fast, model_reasoning, model_embedding, model_image, created_at, updated_at
         FROM workspace_ai_settings
         WHERE workspace_id = $1
         "#,
@@ -222,6 +248,7 @@ pub async fn upsert_workspace_ai_settings(
     model_fast: Option<&str>,
     model_reasoning: Option<&str>,
     model_embedding: Option<&str>,
+    model_image: Option<&str>,
 ) -> DbResult<WorkspaceAiSettingsRow> {
     let row: WorkspaceAiSettingsRow = sqlx::query_as(
         r#"
@@ -229,8 +256,8 @@ pub async fn upsert_workspace_ai_settings(
             workspace_id, provider, litellm_host, litellm_key,
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-            model_fast, model_reasoning, model_embedding
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            model_fast, model_reasoning, model_embedding, model_image
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (workspace_id) DO UPDATE SET
             provider = $2,
             litellm_host = COALESCE($3, workspace_ai_settings.litellm_host),
@@ -246,11 +273,12 @@ pub async fn upsert_workspace_ai_settings(
             model_fast = COALESCE($13, workspace_ai_settings.model_fast),
             model_reasoning = COALESCE($14, workspace_ai_settings.model_reasoning),
             model_embedding = COALESCE($15, workspace_ai_settings.model_embedding),
+            model_image = COALESCE($16, workspace_ai_settings.model_image),
             updated_at = NOW()
         RETURNING id, workspace_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                   bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-                  model_fast, model_reasoning, model_embedding, created_at, updated_at
+                  model_fast, model_reasoning, model_embedding, model_image, created_at, updated_at
         "#,
     )
     .bind(workspace_id)
@@ -268,6 +296,7 @@ pub async fn upsert_workspace_ai_settings(
     .bind(model_fast)
     .bind(model_reasoning)
     .bind(model_embedding)
+    .bind(model_image)
     .fetch_one(pool)
     .await?;
 
@@ -314,6 +343,7 @@ pub async fn get_effective_ai_settings(
         model_fast: None,
         model_reasoning: None,
         model_embedding: None,
+        model_image: None,
     };
 
     // Apply org settings
@@ -332,6 +362,7 @@ pub async fn get_effective_ai_settings(
         effective.model_fast = org.model_fast;
         effective.model_reasoning = org.model_reasoning;
         effective.model_embedding = org.model_embedding;
+        effective.model_image = org.model_image;
     }
 
     // Override with workspace settings (only non-None values)
@@ -378,7 +409,57 @@ pub async fn get_effective_ai_settings(
         if ws.model_embedding.is_some() {
             effective.model_embedding = ws.model_embedding;
         }
+        if ws.model_image.is_some() {
+            effective.model_image = ws.model_image;
+        }
     }
 
     Ok(effective)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ComfyUiConfig;
+
+    fn settings(fast: Option<&str>, image: Option<&str>) -> EffectiveAiSettings {
+        EffectiveAiSettings {
+            provider: PROVIDER_SELF_HOSTED.to_string(),
+            litellm_host: None,
+            litellm_key: None,
+            openai_api_key: None,
+            openai_base_url: None,
+            anthropic_api_key: None,
+            anthropic_base_url: None,
+            bedrock_region: None,
+            bedrock_access_key: None,
+            bedrock_secret_key: None,
+            bedrock_use_iam_role: false,
+            model_fast: fast.map(str::to_string),
+            model_reasoning: None,
+            model_embedding: None,
+            model_image: image.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn apply_to_comfyui_uses_configured_image_model() {
+        let mut config = ComfyUiConfig::default();
+        settings(Some("llama3.2:3b"), Some("custom-image.safetensors"))
+            .apply_to_comfyui(&mut config);
+        assert_eq!(config.classifier_model, "llama3.2:3b");
+        assert_eq!(config.checkpoint, "custom-image.safetensors");
+    }
+
+    #[test]
+    fn apply_to_comfyui_keeps_env_checkpoint_when_image_model_unset() {
+        let mut config = ComfyUiConfig {
+            checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
+            classifier_model: "llama3.1:8b".to_string(),
+            ..ComfyUiConfig::default()
+        };
+        settings(None, Some("   ")).apply_to_comfyui(&mut config);
+        assert_eq!(config.checkpoint, "flux1-schnell-fp8.safetensors");
+        assert_eq!(config.classifier_model, "llama3.1:8b");
+    }
 }

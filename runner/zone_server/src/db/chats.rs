@@ -333,32 +333,58 @@ pub async fn create_message(
     content: &str,
     metadata: Option<serde_json::Value>,
 ) -> DbResult<MessageRow> {
+    create_message_with_id(pool, Uuid::new_v4(), chat_id, role, content, metadata).await
+}
+
+/// Create a message with a caller-provided ID.
+///
+/// Streaming protocols can publish this ID before persistence and later use it
+/// as the durable owner for message-scoped artifacts.
+pub async fn create_message_with_id(
+    pool: &PgPool,
+    message_id: Uuid,
+    chat_id: Uuid,
+    role: &str,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) -> DbResult<MessageRow> {
     // Also update chat's updated_at
     sqlx::query!("UPDATE chats SET updated_at = NOW() WHERE id = $1", chat_id)
         .execute(pool)
         .await?;
 
-    let row = sqlx::query!(
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            String,
+            Option<serde_json::Value>,
+            Option<NaiveDateTime>,
+        ),
+    >(
         r#"
-        INSERT INTO messages (chat_id, role, content, metadata)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO messages (id, chat_id, role, content, metadata)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id, chat_id, role, content, metadata, created_at
         "#,
-        chat_id,
-        role,
-        content,
-        metadata
     )
+    .bind(message_id)
+    .bind(chat_id)
+    .bind(role)
+    .bind(content)
+    .bind(metadata)
     .fetch_one(pool)
     .await?;
 
     Ok(MessageRow {
-        id: row.id,
-        chat_id: row.chat_id,
-        role: row.role,
-        content: row.content,
-        metadata: row.metadata,
-        created_at: row.created_at,
+        id: row.0,
+        chat_id: row.1,
+        role: row.2,
+        content: row.3,
+        metadata: row.4,
+        created_at: row.5,
     })
 }
 

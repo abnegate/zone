@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::auth::AuthUser;
 use crate::db::{chats, message_embeddings};
 use crate::error::ServerError;
+use crate::services::artifacts::ArtifactStore;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 
@@ -396,7 +397,14 @@ pub async fn delete(
     }
 
     match chats::delete_chat(state.db(), id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            if let Some(workspace_id) = chat.workspace_id {
+                ArtifactStore::new(state.config().comfyui.artifact_root.clone())
+                    .cleanup_chat(workspace_id, id)
+                    .await;
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Chat not found")),
@@ -595,6 +603,14 @@ pub async fn delete_message(
                     message_id,
                     e
                 );
+            }
+            if let Some(workspace_id) = chat.workspace_id {
+                // Generated artifacts are stored under their trusted database
+                // message ID. Never derive an owner from user-controlled
+                // attachment metadata.
+                ArtifactStore::new(state.config().comfyui.artifact_root.clone())
+                    .cleanup_owner(workspace_id, chat_id, message_id)
+                    .await;
             }
             StatusCode::NO_CONTENT.into_response()
         }

@@ -108,6 +108,7 @@ const mockAiSettings: AiSettings = {
   model_fast: 'llama3.1:8b',
   model_reasoning: 'deepseek-r1:7b',
   model_embedding: 'nomic-embed-text',
+  model_image: 'flux1-schnell-fp8.safetensors',
 };
 
 describe('WorkspaceSettingsPage', () => {
@@ -472,6 +473,7 @@ describe('WorkspaceSettingsPage', () => {
         model_fast: null,
         model_reasoning: null,
         model_embedding: null,
+        model_image: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -501,6 +503,7 @@ describe('WorkspaceSettingsPage', () => {
         model_fast: null,
         model_reasoning: null,
         model_embedding: null,
+        model_image: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -530,6 +533,7 @@ describe('WorkspaceSettingsPage', () => {
         model_fast: null,
         model_reasoning: null,
         model_embedding: null,
+        model_image: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -565,6 +569,7 @@ describe('WorkspaceSettingsPage', () => {
         model_fast: null,
         model_reasoning: null,
         model_embedding: null,
+        model_image: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -601,6 +606,7 @@ describe('WorkspaceSettingsPage', () => {
         model_fast: null,
         model_reasoning: null,
         model_embedding: null,
+        model_image: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -643,6 +649,7 @@ describe('WorkspaceSettingsPage', () => {
         model_fast: null,
         model_reasoning: null,
         model_embedding: null,
+        model_image: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 

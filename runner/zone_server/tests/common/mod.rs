@@ -52,6 +52,7 @@ pub fn test_config() -> Config {
         cors_allow_credentials: false,
         app_base_url: "http://localhost:3000".to_string(),
         web_search: Default::default(),
+        comfyui: Default::default(),
     }
 }
 
@@ -271,6 +272,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         cors_allow_credentials: false,
         app_base_url: "http://localhost:3000".to_string(),
         web_search: Default::default(),
+        comfyui: Default::default(),
     }
 }
 
