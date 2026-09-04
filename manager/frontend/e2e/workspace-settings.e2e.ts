@@ -41,6 +41,7 @@ test.describe('Workspace Settings Page', () => {
       model_fast: 'gpt-4o-mini',
       model_reasoning: 'gpt-4o',
       model_embedding: 'text-embedding-3-small',
+      model_image: 'flux1-schnell-fp8.safetensors',
     };
     await routeApiContext(
       context,

@@ -32,6 +32,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+bytes = { workspace = true }
+# Stream adapters (LLM chunks -> AgentEvent)
 async-stream = "0.3"
 
 # HTTP framework
@@ -85,7 +87,6 @@ zone_context = { path = "../zone_context" }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 http-body-util = "0.1"
 tower = { workspace = true, features = ["util"] }
-bytes = { workspace = true }
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 zone_context = { path = "../zone_context", features = ["test-utils"] }

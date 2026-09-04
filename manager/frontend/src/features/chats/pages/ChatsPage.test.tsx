@@ -43,6 +43,7 @@ mock.module('../../../api/chats', () => ({
       onmessage: null,
       onerror: null,
       onclose: null,
+      addEventListener() {},
     }),
   },
 }));

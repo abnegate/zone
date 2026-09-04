@@ -1,7 +1,8 @@
 .PHONY: help setup up down restart logs logs-follow ps health check \
 	pull-models clean clean-volumes backup restore \
-	setup-auth add-user validate test \
-	up-vpn up-monitoring up-all dev rebuild update \
+	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
+	verify-comfyui-model validate test \
+	up-vpn up-monitoring up-comfyui up-all dev rebuild update \
 	shell-ollama shell-litellm shell-openwebui shell-manager shell-console \
 	shell-postgres shell-valkey db-shell db-migrate \
 	test-server test-console test-console-coverage test-e2e test-e2e-ui \
@@ -42,6 +43,23 @@ install: ## Start web-based installer (recommended for first-time setup)
 setup: ## Run interactive CLI setup script
 	@echo "$(BLUE)Running setup script...$(NC)"
 	@./scripts/setup.sh
+
+setup-comfyui-macos: ## Install pinned native ComfyUI on Apple Silicon (model excluded)
+	@./scripts/setup-comfyui-macos.sh
+
+setup-comfyui-model: ## Explicitly download and checksum-verify FLUX.1 Schnell FP8 (~17.2 GB)
+	@$(DOCKER_COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		$(if $(filter 1 true yes,$(FORCE)),--force,)
+
+verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-256
+	@$(DOCKER_COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--verify-only
 
 setup-auth: ## Generate basic auth credentials
 	@echo "$(BLUE)Setting up basic authentication...$(NC)"
@@ -85,6 +103,10 @@ up-monitoring: ## Start all services with monitoring (Prometheus + Grafana)
 	@echo "$(BLUE)Grafana: http://grafana.$${DOMAIN_HOST_WEBUI:-localhost}$(NC)"
 	@echo "$(BLUE)Prometheus: http://prometheus.$${DOMAIN_HOST_WEBUI:-localhost}$(NC)"
 
+up-comfyui: verify-comfyui-model ## Start the bundled NVIDIA ComfyUI runtime
+	@echo "$(GREEN)Starting bundled NVIDIA ComfyUI...$(NC)"
+	$(DOCKER_COMPOSE) --profile bundled-comfyui up -d comfyui
+
 up-all: ## Start all services with VPN and monitoring
 	@echo "$(GREEN)Starting all services (VPN + monitoring)...$(NC)"
 	$(DOCKER_COMPOSE) --profile vpn --profile monitoring up -d
@@ -92,7 +114,8 @@ up-all: ## Start all services with VPN and monitoring
 
 down: ## Stop all services
 	@echo "$(YELLOW)Stopping services...$(NC)"
-	$(DOCKER_COMPOSE) --profile vpn --profile monitoring --profile installer down
+	$(DOCKER_COMPOSE) --profile vpn --profile monitoring --profile installer \
+		--profile bundled-comfyui --profile comfyui-model-setup down
 
 restart: ## Restart all services
 	@echo "$(YELLOW)Restarting services...$(NC)"
