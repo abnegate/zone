@@ -76,7 +76,10 @@ pub fn normalize_host(raw: &str) -> Result<String, String> {
         .split_once("://")
         .map(|(_, rest)| rest)
         .unwrap_or("");
-    if without_scheme.is_empty() || without_scheme.contains(char::is_whitespace) {
+    if without_scheme.is_empty()
+        || without_scheme.contains(char::is_whitespace)
+        || without_scheme.contains(['"', '\\'])
+    {
         return Err("Enter a valid Zone server URL".into());
     }
     Ok(trimmed.trim_end_matches('/').to_string())
@@ -185,11 +188,18 @@ fn bundled_candidates(exe_dir: &Path, kind: FrontendKind) -> Vec<PathBuf> {
 fn read_host_from_config() -> Option<String> {
     let home = dirs::home_dir()?;
     let content = std::fs::read_to_string(home.join(".zone/config.toml")).ok()?;
+    host_from_toml(&content)
+}
+
+fn host_from_toml(content: &str) -> Option<String> {
     for line in content.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("host") {
             let rest = rest.trim_start();
-            let rest = rest.strip_prefix('=')?.trim();
+            let Some(rest) = rest.strip_prefix('=') else {
+                continue;
+            };
+            let rest = rest.trim();
             let value = rest.trim_matches('"').trim_matches('\'').trim();
             if !value.is_empty() {
                 return Some(value.trim_end_matches('/').to_string());
@@ -203,7 +213,6 @@ fn read_host_from_config() -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Write;
 
     fn write_index(dir: &Path) {
         fs::create_dir_all(dir).unwrap();
@@ -257,26 +266,20 @@ mod tests {
 
     #[test]
     fn parse_host_from_toml() {
-        let root = tempfile::tempdir().unwrap();
-        let zone = root.path().join(".zone");
-        fs::create_dir_all(&zone).unwrap();
-        let mut file = fs::File::create(zone.join("config.toml")).unwrap();
-        writeln!(
-            file,
-            "model = \"gpt-4o\"\nhost = \"https://zone.example.com/\"\n"
-        )
-        .unwrap();
+        let content = "model = \"gpt-4o\"\nhost = \"https://zone.example.com/\"\n";
+        assert_eq!(
+            host_from_toml(content).as_deref(),
+            Some("https://zone.example.com")
+        );
+    }
 
-        let content = fs::read_to_string(zone.join("config.toml")).unwrap();
-        let mut host = None;
-        for line in content.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("host") {
-                let rest = rest.trim_start().strip_prefix('=').unwrap().trim();
-                host = Some(rest.trim_matches('"').trim_end_matches('/').to_string());
-            }
-        }
-        assert_eq!(host.as_deref(), Some("https://zone.example.com"));
+    #[test]
+    fn parse_host_skips_near_miss_keys() {
+        let content = "hosts = [\"a\"]\nhost = \"https://zone.example.com\"\n";
+        assert_eq!(
+            host_from_toml(content).as_deref(),
+            Some("https://zone.example.com")
+        );
     }
 
     #[test]
@@ -290,6 +293,12 @@ mod tests {
     #[test]
     fn normalize_host_rejects_scheme() {
         assert!(normalize_host("zone.example.com").is_err());
+    }
+
+    #[test]
+    fn normalize_host_rejects_quotes() {
+        assert!(normalize_host(r#"https://a"b.example"#).is_err());
+        assert!(normalize_host(r"https://a\b.example").is_err());
     }
 
     #[test]

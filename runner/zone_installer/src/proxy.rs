@@ -184,6 +184,8 @@ async fn bridge_ws(client: WebSocket, upstream_url: String) {
 pub fn http_client() -> Client {
     Client::builder()
         .danger_accept_invalid_certs(false)
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .expect("HTTP client")
 }

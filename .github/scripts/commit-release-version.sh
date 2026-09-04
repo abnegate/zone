@@ -9,7 +9,12 @@ set -euo pipefail
 : "${DEFAULT_BRANCH:?set DEFAULT_BRANCH}"
 : "${RELEASE_SHA:?set RELEASE_SHA}"
 
-if git diff --quiet -- runner/Cargo.toml runner/Cargo.lock; then
+files=(
+  runner/Cargo.toml
+  runner/Cargo.lock
+  runner/zone_desktop/tauri.conf.json
+)
+if git diff --quiet -- "${files[@]}"; then
   echo "workspace.package.version already ${VERSION}"
   exit 0
 fi
@@ -24,6 +29,6 @@ fi
 git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
 git switch -C "${DEFAULT_BRANCH}"
-git add runner/Cargo.toml runner/Cargo.lock
+git add "${files[@]}"
 git commit -m "(chore): set package.version to ${VERSION}"
 git push origin "HEAD:${DEFAULT_BRANCH}"

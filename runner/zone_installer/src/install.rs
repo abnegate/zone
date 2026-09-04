@@ -242,10 +242,8 @@ async fn create_auth_file() -> Result<(), Box<dyn std::error::Error + Send + Syn
     // Try to use htpasswd command for bcrypt hash
     let htpasswd_content = create_htpasswd_entry("admin", &password).await?;
 
-    // Write htpasswd file
-    fs::write("./auth/users.htpasswd", &htpasswd_content).await?;
+    write_secret_file("./auth/users.htpasswd", &htpasswd_content).await?;
 
-    // Write password reference file
     let password_info = format!(
         "# GENERATED ADMIN CREDENTIALS\n\
          # Username: admin\n\
@@ -254,7 +252,7 @@ async fn create_auth_file() -> Result<(), Box<dyn std::error::Error + Send + Syn
          # You can change the password later with: htpasswd -B auth/users.htpasswd admin\n",
         password
     );
-    fs::write("./auth/ADMIN_PASSWORD.txt", password_info).await?;
+    write_secret_file("./auth/ADMIN_PASSWORD.txt", &password_info).await?;
 
     Ok(())
 }
@@ -284,26 +282,32 @@ async fn create_htpasswd_entry(
 
     match output {
         Ok(output) if output.status.success() => {
-            let result = String::from_utf8_lossy(&output.stdout).to_string();
-            Ok(result)
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("htpasswd failed: {}, using fallback", stderr);
-            // Fallback if htpasswd fails
-            Ok(format!(
-                "{}:{}\n# WARNING: Password stored in plaintext - htpasswd not available\n",
-                username, password
-            ))
+            Err(format!("htpasswd failed: {stderr}").into())
         }
-        Err(e) => {
-            tracing::warn!("htpasswd command not found: {}, using fallback", e);
-            // Fallback if htpasswd is not installed
-            Ok(format!(
-                "{}:{}\n# WARNING: Password stored in plaintext - htpasswd not available\n",
-                username, password
-            ))
-        }
+        Err(err) => Err(format!("htpasswd is required to hash the admin password: {err}").into()),
+    }
+}
+
+async fn write_secret_file(path: &str, contents: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .await?;
+        file.write_all(contents.as_bytes()).await
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents).await
     }
 }
 
