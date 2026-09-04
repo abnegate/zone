@@ -30,6 +30,13 @@ model_list:
       api_base: {{OLLAMA_BASE_URL}}
       timeout: 180
 
+  # Route models selected in the browser while preserving explicit aliases.
+  - model_name: "*"
+    litellm_params:
+      model: ollama_chat/*
+      api_base: {{OLLAMA_BASE_URL}}
+      timeout: 180
+
 # Router Configuration
 router_settings:
   num_retries: 2

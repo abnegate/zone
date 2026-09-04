@@ -18,6 +18,11 @@ data:
           api_base: http://ollama:11434
           timeout: {{ .timeout }}
       {{- end }}
+      - model_name: "*"
+        litellm_params:
+          model: ollama_chat/*
+          api_base: http://ollama:11434
+          timeout: {{ .Values.litellm.router.timeout }}
 
     # Router Configuration
     router_settings:
