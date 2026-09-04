@@ -3,39 +3,36 @@ import { useState } from 'react';
 import { CreateSourceWizard } from '../components/CreateSourceWizard';
 import { getSourceLabel } from '../config';
 import { useSources } from '../hooks';
-import type { Source, SourceType } from '../types';
+import type { Source } from '../types';
 import './SourcesPage.css';
-
-const sourceTypeVariants: Record<
-  SourceType,
-  'default' | 'secondary' | 'info' | 'success' | 'warning' | 'destructive'
-> = {
-  github: 'default',
-  gitlab: 'warning',
-  filesystem: 'info',
-  slack: 'secondary',
-  discord: 'secondary',
-  ical: 'success',
-  imap: 'secondary',
-  web: 'info',
-  text: 'secondary',
-};
-
-function SourceTypeBadge({ type }: { type: SourceType }) {
-  return <Badge variant={sourceTypeVariants[type] || 'secondary'}>{getSourceLabel(type)}</Badge>;
-}
 
 function SourceStatusBadge({ source }: { source: Source }) {
   if (!source.is_active) {
-    return <Badge variant="secondary">Inactive</Badge>;
+    return (
+      <Badge className="source-status" variant="secondary">
+        Inactive
+      </Badge>
+    );
   }
   if (source.last_error) {
-    return <Badge variant="destructive">Error</Badge>;
+    return (
+      <Badge className="source-status" variant="destructive">
+        Error
+      </Badge>
+    );
   }
   if (source.last_verified_at) {
-    return <Badge variant="success">Verified</Badge>;
+    return (
+      <Badge className="source-status" variant="success">
+        Verified
+      </Badge>
+    );
   }
-  return <Badge variant="warning">Unverified</Badge>;
+  return (
+    <Badge className="source-status" variant="warning">
+      Unverified
+    </Badge>
+  );
 }
 
 export default function SourcesPage() {
@@ -54,7 +51,7 @@ export default function SourcesPage() {
     setOperationError(null);
     try {
       const result = await verifySource(sourceId);
-      if (!result.success) {
+      if (!result.verified) {
         setOperationError(result.message || 'Verification failed');
       }
     } catch (err) {
@@ -151,11 +148,11 @@ export default function SourcesPage() {
                 className={`source-card ${!source.is_active ? 'source-inactive' : ''}`}
               >
                 <div className="source-card-header">
-                  <h3>{source.name}</h3>
-                  <div className="source-badges">
-                    <SourceTypeBadge type={source.source_type} />
-                    <SourceStatusBadge source={source} />
+                  <div className="source-heading">
+                    <span className="source-provider">{getSourceLabel(source.source_type)}</span>
+                    <h3>{source.name}</h3>
                   </div>
+                  <SourceStatusBadge source={source} />
                 </div>
 
                 {source.description && <p className="source-description">{source.description}</p>}
@@ -168,11 +165,11 @@ export default function SourcesPage() {
 
                 {source.last_error && <div className="source-error">{source.last_error}</div>}
 
-                <div className="source-meta">
-                  {source.last_verified_at && (
-                    <span>Verified: {new Date(source.last_verified_at).toLocaleDateString()}</span>
-                  )}
-                </div>
+                {source.last_verified_at && (
+                  <div className="source-meta">
+                    Verified: {new Date(source.last_verified_at).toLocaleDateString()}
+                  </div>
+                )}
 
                 <div className="source-actions">
                   <Button
@@ -190,7 +187,12 @@ export default function SourcesPage() {
                   >
                     {source.is_active ? 'Disable' : 'Enable'}
                   </Button>
-                  <Button variant="destructive" size="sm" onClick={() => handleDelete(source.id)}>
+                  <Button
+                    className="source-delete"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleDelete(source.id)}
+                  >
                     Delete
                   </Button>
                 </div>

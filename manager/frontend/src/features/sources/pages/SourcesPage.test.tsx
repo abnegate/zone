@@ -7,7 +7,7 @@ const mockGetSources = mock(() => Promise.resolve([] as Source[]));
 const mockCreateSource = mock(() => Promise.resolve({} as Source));
 const mockUpdateSource = mock(() => Promise.resolve({} as Source));
 const mockDeleteSource = mock(() => Promise.resolve());
-const mockVerifySource = mock(() => Promise.resolve({ success: true, message: 'OK' }));
+const mockVerifySource = mock(() => Promise.resolve({ verified: true, message: 'OK' }));
 const mockGetSource = mock(() => Promise.resolve({} as Source));
 
 // Mock sources API module
@@ -238,7 +238,7 @@ describe('SourcesPage', () => {
   });
 
   it('verifies a source', async () => {
-    mockVerifySource.mockImplementation(() => Promise.resolve({ success: true, message: 'OK' }));
+    mockVerifySource.mockImplementation(() => Promise.resolve({ verified: true, message: 'OK' }));
     mockGetSource.mockImplementation(() => Promise.resolve(mockSources[0]));
 
     render(<SourcesPage />);
@@ -251,6 +251,31 @@ describe('SourcesPage', () => {
 
     await waitFor(() => {
       expect(mockVerifySource).toHaveBeenCalledWith('test-workspace-id', 'src-1');
+      expect(mockGetSource).toHaveBeenCalledWith('test-workspace-id', 'src-1');
+      expect(screen.queryByRole('button', { name: 'Verifying...' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows the verification rejection message and refreshed error status', async () => {
+    mockVerifySource.mockImplementation(() =>
+      Promise.resolve({ verified: false, message: 'Repository access denied' })
+    );
+    mockGetSource.mockImplementation(() =>
+      Promise.resolve({
+        ...mockSources[0],
+        last_error: 'Repository access denied',
+      })
+    );
+
+    render(<SourcesPage />);
+    await screen.findByText('GitHub Repository');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Verify' })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('Repository access denied');
+      expect(screen.getAllByText('Error')).toHaveLength(2);
+      expect(screen.queryByText('Verified')).not.toBeInTheDocument();
     });
   });
 
@@ -381,7 +406,7 @@ describe('SourcesPage', () => {
   });
 
   it('shows verifying state during verification', async () => {
-    let resolveVerify!: (value: { success: boolean; message: string }) => void;
+    let resolveVerify!: (value: { verified: boolean; message: string }) => void;
     mockVerifySource.mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -400,7 +425,7 @@ describe('SourcesPage', () => {
 
     expect(screen.getByRole('button', { name: 'Verifying...' })).toBeDisabled();
 
-    resolveVerify({ success: true, message: 'OK' });
+    resolveVerify({ verified: true, message: 'OK' });
 
     await waitFor(() => {
       expect(screen.getAllByRole('button', { name: 'Verify' }).length).toBeGreaterThan(0);
@@ -438,7 +463,7 @@ describe('SourcesPage', () => {
 
   it('creates a new source via wizard', async () => {
     const newSource: Source = {
-      id: 'src-3',
+      id: 'src-4',
       name: 'New Repo',
       source_type: 'github',
       category: 'file',
