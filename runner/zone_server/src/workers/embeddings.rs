@@ -16,9 +16,6 @@ const MAX_CONCURRENT_EMBEDDINGS: usize = 10;
 // Maximum content length (~2000 tokens for text-embedding-3-small)
 const MAX_CONTENT_LENGTH: usize = 8000;
 
-// Expected embedding dimensions for text-embedding-3-small
-const EXPECTED_EMBEDDING_DIM: usize = 1536;
-
 // Global semaphore to limit concurrent embeddings
 static EMBEDDING_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -128,7 +125,17 @@ pub fn spawn_message_embedding_task(
 
         // Generate embedding
         let embedding = match embedding_service.embed(content_to_embed).await {
-            Ok(emb) => emb,
+            Ok(emb) => match zone_context::embeddings::align_vector(&emb) {
+                Ok(aligned) => aligned,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to align embedding for message {}: {}",
+                        message_id,
+                        e
+                    );
+                    return;
+                }
+            },
             Err(e) => {
                 tracing::error!(
                     "Failed to generate embedding for message {}: {}",
@@ -144,16 +151,6 @@ pub fn spawn_message_embedding_task(
             tracing::error!(
                 "Embedding service returned empty embedding for message {}",
                 message_id
-            );
-            return;
-        }
-
-        if embedding.len() != EXPECTED_EMBEDDING_DIM {
-            tracing::error!(
-                "Unexpected embedding dimensions for message {}: got {}, expected {}",
-                message_id,
-                embedding.len(),
-                EXPECTED_EMBEDDING_DIM
             );
             return;
         }

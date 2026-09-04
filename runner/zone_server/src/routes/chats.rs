@@ -675,7 +675,7 @@ impl From<message_embeddings::MessageSearchResult> for MessageSearchResponse {
             similarity: result.similarity,
             role: result.role,
             content: result.content,
-            timestamps: Timestamps::from_utc(result.created_at, result.created_at),
+            timestamps: Timestamps::from_naive(Some(result.created_at), Some(result.created_at)),
         }
     }
 }

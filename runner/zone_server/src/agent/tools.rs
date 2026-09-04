@@ -16,7 +16,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
-use crate::db::{message_embeddings, projects, sources};
+use crate::db::{knowledge, message_embeddings, projects, sources};
 use crate::state::AppState;
 
 /// Bound legacy search snippets and inventory summaries; full document reads are preserved.
@@ -301,6 +301,46 @@ impl SearchKnowledgeTool {
             since: None,
         };
 
+        let mut lines = Vec::new();
+
+        if let Some(embedding_service) = ctx.state.embedding_service() {
+            match embedding_service.embed(query).await {
+                Ok(query_embedding) => {
+                    match knowledge::search_knowledge_entries(
+                        ctx.state.db(),
+                        &query_embedding,
+                        ctx.workspace_id,
+                        limit as i64,
+                        0.5,
+                    )
+                    .await
+                    {
+                        Ok(hits) => {
+                            for hit in hits {
+                                lines.push(format!(
+                                    "[{:.0}% match] {} (knowledge) [entry_id: {}]\n{}",
+                                    hit.similarity * 100.0,
+                                    hit.title,
+                                    hit.entry_id,
+                                    truncate(&one_line(&hit.content), SNIPPET_CHARS)
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "knowledge entry search failed for workspace {}: {}",
+                                ctx.workspace_id,
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("knowledge query embed failed: {}", e);
+                }
+            }
+        }
+
         let results = match context_service
             .search_hybrid(query, limit, Some(filters), None)
             .await
@@ -316,19 +356,16 @@ impl SearchKnowledgeTool {
             }
         };
 
-        let lines = results
-            .iter()
-            .map(|r| {
-                format!(
-                    "[{:.0}% match] {} ({}) [document_id: {}]\n{}",
-                    r.similarity * 100.0,
-                    r.item_title,
-                    r.item_uri,
-                    r.content_item_id,
-                    truncate(&one_line(&r.chunk_text), SNIPPET_CHARS)
-                )
-            })
-            .collect();
+        lines.extend(results.iter().map(|r| {
+            format!(
+                "[{:.0}% match] {} ({}) [document_id: {}]\n{}",
+                r.similarity * 100.0,
+                r.item_title,
+                r.item_uri,
+                r.content_item_id,
+                truncate(&one_line(&r.chunk_text), SNIPPET_CHARS)
+            )
+        }));
 
         render(
             lines,

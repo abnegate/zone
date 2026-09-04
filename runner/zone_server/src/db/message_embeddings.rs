@@ -5,6 +5,19 @@
 
 use sqlx::PgPool;
 use uuid::Uuid;
+use zone_context::embeddings::align_vector;
+
+fn aligned_vector_literal(embedding: &[f32]) -> Result<String, sqlx::Error> {
+    let embedding = align_vector(embedding).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    Ok(format!(
+        "[{}]",
+        embedding
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
 
 /// Store an embedding for a message
 ///
@@ -15,7 +28,7 @@ use uuid::Uuid;
 /// * `pool` - Database connection pool
 /// * `message_id` - ID of the message
 /// * `chat_id` - ID of the chat containing the message
-/// * `embedding` - The embedding vector (should be 1536 dimensions)
+/// * `embedding` - The embedding vector (padded to 1536 if the model is narrower)
 /// * `model` - Model identifier used to generate the embedding
 ///
 /// # Note
@@ -32,22 +45,7 @@ pub async fn store_message_embedding(
     embedding: &[f32],
     model: &str,
 ) -> Result<(), sqlx::Error> {
-    // Validate that all embedding values are finite
-    if !embedding.iter().all(|&v| v.is_finite()) {
-        return Err(sqlx::Error::Protocol(
-            "Embedding contains non-finite values (NaN or infinity)".to_string(),
-        ));
-    }
-
-    // Convert embedding to pgvector format
-    let vector_str = format!(
-        "[{}]",
-        embedding
-            .iter()
-            .map(|f| f.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
+    let vector_str = aligned_vector_literal(embedding)?;
 
     sqlx::query(
         r#"
@@ -94,22 +92,7 @@ pub async fn search_messages(
     limit: usize,
     threshold: f32,
 ) -> Result<Vec<MessageSearchResult>, sqlx::Error> {
-    // Validate that all embedding values are finite
-    if !query_embedding.iter().all(|&v| v.is_finite()) {
-        return Err(sqlx::Error::Protocol(
-            "Query embedding contains non-finite values (NaN or infinity)".to_string(),
-        ));
-    }
-
-    // Convert embedding to pgvector format
-    let vector_str = format!(
-        "[{}]",
-        query_embedding
-            .iter()
-            .map(|f| f.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    );
+    let vector_str = aligned_vector_literal(query_embedding)?;
 
     let results = match chat_id {
         Some(cid) => {
@@ -237,7 +220,7 @@ pub struct MessageSearchResult {
     pub similarity: f32,
     pub role: String,
     pub content: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::NaiveDateTime,
 }
 
 /// Message embedding record
@@ -247,7 +230,7 @@ pub struct MessageEmbedding {
     pub message_id: Uuid,
     pub chat_id: Uuid,
     pub model: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::NaiveDateTime,
 }
 
 #[cfg(test)]
@@ -277,7 +260,7 @@ mod tests {
             similarity: 0.95,
             role: "user".to_string(),
             content: "Test message".to_string(),
-            created_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now().naive_utc(),
         };
 
         assert_eq!(result.role, "user");
@@ -292,7 +275,7 @@ mod tests {
             message_id: Uuid::new_v4(),
             chat_id: Uuid::new_v4(),
             model: "text-embedding-3-small".to_string(),
-            created_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now().naive_utc(),
         };
 
         assert_eq!(embedding.model, "text-embedding-3-small");

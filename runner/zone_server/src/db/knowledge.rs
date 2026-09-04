@@ -6,11 +6,9 @@
 use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use uuid::Uuid;
+use zone_context::embeddings::align_vector;
 
 use super::DbResult;
-
-/// Expected embedding vector dimension
-const EMBEDDING_DIMENSION: usize = 1536;
 
 /// Knowledge entry row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -209,19 +207,20 @@ pub async fn store_knowledge_embedding(
     vector: &[f32],
     model: &str,
 ) -> DbResult<Uuid> {
-    // Validate embedding dimension
-    if vector.len() != EMBEDDING_DIMENSION {
-        return Err(sqlx::Error::Protocol(format!(
-            "Embedding dimension mismatch: expected {}, got {}",
-            EMBEDDING_DIMENSION,
-            vector.len()
-        )));
-    }
+    let vector = align_vector(vector).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let vector_str = format!(
+        "[{}]",
+        vector
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
 
     let id = sqlx::query_scalar(
         r#"
         INSERT INTO knowledge_embeddings (knowledge_entry_id, workspace_id, vector, model)
-        VALUES ($1, $2, $3, $4)
+        VALUES ($1, $2, $3::vector, $4)
         ON CONFLICT (knowledge_entry_id) DO UPDATE
         SET vector = EXCLUDED.vector, model = EXCLUDED.model
         RETURNING id
@@ -229,12 +228,55 @@ pub async fn store_knowledge_embedding(
     )
     .bind(knowledge_entry_id)
     .bind(workspace_id)
-    .bind(vector)
+    .bind(&vector_str)
     .bind(model)
     .fetch_one(pool)
     .await?;
 
     Ok(id)
+}
+
+/// Hit from [`search_knowledge`] over user-authored knowledge entries.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct KnowledgeSearchHit {
+    pub entry_id: Uuid,
+    pub similarity: f64,
+    pub title: String,
+    pub content: String,
+    pub category: Option<String>,
+    pub tags: Vec<String>,
+}
+
+/// Semantic search over workspace knowledge entries.
+pub async fn search_knowledge_entries(
+    pool: &PgPool,
+    query_embedding: &[f32],
+    workspace_id: Uuid,
+    limit: i64,
+    threshold: f32,
+) -> DbResult<Vec<KnowledgeSearchHit>> {
+    let vector = align_vector(query_embedding).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let vector_str = format!(
+        "[{}]",
+        vector
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    sqlx::query_as::<_, KnowledgeSearchHit>(
+        r#"
+        SELECT entry_id, similarity, title, content, category, tags
+        FROM search_knowledge($1::vector, $2, $3, $4)
+        "#,
+    )
+    .bind(&vector_str)
+    .bind(workspace_id)
+    .bind(limit as i32)
+    .bind(f64::from(threshold))
+    .fetch_all(pool)
+    .await
 }
 
 /// Entry due for refresh

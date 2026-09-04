@@ -33,7 +33,7 @@ use zone_core::llm::{
 
 use crate::agent::{self, AgentEvent, AgentRun, Citation, ToolCallRecord};
 use crate::auth::validate_token;
-use crate::db::{ai_settings, chats, workspace_members, workspaces};
+use crate::db::{ai_settings, chats, knowledge, workspace_members, workspaces};
 use crate::services::searxng::{SearchContext, SearxngClient, sanitize_query};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
@@ -1328,37 +1328,76 @@ async fn prepare_chat(
     } else {
         "You are Zone's assistant, answering inside one of the user's workspaces.".to_string()
     };
-    if !agentic && let Some(context_service) = state.context_service() {
-        // MAJOR-6: Inject knowledge base context scoped to workspace if context service available
-        // Create workspace-scoped search filters
-        let filters = zone_context::embeddings::SearchFilters {
-            workspace_id: Some(workspace_id),
-            source_ids: None,
-            categories: None,
-            min_quality: None,
-            since: None,
-        };
-        match context_service
-            .search(content, MAX_CONTEXT_RESULTS, Some(filters))
-            .await
-        {
-            Ok(results) if !results.is_empty() => {
-                let mut context_text = String::from("Relevant context:\n\n");
-                // MINOR-2: Use named constant for context results in prompt
-                for result in results.iter().take(MAX_CONTEXT_IN_PROMPT) {
-                    context_text.push_str(&format!("- {}\n", result.chunk_text));
-                }
+    if !agentic {
+        let mut context_lines: Vec<String> = Vec::new();
 
-                prompt.push_str("\n\n");
-                prompt.push_str(&context_text);
+        if let Some(embedding_service) = state.embedding_service() {
+            match embedding_service.embed(content).await {
+                Ok(query_embedding) => {
+                    match knowledge::search_knowledge_entries(
+                        state.db(),
+                        &query_embedding,
+                        workspace_id,
+                        MAX_CONTEXT_IN_PROMPT as i64,
+                        0.5,
+                    )
+                    .await
+                    {
+                        Ok(hits) => {
+                            for hit in hits {
+                                let note = hit.content.split_whitespace().collect::<Vec<_>>().join(" ");
+                                let note = if note.chars().count() > 500 {
+                                    format!(
+                                        "{}…",
+                                        note.chars().take(500).collect::<String>()
+                                    )
+                                } else {
+                                    note
+                                };
+                                context_lines.push(format!(
+                                    "- [knowledge] {}: {}",
+                                    hit.title, note
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Knowledge search failed: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Knowledge query embed failed: {}", e);
+                }
             }
-            Ok(_) => {
-                // No relevant context found
+        }
+
+        if let Some(context_service) = state.context_service() {
+            let filters = zone_context::embeddings::SearchFilters {
+                workspace_id: Some(workspace_id),
+                source_ids: None,
+                categories: None,
+                min_quality: None,
+                since: None,
+            };
+            match context_service
+                .search(content, MAX_CONTEXT_RESULTS, Some(filters))
+                .await
+            {
+                Ok(results) => {
+                    for result in results.iter().take(MAX_CONTEXT_IN_PROMPT) {
+                        context_lines.push(format!("- {}", result.chunk_text));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Context search failed: {}", e);
+                }
             }
-            Err(e) => {
-                tracing::warn!("Context search failed: {}", e);
-                // Continue without context
-            }
+        }
+
+        if !context_lines.is_empty() {
+            prompt.push_str("\n\nRelevant context:\n\n");
+            prompt.push_str(&context_lines.join("\n"));
+            prompt.push('\n');
         }
     }
 
