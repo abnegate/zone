@@ -57,12 +57,13 @@ impl Tool for ReadFileTool {
 
         let full_path = context.cwd.join(&params.path);
 
-        // Security check: ensure path doesn't escape cwd
         let canonical = full_path
             .canonicalize()
             .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
 
-        if !canonical.starts_with(&context.cwd) {
+        // Security check: ensure path doesn't escape cwd, unless the caller
+        // has deliberately opted out of containment.
+        if !context.unrestricted && !canonical.starts_with(&context.cwd) {
             return Err(ToolError::Execution(
                 "Path escapes working directory".to_string(),
             ));
@@ -146,10 +147,11 @@ impl Tool for WriteFileTool {
         // Security: Validate path doesn't contain traversal sequences BEFORE any operations
         // This prevents writing files outside the working directory
         let normalized_path = params.path.replace('\\', "/");
-        if normalized_path.contains("..")
-            || normalized_path.starts_with('/')
-            || normalized_path.contains("/../")
-            || normalized_path.ends_with("/..")
+        if !context.unrestricted
+            && (normalized_path.contains("..")
+                || normalized_path.starts_with('/')
+                || normalized_path.contains("/../")
+                || normalized_path.ends_with("/.."))
         {
             return Err(ToolError::Execution(
                 "Path contains traversal sequences".to_string(),
@@ -176,7 +178,7 @@ impl Tool for WriteFileTool {
                 .canonicalize()
                 .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
 
-            if !canonical_parent.starts_with(&canonical_cwd) {
+            if !context.unrestricted && !canonical_parent.starts_with(&canonical_cwd) {
                 return Err(ToolError::Execution(
                     "Path escapes working directory".to_string(),
                 ));
@@ -189,7 +191,7 @@ impl Tool for WriteFileTool {
                 .canonicalize()
                 .map_err(|e| ToolError::Execution(format!("Cannot resolve path: {}", e)))?;
 
-            if !canonical.starts_with(&canonical_cwd) {
+            if !context.unrestricted && !canonical.starts_with(&canonical_cwd) {
                 return Err(ToolError::Execution(
                     "Path escapes working directory".to_string(),
                 ));
@@ -557,6 +559,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             max_file_size: 1024 * 1024,
             command_timeout: 30,
+            unrestricted: false,
         }
     }
 
