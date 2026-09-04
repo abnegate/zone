@@ -7,7 +7,7 @@
 //! consumes the result exactly like the plain completion stream it replaces.
 
 use futures::{Stream, StreamExt};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 use zone_core::llm::{
     LlmClient, Message as LlmMessage, Role as LlmRole, StreamToolCall, ToolCall as LlmToolCall,
@@ -64,6 +64,8 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
         let AgentRun { llm, model, tools, mut messages } = run;
         let definitions = tools.definitions();
         let mut tool_calls_used = 0usize;
+        let names = tools.names();
+        let mut identifiers = BTreeSet::new();
 
         for iteration in 0..MAX_ITERATIONS {
             let stream = match llm
@@ -130,23 +132,39 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
             }
 
             let mut requested = pending.finish();
-            if requested.is_empty() {
-                requested = parse_text_tool_calls(&text);
-            }
+            let parsed = parse_text_tool_calls(&text, &names);
+            let replay_content = match parsed {
+                TextToolCalls::Calls(calls) => {
+                    if requested.is_empty() {
+                        requested = calls;
+                    }
+                    None
+                }
+                TextToolCalls::Malformed if !requested.is_empty() => None,
+                TextToolCalls::Malformed => {
+                    if iteration + 1 == MAX_ITERATIONS {
+                        yield AgentEvent::Failed(
+                            "The model repeatedly returned malformed tool calls. Try another model or turn off agent mode."
+                                .to_string()
+                        );
+                        return;
+                    }
+                    messages.push(LlmMessage::user(
+                        "Your previous response contained a malformed tool call and no tools from it were executed. \
+                         Return a complete valid function tool call with a JSON object for arguments, \
+                         or answer the user in ordinary text. Do not repeat the malformed response."
+                    ));
+                    continue;
+                }
+                TextToolCalls::Prose => (!text.is_empty()).then(|| text.clone()),
+            };
             if requested.is_empty() {
                 if !text.is_empty() {
                     yield AgentEvent::Chunk(text);
                 }
                 return;
             }
-
-            // Text-shaped tool calls are not prose. Keep them off the replay
-            // so the next round does not treat the JSON as the model's answer.
-            let replay_content = if text.trim_start().starts_with('{') {
-                None
-            } else {
-                (!text.is_empty()).then(|| text.clone())
-            };
+            unique_identifiers(&mut requested, &mut identifiers);
 
             // Replay the model's own turn so the tool results it gets back are
             // attached to the calls it made.
@@ -230,23 +248,42 @@ fn summarize(result: &zone_core::tools::ToolResult, output: &str) -> String {
 /// `message.tool_calls`, but the same request streamed arrives as JSON in
 /// `delta.content` (`{"name":"...","arguments":{...}}`). Without this, the
 /// loop treats that JSON as the final answer and never runs a tool.
-fn parse_text_tool_calls(text: &str) -> Vec<LlmToolCall> {
+#[derive(Debug)]
+enum TextToolCalls {
+    Prose,
+    Calls(Vec<LlmToolCall>),
+    Malformed,
+}
+
+fn parse_text_tool_calls(text: &str, names: &[String]) -> TextToolCalls {
     let trimmed = strip_code_fence(text.trim());
     let value: serde_json::Value = match serde_json::from_str(trimmed) {
         Ok(value) => value,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            return if resembles_tool_call(trimmed, names) {
+                TextToolCalls::Malformed
+            } else {
+                TextToolCalls::Prose
+            };
+        }
     };
     let items = match value {
         serde_json::Value::Array(items) => items,
         object if object.is_object() => vec![object],
-        _ => return Vec::new(),
+        _ => return TextToolCalls::Prose,
     };
-
-    items
+    if !items.iter().any(|item| resembles_tool_value(item, names)) {
+        return TextToolCalls::Prose;
+    }
+    match items
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| text_tool_call(item, index))
+        .map(|(index, item)| text_tool_call(item, index, names))
         .collect()
+    {
+        Some(calls) => TextToolCalls::Calls(calls),
+        None => TextToolCalls::Malformed,
+    }
 }
 
 fn strip_code_fence(text: &str) -> &str {
@@ -258,23 +295,134 @@ fn strip_code_fence(text: &str) -> &str {
     text.strip_suffix("```").map(str::trim_end).unwrap_or(text)
 }
 
-fn text_tool_call(value: &serde_json::Value, index: usize) -> Option<LlmToolCall> {
+fn resembles_tool_value(value: &serde_json::Value, names: &[String]) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "id" | "type" | "function" | "name" | "arguments"
+        )
+    }) {
+        return false;
+    }
     let function = value.get("function").unwrap_or(value);
-    let name = function.get("name")?.as_str()?.trim();
-    if name.is_empty() {
+    function
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|name| {
+            names.iter().any(|registered| registered == name)
+                || (value.get("type").and_then(serde_json::Value::as_str) == Some("function")
+                    && function.get("arguments").is_some())
+        })
+}
+
+/// Inspect only envelope keys at the start of JSON-shaped output. String values
+/// are decoded as tokens so quoted examples and nested argument data cannot be
+/// mistaken for a top-level tool request. This recognizes intent, never repairs
+/// arguments or returns anything executable.
+fn resembles_tool_call(text: &str, names: &[String]) -> bool {
+    let mut remaining = text.trim_start();
+    if let Some(array) = remaining.strip_prefix('[') {
+        remaining = array.trim_start();
+    }
+    let Some(object) = remaining.strip_prefix('{') else {
+        return false;
+    };
+    remaining = object.trim_start();
+    let mut wrapped = false;
+    let mut recognized = false;
+    let mut explicit = false;
+    let mut named = false;
+    loop {
+        let mut tokens = serde_json::Deserializer::from_str(remaining).into_iter::<String>();
+        let Some(Ok(key)) = tokens.next() else {
+            return recognized;
+        };
+        if !matches!(
+            key.as_str(),
+            "id" | "type" | "function" | "name" | "arguments"
+        ) {
+            return false;
+        }
+        remaining = remaining[tokens.byte_offset()..].trim_start();
+        let Some(value) = remaining.strip_prefix(':') else {
+            return recognized;
+        };
+        remaining = value.trim_start();
+        if key == "function"
+            && !wrapped
+            && let Some(function) = remaining.strip_prefix('{')
+        {
+            wrapped = true;
+            remaining = function.trim_start();
+            continue;
+        }
+        if key == "arguments" && explicit && named {
+            recognized = true;
+        }
+        let mut values =
+            serde_json::Deserializer::from_str(remaining).into_iter::<serde_json::Value>();
+        let Some(Ok(value)) = values.next() else {
+            return recognized;
+        };
+        if key == "type" {
+            explicit = value.as_str() == Some("function");
+        }
+        if key == "name" {
+            named = value.as_str().is_some();
+            recognized = value
+                .as_str()
+                .is_some_and(|name| names.iter().any(|registered| registered == name));
+        }
+        remaining = remaining[values.byte_offset()..].trim_start();
+        let Some(next) = remaining.strip_prefix(',') else {
+            return recognized;
+        };
+        remaining = next.trim_start();
+    }
+}
+
+fn text_tool_call(
+    value: &serde_json::Value,
+    index: usize,
+    names: &[String],
+) -> Option<LlmToolCall> {
+    let object = value.as_object()?;
+    let function = value.get("function").unwrap_or(value);
+    let name = function.get("name")?.as_str()?;
+    if !names.iter().any(|registered| registered == name)
+        || value
+            .get("type")
+            .is_some_and(|kind| kind.as_str() != Some("function"))
+        || object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "id" | "type" | "function" | "name" | "arguments"
+            )
+        })
+        || function.as_object()?.keys().any(|key| {
+            !matches!(key.as_str(), "name" | "arguments") && value.get("function").is_some()
+        })
+    {
         return None;
     }
-
-    let arguments = match function.get("arguments") {
-        Some(serde_json::Value::String(raw)) => raw.clone(),
-        Some(other) => other.to_string(),
-        None => "{}".to_string(),
+    let arguments = match function.get("arguments")? {
+        serde_json::Value::String(raw) => {
+            let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+            if !parsed.is_object() {
+                return None;
+            }
+            raw.clone()
+        }
+        object if object.is_object() => object.to_string(),
+        _ => return None,
     };
-
     Some(LlmToolCall {
         id: value
             .get("id")
-            .and_then(|id| id.as_str())
+            .and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| format!("call_{}", index)),
@@ -284,6 +432,26 @@ fn text_tool_call(value: &serde_json::Value, index: usize) -> Option<LlmToolCall
             arguments,
         },
     })
+}
+
+fn unique_identifiers(calls: &mut [LlmToolCall], identifiers: &mut BTreeSet<String>) {
+    // Reserve incoming ids before allocating replacements, including ids that
+    // collide with the generated namespace later in this same response.
+    let reserved: BTreeSet<String> = calls.iter().map(|call| call.id.clone()).collect();
+    for call in calls {
+        if !call.id.is_empty() && identifiers.insert(call.id.clone()) {
+            continue;
+        }
+        let mut index = identifiers.len();
+        loop {
+            let candidate = format!("zone_call_{}", index);
+            if !reserved.contains(&candidate) && identifiers.insert(candidate.clone()) {
+                call.id = candidate;
+                break;
+            }
+            index += 1;
+        }
+    }
 }
 
 /// Reassembles tool calls that arrive split across streaming deltas.
@@ -365,6 +533,13 @@ mod tests {
     use super::*;
     use zone_core::llm::StreamFunctionCall;
     use zone_core::tools::ToolResult;
+
+    fn parse_text_tool_calls(text: &str) -> Vec<LlmToolCall> {
+        match super::parse_text_tool_calls(text, &["run_shell".into(), "list_projects".into()]) {
+            TextToolCalls::Calls(calls) => calls,
+            _ => Vec::new(),
+        }
+    }
 
     fn delta(
         index: u32,
@@ -486,6 +661,112 @@ mod tests {
     #[test]
     fn ignores_ordinary_prose() {
         assert!(parse_text_tool_calls("There are no projects yet.").is_empty());
+    }
+
+    #[test]
+    fn malformed_envelopes_are_not_answers_or_partial_calls() {
+        let names = vec!["list_sources".into()];
+        for text in [
+            r#"{"id":"call_0","type":"function","function":{"name":"list_sources","arguments":{"limit":5}}"#,
+            r#"{"name":"list_sources","arguments":{"limit":5}"#,
+            r#"{"name":"list_sources","arguments":"{\"limit\":"}"#,
+            r#"[{"name":"list_sources","arguments":{}},{"name":"unknown","arguments":{}}]"#,
+            r#"[{"name":"list_sources","arguments":{}},42]"#,
+            r#"{"name":"list_sources","arguments":null}"#,
+            r#"{"function":{"name":"list_sources"}}"#,
+        ] {
+            assert!(
+                matches!(
+                    super::parse_text_tool_calls(text, &names),
+                    TextToolCalls::Malformed
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_json_and_embedded_examples_are_preserved() {
+        let names = vec!["list_sources".into()];
+        for text in [
+            r#"{"name":"Jake","arguments":{}}"#,
+            r#"{"answer":{"name":"list_sources","arguments":{}}}"#,
+            r#"Example: {"name":"list_sources","arguments":{}}"#,
+            r#"{"description":"a function with arguments", "answer":42}"#,
+            "[]",
+        ] {
+            assert!(
+                matches!(
+                    super::parse_text_tool_calls(text, &names),
+                    TextToolCalls::Prose
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn fenced_arrays_parse_every_call() {
+        let names = vec!["list_sources".into()];
+        let TextToolCalls::Calls(calls) = super::parse_text_tool_calls(
+            "```json\n[{\"name\":\"list_sources\",\"arguments\":{}},{\"name\":\"list_sources\",\"arguments\":\"{}\"}]\n```",
+            &names,
+        ) else {
+            panic!("expected calls")
+        };
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn identifiers_are_unique_across_rounds_and_incoming_collisions() {
+        let names = vec!["list_sources".into()];
+        let mut calls: Vec<_> = ["call_0", "call_0", "zone_call_1"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| {
+                text_tool_call(
+                    &serde_json::json!({"id":id,"name":"list_sources","arguments":{}}),
+                    index,
+                    &names,
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut identifiers = BTreeSet::new();
+        unique_identifiers(&mut calls, &mut identifiers);
+        assert_eq!(identifiers.len(), 3);
+        assert_eq!(calls[0].id, "call_0");
+        assert_eq!(calls[2].id, "zone_call_1");
+        let previous: BTreeSet<_> = calls.iter().map(|call| call.id.clone()).collect();
+        unique_identifiers(&mut calls, &mut identifiers);
+        assert_eq!(identifiers.len(), 6);
+        assert!(calls.iter().all(|call| !previous.contains(&call.id)));
+    }
+
+    #[test]
+    fn registered_shorthand_missing_arguments_is_malformed() {
+        assert!(matches!(
+            super::parse_text_tool_calls(r#"{"name":"list_sources"}"#, &["list_sources".into()]),
+            TextToolCalls::Malformed
+        ));
+    }
+
+    #[test]
+    fn generic_function_records_are_prose() {
+        let names = vec!["list_sources".into()];
+        for text in [
+            r#"{"type":"function","description":"a mathematical mapping"}"#,
+            r#"{"name":"list_sources","description":"a label for a mathematical mapping"}"#,
+            r#"{"type":"function","description":"a mathematical mapping""#,
+        ] {
+            assert!(
+                matches!(
+                    super::parse_text_tool_calls(text, &names),
+                    TextToolCalls::Prose
+                ),
+                "{text}"
+            );
+        }
     }
 
     #[test]
