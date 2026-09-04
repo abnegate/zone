@@ -22,31 +22,16 @@ export default function ZoneLogo({ size = 'md', showText = true }: ZoneLogoProps
       <svg
         width={iconSize}
         height={iconSize}
-        viewBox="0 0 100 100"
+        viewBox="0 0 64 64"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
-        className="shrink-0 text-foreground"
+        className="shrink-0 text-primary"
         aria-hidden="true"
       >
-        <circle
-          cx="50"
-          cy="50"
-          r="42"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          fill="none"
-          opacity="0.45"
+        <path
+          fill="currentColor"
+          d="M17 10H42L30.267 21H8V19C8 14.029 12.029 10 17 10ZM47 10C54 10 57 18 51 24L17 54C10 54 7 46 13 40L47 10ZM47 54H22L33.733 43H56V45C56 49.971 51.971 54 47 54Z"
         />
-        <circle
-          cx="50"
-          cy="50"
-          r="24"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          fill="none"
-          opacity="0.75"
-        />
-        <circle cx="50" cy="50" r="8" fill="currentColor" />
       </svg>
       {showText && (
         <span className={`${textSizeMap[size]} font-semibold tracking-tight text-foreground`}>

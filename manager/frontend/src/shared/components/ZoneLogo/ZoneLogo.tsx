@@ -29,8 +29,7 @@ export default function ZoneLogo({ size = 'md', showText = true, className = '' 
       >
         <path
           fill="currentColor"
-          fillRule="evenodd"
-          d="M32 4c15.464 0 28 12.536 28 28S47.464 60 32 60 4 47.464 4 32 16.536 4 32 4Zm-13 13h26v8L29 38h16v8H19v-8l16-13H19z"
+          d="M17 10H42L30.267 21H8V19C8 14.029 12.029 10 17 10ZM47 10C54 10 57 18 51 24L17 54C10 54 7 46 13 40L47 10ZM47 54H22L33.733 43H56V45C56 49.971 51.971 54 47 54Z"
         />
       </svg>
       {showText && <span className="zone-logo__text">Zone</span>}
