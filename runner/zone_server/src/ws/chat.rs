@@ -1116,6 +1116,21 @@ async fn prepare_message(
     );
     let image_request = classifier.is_image_request(content, metadata).await;
 
+    if !image_request
+        && crate::services::model::Model::completion(&state.config().ollama_host, &chat.model_name)
+            .await
+            == Some(false)
+    {
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: crate::services::model::UNSUPPORTED.to_string(),
+            },
+        )
+        .await;
+        return Ok(None);
+    }
+
     Ok(Some(if image_request {
         Routing::Image(image_config)
     } else {

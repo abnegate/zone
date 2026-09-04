@@ -143,7 +143,7 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
             if response.status().is_success() {
                 match response.json::<OllamaTagsResponse>().await {
                     Ok(tags) => {
-                        let models: Vec<ModelResponse> = tags
+                        let mut models: Vec<ModelResponse> = tags
                             .models
                             .into_iter()
                             .map(|m| ModelResponse {
@@ -162,6 +162,12 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
                             })
                             .collect();
 
+                        futures::future::join_all(models.iter_mut().map(|model| async {
+                            model.completion =
+                                crate::services::model::Model::completion(ollama_host, &model.name)
+                                    .await;
+                        }))
+                        .await;
                         Json(models).into_response()
                     }
                     Err(e) => (

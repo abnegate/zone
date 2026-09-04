@@ -1,4 +1,5 @@
 export interface InstalledModel {
+  completion?: boolean;
   name: string;
   size: number;
   modified_at: string;

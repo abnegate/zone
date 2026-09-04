@@ -1747,3 +1747,90 @@ async fn test_image_cancel_during_user_insert_preserves_acknowledgement_parity()
     );
     assert!(comfy.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_embedding_models_are_rejected_for_new_and_existing_chats() {
+    let provider = MockServer::start().await;
+    let mut config = test_config();
+    config.ollama_host = provider.uri();
+    config.litellm_host = provider.uri();
+    config.comfyui.enabled = false;
+    let pool = create_test_pool().await;
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    // Missing metadata must allow a custom model, including before it reports capabilities.
+    let (token, chat_id) = seed_chat_with_model(&client, "custom/embedding:latest").await;
+    Mock::given(method("POST"))
+        .and(path("/api/show"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"capabilities": ["embedding"]})),
+        )
+        .mount(&provider)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": [{
+            "name": "custom/embedding:latest", "size": 1, "digest": "test", "modified_at": "2026-09-05T00:00:00Z"
+        }]})))
+        .mount(&provider).await;
+    let inventory = client.get_auth("/api/models", &token).await.json_value();
+    assert_eq!(inventory[0]["completion"], false);
+    let chat = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let response = client
+        .post_json_auth(
+            "/api/chats",
+            &json!({
+                "workspace_id": chat["chat"]["workspace_id"],
+                "title": "Embedding", "model_name": "custom/embedding:latest",
+            }),
+            &token,
+        )
+        .await;
+    response.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value()["error"],
+        zone_server::services::model::UNSUPPORTED
+    );
+    let address = spawn_server_with_pool(config, pool).await;
+    let (mut socket, _) = connect_async(format!("ws://{address}/ws/chats/{chat_id}"))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "send", "content": "Hello"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(10))
+            .await
+            .expect("capability error");
+        if frame["type"] == "error" {
+            assert_eq!(frame["message"], zone_server::services::model::UNSUPPORTED);
+            break;
+        }
+        assert_ne!(frame["type"], "message_start");
+    }
+    assert!(
+        provider
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/chat/completions")
+    );
+    socket.close(None).await.unwrap();
+}

@@ -286,6 +286,16 @@ pub async fn create(
         return e.into_response();
     }
 
+    if crate::services::model::Model::completion(&state.config().ollama_host, &req.model_name).await
+        == Some(false)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(crate::services::model::UNSUPPORTED)),
+        )
+            .into_response();
+    }
+
     match chats::create_chat_with_title(
         state.db(),
         Some(req.workspace_id),

@@ -26,6 +26,9 @@ impl IntoResponse for ErrorResponse {
 #[derive(Debug, Serialize, Clone, PartialEq, Default)]
 pub struct ModelResponse {
     pub name: String,
+    /// Known completion support; absent when engine metadata is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

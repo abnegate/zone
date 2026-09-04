@@ -63,7 +63,8 @@ mock.module('../../models', () => ({
   useModels: () => ({
     models: [
       { name: 'llama2', size: 1, modified_at: '' },
-      { name: 'mistral', size: 1, modified_at: '' },
+      { name: 'mistral', size: 1, modified_at: '', completion: true },
+      { name: 'vectors', size: 1, modified_at: '', completion: false },
     ],
     loading: false,
     error: null,
@@ -634,6 +635,10 @@ describe('ChatsPage', () => {
 
       expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
       expect(screen.getByLabelText('Select Model')).toBeInTheDocument();
+      fireEvent.keyDown(screen.getByLabelText('Select Model'), { key: 'ArrowDown' });
+      expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: 'mistral' })).toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: 'vectors' })).not.toBeInTheDocument();
     });
 
     it('closes new chat modal on cancel', async () => {

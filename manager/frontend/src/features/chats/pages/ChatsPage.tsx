@@ -844,7 +844,10 @@ export default function ChatsPage() {
             value={newChatModel}
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setNewChatModel(e.target.value)}
             placeholder="Choose a model..."
-            options={models.map((model) => ({ value: model.name, label: model.name }))}
+            helpText="Embedding models are not available for chat."
+            options={models
+              .filter((model) => model.completion !== false)
+              .map((model) => ({ value: model.name, label: model.name }))}
           />
           <Checkbox
             label="Agent mode"
