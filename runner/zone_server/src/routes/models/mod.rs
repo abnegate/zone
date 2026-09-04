@@ -6,7 +6,8 @@ mod providers;
 mod types;
 
 pub use providers::{
-    DEFAULT_PAGE_SIZE, Gpt4AllProvider, MAX_PAGE_SIZE, ModelProvider, ProviderError, get_provider,
+    DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider, MAX_PAGE_SIZE, ModelProvider,
+    ProviderError, get_provider,
 };
 pub use types::{
     BrowseQuery, BrowseResponse, ErrorResponse, ListModelsQuery, ModelDetails, ModelResponse,
@@ -101,7 +102,14 @@ pub async fn list(
                 Err(e) => e.into_response(),
             }
         }
-        "huggingface" | "openrouter" => match get_provider(source) {
+        "huggingface" => {
+            let provider = HuggingFaceProvider::new(state.config().huggingface_models_url.clone());
+            match provider.search(query.to_browse_query(limit)).await {
+                Ok(response) => Json(response).into_response(),
+                Err(e) => e.into_response(),
+            }
+        }
+        "openrouter" => match get_provider(source) {
             Ok(provider) => match provider.search(query.to_browse_query(limit)).await {
                 Ok(response) => Json(response).into_response(),
                 Err(e) => e.into_response(),

@@ -6,6 +6,9 @@ use std::env;
 pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
     "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
 
+/// Upstream HuggingFace models API. Tests should override `Config::huggingface_models_url`.
+pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/models";
+
 /// Server configuration loaded from environment variables
 #[derive(Clone)]
 pub struct Config {
@@ -31,6 +34,8 @@ pub struct Config {
     pub ollama_host: String,
     /// GPT4All browse catalog. Override in tests so CI does not hit GitHub raw.
     pub gpt4all_models_url: String,
+    /// HuggingFace browse API. Override in tests so CI does not hit huggingface.co.
+    pub huggingface_models_url: String,
     /// Encryption key for source credentials (must be at least 32 characters)
     pub encryption_key: String,
     /// CORS allowed origins (comma-separated, default: *)
@@ -276,6 +281,8 @@ impl Config {
                 .unwrap_or_else(|_| "http://ollama:11434".to_string()),
             gpt4all_models_url: env::var("GPT4ALL_MODELS_URL")
                 .unwrap_or_else(|_| DEFAULT_GPT4ALL_MODELS_URL.to_string()),
+            huggingface_models_url: env::var("HUGGINGFACE_MODELS_URL")
+                .unwrap_or_else(|_| DEFAULT_HUGGINGFACE_MODELS_URL.to_string()),
             encryption_key,
             cors_origins,
             cors_allow_credentials,
@@ -301,6 +308,7 @@ impl std::fmt::Debug for Config {
             .field("litellm_key", &"[REDACTED]")
             .field("ollama_host", &self.ollama_host)
             .field("gpt4all_models_url", &self.gpt4all_models_url)
+            .field("huggingface_models_url", &self.huggingface_models_url)
             .field("encryption_key", &"[REDACTED]")
             .field("cors_origins", &self.cors_origins)
             .field("cors_allow_credentials", &self.cors_allow_credentials)
@@ -341,6 +349,7 @@ mod tests {
             litellm_key: "test-key".to_string(),
             ollama_host: "http://localhost:11434".to_string(),
             gpt4all_models_url: DEFAULT_GPT4ALL_MODELS_URL.to_string(),
+            huggingface_models_url: DEFAULT_HUGGINGFACE_MODELS_URL.to_string(),
             encryption_key: "12345678901234567890123456789012".to_string(),
             cors_origins: vec!["*".to_string()],
             cors_allow_credentials: false,

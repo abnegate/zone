@@ -7,7 +7,7 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use std::time::Duration;
 
-use crate::config::DEFAULT_GPT4ALL_MODELS_URL;
+use crate::config::{DEFAULT_GPT4ALL_MODELS_URL, DEFAULT_HUGGINGFACE_MODELS_URL};
 
 use super::types::{
     BrowseQuery, BrowseResponse, ErrorResponse, ModelDetails, ModelResponse, ModelSize,
@@ -106,7 +106,7 @@ pub trait ModelProvider: Send + Sync {
 pub fn get_provider(name: &str) -> Result<Box<dyn ModelProvider>, ProviderError> {
     match name {
         "ollama" => Ok(Box::new(OllamaLibraryProvider)),
-        "huggingface" => Ok(Box::new(HuggingFaceProvider)),
+        "huggingface" => Ok(Box::new(HuggingFaceProvider::default())),
         "gpt4all" => Ok(Box::new(Gpt4AllProvider::default())),
         "openrouter" => Ok(Box::new(OpenRouterProvider)),
         _ => Err(ProviderError::Unavailable(format!(
@@ -515,7 +515,23 @@ fn get_popular_ollama_models() -> Vec<ModelResponse> {
 // HuggingFace Provider
 // =============================================================================
 
-pub struct HuggingFaceProvider;
+pub struct HuggingFaceProvider {
+    catalog_url: String,
+}
+
+impl Default for HuggingFaceProvider {
+    fn default() -> Self {
+        Self::new(DEFAULT_HUGGINGFACE_MODELS_URL)
+    }
+}
+
+impl HuggingFaceProvider {
+    pub fn new(catalog_url: impl Into<String>) -> Self {
+        Self {
+            catalog_url: catalog_url.into(),
+        }
+    }
+}
 
 #[async_trait]
 impl ModelProvider for HuggingFaceProvider {
@@ -526,7 +542,7 @@ impl ModelProvider for HuggingFaceProvider {
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
         if !huggingface_uses_local_window(&opts) {
             let (models, next_cursor) =
-                fetch_huggingface_page(&opts, opts.cursor, opts.limit).await?;
+                fetch_huggingface_page(&self.catalog_url, &opts, opts.cursor, opts.limit).await?;
             return Ok(BrowseResponse {
                 models: refine_models(models, &opts),
                 next_cursor,
@@ -544,8 +560,13 @@ impl ModelProvider for HuggingFaceProvider {
         let mut pages = 0;
 
         loop {
-            let (page, next) =
-                fetch_huggingface_page(&opts, hf_cursor.as_deref(), MAX_PAGE_SIZE).await?;
+            let (page, next) = fetch_huggingface_page(
+                &self.catalog_url,
+                &opts,
+                hf_cursor.as_deref(),
+                MAX_PAGE_SIZE,
+            )
+            .await?;
             pages += 1;
             accumulated.extend(page);
             hf_cursor = next;
@@ -626,15 +647,14 @@ fn huggingface_uses_local_window(opts: &BrowseQuery<'_>) -> bool {
 }
 
 async fn fetch_huggingface_page(
+    catalog_url: &str,
     opts: &BrowseQuery<'_>,
     cursor: Option<&str>,
     limit: usize,
 ) -> Result<(Vec<ModelResponse>, Option<String>), ProviderError> {
     let (sort_field, direction) = huggingface_sort_params(opts.sort);
-    let mut url = format!(
-        "https://huggingface.co/api/models?filter=gguf&sort={}&direction={}&limit={}",
-        sort_field, direction, limit
-    );
+    let mut url =
+        format!("{catalog_url}?filter=gguf&sort={sort_field}&direction={direction}&limit={limit}");
     for field in [
         "cardData",
         "gguf",
