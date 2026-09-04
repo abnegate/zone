@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
+use tool_runner::Proxy;
 
 use super::{Tool, ToolContext, ToolError, ToolResult};
 
@@ -134,6 +135,7 @@ impl Tool for RunCommandTool {
         for (key, value) in &context.env {
             cmd.env(key, value);
         }
+        Proxy::from_env().apply(&mut cmd);
 
         // Execute with timeout
         let timeout_duration =
@@ -302,6 +304,7 @@ impl Tool for RunShellTool {
         for (key, value) in &context.env {
             cmd.env(key, value);
         }
+        Proxy::from_env().apply(&mut cmd);
 
         let output = match timeout(limit, cmd.output()).await {
             Ok(Ok(output)) => output,
@@ -352,6 +355,70 @@ mod tests {
             max_file_size: 1024 * 1024,
             command_timeout: 30,
             unrestricted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_overrides_command_and_shell_environment() {
+        const NAME: &str = "tools::command::tests::proxy_overrides_command_and_shell_environment";
+        if std::env::var("ZONE_PROXY_TEST_CHILD").as_deref() != Ok(NAME) {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("ZONE_PROXY_TEST_CHILD", NAME)
+                .env("TOOL_RUNNER_PROXY_URL", "http://127.0.0.1:28888")
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let mut context = create_test_context();
+        context.env = HashMap::from([
+            ("HTTPS_PROXY".to_string(), "http://wrong:8888".to_string()),
+            ("http_proxy".to_string(), "http://wrong:8888".to_string()),
+            ("NO_PROXY".to_string(), "*".to_string()),
+            ("no_proxy".to_string(), "*".to_string()),
+            ("TOOL_RUNNER_PROXY_URL".to_string(), "".to_string()),
+        ]);
+        let command = RunCommandTool
+            .execute(json!({"command": "env"}), &context)
+            .await
+            .unwrap();
+        let shell = RunShellTool
+            .execute(json!({"command": "env"}), &context)
+            .await
+            .unwrap();
+        for result in [command, shell] {
+            assert!(result.success, "{result:?}");
+            let output = result.output.unwrap();
+            for key in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ] {
+                assert!(
+                    output
+                        .lines()
+                        .any(|line| line == format!("{key}=http://127.0.0.1:28888")),
+                    "{output}"
+                );
+            }
+            assert!(
+                !output
+                    .lines()
+                    .any(|line| line == "NO_PROXY=*" || line == "no_proxy=*")
+            );
+            assert!(output.contains("NO_PROXY=localhost,127.0.0.1,::1"));
         }
     }
 

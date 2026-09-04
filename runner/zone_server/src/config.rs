@@ -120,7 +120,7 @@ impl ComfyUiConfig {
 /// the hostname is `gluetun`, not `searxng`.
 pub const DEFAULT_SEARXNG_QUERY_URL: &str = "http://gluetun:8080/search?q=<query>&format=json";
 
-/// Chat / Open WebUI web search settings loaded from `SEARCH_*` env vars.
+/// Zone chat web search settings loaded from `SEARCH_*` env vars.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebSearchConfig {
     /// Master switch. When false, chat never calls SearXNG.
@@ -147,7 +147,7 @@ impl Default for WebSearchConfig {
 
 impl WebSearchConfig {
     /// Load from `SEARCH_*` environment variables. Missing values use defaults
-    /// that match Open WebUI / docker-compose (`SEARCH_ENABLE_WEB_SEARCH=true`
+    /// that match docker-compose (`SEARCH_ENABLE_WEB_SEARCH=true`
     /// and the Gluetun SearXNG URL).
     pub fn from_env() -> Self {
         let result_count = env::var("SEARCH_RESULT_COUNT")

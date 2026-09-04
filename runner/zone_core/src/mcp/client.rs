@@ -11,6 +11,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tool_runner::Proxy;
 
 use super::config::{McpConfig, McpServerSpec};
 use super::tool::{McpTool, unique_qualified_tool_name};
@@ -144,12 +145,14 @@ impl McpSession {
         let mut command = Command::new(&spec.command);
         command.kill_on_drop(true);
         // Inherit the runner environment (PATH, HOME, credentials) and overlay
-        // spec.env. Configured MCP servers are trusted local processes.
+        // spec.env, then apply the process-level proxy policy.
+        // Configured MCP servers are trusted local processes.
         let transport = TokioChildProcess::new(command.configure(|cmd| {
             cmd.args(&spec.args);
             for (key, value) in &spec.env {
                 cmd.env(key, value);
             }
+            Proxy::from_env().apply(cmd);
             if let Some(cwd) = &spec.cwd {
                 cmd.current_dir(cwd);
             }
@@ -232,6 +235,74 @@ mod tests {
     use serde::Deserialize;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn proxy_overrides_mcp_environment_before_handshake() {
+        const NAME: &str = "mcp::client::tests::proxy_overrides_mcp_environment_before_handshake";
+        if std::env::var("ZONE_PROXY_TEST_CHILD").as_deref() != Ok(NAME) {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("ZONE_PROXY_TEST_CHILD", NAME)
+                .env("TOOL_RUNNER_PROXY_URL", "http://127.0.0.1:28888")
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("environment");
+        let spec = McpServerSpec {
+            name: "environment".to_string(),
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "env > \"$1\"; exec cat > /dev/null".to_string(),
+                "sh".to_string(),
+                path.to_string_lossy().into_owned(),
+            ],
+            env: HashMap::from([
+                ("HTTPS_PROXY".to_string(), "http://wrong:8888".to_string()),
+                ("http_proxy".to_string(), "http://wrong:8888".to_string()),
+                ("NO_PROXY".to_string(), "*".to_string()),
+                ("no_proxy".to_string(), "*".to_string()),
+                ("TOOL_RUNNER_PROXY_URL".to_string(), "".to_string()),
+            ]),
+            cwd: None,
+            disabled: false,
+        };
+        let result = McpSession::connect_with_timeout(&spec, Duration::from_millis(500)).await;
+        assert!(matches!(result, Err(McpError::Handshake { .. })));
+        let output = std::fs::read_to_string(path).unwrap();
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert!(
+                output
+                    .lines()
+                    .any(|line| line == format!("{key}=http://127.0.0.1:28888")),
+                "{output}"
+            );
+        }
+        assert!(
+            !output
+                .lines()
+                .any(|line| line == "NO_PROXY=*" || line == "no_proxy=*")
+        );
+        assert!(output.contains("NO_PROXY=localhost,127.0.0.1,::1"));
+    }
 
     #[derive(Clone, Default)]
     struct Echo;

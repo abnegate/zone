@@ -2,6 +2,7 @@
 
 use crate::error::ExecutorError;
 use crate::protocol::{InboundMessage, LogLevel, OutboundMessage};
+use crate::proxy::Proxy;
 use base64::prelude::*;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -173,6 +174,8 @@ impl CommandExecutor {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+
+        Proxy::from_env().apply(&mut cmd);
 
         // Set up process group (Unix-specific)
         // Setting process_group(0) creates a new process group with the child as leader
@@ -445,9 +448,91 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    // =========================================================================
     // CommandExecutor Tests
-    // =========================================================================
+
+    #[tokio::test]
+    async fn proxy_overrides_request_environment() {
+        const NAME: &str = "executor::command::tests::proxy_overrides_request_environment";
+        if std::env::var("ZONE_PROXY_TEST_CHILD").as_deref() != Ok(NAME) {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("ZONE_PROXY_TEST_CHILD", NAME)
+                .env("TOOL_RUNNER_PROXY_URL", "http://127.0.0.1:28888")
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let request = InboundMessage::RunStart {
+            job_id: "proxy-environment".to_string(),
+            workspace: std::env::temp_dir(),
+            command: "env".to_string(),
+            args: vec![],
+            env: HashMap::from([
+                ("HTTPS_PROXY".to_string(), "http://wrong:8888".to_string()),
+                ("http_proxy".to_string(), "http://wrong:8888".to_string()),
+                ("NO_PROXY".to_string(), "*".to_string()),
+                ("no_proxy".to_string(), "*".to_string()),
+                ("TOOL_RUNNER_PROXY_URL".to_string(), "".to_string()),
+            ]),
+            working_dir: None,
+            timeout_ms: Some(5000),
+            max_output_bytes: None,
+        };
+        let (sender, mut receiver) = mpsc::channel(100);
+        CommandExecutor::new()
+            .spawn(&request, sender)
+            .await
+            .unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut output = String::new();
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    OutboundMessage::RunStdout { data, .. } => output.push_str(
+                        &String::from_utf8(BASE64_STANDARD.decode(data).unwrap()).unwrap(),
+                    ),
+                    OutboundMessage::RunExit { exit_code, .. } => {
+                        assert_eq!(exit_code, Some(0));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            output
+        })
+        .await
+        .unwrap();
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert!(
+                output
+                    .lines()
+                    .any(|line| line == format!("{key}=http://127.0.0.1:28888")),
+                "{output}"
+            );
+        }
+        assert!(
+            !output
+                .lines()
+                .any(|line| line == "NO_PROXY=*" || line == "no_proxy=*")
+        );
+        assert!(output.contains("NO_PROXY=localhost,127.0.0.1,::1"));
+    }
 
     #[test]
     fn test_executor_new() {
@@ -480,9 +565,7 @@ mod tests {
         assert_eq!(executor.config().buffer_size, 4096);
     }
 
-    // =========================================================================
     // JobHandle Tests
-    // =========================================================================
 
     #[tokio::test]
     async fn test_job_handle_cancel() {
@@ -532,9 +615,7 @@ mod tests {
         assert!(elapsed >= Duration::from_millis(50));
     }
 
-    // =========================================================================
     // StdinHandle Tests
-    // =========================================================================
 
     #[tokio::test]
     async fn test_stdin_handle_send() {
@@ -576,9 +657,7 @@ mod tests {
         assert!(rx.recv().await.is_none());
     }
 
-    // =========================================================================
     // OutputKind Tests
-    // =========================================================================
 
     #[test]
     fn test_output_kind_clone_copy() {
@@ -600,9 +679,7 @@ mod tests {
         assert!(debug_str.contains("Stdout"));
     }
 
-    // =========================================================================
     // spawn() Tests
-    // =========================================================================
 
     #[tokio::test]
     async fn test_spawn_echo() {
