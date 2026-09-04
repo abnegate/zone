@@ -31,6 +31,14 @@ Prerequisites: a cluster with the CloudNativePG operator, a default StorageClass
 ```bash
 kubectl create namespace zone
 
+# Generate 32-character values when unset, then fail fast if either value has
+# the wrong length.
+: "${JWT_SECRET:=$(openssl rand -hex 16)}"
+: "${ENCRYPTION_KEY:=$(openssl rand -hex 16)}"
+export JWT_SECRET ENCRYPTION_KEY
+[ "${#JWT_SECRET}" -eq 32 ] || { echo "JWT_SECRET must be exactly 32 characters" >&2; exit 1; }
+[ "${#ENCRYPTION_KEY}" -eq 32 ] || { echo "ENCRYPTION_KEY must be exactly 32 characters" >&2; exit 1; }
+
 # Application + CNPG owner credentials (username/password are required by CNPG)
 kubectl -n zone create secret generic zone-secrets \
   --from-literal=username=zone \
@@ -56,7 +64,7 @@ helm upgrade --install zone-apps ./helm/zone-apps --namespace zone \
   -f helm/zone-apps/examples/development.yaml
 ```
 
-`JWT_SECRET` and `ENCRYPTION_KEY` must be at least 32 characters. zone-server runs sqlx migrations on startup; do not enable `migration.enabled`.
+`JWT_SECRET` and `ENCRYPTION_KEY` must each be exactly 32 characters. zone-server runs sqlx migrations on startup; do not enable `migration.enabled`.
 
 ## Access
 

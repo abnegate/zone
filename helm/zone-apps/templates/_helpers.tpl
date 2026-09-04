@@ -122,7 +122,9 @@ Common environment variables for all containers
 Secret name used by zone-server
 */}}
 {{- define "zone-apps.secretsName" -}}
-{{- if and (not .Values.secrets.create) .Values.secrets.existingSecret }}
+{{- if and .Values.server.enabled (not .Values.secrets.create) (not .Values.secrets.existingSecret) }}
+{{- fail "secrets.existingSecret is required when server.enabled=true and secrets.create=false" }}
+{{- else if and (not .Values.secrets.create) .Values.secrets.existingSecret }}
 {{- .Values.secrets.existingSecret }}
 {{- else }}
 {{- printf "%s-secrets" (include "zone-apps.fullname" .) }}

@@ -18,6 +18,10 @@ only = cfg.get("only", [])
 def should_run(name):
     if not only:
         return True
+    if name == "infra" and any(selection in ["ai", "apps"] for selection in only):
+        return True
+    if name == "ai" and "apps" in only:
+        return True
     return name in only or any(name.startswith(prefix) for prefix in only)
 
 namespace_create('zone')

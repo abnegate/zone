@@ -1,4 +1,5 @@
 #!/bin/bash
+# Usage: ./scripts/tilt-up.sh [Tilt args]; run `make kind-create` first.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +21,55 @@ kubectl config use-context kind-zone-dev
 
 SECRETS_FILE="$PROJECT_ROOT/k8s/secrets.yaml"
 
+has_cnpg_superuser_secret() {
+    awk '
+        function reset_document() {
+            kind = ""
+            name = ""
+            section = ""
+            username = 0
+            password = 0
+        }
+        function value(line) {
+            sub(/^[^:]+:[[:space:]]*/, "", line)
+            sub(/[[:space:]]+#.*$/, "", line)
+            gsub(/^[[:space:]"'\'' ]+|[[:space:]"'\'' ]+$/, "", line)
+            return line
+        }
+        function finish_document() {
+            if (kind == "Secret" && name == "zone-postgres-superuser" && username && password) {
+                found = 1
+            }
+        }
+        BEGIN { reset_document() }
+        /^---[[:space:]]*$/ {
+            finish_document()
+            reset_document()
+            next
+        }
+        /^kind:/ { kind = value($0); next }
+        /^metadata:/ { section = "metadata"; next }
+        /^(stringData|data):/ { section = "data"; next }
+        /^[^[:space:]#]/ { section = "" }
+        section == "metadata" && /^[[:space:]]+name:/ { name = value($0); next }
+        section == "data" && /^[[:space:]]+username:/ { username = (value($0) != ""); next }
+        section == "data" && /^[[:space:]]+password:/ { password = (value($0) != ""); next }
+        END {
+            finish_document()
+            exit(found ? 0 : 1)
+        }
+    ' "$SECRETS_FILE"
+}
+
+GENERATE_SECRETS=false
 if [ ! -f "$SECRETS_FILE" ]; then
+    GENERATE_SECRETS=true
+elif ! has_cnpg_superuser_secret; then
+    echo -e "${YELLOW}Existing secrets file uses an outdated layout; migrating it with fresh development secrets...${NC}"
+    GENERATE_SECRETS=true
+fi
+
+if [ "$GENERATE_SECRETS" = true ]; then
     echo -e "${YELLOW}Generating development secrets...${NC}"
 
     POSTGRES_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)

@@ -20,14 +20,8 @@ commonEnv:
   OLLAMA_HOST: "http://ollama:11434"
 
 secrets:
-  create: true
-  existingSecret: ""
-  dbPassword: "REPLACE_WITH_SECURE_PASSWORD"
-  jwtSecret: "REPLACE_WITH_JWT_SECRET_AT_LEAST_32_CHARS"
-  encryptionKey: "REPLACE_WITH_ENCRYPTION_KEY_32_CHARS"
-  litellmMasterKey: "REPLACE_WITH_LITELLM_MASTER_KEY"
-  stripeSecretKey: "REPLACE_WITH_STRIPE_KEY"
-  smtpPassword: "REPLACE_WITH_SMTP_PASSWORD"
+  create: false
+  existingSecret: "zone-production-secrets"
 
 # Server configuration
 server:

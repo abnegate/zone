@@ -62,7 +62,15 @@ spec:
         - protocol: UDP
           port: 53
     # Allow database connections
-    {{- if not .Values.global.externalDatabase }}
+    {{- if .Values.global.externalDatabase }}
+    {{- $externalDatabaseCIDR := required "networkPolicy.externalDatabaseCIDR is required when networkPolicy.enabled=true and global.externalDatabase=true" .Values.networkPolicy.externalDatabaseCIDR }}
+    - to:
+        - ipBlock:
+            cidr: {{ $externalDatabaseCIDR | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.commonEnv.DB_PORT | int }}
+    {{- else }}
     - to:
         - podSelector:
             matchLabels:

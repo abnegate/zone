@@ -6,12 +6,8 @@ global:
   securityContexts: true
 
 secrets:
-  create: true
-  existingSecret: ""
-  dbPassword: "testpassword"
-  jwtSecret: "test-jwt-secret-at-least-32-characters"
-  encryptionKey: "test-encryption-key-32-characters"
-  litellmMasterKey: "test-litellm-master-key"
+  create: false
+  existingSecret: "zone-minimal-secrets"
 
 server:
   enabled: true

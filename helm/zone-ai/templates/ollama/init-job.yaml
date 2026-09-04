@@ -4,6 +4,9 @@ kind: Job
 metadata:
   name: ollama-init-{{ .Values.ollama.models | toJson | sha256sum | trunc 10 }}
   namespace: {{ include "zone-ai.namespace" . }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
   labels:
     {{- include "zone-ai.labels" . | nindent 4 }}
     app.kubernetes.io/component: initialization
@@ -46,8 +49,10 @@ spec:
               echo "Ollama is ready. Pulling models..."
 
               {{- range .Values.ollama.models }}
-              echo "Pulling {{ . }}..."
-              curl -f --retry 5 --retry-delay 5 -X POST http://ollama:11434/api/pull -d {{ dict "name" . | toJson | squote }}
+              echo "Pulling configured model..."
+              curl -f --retry 5 --retry-delay 5 -X POST http://ollama:11434/api/pull --data-binary @- <<'JSON'
+              {{ dict "name" . | toJson }}
+              JSON
               {{- end }}
 
               echo "Model initialization complete!"

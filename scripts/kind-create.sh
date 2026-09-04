@@ -10,16 +10,37 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 port_in_use() {
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    local output status
+
+    output="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>&1)" && return 0
+    status=$?
+    if [ "$status" -eq 1 ] && [ -z "$output" ]; then
+        return 1
+    fi
+
+    echo "Failed to probe TCP port $1 with lsof: ${output:-exit status $status}" >&2
+    return 2
 }
 
 pick_port() {
-    local port
+    local port status
+
+    if ! command -v lsof >/dev/null 2>&1; then
+        echo "lsof is required to select available Kind host ports" >&2
+        return 2
+    fi
+
     for port in "$@"; do
-        if ! port_in_use "$port"; then
+        if port_in_use "$port"; then
+            continue
+        else
+            status=$?
+        fi
+        if [ "$status" -eq 1 ]; then
             echo "$port"
             return 0
         fi
+        return "$status"
     done
     echo "$1"
 }
