@@ -45,7 +45,7 @@ async fn setup_test_data(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid), sqlx::Erro
     )
     .bind(source_id)
     .bind(workspace_id)
-    .bind("Test Source")
+    .bind(format!("Test Source {}", source_id.as_simple()))
     .bind("text")
     .bind(serde_json::json!({}))
     .execute(pool)

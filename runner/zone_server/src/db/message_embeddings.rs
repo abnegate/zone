@@ -119,7 +119,7 @@ pub async fn search_messages(
                 SELECT
                     m.id as message_id,
                     m.chat_id,
-                    (1 - (me.vector <=> $1::vector))::FLOAT as similarity,
+                    (1 - (me.vector <=> $1::vector))::REAL as similarity,
                     m.role,
                     m.content,
                     m.created_at
@@ -148,7 +148,7 @@ pub async fn search_messages(
                 SELECT
                     m.id as message_id,
                     m.chat_id,
-                    (1 - (me.vector <=> $1::vector))::FLOAT as similarity,
+                    (1 - (me.vector <=> $1::vector))::REAL as similarity,
                     m.role,
                     m.content,
                     m.created_at
