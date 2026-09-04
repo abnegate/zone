@@ -128,6 +128,55 @@ async fn send_server(sender: &SharedSender, message: ServerMessage) -> bool {
         .is_ok()
 }
 
+/// A request owns its cancellation registration from the moment the socket
+/// accepts it, including time spent waiting or preparing context.
+struct Generation {
+    chat_id: Uuid,
+    message_id: Uuid,
+    cancel: broadcast::Receiver<()>,
+}
+
+impl Generation {
+    fn new(chat_id: Uuid) -> Self {
+        let message_id = Uuid::new_v4();
+        let (sender, cancel) = broadcast::channel(1);
+        CHAT_CANCELLATIONS.insert((chat_id, message_id), sender);
+        Self {
+            chat_id,
+            message_id,
+            cancel,
+        }
+    }
+
+    async fn cancelled(&self, sender: &SharedSender) {
+        let _ = send_server(
+            sender,
+            ServerMessage::Cancelled {
+                message_id: Some(self.message_id),
+            },
+        )
+        .await;
+    }
+}
+
+impl Drop for Generation {
+    fn drop(&mut self) {
+        CHAT_CANCELLATIONS.remove(&(self.chat_id, self.message_id));
+    }
+}
+
+struct ChatPreparation {
+    model: String,
+    agentic: bool,
+    tools: agent::ChatTools,
+    messages: Vec<LlmMessage>,
+}
+
+enum Preparation {
+    Image(crate::config::ComfyUiConfig),
+    Chat(ChatPreparation),
+}
+
 /// Client message types
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -562,24 +611,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 let task_state = state.clone();
                                 let task_sender = sender.clone();
                                 let task_content = content;
+                                let generation = Generation::new(chat_id);
                                 tokio::spawn(async move {
-                                if let Err(e) = handle_send_message(
-                                    &task_state,
-                                    &task_sender,
-                                    chat_id,
-                                    workspace_id,
-                                    &task_content,
-                                    metadata,
-                                ).await {
-                                    tracing::error!("Error handling send message: {}", e);
-                                    let _ = send_server(
+                                    handle_send_message(
+                                        &task_state,
                                         &task_sender,
-                                        ServerMessage::Error {
-                                            message: "Failed to process message".to_string(),
-                                        },
-                                    )
-                                    .await;
-                                }
+                                        chat_id,
+                                        workspace_id,
+                                        &task_content,
+                                        metadata,
+                                        generation,
+                                    ).await;
                                 });
                             }
                             Ok(ClientMessage::Cancel) => {
@@ -597,10 +639,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     }
                                 }
 
-                                let cancel_msg = ServerMessage::Cancelled {
-                                    message_id: None,
-                                };
-                                let _ = send_server(&sender, cancel_msg).await;
                             }
                             Ok(ClientMessage::Auth { .. }) => {
                                 // Ignore duplicate auth messages
@@ -698,6 +736,7 @@ async fn handle_image_generation(
     workspace_id: Uuid,
     prompt: &str,
     image_config: crate::config::ComfyUiConfig,
+    generation: &mut Generation,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::{
         artifacts::ArtifactStore,
@@ -705,15 +744,11 @@ async fn handle_image_generation(
     };
 
     const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
-    let assistant_message_id = Uuid::new_v4();
-    let cancel_key = (chat_id, assistant_message_id);
-    let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
-    CHAT_CANCELLATIONS.insert(cancel_key, cancel_tx);
+    let assistant_message_id = generation.message_id;
 
     let client = match ComfyUiClient::new(image_config.clone()) {
         Ok(client) => client,
         Err(error) => {
-            CHAT_CANCELLATIONS.remove(&cancel_key);
             let _ = send_server(
                 sender,
                 ServerMessage::Error {
@@ -724,16 +759,23 @@ async fn handle_image_generation(
             return Ok(());
         }
     };
+    let _ = send_server(
+        sender,
+        ServerMessage::Status {
+            message: "Preparing image generation...".to_string(),
+        },
+    )
+    .await;
     let _generation_permit = tokio::select! {
-        permit = IMAGE_GENERATIONS.acquire() => permit.expect("image semaphore is never closed"),
-        _ = cancel_rx.recv() => {
-            CHAT_CANCELLATIONS.remove(&cancel_key);
+        biased;
+        _ = generation.cancel.recv() => {
             let _ = send_server(
                 sender,
                 ServerMessage::Cancelled { message_id: Some(assistant_message_id) },
             ).await;
             return Ok(());
         }
+        permit = IMAGE_GENERATIONS.acquire() => permit.expect("image semaphore is never closed"),
     };
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let progress_sender = sender.clone();
@@ -745,9 +787,15 @@ async fn handle_image_generation(
         }
     });
 
-    let result = client.generate(prompt, cancel_rx, progress_tx).await;
-    CHAT_CANCELLATIONS.remove(&cancel_key);
+    let result = client
+        .generate(prompt, &mut generation.cancel, progress_tx)
+        .await;
     progress_task.abort();
+    let _ = progress_task.await;
+    if result.is_ok() && generation.cancel.try_recv().is_ok() {
+        generation.cancelled(sender).await;
+        return Ok(());
+    }
 
     let images = match result {
         Ok(images) => images,
@@ -762,13 +810,14 @@ async fn handle_image_generation(
             return Ok(());
         }
         Err(error) => {
-            let _ = send_server(
-                sender,
-                ServerMessage::Error {
-                    message: format!("Image generation failed: {error}"),
-                },
-            )
-            .await;
+            let message = match &error {
+                ComfyUiError::Http(error) if error.is_connect() =>
+                    "Image generation failed: cannot reach ComfyUI. Start the image service and try again.".to_string(),
+                ComfyUiError::Http(error) if error.is_timeout() =>
+                    "Image generation failed: ComfyUI did not respond in time. Check the image service and try again.".to_string(),
+                _ => format!("Image generation failed: {error}"),
+            };
+            let _ = send_server(sender, ServerMessage::Error { message }).await;
             return Ok(());
         }
     };
@@ -934,13 +983,68 @@ async fn handle_send_message(
     workspace_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    mut request: Generation,
+) {
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
         .clone();
-    let _chat_generation_permit = generation.acquire().await?;
+    let _permit = tokio::select! {
+        biased;
+        _ = request.cancel.recv() => {
+            request.cancelled(sender).await;
+            return;
+        }
+        permit = generation.acquire() => permit.expect("chat semaphore is never closed"),
+    };
 
+    let preparation = tokio::select! {
+        biased;
+        _ = request.cancel.recv() => {
+            request.cancelled(sender).await;
+            return;
+        }
+        result = prepare_message(state, sender, chat_id, workspace_id, content, metadata) => result,
+    };
+    let result = match preparation {
+        Ok(Some(Preparation::Image(config))) => {
+            handle_image_generation(
+                state,
+                sender,
+                chat_id,
+                workspace_id,
+                content,
+                config,
+                &mut request,
+            )
+            .await
+        }
+        Ok(Some(Preparation::Chat(chat))) => {
+            handle_chat_generation(state, sender, chat_id, chat, &mut request).await
+        }
+        Ok(None) => return,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        tracing::error!("Error handling send message: {error}");
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Failed to process message".to_string(),
+            },
+        )
+        .await;
+    }
+}
+
+async fn prepare_message(
+    state: &AppState,
+    sender: &SharedSender,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) -> Result<Option<Preparation>, Box<dyn std::error::Error + Send + Sync>> {
     // Read the chat fresh rather than trusting the row captured at connect
     // time, so switching model or toggling agent mode takes effect on the next
     // message instead of the next reconnect.
@@ -951,7 +1055,7 @@ async fn handle_send_message(
                 message: "Chat not found".to_string(),
             };
             let _ = send_server(sender, error_msg).await;
-            return Ok(());
+            return Ok(None);
         }
     };
     let model_name = chat.model_name.as_str();
@@ -984,7 +1088,7 @@ async fn handle_send_message(
             message: "Invalid model configuration".to_string(),
         };
         let _ = send_server(sender, error_msg).await;
-        return Ok(()); // Not a fatal error, just reject this message
+        return Ok(None); // Not a fatal error, just reject this message
     }
 
     let web_search_requested = state
@@ -1011,15 +1115,7 @@ async fn handle_send_message(
     spawn_message_embedding_task(state.clone(), user_message.id, chat_id, content.to_string());
 
     if image_request {
-        return handle_image_generation(
-            state,
-            sender,
-            chat_id,
-            workspace_id,
-            content,
-            image_config,
-        )
-        .await;
+        return Ok(Some(Preparation::Image(image_config)));
     }
 
     // Build context for AI
@@ -1157,6 +1253,28 @@ async fn handle_send_message(
         }
     }
 
+    Ok(Some(Preparation::Chat(ChatPreparation {
+        model: model_name.to_string(),
+        agentic,
+        tools,
+        messages: context_messages,
+    })))
+}
+
+async fn handle_chat_generation(
+    state: &AppState,
+    sender: &SharedSender,
+    chat_id: Uuid,
+    preparation: ChatPreparation,
+    generation: &mut Generation,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ChatPreparation {
+        model,
+        agentic,
+        tools,
+        messages: context_messages,
+    } = preparation;
+    let model_name = model.as_str();
     // Create LLM client
     let llm_config = LlmConfig {
         base_url: state.config().litellm_host.clone(),
@@ -1167,13 +1285,11 @@ async fn handle_send_message(
     };
     let llm_client = LlmClient::new(llm_config);
 
-    // CRITICAL-4: Generate assistant message ID early and use it consistently
-    let assistant_message_id = Uuid::new_v4();
-
-    // CRITICAL-2: Create cancellation channel with composite key (chat_id, message_id)
-    let cancel_key = (chat_id, assistant_message_id);
-    let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
-    CHAT_CANCELLATIONS.insert(cancel_key, cancel_tx);
+    let assistant_message_id = generation.message_id;
+    if generation.cancel.try_recv().is_ok() {
+        generation.cancelled(sender).await;
+        return Ok(());
+    }
 
     // Send message start with the ID we'll use throughout
     let start_msg = ServerMessage::MessageStart {
@@ -1192,10 +1308,15 @@ async fn handle_send_message(
             messages: context_messages,
         }))
     } else {
-        match llm_client
-            .chat_stream_with_model(model_name, context_messages, None)
-            .await
-        {
+        let stream = tokio::select! {
+            biased;
+            _ = generation.cancel.recv() => {
+                generation.cancelled(sender).await;
+                return Ok(());
+            }
+            stream = llm_client.chat_stream_with_model(model_name, context_messages, None) => stream,
+        };
+        match stream {
             Ok(stream) => Box::pin(plain_events(stream)),
             Err(e) => {
                 tracing::error!("Failed to create LLM stream: {}", e);
@@ -1203,8 +1324,7 @@ async fn handle_send_message(
                     message: "Failed to generate response".to_string(),
                 };
                 let _ = send_server(sender, error_msg).await;
-                CHAT_CANCELLATIONS.remove(&cancel_key);
-                return Err(Box::new(e));
+                return Ok(());
             }
         }
     };
@@ -1214,7 +1334,7 @@ async fn handle_send_message(
     let mut chunk_index = 0;
     let mut cancelled = false;
     let mut client_gone = false;
-    let mut stream_failed = false;
+    let mut failure = None;
     let mut response_truncated = false;
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
 
@@ -1224,8 +1344,9 @@ async fn handle_send_message(
 
     loop {
         tokio::select! {
-            // Check for cancellation
-            _ = cancel_rx.recv() => {
+            biased;
+            // Check for cancellation before polling another event.
+            _ = generation.cancel.recv() => {
                 cancelled = true;
                 tracing::debug!("Stream cancelled for message {}", assistant_message_id);
                 break;
@@ -1234,10 +1355,7 @@ async fn handle_send_message(
             // MAJOR-4: Timeout for entire stream
             _ = tokio::time::sleep_until(stream_deadline) => {
                 tracing::warn!("LLM stream timeout for chat {}, message {}", chat_id, assistant_message_id);
-                let error_msg = ServerMessage::Error {
-                    message: "Response generation timed out".to_string(),
-                };
-                let _ = send_server(sender, error_msg).await;
+                failure = Some("Response generation timed out".to_string());
                 break;
             }
 
@@ -1344,11 +1462,7 @@ async fn handle_send_message(
                         }
                     }
                     Some(AgentEvent::Failed(message)) => {
-                        if !client_gone {
-                            let error_msg = ServerMessage::Error { message };
-                            let _ = send_server(sender, error_msg).await;
-                        }
-                        stream_failed = true;
+                        failure = Some(message);
                         break;
                     }
                     None => {
@@ -1360,22 +1474,26 @@ async fn handle_send_message(
         }
     }
 
-    // Clean up cancellation channel
-    CHAT_CANCELLATIONS.remove(&cancel_key);
+    // Drop the producer before acknowledging cancellation so it cannot emit
+    // more events after the terminal frame.
+    drop(events);
 
     // Nothing generated yet: there is no reply worth keeping. A turn that ran
     // tools or produced an image before it broke is worth keeping even with no
     // prose, because both show the reader what was attempted.
-    if (cancelled || stream_failed)
+    if (cancelled || failure.is_some())
         && full_content.is_empty()
         && tool_calls.is_empty()
         && generated_images.is_empty()
     {
         if !client_gone {
-            let cancel_msg = ServerMessage::Cancelled {
-                message_id: Some(assistant_message_id),
+            let terminal = match failure {
+                Some(message) => ServerMessage::Error { message },
+                None => ServerMessage::Cancelled {
+                    message_id: Some(assistant_message_id),
+                },
             };
-            let _ = send_server(sender, cancel_msg).await;
+            let _ = send_server(sender, terminal).await;
         }
         return Ok(());
     }
@@ -1384,7 +1502,7 @@ async fn handle_send_message(
     // Note: We save even truncated responses so users see partial results
     if response_truncated {
         full_content.push_str("\n\n[Response truncated due to length limit]");
-    } else if stream_failed {
+    } else if failure.is_some() {
         full_content.push_str("\n\n[Response interrupted]");
     }
 
@@ -1423,6 +1541,8 @@ async fn handle_send_message(
                     ServerMessage::Cancelled {
                         message_id: Some(assistant_message_id),
                     }
+                } else if let Some(message) = failure {
+                    ServerMessage::Error { message }
                 } else {
                     ServerMessage::MessageEnd {
                         message_id: assistant_message_id,
@@ -1447,7 +1567,7 @@ async fn handle_send_message(
                 message: "Failed to save response".to_string(),
             };
             let _ = send_server(sender, error_msg).await;
-            return Err(Box::new(e));
+            return Ok(());
         }
     }
 

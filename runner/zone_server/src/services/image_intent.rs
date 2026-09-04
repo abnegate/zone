@@ -212,6 +212,7 @@ mod tests {
     fn classifier_rule_matrix() {
         for request in [
             "Generate an image of a red panda",
+            "Generate an image of the same rooster facing the other way",
             "please draw a picture of the moon",
             "Create a picture of our city",
             "Illustrate a quiet forest",

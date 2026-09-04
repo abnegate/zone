@@ -606,13 +606,18 @@ async fn test_image_failure_never_announces_empty_assistant_message() {
         .unwrap();
 
     let mut saw_start = false;
+    let mut saw_error = false;
     while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
         match frame["type"].as_str() {
             Some("message_start") => saw_start = true,
-            Some("error") => break,
+            Some("error") => {
+                saw_error = true;
+                break;
+            }
             _ => {}
         }
     }
+    assert!(saw_error, "a failed generation must report its error");
     assert!(
         !saw_start,
         "a failed generation must not create an empty bubble"
@@ -927,4 +932,528 @@ async fn test_protected_artifact_urls_are_not_forwarded_to_litellm() {
             "the exact protected URL must stay out of later-turn model context"
         );
     }
+}
+
+type ChatSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn image_socket(config: Config) -> (TestClient, String, String, ChatSocket) {
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat_with_model(&client, "llava:7b").await;
+    let response = client
+        .put_json_auth(
+            &format!("/api/chats/{chat_id}"),
+            &json!({"agent_enabled": true}),
+            &token,
+        )
+        .await;
+    assert!(response.status.is_success());
+    let addr = spawn_server_with_config(config).await;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/ws/chats/{chat_id}"))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"auth", "token":token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_frame(&mut socket, Duration::from_secs(5))
+            .await
+            .unwrap()["type"],
+        "init"
+    );
+    (client, token, chat_id, socket)
+}
+
+async fn image_error(socket: &mut ChatSocket) -> String {
+    loop {
+        let frame = next_frame(socket, Duration::from_secs(5))
+            .await
+            .expect("generation must finish with an error");
+        match frame["type"].as_str() {
+            Some("error") => return frame["message"].as_str().unwrap().to_string(),
+            Some("message_start" | "message_end" | "image") => {
+                panic!("failed image must not create a bubble: {frame}")
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_image_status_precedes_stalled_prompt_and_timeout_is_visible() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(3))
+                .set_body_json(json!({"prompt_id":"slow"})),
+        )
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.request_timeout_secs = 1;
+    config.litellm_host = "http://127.0.0.1:9".to_string();
+    let (_, _, _, mut socket) = image_socket(config).await;
+    socket.send(WsMessage::Text(json!({"type":"send", "content":"Generate an image of the same rooster facing the other way"}).to_string().into())).await.unwrap();
+    let mut status = false;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_millis(500)).await {
+        match frame["type"].as_str() {
+            Some("status") => {
+                status = true;
+                break;
+            }
+            Some("error" | "message_start" | "message_end") => {
+                panic!("progress must precede completion: {frame}")
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        status,
+        "image progress must be visible while POST /prompt is pending"
+    );
+    assert!(
+        image_error(&mut socket)
+            .await
+            .contains("Image generation failed")
+    );
+}
+
+#[tokio::test]
+async fn test_image_refused_connection_reports_error_without_empty_message() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = format!("http://{address}");
+    let (client, token, chat_id, mut socket) = image_socket(config).await;
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send", "content":"Generate an image of a rooster"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        image_error(&mut socket)
+            .await
+            .contains("Image generation failed")
+    );
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    assert!(
+        reloaded["chat"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["role"] != "assistant")
+    );
+}
+
+#[tokio::test]
+async fn test_image_cancel_during_classification_prevents_submission_and_allows_retry() {
+    let classifier = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)).set_body_json(json!({
+            "id":"classifier", "object":"chat.completion", "created":0, "model":"fast",
+            "choices":[{"index":0,"message":{"role":"assistant","content":"IMAGE"},"finish_reason":"stop"}]
+        }))).expect(1).mount(&classifier).await;
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id":"retry"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/retry"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"retry":{"outputs":{"9":{"images":[{"filename":"retry.png","type":"temp"}]}}}}),
+        ))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(vec![1, 2, 3]),
+        )
+        .mount(&comfy)
+        .await;
+    let root = std::env::temp_dir().join(format!("zone-cancel-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.artifact_root = root.clone();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.classifier_timeout_secs = 5;
+    config.litellm_host = classifier.uri();
+    let (_, _, _, mut socket) = image_socket(config).await;
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send", "content":"Design a logo for Acme"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while classifier.received_requests().await.unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("classifier request");
+    socket
+        .send(WsMessage::Text(json!({"type":"cancel"}).to_string().into()))
+        .await
+        .unwrap();
+    let cancelled = next_frame(&mut socket, Duration::from_secs(1))
+        .await
+        .expect("cancelled acknowledgement");
+    assert_eq!(cancelled["type"], "cancelled");
+    assert!(
+        cancelled["message_id"].is_string(),
+        "only the owning request may acknowledge cancellation: {cancelled}"
+    );
+    assert!(
+        comfy.received_requests().await.unwrap().is_empty(),
+        "cancelled preparation must not submit an image"
+    );
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send", "content":"Generate an image of a fox"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("retry must complete");
+        match frame["type"].as_str() {
+            Some("cancelled" | "error") => {
+                panic!("old cancellation must not terminate retry: {frame}")
+            }
+            Some("message_end") => {
+                assert_ne!(frame["message_id"], cancelled["message_id"]);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        next_frame(&mut socket, Duration::from_millis(2200))
+            .await
+            .is_none(),
+        "no old progress or terminal after retry"
+    );
+    assert_eq!(
+        comfy
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/prompt")
+            .count(),
+        1
+    );
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_image_immediate_cancel_has_one_terminal_and_never_submits() {
+    let comfy = MockServer::start().await;
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    let (_, _, _, mut socket) = image_socket(config).await;
+    socket
+        .feed(WsMessage::Text(
+            json!({"type":"send", "content":"Generate an image of a rooster"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .feed(WsMessage::Text(json!({"type":"cancel"}).to_string().into()))
+        .await
+        .unwrap();
+    socket.flush().await.unwrap();
+    let terminal = next_frame(&mut socket, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(terminal["type"], "cancelled");
+    assert!(terminal["message_id"].is_string());
+    assert!(
+        next_frame(&mut socket, Duration::from_millis(300))
+            .await
+            .is_none()
+    );
+    assert!(comfy.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_image_cancel_after_queue_waits_for_cleanup_and_stops_progress() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id":"cancel-owned"})))
+        .expect(2)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/queue"))
+        .and(wiremock::matchers::body_json(
+            json!({"delete":["cancel-owned"]}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(200)))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 1000;
+    let root = std::env::temp_dir().join(format!("zone-active-cancel-{}", uuid::Uuid::new_v4()));
+    config.comfyui.artifact_root = root.clone();
+    let (_, _, _, mut socket) = image_socket(config).await;
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send", "content":"Generate an image of a rooster"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(3))
+            .await
+            .unwrap();
+        if frame["type"] == "status" && frame["message"] == "Image queued..." {
+            break;
+        }
+        assert!(!matches!(
+            frame["type"].as_str(),
+            Some("error" | "cancelled")
+        ));
+    }
+    let started = std::time::Instant::now();
+    socket
+        .send(WsMessage::Text(json!({"type":"cancel"}).to_string().into()))
+        .await
+        .unwrap();
+    let terminal = next_frame(&mut socket, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(terminal["type"], "cancelled");
+    assert!(terminal["message_id"].is_string());
+    assert!(
+        started.elapsed() >= Duration::from_millis(180),
+        "acknowledgement must wait for prompt cleanup"
+    );
+    Mock::given(method("GET")).and(path("/history/cancel-owned"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"cancel-owned":{"outputs":{"9":{"images":[{"filename":"retry.png","type":"temp"}]}}}})))
+        .mount(&comfy).await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(vec![1, 2, 3]),
+        )
+        .mount(&comfy)
+        .await;
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send", "content":"Generate an image of another rooster"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(5))
+            .await
+            .expect("retry must complete after active cancellation");
+        match frame["type"].as_str() {
+            Some("cancelled" | "error") => {
+                panic!("old generation must not terminate retry: {frame}")
+            }
+            Some("message_end") => {
+                assert_ne!(frame["message_id"], terminal["message_id"]);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        next_frame(&mut socket, Duration::from_millis(300))
+            .await
+            .is_none()
+    );
+    tokio::fs::remove_dir_all(root).await.unwrap();
+    assert!(
+        comfy
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/interrupt")
+    );
+}
+
+#[tokio::test]
+async fn test_chat_cancel_preserves_partial_reply_before_one_terminal() {
+    let router = axum::Router::new().route("/chat/completions", axum::routing::post(|| async {
+        let events = async_stream::stream! {
+            yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
+                json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"partial reply"},"finish_reason":null}]}).to_string()
+            ));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            yield Ok(axum::response::sse::Event::default().data(
+                json!({"choices":[{"index":0,"delta":{"content":" too late"},"finish_reason":"stop"}]}).to_string()
+            ));
+        };
+        axum::response::Sse::new(events)
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut config = test_config();
+    config.litellm_host = format!("http://{address}");
+    let (client, token, chat_id, mut socket) = image_socket(config).await;
+    client
+        .put_json_auth(
+            &format!("/api/chats/{chat_id}"),
+            &json!({"agent_enabled":false}),
+            &token,
+        )
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send", "content":"Hello"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let mut assistant = Value::Null;
+    loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(3))
+            .await
+            .unwrap();
+        match frame["type"].as_str() {
+            Some("message_start") => assistant = frame["message_id"].clone(),
+            Some("chunk") => {
+                assert_eq!(frame["content"], "partial reply");
+                break;
+            }
+            Some("error" | "cancelled" | "message_end") => {
+                panic!("expected partial reply: {frame}")
+            }
+            _ => {}
+        }
+    }
+    socket
+        .send(WsMessage::Text(json!({"type":"cancel"}).to_string().into()))
+        .await
+        .unwrap();
+    let cancelled = next_frame(&mut socket, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(cancelled["type"], "cancelled");
+    assert_eq!(cancelled["message_id"], assistant);
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let saved = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == assistant)
+        .expect("partial reply must be saved before cancellation acknowledgement");
+    assert_eq!(saved["content"], "partial reply");
+    assert!(
+        next_frame(&mut socket, Duration::from_millis(2200))
+            .await
+            .is_none()
+    );
+    service.abort();
+    let _ = service.await;
+}
+
+#[tokio::test]
+async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial reply\"},\"finish_reason\":null}]}\n\ndata: invalid-json\n\n"
+        )).expect(1).mount(&provider).await;
+    let mut config = test_config();
+    config.litellm_host = provider.uri();
+    let (client, token, chat_id, mut socket) = image_socket(config).await;
+    client
+        .put_json_auth(
+            &format!("/api/chats/{chat_id}"),
+            &json!({"agent_enabled":false}),
+            &token,
+        )
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send","content":"Hello"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let mut assistant = Value::Null;
+    loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(5))
+            .await
+            .unwrap();
+        match frame["type"].as_str() {
+            Some("message_start") => assistant = frame["message_id"].clone(),
+            Some("error") => {
+                assert_eq!(frame["message"], "Stream error");
+                break;
+            }
+            Some("cancelled" | "message_end") => {
+                panic!("failed stream must end with error: {frame}")
+            }
+            _ => {}
+        }
+    }
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let saved = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == assistant)
+        .expect("partial reply must be saved before error terminal");
+    assert_eq!(saved["content"], "partial reply\n\n[Response interrupted]");
+    assert!(
+        next_frame(&mut socket, Duration::from_millis(300))
+            .await
+            .is_none()
+    );
 }

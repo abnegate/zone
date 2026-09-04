@@ -94,13 +94,16 @@ impl ComfyUiClient {
     pub async fn generate(
         &self,
         prompt: &str,
-        mut cancel: broadcast::Receiver<()>,
+        cancel: &mut broadcast::Receiver<()>,
         progress: mpsc::UnboundedSender<String>,
     ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
         if !self.config.enabled {
             return Err(ComfyUiError::Disabled);
         }
 
+        if cancel.try_recv().is_ok() {
+            return Err(ComfyUiError::Cancelled);
+        }
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(self.config.generation_timeout_secs);
         let workflow = configure_flux_schnell_workflow(
@@ -116,7 +119,7 @@ impl ComfyUiClient {
                 "client_id": Uuid::new_v4().to_string()
             }));
         let response = self
-            .bounded(&mut cancel, deadline, async move {
+            .bounded(cancel, deadline, async move {
                 request
                     .send()
                     .await?
@@ -131,6 +134,7 @@ impl ComfyUiClient {
         let mut announced_generation = false;
         loop {
             tokio::select! {
+                biased;
                 _ = cancel.recv() => {
                     self.cancel(&prompt_id).await;
                     return Err(ComfyUiError::Cancelled);
@@ -144,10 +148,10 @@ impl ComfyUiClient {
                         let _ = progress.send("Generating image...".to_string());
                         announced_generation = true;
                     }
-                    match self.history_outputs(&prompt_id, &mut cancel, deadline).await {
+                    match self.history_outputs(&prompt_id, cancel, deadline).await {
                         Ok(Some(outputs)) => {
                             let _ = progress.send("Saving generated image...".to_string());
-                            let result = self.fetch_outputs(outputs, &mut cancel, deadline).await;
+                            let result = self.fetch_outputs(outputs, cancel, deadline).await;
                             self.clear_history(&prompt_id).await;
                             if matches!(result, Err(ComfyUiError::Cancelled | ComfyUiError::Timeout)) {
                                 self.cancel(&prompt_id).await;
@@ -184,6 +188,7 @@ impl ComfyUiClient {
         F: Future<Output = Result<T, reqwest::Error>>,
     {
         tokio::select! {
+            biased;
             _ = cancel.recv() => Err(ComfyUiError::Cancelled),
             _ = tokio::time::sleep_until(deadline) => Err(ComfyUiError::Timeout),
             result = request => result.map_err(ComfyUiError::Http),
@@ -448,10 +453,10 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let (_cancel_tx, cancel_rx) = broadcast::channel(1);
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let images = client
-            .generate("a fox", cancel_rx, progress_tx)
+            .generate("a fox", &mut cancel_rx, progress_tx)
             .await
             .unwrap();
         assert_eq!(images.len(), 1);
@@ -481,10 +486,12 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let (cancel_tx, cancel_rx) = broadcast::channel(1);
+        let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
         let task =
-            tokio::spawn(async move { client.generate("a fox", cancel_rx, progress_tx).await });
+            tokio::spawn(
+                async move { client.generate("a fox", &mut cancel_rx, progress_tx).await },
+            );
         tokio::time::sleep(Duration::from_millis(25)).await;
         cancel_tx.send(()).unwrap();
         assert!(matches!(task.await.unwrap(), Err(ComfyUiError::Cancelled)));
@@ -517,10 +524,12 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let (cancel_tx, cancel_rx) = broadcast::channel(1);
+        let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();
         let task =
-            tokio::spawn(async move { client.generate("a fox", cancel_rx, progress_tx).await });
+            tokio::spawn(
+                async move { client.generate("a fox", &mut cancel_rx, progress_tx).await },
+            );
         tokio::time::sleep(Duration::from_millis(25)).await;
         cancel_tx.send(()).unwrap();
         assert!(matches!(task.await.unwrap(), Err(ComfyUiError::Cancelled)));
