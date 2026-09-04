@@ -660,6 +660,7 @@ async fn handle_image_generation(
     chat_id: Uuid,
     workspace_id: Uuid,
     prompt: &str,
+    image_config: crate::config::ComfyUiConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::{
         artifacts::ArtifactStore,
@@ -672,7 +673,7 @@ async fn handle_image_generation(
     let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
     CHAT_CANCELLATIONS.insert(cancel_key, cancel_tx);
 
-    let client = match ComfyUiClient::new(state.config().comfyui.clone()) {
+    let client = match ComfyUiClient::new(image_config.clone()) {
         Ok(client) => client,
         Err(error) => {
             CHAT_CANCELLATIONS.remove(&cancel_key);
@@ -735,7 +736,7 @@ async fn handle_image_generation(
         }
     };
 
-    let store = ArtifactStore::new(state.config().comfyui.artifact_root.clone());
+    let store = ArtifactStore::new(image_config.artifact_root.clone());
     let mut attachments = Vec::new();
     for image in images.into_iter().take(MAX_GENERATED_IMAGES) {
         if image.bytes.len() > MAX_ARTIFACT_BYTES {
@@ -870,12 +871,11 @@ async fn handle_send_message(
             workspace_id,
         )
         .await
-        && let Some(model) = settings.model_fast.filter(|model| !model.trim().is_empty())
     {
-        image_config.classifier_model = model;
+        settings.apply_to_comfyui(&mut image_config);
     }
     let classifier = crate::services::image_intent::ImageIntentClassifier::new(
-        image_config,
+        image_config.clone(),
         state.config().litellm_host.clone(),
         state.config().litellm_key.clone(),
     );
@@ -918,7 +918,15 @@ async fn handle_send_message(
     spawn_message_embedding_task(state.clone(), user_message.id, chat_id, content.to_string());
 
     if image_request {
-        return handle_image_generation(state, sender, chat_id, workspace_id, content).await;
+        return handle_image_generation(
+            state,
+            sender,
+            chat_id,
+            workspace_id,
+            content,
+            image_config,
+        )
+        .await;
     }
 
     // Build context for AI
