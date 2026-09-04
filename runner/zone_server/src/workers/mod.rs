@@ -15,3 +15,4 @@ pub mod indexing;
 pub mod knowledge_refresh;
 pub mod pr;
 pub mod task;
+pub mod titles;

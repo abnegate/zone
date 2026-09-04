@@ -28,6 +28,7 @@ pub struct ChatRow {
 /// Message row from database
 #[derive(Debug, Clone)]
 pub struct MessageRow {
+    pub title_claimed: bool,
     pub id: Uuid,
     pub chat_id: Uuid,
     pub role: String,
@@ -153,6 +154,28 @@ pub async fn create_chat(
     agent_enabled: bool,
     agent_sandboxed: bool,
 ) -> DbResult<ChatRow> {
+    create_chat_with_title(
+        pool,
+        workspace_id,
+        title,
+        model_name,
+        (agent_enabled, agent_sandboxed),
+        false,
+    )
+    .await
+}
+
+/// Create a chat with explicitly opted-in automatic naming.
+pub async fn create_chat_with_title(
+    pool: &PgPool,
+    workspace_id: Option<Uuid>,
+    title: &str,
+    model_name: &str,
+    agent: (bool, bool),
+    automatic_title: bool,
+) -> DbResult<ChatRow> {
+    let (agent_enabled, agent_sandboxed) = agent;
+    let mut transaction = pool.begin().await?;
     let row = sqlx::query!(
         r#"
         INSERT INTO chats (workspace_id, title, model_name, agent_enabled, agent_sandboxed)
@@ -165,8 +188,16 @@ pub async fn create_chat(
         agent_enabled,
         agent_sandboxed
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await?;
+
+    if automatic_title {
+        sqlx::query("UPDATE chats SET automatic_title = TRUE WHERE id = $1")
+            .bind(row.id)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
 
     Ok(ChatRow {
         id: row.id,
@@ -189,6 +220,13 @@ pub async fn update_chat(
     agent_enabled: Option<bool>,
     agent_sandboxed: Option<bool>,
 ) -> DbResult<Option<ChatRow>> {
+    let mut transaction = pool.begin().await?;
+    if title.is_some() {
+        sqlx::query("UPDATE chats SET automatic_title = FALSE WHERE id = $1")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
     let row = sqlx::query!(
         r#"
         UPDATE chats
@@ -204,8 +242,10 @@ pub async fn update_chat(
         agent_enabled,
         agent_sandboxed
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await?;
+
+    transaction.commit().await?;
 
     Ok(row.map(|r| ChatRow {
         id: r.id,
@@ -218,6 +258,17 @@ pub async fn update_chat(
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))
+}
+
+/// Save a generated title only while its original claim still owns the title.
+pub async fn complete_title(
+    pool: &PgPool,
+    chat_id: Uuid,
+    message_id: Uuid,
+    title: &str,
+) -> DbResult<bool> {
+    Ok(sqlx::query("UPDATE chats SET title = $3, automatic_title = FALSE, updated_at = NOW() WHERE id = $1 AND automatic_title AND title_message_id = $2")
+        .bind(chat_id).bind(message_id).bind(title).execute(pool).await?.rows_affected() == 1)
 }
 
 /// Delete a chat
@@ -302,6 +353,7 @@ pub async fn list_messages(pool: &PgPool, chat_id: Uuid) -> DbResult<Vec<Message
     Ok(rows
         .into_iter()
         .map(|r| MessageRow {
+            title_claimed: false,
             id: r.id,
             chat_id: r.chat_id,
             role: r.role,
@@ -348,10 +400,29 @@ pub async fn create_message_with_id(
     content: &str,
     metadata: Option<serde_json::Value>,
 ) -> DbResult<MessageRow> {
-    // Also update chat's updated_at
-    sqlx::query!("UPDATE chats SET updated_at = NOW() WHERE id = $1", chat_id)
-        .execute(pool)
+    let mut transaction = pool.begin().await?;
+    // The row lock serializes first-user-message ownership with every insertion
+    // and explicit rename, including requests served by different processes.
+    sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+        .bind(chat_id)
+        .execute(&mut *transaction)
         .await?;
+
+    let title_claimed = if role == "user" {
+        sqlx::query(
+            "UPDATE chats SET title_message_id = $2
+             WHERE id = $1 AND automatic_title AND title_message_id IS NULL
+             AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = $1 AND role = 'user')",
+        )
+        .bind(chat_id)
+        .bind(message_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1
+    } else {
+        false
+    };
 
     let row = sqlx::query_as::<
         _,
@@ -375,10 +446,13 @@ pub async fn create_message_with_id(
     .bind(role)
     .bind(content)
     .bind(metadata)
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await?;
 
+    transaction.commit().await?;
+
     Ok(MessageRow {
+        title_claimed,
         id: row.0,
         chat_id: row.1,
         role: row.2,

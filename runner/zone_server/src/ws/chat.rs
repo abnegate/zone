@@ -211,6 +211,8 @@ pub struct ChatImageAttachment {
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+    /// The first message's automatic title has been saved.
+    TitleUpdated { chat_id: Uuid, title: String },
     /// Initial connection status
     Init { chat_id: Uuid, status: String },
     /// User message saved confirmation
@@ -571,6 +573,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
         return;
     }
     let sender = Arc::new(Mutex::new(sender));
+    let mut titles = crate::workers::titles::subscribe();
 
     // Setup state for message loop
     let mut auth_check_counter = 0;
@@ -583,6 +586,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     // Main message loop
     loop {
         tokio::select! {
+            update = titles.recv() => {
+                if let Ok((updated_chat_id, title)) = update
+                    && updated_chat_id == chat_id
+                    && !send_server(&sender, ServerMessage::TitleUpdated { chat_id, title }).await
+                {
+                    break;
+                }
+            }
             // Handle client messages
             msg = receiver.next() => {
                 match msg {
@@ -1073,6 +1084,7 @@ async fn save_message(
     // Save user message to database
     let user_message =
         chats::create_message(state.db(), chat_id, "user", content, metadata).await?;
+    crate::workers::titles::spawn(state.clone(), &user_message);
 
     // Confirm message saved
     let saved_msg = ServerMessage::MessageSaved {

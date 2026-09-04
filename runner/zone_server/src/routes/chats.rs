@@ -216,6 +216,8 @@ pub struct ListChatsQuery {
 /// Create chat request
 #[derive(Debug, Deserialize)]
 pub struct CreateChatRequest {
+    #[serde(default)]
+    automatic_title: bool,
     workspace_id: Uuid,
     title: String,
     model_name: String,
@@ -284,13 +286,13 @@ pub async fn create(
         return e.into_response();
     }
 
-    match chats::create_chat(
+    match chats::create_chat_with_title(
         state.db(),
         Some(req.workspace_id),
         &req.title,
         &req.model_name,
-        req.agent_enabled,
-        req.agent_sandboxed,
+        (req.agent_enabled, req.agent_sandboxed),
+        req.automatic_title,
     )
     .await
     {
@@ -348,10 +350,18 @@ pub async fn update(
         return e.into_response();
     }
 
+    let title = req.title.as_deref().map(str::trim);
+    if title.is_some_and(str::is_empty) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new("Title cannot be blank")),
+        )
+            .into_response();
+    }
     match chats::update_chat(
         state.db(),
         id,
-        req.title.as_deref(),
+        title,
         req.agent_enabled,
         req.agent_sandboxed,
     )
@@ -550,6 +560,7 @@ pub async fn create_message(
 
     match chats::create_message(state.db(), id, &req.role, &req.content, req.metadata).await {
         Ok(msg) => {
+            crate::workers::titles::spawn(state.clone(), &msg);
             // Spawn background task to generate and store embedding
             // This is non-blocking and allows the message to be returned immediately
             spawn_message_embedding_task(state.clone(), msg.id, msg.chat_id, msg.content.clone());

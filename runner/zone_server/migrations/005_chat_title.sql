@@ -1,0 +1,2 @@
+ALTER TABLE chats ADD COLUMN automatic_title BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE chats ADD COLUMN title_message_id UUID;
