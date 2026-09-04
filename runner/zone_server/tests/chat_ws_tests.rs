@@ -42,8 +42,12 @@ async fn spawn_server() -> String {
 }
 
 async fn spawn_server_with_config(config: Config) -> String {
+    spawn_server_with_pool(config, create_test_pool().await).await
+}
+
+async fn spawn_server_with_pool(config: Config, pool: sqlx::PgPool) -> String {
     init_tracing();
-    let state = create_test_state(config, create_test_pool().await);
+    let state = create_test_state(config, pool);
     let router = create_test_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -938,6 +942,13 @@ type ChatSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn image_socket(config: Config) -> (TestClient, String, String, ChatSocket) {
+    image_socket_with_pool(config, create_test_pool().await).await
+}
+
+async fn image_socket_with_pool(
+    config: Config,
+    pool: sqlx::PgPool,
+) -> (TestClient, String, String, ChatSocket) {
     let client = TestClient::with_db().await;
     let (token, chat_id) = seed_chat_with_model(&client, "llava:7b").await;
     let response = client
@@ -948,7 +959,7 @@ async fn image_socket(config: Config) -> (TestClient, String, String, ChatSocket
         )
         .await;
     assert!(response.status.is_success());
-    let addr = spawn_server_with_config(config).await;
+    let addr = spawn_server_with_pool(config, pool).await;
     let (mut socket, _) = connect_async(format!("ws://{addr}/ws/chats/{chat_id}"))
         .await
         .unwrap();
@@ -1402,10 +1413,21 @@ async fn test_chat_cancel_preserves_partial_reply_before_one_terminal() {
 #[tokio::test]
 async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
     let provider = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial reply\"},\"finish_reason\":null}]}\n\ndata: invalid-json\n\n"
-        )).expect(1).mount(&provider).await;
+    let attachment = red_png_data_url();
+    let chunk = json!({"choices":[{"index":0,"delta":{
+        "content":"partial reply",
+        "images":[{"image_url":{"url":attachment},"index":0,"type":"image_url"}]
+    },"finish_reason":null}]});
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!("data: {chunk}\n\ndata: invalid-json\n\n")),
+        )
+        .expect(1)
+        .mount(&provider)
+        .await;
     let mut config = test_config();
     config.litellm_host = provider.uri();
     let (client, token, chat_id, mut socket) = image_socket(config).await;
@@ -1424,22 +1446,22 @@ async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
         .await
         .unwrap();
     let mut assistant = Value::Null;
-    loop {
+    let terminal = loop {
         let frame = next_frame(&mut socket, Duration::from_secs(5))
             .await
             .unwrap();
         match frame["type"].as_str() {
             Some("message_start") => assistant = frame["message_id"].clone(),
-            Some("error") => {
-                assert_eq!(frame["message"], "Stream error");
-                break;
+            Some("message_end") => {
+                assert_eq!(frame["error"], "Stream error");
+                break frame;
             }
-            Some("cancelled" | "message_end") => {
-                panic!("failed stream must end with error: {frame}")
+            Some("cancelled" | "error") => {
+                panic!("failed partial stream must include its canonical snapshot: {frame}")
             }
             _ => {}
         }
-    }
+    };
     let reloaded = client
         .get_auth(&format!("/api/chats/{chat_id}"), &token)
         .await
@@ -1451,9 +1473,87 @@ async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
         .find(|message| message["id"] == assistant)
         .expect("partial reply must be saved before error terminal");
     assert_eq!(saved["content"], "partial reply\n\n[Response interrupted]");
+    assert_eq!(terminal["content"], saved["content"]);
+    assert_eq!(terminal["metadata"], saved["metadata"]);
+    assert_eq!(terminal["metadata"]["attachments"][0]["url"], attachment);
     assert!(
         next_frame(&mut socket, Duration::from_millis(300))
             .await
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn test_image_cancel_during_user_insert_preserves_acknowledgement_parity() {
+    let comfy = MockServer::start().await;
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    let pool = create_test_pool().await;
+    let server = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&server)
+        .await
+        .unwrap();
+    let (client, token, chat_id, mut socket) = image_socket_with_pool(config, server).await;
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE messages IN SHARE MODE")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send","content":"Generate an image of a committed rooster"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock' AND query LIKE '%INSERT INTO messages%')"
+            ).bind(backend).fetch_one(&pool).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("user INSERT must be blocked by the test transaction");
+    socket
+        .send(WsMessage::Text(json!({"type":"cancel"}).to_string().into()))
+        .await
+        .unwrap();
+    let premature = next_frame(&mut socket, Duration::from_millis(200)).await;
+    transaction.commit().await.unwrap();
+    assert!(
+        premature.is_none(),
+        "cancellation must wait for the in-flight insert and its acknowledgement: {premature:?}"
+    );
+    let saved = next_frame(&mut socket, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(saved["type"], "message_saved");
+    let cancelled = next_frame(&mut socket, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(cancelled["type"], "cancelled");
+    assert!(cancelled["message_id"].is_string());
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let messages = reloaded["chat"]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["id"], saved["message_id"]);
+    assert_eq!(messages[0]["content"], saved["content"]);
+    assert_eq!(messages[0]["role"], "user");
+    assert!(
+        next_frame(&mut socket, Duration::from_millis(300))
+            .await
+            .is_none()
+    );
+    assert!(comfy.received_requests().await.unwrap().is_empty());
 }

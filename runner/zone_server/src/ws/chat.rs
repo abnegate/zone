@@ -148,6 +148,13 @@ impl Generation {
         }
     }
 
+    fn is_cancelled(&mut self) -> bool {
+        !matches!(
+            self.cancel.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        )
+    }
+
     async fn cancelled(&self, sender: &SharedSender) {
         let _ = send_server(
             sender,
@@ -172,9 +179,9 @@ struct ChatPreparation {
     messages: Vec<LlmMessage>,
 }
 
-enum Preparation {
+enum Routing {
     Image(crate::config::ComfyUiConfig),
-    Chat(ChatPreparation),
+    Chat(chats::ChatRow),
 }
 
 /// Client message types
@@ -246,6 +253,8 @@ pub enum ServerMessage {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Generation cancelled
     Cancelled { message_id: Option<Uuid> },
@@ -924,6 +933,7 @@ async fn handle_image_generation(
             message_id: assistant_message_id,
             content: content.to_string(),
             metadata,
+            error: None,
         },
     )
     .await;
@@ -1004,27 +1014,43 @@ async fn handle_send_message(
             request.cancelled(sender).await;
             return;
         }
-        result = prepare_message(state, sender, chat_id, workspace_id, content, metadata) => result,
+        result = prepare_message(state, sender, chat_id, workspace_id, content, metadata.as_ref()) => result,
     };
-    let result = match preparation {
-        Ok(Some(Preparation::Image(config))) => {
-            handle_image_generation(
-                state,
-                sender,
-                chat_id,
-                workspace_id,
-                content,
-                config,
-                &mut request,
-            )
-            .await
+    let result = async {
+        let Some(routing) = preparation? else {
+            return Ok(());
+        };
+        if request.is_cancelled() {
+            request.cancelled(sender).await;
+            return Ok(());
         }
-        Ok(Some(Preparation::Chat(chat))) => {
-            handle_chat_generation(state, sender, chat_id, chat, &mut request).await
+        let web_search_requested = state.config().web_search.requested_for(content, metadata.as_ref());
+
+        // Once persistence begins, finish the commit and acknowledgement
+        // before honouring Stop. Dropping an INSERT future cannot roll it back.
+        save_message(state, sender, chat_id, content, metadata).await?;
+
+        if request.is_cancelled() {
+            request.cancelled(sender).await;
+            return Ok(());
         }
-        Ok(None) => return,
-        Err(error) => Err(error),
-    };
+        match routing {
+            Routing::Image(config) => {
+                handle_image_generation(state, sender, chat_id, workspace_id, content, config, &mut request).await
+            }
+            Routing::Chat(chat) => {
+                let preparation = tokio::select! {
+                    biased;
+                    _ = request.cancel.recv() => {
+                        request.cancelled(sender).await;
+                        return Ok(());
+                    }
+                    result = prepare_chat(state, sender, chat_id, workspace_id, content, chat, web_search_requested) => result,
+                };
+                handle_chat_generation(state, sender, chat_id, preparation, &mut request).await
+            }
+        }
+    }.await;
     if let Err(error) = result {
         tracing::error!("Error handling send message: {error}");
         let _ = send_server(
@@ -1037,14 +1063,41 @@ async fn handle_send_message(
     }
 }
 
+async fn save_message(
+    state: &AppState,
+    sender: &SharedSender,
+    chat_id: Uuid,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Save user message to database
+    let user_message =
+        chats::create_message(state.db(), chat_id, "user", content, metadata).await?;
+
+    // Confirm message saved
+    let saved_msg = ServerMessage::MessageSaved {
+        message_id: user_message.id,
+        role: "user".to_string(),
+        content: content.to_string(),
+        metadata: user_message.metadata.clone(),
+    };
+    if !send_server(sender, saved_msg).await {
+        tracing::debug!("Client disconnected after saving user message");
+    }
+
+    // Spawn background task to generate user message embedding
+    spawn_message_embedding_task(state.clone(), user_message.id, chat_id, content.to_string());
+    Ok(())
+}
+
 async fn prepare_message(
     state: &AppState,
     sender: &SharedSender,
     chat_id: Uuid,
     workspace_id: Uuid,
     content: &str,
-    metadata: Option<serde_json::Value>,
-) -> Result<Option<Preparation>, Box<dyn std::error::Error + Send + Sync>> {
+    metadata: Option<&serde_json::Value>,
+) -> Result<Option<Routing>, Box<dyn std::error::Error + Send + Sync>> {
     // Read the chat fresh rather than trusting the row captured at connect
     // time, so switching model or toggling agent mode takes effect on the next
     // message instead of the next reconnect.
@@ -1076,9 +1129,7 @@ async fn prepare_message(
         state.config().litellm_host.clone(),
         state.config().litellm_key.clone(),
     );
-    let image_request = classifier
-        .is_image_request(content, metadata.as_ref())
-        .await;
+    let image_request = classifier.is_image_request(content, metadata).await;
 
     // Image requests never route through the selected model. Validate it only
     // when it will actually receive the request.
@@ -1091,33 +1142,23 @@ async fn prepare_message(
         return Ok(None); // Not a fatal error, just reject this message
     }
 
-    let web_search_requested = state
-        .config()
-        .web_search
-        .requested_for(content, metadata.as_ref());
+    Ok(Some(if image_request {
+        Routing::Image(image_config)
+    } else {
+        Routing::Chat(chat)
+    }))
+}
 
-    // Save user message to database
-    let user_message =
-        chats::create_message(state.db(), chat_id, "user", content, metadata).await?;
-
-    // Confirm message saved
-    let saved_msg = ServerMessage::MessageSaved {
-        message_id: user_message.id,
-        role: "user".to_string(),
-        content: content.to_string(),
-        metadata: user_message.metadata.clone(),
-    };
-    if !send_server(sender, saved_msg).await {
-        tracing::debug!("Client disconnected after saving user message");
-    }
-
-    // Spawn background task to generate user message embedding
-    spawn_message_embedding_task(state.clone(), user_message.id, chat_id, content.to_string());
-
-    if image_request {
-        return Ok(Some(Preparation::Image(image_config)));
-    }
-
+async fn prepare_chat(
+    state: &AppState,
+    sender: &SharedSender,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    content: &str,
+    chat: chats::ChatRow,
+    web_search_requested: bool,
+) -> ChatPreparation {
+    let model_name = chat.model_name.as_str();
     // Build context for AI
     let mut context_messages = Vec::new();
 
@@ -1253,12 +1294,12 @@ async fn prepare_message(
         }
     }
 
-    Ok(Some(Preparation::Chat(ChatPreparation {
+    ChatPreparation {
         model: model_name.to_string(),
         agentic,
         tools,
         messages: context_messages,
-    })))
+    }
 }
 
 async fn handle_chat_generation(
@@ -1541,13 +1582,12 @@ async fn handle_chat_generation(
                     ServerMessage::Cancelled {
                         message_id: Some(assistant_message_id),
                     }
-                } else if let Some(message) = failure {
-                    ServerMessage::Error { message }
                 } else {
                     ServerMessage::MessageEnd {
                         message_id: assistant_message_id,
                         content: full_content.clone(),
                         metadata: assistant_metadata,
+                        error: failure,
                     }
                 };
                 let _ = send_server(sender, end_msg).await;
@@ -1850,12 +1890,14 @@ mod tests {
             message_id: Uuid::new_v4(),
             content: "Full response".to_string(),
             metadata: Some(metadata),
+            error: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"message_end\""));
         assert!(json.contains("\"content\":\"Full response\""));
         assert!(json.contains("\"metadata\""));
         assert!(json.contains("generated-image-1.png"));
+        assert!(!json.contains("\"error\""));
     }
 
     #[test]
