@@ -165,7 +165,8 @@ export default function ModelsPage() {
             <section className="card models-install-panel">
               <h2>Add Model</h2>
               <p className="help-text">
-                Enter an Ollama model name (e.g., llama3.2) or HuggingFace GGUF model
+                Enter an Ollama model:tag (e.g., llama3.2:3b) or a HuggingFace GGUF reference
+                (hf.co/owner/Model-GGUF).
               </p>
 
               <form className="model-form" onSubmit={handlePull}>

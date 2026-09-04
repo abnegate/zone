@@ -434,7 +434,82 @@ describe('usePull', () => {
 
 describe('pull lifecycle regressions', () => {
   beforeEach(() => {
+    mockCreatePullWebSocket.mockReset();
     authState = { isAuthenticated: true, accessToken: 'access-token' };
+  });
+
+  for (const outcome of ['error', 'complete', 'close', 'cancel', 'success'] as const) {
+    it(`settles pending steps on ${outcome} while preserving completed steps`, async () => {
+      const socket = createMockWebSocket();
+      mockCreatePullWebSocket.mockReturnValueOnce(socket);
+      const { result } = renderHook(() => usePull());
+      let pending!: Promise<boolean>;
+      act(() => {
+        pending = result.current.pull('qwen3.8:27b');
+        for (const status of ['pulling manifest', 'pulling manifest', 'downloading']) {
+          socket.onmessage?.({ data: JSON.stringify({ type: 'step', status }) } as MessageEvent);
+        }
+      });
+      expect(result.current.steps.map((step) => step.status)).toEqual(['success', 'pending']);
+
+      act(() => {
+        if (outcome === 'close') socket.onclose?.();
+        else if (outcome === 'cancel') result.current.cancel();
+        else {
+          socket.onmessage?.({
+            data: JSON.stringify({
+              type: outcome === 'error' ? 'error' : 'complete',
+              success: outcome === 'success',
+              message: outcome === 'success' ? 'Done' : 'Download failed',
+            }),
+          } as MessageEvent);
+        }
+      });
+
+      expect(await pending).toBe(outcome === 'success');
+      expect(result.current.steps.map((step) => step.status)).toEqual([
+        'success',
+        outcome === 'success' ? 'success' : 'error',
+      ]);
+      expect(result.current.pulling).toBe(false);
+    });
+  }
+
+  it('clears failed steps, progress, and result before a successful retry', async () => {
+    const first = createMockWebSocket();
+    const second = createMockWebSocket();
+    mockCreatePullWebSocket.mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const { result } = renderHook(() => usePull());
+    act(() => {
+      result.current.pull('missing');
+      first.onmessage?.({
+        data: JSON.stringify({ type: 'step', status: 'pulling manifest' }),
+      } as MessageEvent);
+      first.onmessage?.({
+        data: JSON.stringify({ type: 'progress', percent: 50 }),
+      } as MessageEvent);
+      first.onmessage?.({ data: JSON.stringify({ type: 'error' }) } as MessageEvent);
+    });
+    expect(result.current.steps[0].status).toBe('error');
+
+    let pending!: Promise<boolean>;
+    act(() => {
+      pending = result.current.pull('qwen3.8:27b');
+    });
+    expect(result.current.steps).toEqual([]);
+    expect(result.current.progress).toBeNull();
+    expect(result.current.result).toBeNull();
+    expect(result.current.pulling).toBe(true);
+    act(() => {
+      second.onmessage?.({
+        data: JSON.stringify({ type: 'step', status: 'verifying digest' }),
+      } as MessageEvent);
+      second.onmessage?.({ data: JSON.stringify({ type: 'complete' }) } as MessageEvent);
+    });
+    expect(await pending).toBe(true);
+    expect(result.current.steps).toEqual([
+      { name: 'verifying digest', message: '', status: 'success' },
+    ]);
   });
 
   for (const outcome of ['close', 'cancel', 'unmount'] as const) {
