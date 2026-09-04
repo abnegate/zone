@@ -10,7 +10,6 @@ const mockTasksApi = {
   updateTask: mock(),
   deleteTask: mock(),
   runTask: mock(),
-  cancelTaskRun: mock(),
 };
 
 mock.module('../../../api/tasks', () => ({
@@ -40,7 +39,8 @@ const createWrapper = () => {
 
 const mockTask: Task = {
   id: 'task-1',
-  project_id: 'proj-1',
+  workspace_id: 'workspace-1',
+  project_ids: ['proj-1'],
   title: 'Test Task',
   description: 'Test description',
   acceptance_criteria: null,
@@ -171,7 +171,14 @@ describe('useTask', () => {
 
   it('runs task', async () => {
     mockTasksApi.getTask.mockResolvedValueOnce(mockTask);
-    mockTasksApi.runTask.mockResolvedValueOnce({ run_id: 'run-1' });
+    mockTasksApi.runTask.mockResolvedValueOnce({
+      id: 'run-1',
+      task_id: 'task-1',
+      status: 'pending',
+      current_phase: null,
+      progress_percent: null,
+      error_message: null,
+    });
 
     const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
 
@@ -182,7 +189,14 @@ describe('useTask', () => {
     const response = await result.current.runTask();
 
     expect(mockTasksApi.runTask).toHaveBeenCalledWith('task-1');
-    expect(response).toEqual({ run_id: 'run-1' });
+    expect(response).toEqual({
+      id: 'run-1',
+      task_id: 'task-1',
+      status: 'pending',
+      current_phase: null,
+      progress_percent: null,
+      error_message: null,
+    });
   });
 
   it('throws error when running without id', async () => {
@@ -193,31 +207,6 @@ describe('useTask', () => {
     });
 
     await expect(result.current.runTask()).rejects.toThrow('No task ID provided');
-  });
-
-  it('cancels task run', async () => {
-    mockTasksApi.getTask.mockResolvedValueOnce(mockTask);
-    mockTasksApi.cancelTaskRun.mockResolvedValueOnce();
-
-    const { result } = renderHook(() => useTask('task-1'), { wrapper: createWrapper() });
-
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false);
-    });
-
-    await result.current.cancelRun();
-
-    expect(mockTasksApi.cancelTaskRun).toHaveBeenCalledWith('task-1');
-  });
-
-  it('throws error when cancelling without id', async () => {
-    const { result } = renderHook(() => useTask(null), { wrapper: createWrapper() });
-
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false);
-    });
-
-    await expect(result.current.cancelRun()).rejects.toThrow('No task ID provided');
   });
 
   it('refetches task', async () => {

@@ -39,17 +39,17 @@ import type {
   Limits,
   Message,
   ModelSource,
+  OrgMembersResponse,
   Organization,
   OrganizationMember,
-  OrgMembersResponse,
   Plan,
   SendMessageRequest,
   SessionsResponse,
   Subscription,
   UpdateAiSettingsRequest,
   UpdateChatRequest,
-  UpdateOrganizationRequest,
   UpdateOrgMemberRequest,
+  UpdateOrganizationRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceThemeRequest,
@@ -69,10 +69,10 @@ import {
   InvitationSchema,
   InvitationsResponseSchema,
   LimitsResponseSchema,
+  OrgMembersResponseSchema,
   OrganizationMemberSchema,
   OrganizationResponseSchema,
   OrganizationsResponseSchema,
-  OrgMembersResponseSchema,
   PlanResponseSchema,
   PlansResponseSchema,
   ProjectResponseSchema,
@@ -85,8 +85,8 @@ import {
   WorkspaceMemberSchema,
   WorkspaceMembersResponseSchema,
   WorkspaceResponseSchema,
-  WorkspacesResponseSchema,
   WorkspaceThemeResponseSchema,
+  WorkspacesResponseSchema,
 } from '../validation/schemas';
 import { chatsApi } from './chats';
 import { knowledgeApi } from './knowledge';
@@ -292,10 +292,6 @@ class Client {
 
   async startTask(id: string) {
     return tasksApi.runTask(id);
-  }
-
-  async stopTask(id: string) {
-    return tasksApi.cancelTaskRun(id);
   }
 
   async getTaskRuns(taskId: string) {

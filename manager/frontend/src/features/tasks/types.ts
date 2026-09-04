@@ -1,6 +1,9 @@
+import type { z } from 'zod';
+import type { TaskProgressMessageSchema } from './schemas';
+
 // Task Types
 export type TaskStatus = 'created' | 'queued' | 'in_progress' | 'blocked' | 'review' | 'complete';
-export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type RunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type LogLevel = 'debug' | 'info' | 'warning' | 'error';
 export type PrStatus = 'pending' | 'open' | 'merged' | 'closed';
 
@@ -46,15 +49,15 @@ export interface TaskRun {
   task_id: string;
   status: RunStatus;
   current_phase: string | null;
-  progress_percent: number;
+  progress_percent: number | null;
   error_message: string | null;
-  started_at: string;
-  completed_at: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
 }
 
 export interface TaskRunLog {
   id: string;
-  run_id: string;
+  run_id?: string;
   phase: string;
   agent_type: string;
   level: LogLevel;
@@ -100,17 +103,7 @@ export interface UpdateTaskRequest {
 }
 
 // Task execution progress (WebSocket messages)
-export interface TaskProgressMessage {
-  type: 'phase_started' | 'phase_completed' | 'log' | 'complete' | 'error';
-  run_id: string;
-  phase?: string;
-  progress_percent?: number;
-  message?: string;
-  agent_type?: string;
-  log_level?: string;
-  success?: boolean;
-  error?: string;
-}
+export type TaskProgressMessage = z.infer<typeof TaskProgressMessageSchema>;
 
 // API Response wrappers
 export interface TasksResponse {

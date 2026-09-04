@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
-import type { Task, UpdateTaskRequest } from '../types';
+import type { Task, TaskRun, UpdateTaskRequest } from '../types';
 
 export function useTask(id: string | null) {
   const [task, setTask] = useState<Task | null>(null);
@@ -51,18 +51,11 @@ export function useTask(id: string | null) {
     setTask(null);
   }, [id]);
 
-  const runTask = useCallback(async (): Promise<{ run_id: string }> => {
+  const runTask = useCallback(async (): Promise<TaskRun> => {
     if (!id) {
       throw new Error('No task ID provided');
     }
     return tasksApi.runTask(id);
-  }, [id]);
-
-  const cancelRun = useCallback(async (): Promise<void> => {
-    if (!id) {
-      throw new Error('No task ID provided');
-    }
-    return tasksApi.cancelTaskRun(id);
   }, [id]);
 
   const refetch = useCallback(() => {
@@ -76,7 +69,6 @@ export function useTask(id: string | null) {
     updateTask,
     deleteTask,
     runTask,
-    cancelRun,
     refetch,
   };
 }

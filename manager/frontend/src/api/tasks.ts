@@ -1,5 +1,4 @@
 import {
-  RunTaskResponseSchema,
   TaskResponseSchema,
   TaskRunLogsResponseSchema,
   TaskRunResponseSchema,
@@ -29,7 +28,7 @@ async function parseErrorResponse(response: Response): Promise<{ message?: strin
 class TasksApi {
   private getAccessToken: (() => string | null) | null = null;
 
-  setGetAccessToken(fn: () => string | null) {
+  setGetAccessToken(fn: () => string | null): void {
     this.getAccessToken = fn;
   }
 
@@ -118,33 +117,24 @@ class TasksApi {
     }
   }
 
-  async runTask(id: string): Promise<{ run_id: string }> {
-    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}/start`, {
+  async runTask(id: string, signal?: AbortSignal): Promise<TaskRun> {
+    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}/runs`, {
       method: 'POST',
       headers: this.getHeaders(),
+      signal,
     });
     if (!response.ok) {
       const errorData = await parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to run task: ${response.status}`);
     }
-    const data = parse(RunTaskResponseSchema, await response.json());
-    return data;
+    const data = parse(TaskRunResponseSchema, await response.json());
+    return data.run;
   }
 
-  async cancelTaskRun(id: string): Promise<void> {
-    const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}/stop`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      const errorData = await parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to cancel task run: ${response.status}`);
-    }
-  }
-
-  async getTaskRuns(taskId: string): Promise<TaskRun[]> {
+  async getTaskRuns(taskId: string, signal?: AbortSignal): Promise<TaskRun[]> {
     const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(taskId)}/runs`, {
       headers: this.getHeaders(),
+      signal,
     });
     if (!response.ok) {
       const errorData = await parseErrorResponse(response);
@@ -154,13 +144,11 @@ class TasksApi {
     return data.runs;
   }
 
-  async getTaskRun(taskId: string, runId: string): Promise<TaskRun> {
-    const response = await fetch(
-      `${API_BASE}/api/tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}`,
-      {
-        headers: this.getHeaders(),
-      }
-    );
+  async getTaskRun(_taskId: string, runId: string, signal?: AbortSignal): Promise<TaskRun> {
+    const response = await fetch(`${API_BASE}/api/tasks/runs/${encodeURIComponent(runId)}`, {
+      headers: this.getHeaders(),
+      signal,
+    });
     if (!response.ok) {
       const errorData = await parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to fetch task run: ${response.status}`);
@@ -169,13 +157,15 @@ class TasksApi {
     return data.run;
   }
 
-  async getTaskRunLogs(taskId: string, runId: string): Promise<TaskRunLog[]> {
-    const response = await fetch(
-      `${API_BASE}/api/tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}/logs`,
-      {
-        headers: this.getHeaders(),
-      }
-    );
+  async getTaskRunLogs(
+    _taskId: string,
+    runId: string,
+    signal?: AbortSignal
+  ): Promise<TaskRunLog[]> {
+    const response = await fetch(`${API_BASE}/api/tasks/runs/${encodeURIComponent(runId)}/logs`, {
+      headers: this.getHeaders(),
+      signal,
+    });
     if (!response.ok) {
       const errorData = await parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to fetch task run logs: ${response.status}`);
@@ -188,12 +178,20 @@ class TasksApi {
     let wsUrl: string;
     if (API_BASE) {
       const wsBase = API_BASE.replace(/^http/, 'ws');
-      wsUrl = `${wsBase}/ws/tasks/${encodeURIComponent(runId)}`;
+      wsUrl = `${wsBase}/ws/tasks/runs/${encodeURIComponent(runId)}`;
     } else {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${protocol}//${window.location.host}/ws/tasks/${encodeURIComponent(runId)}`;
+      wsUrl = `${protocol}//${window.location.host}/ws/tasks/runs/${encodeURIComponent(runId)}`;
     }
-    return new WebSocket(wsUrl);
+    const socket = new WebSocket(wsUrl);
+    socket.addEventListener(
+      'open',
+      () => {
+        socket.send(JSON.stringify({ type: 'auth', token: this.getAccessToken?.() ?? '' }));
+      },
+      { once: true }
+    );
+    return socket;
   }
 }
 

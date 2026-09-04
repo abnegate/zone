@@ -1,9 +1,5 @@
 import { z } from 'zod';
 
-// =============================================================================
-// Task Schemas
-// =============================================================================
-
 export const TaskStatusSchema = z.enum([
   'created',
   'queued',
@@ -13,7 +9,7 @@ export const TaskStatusSchema = z.enum([
   'complete',
 ]);
 
-export const RunStatusSchema = z.enum(['running', 'completed', 'failed', 'cancelled']);
+export const RunStatusSchema = z.enum(['pending', 'running', 'completed', 'failed', 'cancelled']);
 
 export const LogLevelSchema = z.enum(['debug', 'info', 'warning', 'error']);
 
@@ -51,21 +47,31 @@ export const TaskRunSchema = z.object({
   task_id: z.string(),
   status: RunStatusSchema,
   current_phase: z.string().nullable(),
-  progress_percent: z.number(),
+  progress_percent: z.number().nullable(),
   error_message: z.string().nullable(),
-  started_at: z.string(),
-  completed_at: z.string().nullable(),
+  started_at: z.string().nullable().optional(),
+  completed_at: z.string().nullable().optional(),
 });
 
-export const TaskRunLogSchema = z.object({
-  id: z.string(),
-  run_id: z.string(),
-  phase: z.string(),
-  agent_type: z.string(),
-  level: LogLevelSchema,
-  message: z.string(),
-  created_at: z.string(),
-});
+export const TaskRunLogSchema = z
+  .object({
+    id: z.string(),
+    run_id: z.string().optional(),
+    phase: z.string(),
+    agent_type: z.string(),
+    log_level: LogLevelSchema.optional(),
+    level: LogLevelSchema.optional(),
+    message: z.string(),
+    created_at: z.string(),
+  })
+  .transform(({ log_level, level, ...log }, context) => {
+    const severity = log_level ?? level;
+    if (severity === undefined) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: 'Log level is required' });
+      return z.NEVER;
+    }
+    return { ...log, level: severity };
+  });
 
 export const CreateTaskRequestSchema = z.object({
   project_ids: z.array(z.string()).optional(),
@@ -126,18 +132,30 @@ export const TaskRunLogsResponseSchema = z.object({
   logs: z.array(TaskRunLogSchema),
 });
 
-export const TaskProgressMessageSchema = z.object({
-  type: z.enum(['phase_started', 'phase_completed', 'log', 'complete', 'error']),
-  run_id: z.string(),
-  phase: z.string().optional(),
-  progress_percent: z.number().optional(),
-  message: z.string().optional(),
-  agent_type: z.string().optional(),
-  log_level: z.string().optional(),
-  success: z.boolean().optional(),
-  error: z.string().optional(),
-});
+export const TaskProgressMessageSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('init'),
+    run_id: z.string(),
+    task_id: z.string(),
+    status: RunStatusSchema,
+  }),
+  z.object({
+    type: z.literal('status_update'),
+    status: RunStatusSchema,
+    current_phase: z.string().nullable(),
+    progress_percent: z.number().nullable(),
+  }),
+  z.object({
+    type: z.literal('log'),
+    id: z.string(),
+    phase: z.string(),
+    agent_type: z.string(),
+    log_level: LogLevelSchema,
+    message: z.string(),
+  }),
+  z.object({ type: z.literal('completed'), status: RunStatusSchema }),
+  z.object({ type: z.literal('failed'), error: z.string() }),
+  z.object({ type: z.literal('error'), message: z.string() }),
+]);
 
-export const RunTaskResponseSchema = z.object({
-  run_id: z.string(),
-});
+export const RunTaskResponseSchema = TaskRunResponseSchema;

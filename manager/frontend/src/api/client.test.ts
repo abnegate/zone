@@ -821,26 +821,12 @@ describe('Client', () => {
     it('startTask starts task', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ run_id: 'run-1' }),
+        json: async () => ({ run: mockTaskRun }),
       });
 
       const result = await client.startTask('task-1');
 
-      expect(result.run_id).toBe('run-1');
-    });
-
-    it('stopTask stops task', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      });
-
-      await client.stopTask('task-1');
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/tasks/task-1/stop'),
-        expect.objectContaining({ method: 'POST' })
-      );
+      expect(result.id).toBe('run-1');
     });
 
     it('getTaskRuns fetches runs', async () => {
@@ -1306,12 +1292,6 @@ describe('Client', () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
       await expect(client.startTask('task-1')).rejects.toThrow('Failed to run task: 500');
-    });
-
-    it('stopTask throws on failed request', async () => {
-      mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-
-      await expect(client.stopTask('task-1')).rejects.toThrow('Failed to cancel task run: 500');
     });
 
     it('getTaskRuns throws on failed request', async () => {
