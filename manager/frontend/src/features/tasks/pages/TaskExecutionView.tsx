@@ -199,6 +199,9 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
               {logs.map((log) => (
                 <div key={log.id} className="log-entry">
                   <span className="log-phase">{ACTIVITIES[log.phase] ?? log.phase}</span>
+                  <span className="log-details">
+                    {log.agent_type} · {log.level}
+                  </span>
                   <span className="log-message">{log.message}</span>
                 </div>
               ))}

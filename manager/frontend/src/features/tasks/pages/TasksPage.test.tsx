@@ -668,6 +668,7 @@ describe('TasksPage', () => {
     renderTasksPage();
     fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
     expect(await screen.findByText('Reading project files')).toBeInTheDocument();
+    expect(screen.getByText('worker · info')).toBeInTheDocument();
     expect(screen.getByText('Running')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Stop Execution' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));

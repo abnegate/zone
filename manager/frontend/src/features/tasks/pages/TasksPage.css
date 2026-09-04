@@ -320,6 +320,10 @@
   color: var(--ui-text-secondary);
   font-size: .75rem;
 }
+.log-details {
+  color: var(--ui-text-secondary);
+  font-size: .75rem;
+}
 .log-message {
   color: var(--ui-text-primary);
   white-space: pre-wrap;

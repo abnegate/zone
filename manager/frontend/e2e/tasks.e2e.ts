@@ -625,6 +625,9 @@ test.describe('Tasks Page', () => {
           fullPage: true,
         });
         await page.setViewportSize({ width: 390, height: 844 });
+        await expect
+          .poll(() => page.evaluate(() => document.documentElement.scrollWidth))
+          .toBe(390);
         await expect(page.getByRole('button', { name: 'Try Again' })).toBeInViewport();
         await expect
           .poll(() =>
@@ -636,8 +639,13 @@ test.describe('Tasks Page', () => {
           .toBe(true);
         await page.screenshot({
           path: testInfo.outputPath(`task-error-${theme}-mobile.png`),
-          fullPage: true,
+          fullPage: false,
         });
+        await page.keyboard.press('Escape');
+        await expect(page.getByRole('dialog')).toHaveCount(0);
+        await expect
+          .poll(() => page.evaluate(() => document.documentElement.scrollWidth))
+          .toBe(390);
       });
     }
   });
