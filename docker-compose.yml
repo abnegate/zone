@@ -155,6 +155,55 @@ services:
     networks:
       - internal
 
+  comfyui:
+    build:
+      context: ./comfyui
+      args:
+        COMFYUI_COMMIT: ${COMFYUI_COMMIT:-30bdda1ef13a3a34fce2cd2fec633f15d832122a}
+    image: zone-comfyui:${COMFYUI_COMMIT:-30bdda1ef13}
+    profiles: [bundled-comfyui]
+    container_name: comfyui
+    restart: unless-stopped
+    volumes:
+      - comfyui_models:/workspace/ComfyUI/models:ro
+      - comfyui_output:/workspace/ComfyUI/output
+    networks:
+      - internal
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  comfyui-model-setup:
+    image: python:3.12-alpine
+    profiles: [comfyui-model-setup]
+    restart: "no"
+    volumes:
+      - comfyui_models:/models
+      - ./comfyui:/opt/zone:ro
+    command:
+      - python
+      - /opt/zone/download-models.py
+      - --manifest
+      - /opt/zone/model-manifest.json
+      - --models-dir
+      - /models
+    networks:
+      - edge
+
   litellm:
     build:
       context: ./litellm
@@ -253,10 +302,22 @@ services:
       - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
       - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
       - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
+      - COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://host.docker.internal:8188}
+      - COMFYUI_API_TOKEN=${COMFYUI_API_TOKEN:-}
+      - COMFYUI_WORKFLOW_PATH=${COMFYUI_WORKFLOW_PATH:-/app/comfyui/workflows/flux1-schnell-fp8-api.json}
+      - COMFYUI_CHECKPOINT=${COMFYUI_CHECKPOINT:-flux1-schnell-fp8.safetensors}
+      - COMFYUI_CLASSIFIER_MODEL=${COMFYUI_CLASSIFIER_MODEL:-llama3.1:8b}
+      - COMFYUI_CLASSIFIER_TIMEOUT_SECS=${COMFYUI_CLASSIFIER_TIMEOUT_SECS:-3}
+      - COMFYUI_REQUEST_TIMEOUT_SECS=${COMFYUI_REQUEST_TIMEOUT_SECS:-15}
+      - COMFYUI_GENERATION_TIMEOUT_SECS=${COMFYUI_GENERATION_TIMEOUT_SECS:-300}
+      - COMFYUI_POLL_INTERVAL_MS=${COMFYUI_POLL_INTERVAL_MS:-500}
+      - ARTIFACT_ROOT=${ARTIFACT_ROOT:-/app/artifacts}
     volumes:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts
       - manager_embed_cache:/app/embed-cache
+      - ./comfyui/workflows:/app/comfyui/workflows:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -639,6 +700,10 @@ volumes:
     name: zone_valkey_data
   ollama_data:
     name: zone_ollama_data
+  comfyui_models:
+    name: zone_comfyui_models
+  comfyui_output:
+    name: zone_comfyui_output
   manager_repos:
     name: zone_manager_repos
   manager_artifacts:

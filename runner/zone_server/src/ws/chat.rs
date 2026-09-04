@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Semaphore, broadcast};
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_core::llm::{
     ChatStreamChunk, LlmClient, LlmConfig, LlmError, Message as LlmMessage, Role as LlmRole,
@@ -33,7 +33,7 @@ use zone_core::llm::{
 
 use crate::agent::{self, AgentEvent, AgentRun, ToolCallRecord};
 use crate::auth::validate_token;
-use crate::db::{chats, workspace_members};
+use crate::db::{ai_settings, chats, workspace_members, workspaces};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 
@@ -111,6 +111,22 @@ static CHAT_CONNECTIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap
 /// Using composite key prevents race conditions when multiple streams run concurrently
 static CHAT_CANCELLATIONS: Lazy<DashMap<(Uuid, Uuid), broadcast::Sender<()>>> =
     Lazy::new(DashMap::new);
+/// Serialize full request lifecycles per chat. The protocol's chunk/status
+/// frames are intentionally compact and do not all carry correlation IDs.
+static CHAT_GENERATIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
+/// Keep direct image jobs globally bounded for the shared GPU runtime.
+static IMAGE_GENERATIONS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
+
+type SharedSender = Arc<Mutex<futures::stream::SplitSink<WebSocket, Message>>>;
+
+async fn send_server(sender: &SharedSender, message: ServerMessage) -> bool {
+    sender
+        .lock()
+        .await
+        .send(message.to_ws_message())
+        .await
+        .is_ok()
+}
 
 /// Client message types
 #[derive(Debug, Deserialize)]
@@ -236,10 +252,12 @@ impl Drop for ConnectionCleanupGuard {
     }
 }
 
-/// Pull image data URLs out of a message's stored metadata.
+/// Pull provider-safe image URLs out of a message's stored metadata.
 ///
 /// Images ride in `metadata.attachments[]` rather than in `content`, so the
-/// text of a message stays readable and the images survive a reload.
+/// text of a message stays readable and the images survive a reload. Protected
+/// relative artifact URLs require Zone authentication, which LiteLLM does not
+/// receive, so they must never be forwarded on later turns.
 fn image_urls_from_metadata(metadata: Option<&serde_json::Value>) -> Vec<String> {
     metadata
         .and_then(|m| m.get("attachments"))
@@ -253,6 +271,11 @@ fn image_urls_from_metadata(metadata: Option<&serde_json::Value>) -> Vec<String>
                         .is_some_and(|m| m.starts_with("image/"))
                 })
                 .filter_map(|a| a.get("url").and_then(|u| u.as_str()))
+                .filter(|url| {
+                    url.starts_with("data:")
+                        || url.starts_with("https://")
+                        || url.starts_with("http://")
+                })
                 .map(str::to_string)
                 .collect()
         })
@@ -273,8 +296,17 @@ fn generated_image_attachment(url: &str, index: usize) -> Option<ChatImageAttach
             return None;
         }
         mime.to_string()
-    } else if url.starts_with("https://") || url.starts_with("http://") {
-        "image/png".to_string()
+    } else if url.starts_with("https://")
+        || url.starts_with("http://")
+        || url.starts_with("/api/artifacts/")
+    {
+        if url.ends_with(".jpg") || url.ends_with(".jpeg") {
+            "image/jpeg".to_string()
+        } else if url.ends_with(".webp") {
+            "image/webp".to_string()
+        } else {
+            "image/png".to_string()
+        }
     } else {
         return None;
     };
@@ -480,6 +512,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     if sender.send(init_msg.to_ws_message()).await.is_err() {
         return;
     }
+    let sender = Arc::new(Mutex::new(sender));
 
     // Setup state for message loop
     let mut auth_check_counter = 0;
@@ -512,7 +545,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     let error_msg = ServerMessage::Error {
                                         message: "Rate limit exceeded".to_string(),
                                     };
-                                    let _ = sender.send(error_msg.to_ws_message()).await;
+                                    let _ = send_server(&sender, error_msg).await;
                                     continue;
                                 }
 
@@ -521,30 +554,33 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     let error_msg = ServerMessage::Error {
                                         message: "Message too long".to_string(),
                                     };
-                                    let _ = sender.send(error_msg.to_ws_message()).await;
+                                    let _ = send_server(&sender, error_msg).await;
                                     continue;
                                 }
 
                                 // Handle the send message
+                                let task_state = state.clone();
+                                let task_sender = sender.clone();
+                                let task_content = content;
+                                tokio::spawn(async move {
                                 if let Err(e) = handle_send_message(
-                                    &state,
-                                    &mut sender,
+                                    &task_state,
+                                    &task_sender,
                                     chat_id,
                                     workspace_id,
-                                    &content,
+                                    &task_content,
                                     metadata,
-                                    &mut consecutive_errors,
                                 ).await {
                                     tracing::error!("Error handling send message: {}", e);
-                                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                                        let error_msg = ServerMessage::Error {
-                                            message: "Connection unstable, please reconnect".to_string(),
-                                        };
-                                        let _ = sender.send(error_msg.to_ws_message()).await;
-                                        let _ = sender.close().await;
-                                        return;
-                                    }
+                                    let _ = send_server(
+                                        &task_sender,
+                                        ServerMessage::Error {
+                                            message: "Failed to process message".to_string(),
+                                        },
+                                    )
+                                    .await;
                                 }
+                                });
                             }
                             Ok(ClientMessage::Cancel) => {
                                 // Broadcast cancellation to all active streams for this chat
@@ -564,7 +600,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 let cancel_msg = ServerMessage::Cancelled {
                                     message_id: None,
                                 };
-                                let _ = sender.send(cancel_msg.to_ws_message()).await;
+                                let _ = send_server(&sender, cancel_msg).await;
                             }
                             Ok(ClientMessage::Auth { .. }) => {
                                 // Ignore duplicate auth messages
@@ -574,12 +610,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 let error_msg = ServerMessage::Error {
                                     message: "Invalid message format".to_string(),
                                 };
-                                let _ = sender.send(error_msg.to_ws_message()).await;
+                                let _ = send_server(&sender, error_msg).await;
                             }
                         }
                     }
                     Some(Ok(Message::Ping(data))) => {
-                        if sender.send(Message::Pong(data)).await.is_err() {
+                        if sender.lock().await.send(Message::Pong(data)).await.is_err() {
                             return;
                         }
                         last_client_activity = Instant::now();
@@ -597,7 +633,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 // Check for idle timeout
                 if last_client_activity.elapsed() > Duration::from_secs(WS_IDLE_TIMEOUT_SECS) {
                     tracing::info!("Closing idle WebSocket connection for chat {}", chat_id);
-                    let _ = sender.close().await;
+                    let _ = sender.lock().await.close().await;
                     return;
                 }
 
@@ -616,8 +652,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                             let error_msg = ServerMessage::Error {
                                 message: "Access revoked".to_string(),
                             };
-                            let _ = sender.send(error_msg.to_ws_message()).await;
-                            let _ = sender.close().await;
+                            let _ = send_server(&sender, error_msg).await;
+                            let _ = sender.lock().await.close().await;
                             return;
                         }
                         Err(e) => {
@@ -627,8 +663,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                 let error_msg = ServerMessage::Error {
                                     message: "Connection unstable, please reconnect".to_string(),
                                 };
-                                let _ = sender.send(error_msg.to_ws_message()).await;
-                                let _ = sender.close().await;
+                                let _ = send_server(&sender, error_msg).await;
+                                let _ = sender.lock().await.close().await;
                                 return;
                             }
                         }
@@ -639,7 +675,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 }
 
                 // Send ping
-                if sender.send(Message::Ping(Bytes::new())).await.is_err() {
+                if sender.lock().await.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
                 }
             }
@@ -653,6 +689,196 @@ fn is_valid_model(model_name: &str) -> bool {
     ALLOWED_MODEL_PREFIXES
         .iter()
         .any(|prefix| model_lower.starts_with(prefix))
+}
+
+async fn handle_image_generation(
+    state: &AppState,
+    sender: &SharedSender,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    prompt: &str,
+    image_config: crate::config::ComfyUiConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::services::{
+        artifacts::ArtifactStore,
+        comfyui::{ComfyUiClient, ComfyUiError},
+    };
+
+    const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+    let assistant_message_id = Uuid::new_v4();
+    let cancel_key = (chat_id, assistant_message_id);
+    let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
+    CHAT_CANCELLATIONS.insert(cancel_key, cancel_tx);
+
+    let client = match ComfyUiClient::new(image_config.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            CHAT_CANCELLATIONS.remove(&cancel_key);
+            let _ = send_server(
+                sender,
+                ServerMessage::Error {
+                    message: format!("Image generation is not configured: {error}"),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+    };
+    let _generation_permit = tokio::select! {
+        permit = IMAGE_GENERATIONS.acquire() => permit.expect("image semaphore is never closed"),
+        _ = cancel_rx.recv() => {
+            CHAT_CANCELLATIONS.remove(&cancel_key);
+            let _ = send_server(
+                sender,
+                ServerMessage::Cancelled { message_id: Some(assistant_message_id) },
+            ).await;
+            return Ok(());
+        }
+    };
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let progress_sender = sender.clone();
+    let progress_task = tokio::spawn(async move {
+        while let Some(message) = progress_rx.recv().await {
+            if !send_server(&progress_sender, ServerMessage::Status { message }).await {
+                break;
+            }
+        }
+    });
+
+    let result = client.generate(prompt, cancel_rx, progress_tx).await;
+    CHAT_CANCELLATIONS.remove(&cancel_key);
+    progress_task.abort();
+
+    let images = match result {
+        Ok(images) => images,
+        Err(ComfyUiError::Cancelled) => {
+            let _ = send_server(
+                sender,
+                ServerMessage::Cancelled {
+                    message_id: Some(assistant_message_id),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+        Err(error) => {
+            let _ = send_server(
+                sender,
+                ServerMessage::Error {
+                    message: format!("Image generation failed: {error}"),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+    };
+
+    let store = ArtifactStore::new(image_config.artifact_root.clone());
+    let mut attachments = Vec::new();
+    for image in images.into_iter().take(MAX_GENERATED_IMAGES) {
+        if image.bytes.len() > MAX_ARTIFACT_BYTES {
+            tracing::warn!("ComfyUI output exceeded artifact size limit");
+            continue;
+        }
+        let extension = match image.mime.as_str() {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            _ => "png",
+        };
+        let url = match store
+            .persist(
+                workspace_id,
+                chat_id,
+                assistant_message_id,
+                extension,
+                &image.bytes,
+            )
+            .await
+        {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::error!("Failed to persist generated image: {error}");
+                store
+                    .cleanup_owner(workspace_id, chat_id, assistant_message_id)
+                    .await;
+                let _ = send_server(
+                    sender,
+                    ServerMessage::Error {
+                        message: "Image generation failed: could not store the image".to_string(),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+        if let Some(attachment) = generated_image_attachment(&url, attachments.len()) {
+            attachments.push(attachment);
+        }
+    }
+    if attachments.is_empty() {
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Image generation completed without a usable image".to_string(),
+            },
+        )
+        .await;
+        return Ok(());
+    }
+
+    let content = "Generated image.";
+    let metadata = image_metadata(&attachments);
+    if let Err(error) = chats::create_message_with_id(
+        state.db(),
+        assistant_message_id,
+        chat_id,
+        "assistant",
+        content,
+        metadata.clone(),
+    )
+    .await
+    {
+        tracing::error!("Failed to persist generated image message: {error}");
+        store
+            .cleanup_owner(workspace_id, chat_id, assistant_message_id)
+            .await;
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Image generation failed: could not save the message".to_string(),
+            },
+        )
+        .await;
+        return Ok(());
+    }
+    let _ = send_server(
+        sender,
+        ServerMessage::MessageStart {
+            message_id: assistant_message_id,
+            role: "assistant".to_string(),
+        },
+    )
+    .await;
+    for attachment in &attachments {
+        let _ = send_server(
+            sender,
+            ServerMessage::Image {
+                message_id: assistant_message_id,
+                attachment: attachment.clone(),
+            },
+        )
+        .await;
+    }
+    let _ = send_server(
+        sender,
+        ServerMessage::MessageEnd {
+            message_id: assistant_message_id,
+            content: content.to_string(),
+            metadata,
+        },
+    )
+    .await;
+    Ok(())
 }
 
 /// Adapt a plain completion stream to the events the agent emits, so one loop
@@ -703,13 +929,18 @@ fn plain_events(
 /// This is intentionally stricter than context.rs which only requires membership.
 async fn handle_send_message(
     state: &AppState,
-    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    sender: &SharedSender,
     chat_id: Uuid,
     workspace_id: Uuid,
     content: &str,
     metadata: Option<serde_json::Value>,
-    consecutive_errors: &mut u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let generation = CHAT_GENERATIONS
+        .entry(chat_id)
+        .or_insert_with(|| Arc::new(Semaphore::new(1)))
+        .clone();
+    let _chat_generation_permit = generation.acquire().await?;
+
     // Read the chat fresh rather than trusting the row captured at connect
     // time, so switching model or toggling agent mode takes effect on the next
     // message instead of the next reconnect.
@@ -719,19 +950,40 @@ async fn handle_send_message(
             let error_msg = ServerMessage::Error {
                 message: "Chat not found".to_string(),
             };
-            sender.send(error_msg.to_ws_message()).await?;
+            let _ = send_server(sender, error_msg).await;
             return Ok(());
         }
     };
     let model_name = chat.model_name.as_str();
 
-    // MAJOR-2: Validate model name to prevent routing to unexpected/expensive models
-    if !is_valid_model(model_name) {
+    let mut image_config = state.config().comfyui.clone();
+    if let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
+        && let Ok(settings) = ai_settings::get_effective_ai_settings(
+            state.db(),
+            workspace.organization_id,
+            workspace_id,
+        )
+        .await
+    {
+        settings.apply_to_comfyui(&mut image_config);
+    }
+    let classifier = crate::services::image_intent::ImageIntentClassifier::new(
+        image_config.clone(),
+        state.config().litellm_host.clone(),
+        state.config().litellm_key.clone(),
+    );
+    let image_request = classifier
+        .is_image_request(content, metadata.as_ref())
+        .await;
+
+    // Image requests never route through the selected model. Validate it only
+    // when it will actually receive the request.
+    if !image_request && !is_valid_model(model_name) {
         tracing::warn!("Invalid model name rejected: {}", model_name);
         let error_msg = ServerMessage::Error {
             message: "Invalid model configuration".to_string(),
         };
-        sender.send(error_msg.to_ws_message()).await?;
+        let _ = send_server(sender, error_msg).await;
         return Ok(()); // Not a fatal error, just reject this message
     }
 
@@ -744,9 +996,6 @@ async fn handle_send_message(
     let user_message =
         chats::create_message(state.db(), chat_id, "user", content, metadata).await?;
 
-    // Reset error counter on success
-    *consecutive_errors = 0;
-
     // Confirm message saved
     let saved_msg = ServerMessage::MessageSaved {
         message_id: user_message.id,
@@ -754,10 +1003,24 @@ async fn handle_send_message(
         content: content.to_string(),
         metadata: user_message.metadata.clone(),
     };
-    sender.send(saved_msg.to_ws_message()).await?;
+    if !send_server(sender, saved_msg).await {
+        tracing::debug!("Client disconnected after saving user message");
+    }
 
     // Spawn background task to generate user message embedding
     spawn_message_embedding_task(state.clone(), user_message.id, chat_id, content.to_string());
+
+    if image_request {
+        return handle_image_generation(
+            state,
+            sender,
+            chat_id,
+            workspace_id,
+            content,
+            image_config,
+        )
+        .await;
+    }
 
     // Build context for AI
     let mut context_messages = Vec::new();
@@ -863,7 +1126,7 @@ async fn handle_send_message(
             let status_msg = ServerMessage::Status {
                 message: "Searching the web...".to_string(),
             };
-            let _ = sender.send(status_msg.to_ws_message()).await;
+            let _ = send_server(sender, status_msg).await;
 
             match crate::services::searxng::SearxngClient::new(state.config().web_search.clone()) {
                 Ok(client) => match client.search(&query).await {
@@ -917,7 +1180,7 @@ async fn handle_send_message(
         message_id: assistant_message_id,
         role: "assistant".to_string(),
     };
-    sender.send(start_msg.to_ws_message()).await?;
+    let _ = send_server(sender, start_msg).await;
 
     // Both modes produce the same event stream, so the loop below - and its
     // cancellation, timeout and truncation handling - is shared.
@@ -939,7 +1202,7 @@ async fn handle_send_message(
                 let error_msg = ServerMessage::Error {
                     message: "Failed to generate response".to_string(),
                 };
-                sender.send(error_msg.to_ws_message()).await?;
+                let _ = send_server(sender, error_msg).await;
                 CHAT_CANCELLATIONS.remove(&cancel_key);
                 return Err(Box::new(e));
             }
@@ -974,7 +1237,7 @@ async fn handle_send_message(
                 let error_msg = ServerMessage::Error {
                     message: "Response generation timed out".to_string(),
                 };
-                let _ = sender.send(error_msg.to_ws_message()).await;
+                let _ = send_server(sender, error_msg).await;
                 break;
             }
 
@@ -998,9 +1261,7 @@ async fn handle_send_message(
                             content,
                             index: chunk_index,
                         };
-                        if !client_gone
-                            && sender.send(chunk_msg.to_ws_message()).await.is_err()
-                        {
+                        if !client_gone && !send_server(sender, chunk_msg).await {
                             // The reader navigated away. Keep generating:
                             // the reply still has to be saved, because the
                             // console reloads history from the database.
@@ -1026,7 +1287,7 @@ async fn handle_send_message(
                             name,
                             arguments,
                         };
-                        if !client_gone && sender.send(tool_msg.to_ws_message()).await.is_err() {
+                        if !client_gone && !send_server(sender, tool_msg).await {
                             client_gone = true;
                         }
                     }
@@ -1058,7 +1319,7 @@ async fn handle_send_message(
                                 message_id: assistant_message_id,
                                 attachment,
                             };
-                            if sender.send(image_msg.to_ws_message()).await.is_err() {
+                            if !send_server(sender, image_msg).await {
                                 client_gone = true;
                             }
                         }
@@ -1078,14 +1339,14 @@ async fn handle_send_message(
                             detail,
                             duration_ms,
                         };
-                        if !client_gone && sender.send(tool_msg.to_ws_message()).await.is_err() {
+                        if !client_gone && !send_server(sender, tool_msg).await {
                             client_gone = true;
                         }
                     }
                     Some(AgentEvent::Failed(message)) => {
                         if !client_gone {
                             let error_msg = ServerMessage::Error { message };
-                            let _ = sender.send(error_msg.to_ws_message()).await;
+                            let _ = send_server(sender, error_msg).await;
                         }
                         stream_failed = true;
                         break;
@@ -1114,7 +1375,7 @@ async fn handle_send_message(
             let cancel_msg = ServerMessage::Cancelled {
                 message_id: Some(assistant_message_id),
             };
-            let _ = sender.send(cancel_msg.to_ws_message()).await;
+            let _ = send_server(sender, cancel_msg).await;
         }
         return Ok(());
     }
@@ -1139,8 +1400,9 @@ async fn handle_send_message(
     // produced both keeps both.
     let assistant_metadata = merge_metadata(image_metadata(&generated_images), &tool_calls);
 
-    match chats::create_message(
+    match chats::create_message_with_id(
         state.db(),
+        assistant_message_id,
         chat_id,
         "assistant",
         &full_content,
@@ -1168,7 +1430,7 @@ async fn handle_send_message(
                         metadata: assistant_metadata,
                     }
                 };
-                let _ = sender.send(end_msg.to_ws_message()).await;
+                let _ = send_server(sender, end_msg).await;
             }
 
             tracing::debug!(
@@ -1184,7 +1446,7 @@ async fn handle_send_message(
             let error_msg = ServerMessage::Error {
                 message: "Failed to save response".to_string(),
             };
-            sender.send(error_msg.to_ws_message()).await?;
+            let _ = send_server(sender, error_msg).await;
             return Err(Box::new(e));
         }
     }
@@ -1306,12 +1568,28 @@ mod tests {
                     "name": "notes.md",
                     "mime": "text/markdown",
                     "url": "https://example.test/notes.md"
+                },
+                {
+                    "name": "protected.png",
+                    "mime": "image/png",
+                    "url": "/api/artifacts/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003/image.png"
                 }
             ]
         });
         assert_eq!(
             image_urls_from_metadata(Some(&metadata)),
             vec!["data:image/png;base64,xx".to_string()]
+        );
+        let public = serde_json::json!({
+            "attachments": [{
+                "name": "remote.png",
+                "mime": "image/png",
+                "url": "https://example.test/remote.png"
+            }]
+        });
+        assert_eq!(
+            image_urls_from_metadata(Some(&public)),
+            vec!["https://example.test/remote.png".to_string()]
         );
         assert!(image_urls_from_metadata(None).is_empty());
     }

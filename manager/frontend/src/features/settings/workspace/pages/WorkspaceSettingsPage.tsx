@@ -64,6 +64,8 @@ const modelOptions = {
   },
 };
 
+const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
+
 const awsRegions = ['us-east-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-northeast-1'];
 
 export default function WorkspaceSettingsPage() {
@@ -104,6 +106,7 @@ export default function WorkspaceSettingsPage() {
   const [modelFast, setModelFast] = useState('');
   const [modelReasoning, setModelReasoning] = useState('');
   const [modelEmbedding, setModelEmbedding] = useState('');
+  const [modelImage, setModelImage] = useState('');
   const [hasLitellmKey, setHasLitellmKey] = useState(false);
   const [hasOpenaiKey, setHasOpenaiKey] = useState(false);
   const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
@@ -147,6 +150,7 @@ export default function WorkspaceSettingsPage() {
       settings.model_fast ||
       settings.model_reasoning ||
       settings.model_embedding ||
+      settings.model_image ||
       settings.litellm_host ||
       settings.openai_base_url ||
       settings.anthropic_base_url ||
@@ -162,6 +166,7 @@ export default function WorkspaceSettingsPage() {
     setModelFast(settings.model_fast || '');
     setModelReasoning(settings.model_reasoning || '');
     setModelEmbedding(settings.model_embedding || '');
+    setModelImage(settings.model_image || '');
     setHasLitellmKey(settings.has_litellm_key);
     setHasOpenaiKey(settings.has_openai_api_key);
     setHasAnthropicKey(settings.has_anthropic_api_key);
@@ -251,6 +256,7 @@ export default function WorkspaceSettingsPage() {
           model_fast: modelFast || undefined,
           model_reasoning: modelReasoning || undefined,
           model_embedding: modelEmbedding || undefined,
+          model_image: modelImage || undefined,
         };
         if (aiProvider === 'self_hosted') {
           aiRequest.litellm_host = litellmHost || undefined;
@@ -826,6 +832,27 @@ export default function WorkspaceSettingsPage() {
                           </>
                         )}
                       </div>
+                      <div className="form-group">
+                        <label htmlFor="model-image">Image Model</label>
+                        <select
+                          id="model-image"
+                          value={modelImage}
+                          onChange={(e) => setModelImage(e.target.value)}
+                          className="form-select"
+                        >
+                          <option value="">Use organization / server default</option>
+                          {Array.from(
+                            new Set([...IMAGE_MODEL_OPTIONS, modelImage].filter(Boolean))
+                          ).map((model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="form-hint">
+                          ComfyUI checkpoint used when a message asks for an image.
+                        </p>
+                      </div>
                     </div>
                   </>
                 ) : (
@@ -856,6 +883,12 @@ export default function WorkspaceSettingsPage() {
                           <span className="effective-label">Embedding Model:</span>
                           <span className="effective-value">
                             {effectiveSettings.model_embedding || 'Not configured'}
+                          </span>
+                        </div>
+                        <div className="effective-row">
+                          <span className="effective-label">Image Model:</span>
+                          <span className="effective-value">
+                            {effectiveSettings.model_image || 'Server default'}
                           </span>
                         </div>
                       </div>

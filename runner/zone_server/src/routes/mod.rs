@@ -3,6 +3,7 @@
 //! This module defines all HTTP endpoints for the Zone API.
 
 pub mod ai_settings;
+pub mod artifacts;
 pub mod audit;
 pub mod auth;
 pub mod billing;
@@ -190,6 +191,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/tasks/runs/{run_id}", get(tasks::get_run))
         .route("/api/tasks/runs/{run_id}/logs", get(tasks::get_run_logs))
         // Chats
+        .route(
+            "/api/artifacts/{workspace_id}/{chat_id}/{owner_id}/{filename}",
+            get(artifacts::get),
+        )
         .route("/api/chats", get(chats::list).post(chats::create))
         .route("/api/chats/search", get(chats::search_messages))
         .route(
