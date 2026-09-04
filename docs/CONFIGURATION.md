@@ -252,7 +252,7 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Default**: empty (direct catalog requests)
 - **Description**: Optional HTTP proxy for remote model catalog searches from Manager
 - **VPN value**: `http://gluetun:8888`
-- **Usage**: `make up-vpn` and `make up-all` save this in `.env` automatically so rebuilds retain it; clear it and recreate Manager when disabling the VPN
+- **Usage**: `make up-vpn` and `make up-all` save this in `.env` automatically so rebuilds retain it; `make up` clears it for direct catalog requests
 
 ### Manager / zone-server chat
 

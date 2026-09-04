@@ -95,7 +95,8 @@ build: ## Build all services
 
 up: ## Start all services (without VPN or monitoring)
 	@echo "$(GREEN)Starting services...$(NC)"
-	$(DOCKER_COMPOSE) up -d
+	@sh scripts/configure-model-proxy.sh .env direct
+	MODEL_SEARCH_PROXY_URL= $(DOCKER_COMPOSE) up -d
 	@echo "$(GREEN)Services started! Check status with: make ps$(NC)"
 	@echo "$(YELLOW)Note: VPN not enabled. For VPN-protected search, use: make up-vpn$(NC)"
 
