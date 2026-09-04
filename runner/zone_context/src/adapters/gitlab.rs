@@ -639,14 +639,21 @@ impl GitLabAdapter {
             .map_err(|e| ContextError::adapter("gitlab", format!("Failed to parse content: {}", e)))
     }
 
-    /// Decode base64 content
-    fn decode_content(content: &str) -> Result<String> {
+    /// Decode base64 content as UTF-8 text.
+    fn decode_text_content(content: &str) -> Result<Option<String>> {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(content.replace('\n', ""))
             .map_err(|e| ContextError::Parse(format!("Failed to decode base64: {}", e)))?;
 
-        String::from_utf8(decoded)
-            .map_err(|e| ContextError::Parse(format!("Failed to decode UTF-8: {}", e)))
+        Ok(String::from_utf8(decoded).ok())
+    }
+
+    /// Decode base64 content
+    #[cfg(test)]
+    fn decode_content(content: &str) -> Result<String> {
+        Self::decode_text_content(content)?.ok_or_else(|| {
+            ContextError::Parse("Failed to decode UTF-8: blob is not valid UTF-8".to_string())
+        })
     }
 
     /// Create a ContentItem from a GitLab file
@@ -897,10 +904,19 @@ impl SourceAdapter for GitLabAdapter {
                         )
                         .await?;
 
-                    let content = if let Some(ref encoded) = file_content.content {
-                        Some(Self::decode_content(encoded)?)
-                    } else {
-                        None
+                    let content = match file_content.content.as_deref() {
+                        Some(encoded) => match Self::decode_text_content(encoded)? {
+                            Some(text) => Some(text),
+                            None => {
+                                tracing::debug!(
+                                    path = %entry.path,
+                                    "skipping non-UTF-8 GitLab file"
+                                );
+                                progress.on_progress(idx + 1, Some(total_files));
+                                continue;
+                            }
+                        },
+                        None => None,
                     };
 
                     let item = Self::create_content_item(
@@ -962,10 +978,18 @@ impl SourceAdapter for GitLabAdapter {
                             )
                             .await?;
 
-                        let content = if let Some(ref encoded) = file_content.content {
-                            Some(Self::decode_content(encoded)?)
-                        } else {
-                            None
+                        let content = match file_content.content.as_deref() {
+                            Some(encoded) => match Self::decode_text_content(encoded)? {
+                                Some(text) => Some(text),
+                                None => {
+                                    tracing::debug!(
+                                        path = %entry.path,
+                                        "skipping non-UTF-8 GitLab file"
+                                    );
+                                    continue;
+                                }
+                            },
+                            None => None,
                         };
 
                         let item = Self::create_content_item(
@@ -1043,10 +1067,18 @@ impl SourceAdapter for GitLabAdapter {
                             )
                             .await?;
 
-                        let content = if let Some(ref encoded) = file_content.content {
-                            Some(Self::decode_content(encoded)?)
-                        } else {
-                            None
+                        let content = match file_content.content.as_deref() {
+                            Some(encoded) => match Self::decode_text_content(encoded)? {
+                                Some(text) => Some(text),
+                                None => {
+                                    tracing::debug!(
+                                        path = %entry.path,
+                                        "skipping non-UTF-8 GitLab file"
+                                    );
+                                    continue;
+                                }
+                            },
+                            None => None,
                         };
 
                         let item = Self::create_content_item(

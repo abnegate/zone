@@ -28,7 +28,7 @@ const BINARY_EXTENSIONS: &[&str] = &[
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg", ".pdf", ".zip", ".tar",
     ".gz", ".7z", ".rar", ".exe", ".dll", ".so", ".dylib", ".o", ".a", ".lib", ".bin", ".wasm",
     ".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac", ".ogg", ".ttf", ".otf", ".woff", ".woff2",
-    ".eot",
+    ".eot", ".icns",
 ];
 
 /// Maximum file size in bytes (10MB, same as FilesystemAdapter)
@@ -587,14 +587,82 @@ impl GitHubAdapter {
             .map_err(|e| ContextError::adapter("github", format!("Failed to parse content: {}", e)))
     }
 
-    /// Decode base64 content
-    fn decode_content(content: &str) -> Result<String> {
+    /// Decode base64 content as UTF-8 text.
+    ///
+    /// Returns `None` when the blob is not valid UTF-8 so callers can skip
+    /// binaries instead of aborting the whole repository fetch.
+    fn decode_text_content(content: &str) -> Result<Option<String>> {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(content.replace("\n", ""))
             .map_err(|e| ContextError::Parse(format!("Failed to decode base64: {}", e)))?;
 
-        String::from_utf8(decoded)
-            .map_err(|e| ContextError::Parse(format!("Failed to decode UTF-8: {}", e)))
+        Ok(String::from_utf8(decoded).ok())
+    }
+
+    /// Decode base64 content
+    #[cfg(test)]
+    fn decode_content(content: &str) -> Result<String> {
+        Self::decode_text_content(content)?.ok_or_else(|| {
+            ContextError::Parse("Failed to decode UTF-8: blob is not valid UTF-8".to_string())
+        })
+    }
+
+    fn is_fatal_fetch_error(err: &ContextError) -> bool {
+        matches!(
+            err,
+            ContextError::RateLimited { .. }
+                | ContextError::Auth(_)
+                | ContextError::CredentialsRequired(_)
+        )
+    }
+
+    async fn fetch_file_item(
+        &self,
+        source_id: uuid::Uuid,
+        config: &GitHubConfig,
+        branch: &str,
+        entry: &GitHubTreeEntry,
+    ) -> Result<Option<ContentItem>> {
+        let content_response = match self
+            .get_file_content(
+                &config.owner,
+                &config.repo,
+                &entry.path,
+                branch,
+                config.token.as_deref(),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(err) if Self::is_fatal_fetch_error(&err) => return Err(err),
+            Err(err) => {
+                tracing::warn!(path = %entry.path, error = %err, "skipping GitHub file");
+                return Ok(None);
+            }
+        };
+
+        let content = match content_response.content.as_deref() {
+            Some(encoded) => match Self::decode_text_content(encoded)? {
+                Some(text) => Some(text),
+                None => {
+                    tracing::debug!(path = %entry.path, "skipping non-UTF-8 GitHub file");
+                    return Ok(None);
+                }
+            },
+            None => None,
+        };
+
+        Ok(Some(Self::create_content_item(
+            source_id,
+            &config.owner,
+            &config.repo,
+            branch,
+            &entry.path,
+            &entry.sha,
+            entry.size.unwrap_or(0),
+            content,
+            false,
+        )?))
     }
 
     /// Create a ContentItem from a GitHub file
@@ -845,36 +913,13 @@ impl SourceAdapter for GitHubAdapter {
             FetchStrategy::Full => {
                 progress.on_message(&format!("Fetching {} files from GitHub", total_files));
                 for (idx, entry) in files.iter().enumerate() {
-                    let content_response = self
-                        .get_file_content(
-                            &config.owner,
-                            &config.repo,
-                            &entry.path,
-                            &branch,
-                            config.token.as_deref(),
-                        )
-                        .await?;
-
-                    let content = if let Some(ref encoded) = content_response.content {
-                        Some(Self::decode_content(encoded)?)
-                    } else {
-                        None
-                    };
-
-                    let item = Self::create_content_item(
-                        source.id,
-                        &config.owner,
-                        &config.repo,
-                        &branch,
-                        &entry.path,
-                        &entry.sha,
-                        entry.size.unwrap_or(0),
-                        content,
-                        false,
-                    )?;
-
-                    progress.on_item(&item);
-                    result.add_item(item);
+                    if let Some(item) = self
+                        .fetch_file_item(source.id, &config, &branch, entry)
+                        .await?
+                    {
+                        progress.on_item(&item);
+                        result.add_item(item);
+                    }
                     progress.on_progress(idx + 1, Some(total_files));
                 }
             }
@@ -927,37 +972,14 @@ impl SourceAdapter for GitHubAdapter {
                         break;
                     }
 
-                    let content_response = self
-                        .get_file_content(
-                            &config.owner,
-                            &config.repo,
-                            &entry.path,
-                            &branch,
-                            config.token.as_deref(),
-                        )
-                        .await?;
-
-                    let content = if let Some(ref encoded) = content_response.content {
-                        Some(Self::decode_content(encoded)?)
-                    } else {
-                        None
-                    };
-
-                    let item = Self::create_content_item(
-                        source.id,
-                        &config.owner,
-                        &config.repo,
-                        &branch,
-                        &entry.path,
-                        &entry.sha,
-                        entry.size.unwrap_or(0),
-                        content,
-                        false,
-                    )?;
-
-                    budget.try_add(&entry.path, item.token_count);
-                    progress.on_item(&item);
-                    result.add_item(item);
+                    if let Some(item) = self
+                        .fetch_file_item(source.id, &config, &branch, entry)
+                        .await?
+                    {
+                        budget.try_add(&entry.path, item.token_count);
+                        progress.on_item(&item);
+                        result.add_item(item);
+                    }
                     progress.on_progress(idx + 1, Some(total_files));
                 }
             }
@@ -1005,36 +1027,11 @@ impl SourceAdapter for GitHubAdapter {
 
                 // Fetch in priority order
                 for (idx, priority_item) in prioritized.iter().enumerate() {
-                    // Find the entry
-                    if let Some(entry) = files.iter().find(|e| e.path == priority_item.path) {
-                        let content_response = self
-                            .get_file_content(
-                                &config.owner,
-                                &config.repo,
-                                &entry.path,
-                                &branch,
-                                config.token.as_deref(),
-                            )
-                            .await?;
-
-                        let content = if let Some(ref encoded) = content_response.content {
-                            Some(Self::decode_content(encoded)?)
-                        } else {
-                            None
-                        };
-
-                        let item = Self::create_content_item(
-                            source.id,
-                            &config.owner,
-                            &config.repo,
-                            &branch,
-                            &entry.path,
-                            &entry.sha,
-                            entry.size.unwrap_or(0),
-                            content,
-                            false,
-                        )?;
-
+                    if let Some(entry) = files.iter().find(|e| e.path == priority_item.path)
+                        && let Some(item) = self
+                            .fetch_file_item(source.id, &config, &branch, entry)
+                            .await?
+                    {
                         progress.on_item(&item);
                         result.add_item(item);
                     }
@@ -1355,6 +1352,12 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode("Hello, World!");
         let decoded = GitHubAdapter::decode_content(&encoded).unwrap();
         assert_eq!(decoded, "Hello, World!");
+    }
+
+    #[test]
+    fn test_decode_text_content_skips_invalid_utf8() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode([b'h', b'e', 0xff, b'l']);
+        assert_eq!(GitHubAdapter::decode_text_content(&encoded).unwrap(), None);
     }
 
     #[test]

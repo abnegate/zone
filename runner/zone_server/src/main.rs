@@ -103,6 +103,13 @@ async fn main() {
         };
 
         let engine = embedding_engine_from_env();
+        // OllamaProvider uses the native /api/embeddings protocol. LiteLLM
+        // only exposes OpenAI /v1/embeddings, so ollama-engine traffic must
+        // go to OLLAMA_HOST or every embed 404s.
+        let mut default_settings = default_settings;
+        if !matches!(engine.as_deref(), Some("local")) {
+            default_settings.litellm_host = Some(config.ollama_host.clone());
+        }
         match create_embedding_service(&default_settings, engine.as_deref()) {
             Ok(service) => {
                 tracing::info!(

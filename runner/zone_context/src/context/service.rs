@@ -281,6 +281,12 @@ impl ContextService {
                     result.embeddings_created += count;
                 }
                 Err(e) => {
+                    tracing::warn!(
+                        source_id = %item.source_id,
+                        uri = %item.uri,
+                        error = %e,
+                        "Store/embed failed"
+                    );
                     result
                         .errors
                         .push((item.source_id, format!("Store/embed failed: {}", e)));
