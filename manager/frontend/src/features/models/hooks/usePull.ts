@@ -4,127 +4,121 @@ import { useAuth } from '../../../features/auth';
 import type { PullProgress, Step } from '../types';
 
 export function usePull() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, accessToken } = useAuth();
   const [pulling, setPulling] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [steps, setSteps] = useState<Step[]>([]);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const pullingRef = useRef(pulling);
-
-  // Keep ref in sync with state to avoid stale closures
-  useEffect(() => {
-    pullingRef.current = pulling;
-  }, [pulling]);
+  const finishRef = useRef<((success: boolean, message: string, update?: boolean) => void) | null>(
+    null
+  );
 
   const pull = useCallback(
     (modelName: string): Promise<boolean> => {
       return new Promise((resolve) => {
-        if (!isAuthenticated || !modelName.trim()) {
+        if (!isAuthenticated || !accessToken || !modelName.trim()) {
           resolve(false);
           return;
         }
 
+        finishRef.current?.(false, 'Installation cancelled');
         setPulling(true);
         setProgress(null);
         setSteps([]);
         setResult(null);
 
-        const ws = modelsApi.createPullWebSocket(modelName.trim());
-        wsRef.current = ws;
+        let socket: WebSocket | null = null;
+        let settled = false;
+        let requested = false;
+        const finish = (success: boolean, message: string, update = true): void => {
+          if (settled) return;
+          settled = true;
+          if (finishRef.current === finish) finishRef.current = null;
+          if (update) {
+            setPulling(false);
+            setResult({ success, message });
+          }
+          if (socket) {
+            socket.onopen = null;
+            socket.onmessage = null;
+            socket.onerror = null;
+            socket.onclose = null;
+            socket.close();
+          }
+          resolve(success);
+        };
+        finishRef.current = finish;
 
-        ws.onopen = () => {
-          // For now, we'll skip authentication via WebSocket
-          // and send the pull request directly
-          const msg = JSON.stringify({ model: modelName.trim() });
-          ws.send(msg);
+        try {
+          socket = modelsApi.createPullWebSocket(modelName.trim());
+        } catch {
+          finish(false, 'Connection error');
+          return;
+        }
+
+        socket.onopen = () => {
+          if (settled) return;
+          try {
+            socket?.send(JSON.stringify({ type: 'auth', token: accessToken }));
+          } catch {
+            finish(false, 'Connection error');
+          }
         };
 
-        ws.onmessage = (event) => {
+        socket.onmessage = (event) => {
+          if (settled) return;
           try {
             const data: PullProgress = JSON.parse(event.data);
-
-            // Handle authentication response
             if (data.type === 'authenticated') {
-              // Now send the pull request
-              const msg = JSON.stringify({ model: modelName.trim() });
-              ws.send(msg);
+              if (requested) return;
+              requested = true;
+              try {
+                socket?.send(JSON.stringify({ model: modelName.trim() }));
+              } catch {
+                finish(false, 'Connection error');
+              }
               return;
             }
 
             switch (data.type) {
               case 'progress':
-                if (data.percent !== undefined) {
-                  setProgress(data.percent);
-                }
+                if (data.percent !== undefined) setProgress(data.percent);
                 break;
-
               case 'step':
                 if (data.status) {
-                  const stepName = data.status;
-                  setSteps((prev) => {
-                    const existing = prev.find((s) => s.name === stepName);
+                  const name = data.status;
+                  setSteps((previous) => {
+                    const existing = previous.find((step) => step.name === name);
                     if (existing) {
-                      return prev.map((s) =>
-                        s.name === stepName
-                          ? { ...s, message: data.message || '', status: 'success' as const }
-                          : s
+                      return previous.map((step) =>
+                        step.name === name
+                          ? { ...step, message: data.message || '', status: 'success' as const }
+                          : step
                       );
                     }
                     return [
-                      ...prev,
-                      {
-                        name: stepName,
-                        message: data.message || '',
-                        status: 'pending' as const,
-                      },
+                      ...previous,
+                      { name, message: data.message || '', status: 'pending' as const },
                     ];
                   });
                 }
                 break;
-
               case 'complete':
-                setPulling(false);
-                setResult({
-                  success: data.success ?? true,
-                  message: data.message || 'Model installed successfully',
-                });
-                ws.close();
-                resolve(data.success ?? true);
+                finish(data.success ?? true, data.message || 'Model installed successfully');
                 break;
-
               case 'error':
-                setPulling(false);
-                setResult({
-                  success: false,
-                  message: data.message || 'Failed to install model',
-                });
-                ws.close();
-                resolve(false);
+                finish(false, data.message || 'Failed to install model');
                 break;
             }
           } catch {
-            // Ignore parse errors
+            // Ignore frames that do not belong to the pull protocol.
           }
         };
-
-        ws.onerror = () => {
-          setPulling(false);
-          setResult({
-            success: false,
-            message: 'Connection error',
-          });
-          resolve(false);
-        };
-
-        ws.onclose = () => {
-          if (pullingRef.current) {
-            setPulling(false);
-          }
-        };
+        socket.onerror = () => finish(false, 'Connection error');
+        socket.onclose = () => finish(false, 'Connection closed before installation completed');
       });
     },
-    [isAuthenticated]
+    [isAuthenticated, accessToken]
   );
 
   const reset = useCallback(() => {
@@ -134,25 +128,16 @@ export function usePull() {
   }, []);
 
   const cancel = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
+    if (finishRef.current) {
+      finishRef.current(false, 'Installation cancelled');
+    } else {
+      setPulling(false);
+      setResult({ success: false, message: 'Installation cancelled' });
     }
-    setPulling(false);
-    setResult({
-      success: false,
-      message: 'Installation cancelled',
-    });
   }, []);
 
-  // Cleanup WebSocket on unmount
   useEffect(() => {
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-    };
+    return () => finishRef.current?.(false, 'Installation cancelled', false);
   }, []);
 
   return { pulling, progress, steps, result, pull, reset, cancel };
