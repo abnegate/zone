@@ -2,54 +2,42 @@
 # Documentation: https://docs.litellm.ai/docs/
 
 model_list:
-  # ===========================================================================
   # Fast Model - For simple queries (default)
-  # ===========================================================================
   - model_name: "{{OLLAMA_MODEL_FAST}}"
     litellm_params:
-      model: ollama/{{OLLAMA_MODEL_FAST}}
+      model: ollama_chat/{{OLLAMA_MODEL_FAST}}
       api_base: {{OLLAMA_BASE_URL}}
       timeout: 60
 
-  # ===========================================================================
   # Reasoning Model - For complex analysis
-  # ===========================================================================
   - model_name: "{{OLLAMA_MODEL_REASON}}"
     litellm_params:
-      model: ollama/{{OLLAMA_MODEL_REASON}}
+      model: ollama_chat/{{OLLAMA_MODEL_REASON}}
       api_base: {{OLLAMA_BASE_URL}}
       timeout: 180
 
-  # ===========================================================================
   # Embedding Model - For RAG and semantic search
-  # ===========================================================================
   - model_name: "{{OLLAMA_MODEL_EMBED}}"
     litellm_params:
       model: ollama/{{OLLAMA_MODEL_EMBED}}
       api_base: {{OLLAMA_BASE_URL}}
       timeout: 30
 
-  # ===========================================================================
   # Vision Model - For messages carrying images
-  # ===========================================================================
   - model_name: "{{OLLAMA_MODEL_VISION}}"
     litellm_params:
-      model: ollama/{{OLLAMA_MODEL_VISION}}
+      model: ollama_chat/{{OLLAMA_MODEL_VISION}}
       api_base: {{OLLAMA_BASE_URL}}
       timeout: 180
 
-# =============================================================================
 # Router Configuration
-# =============================================================================
 router_settings:
   num_retries: 2
   timeout: 180
   fallbacks:
     - "{{OLLAMA_MODEL_FAST}}": ["{{OLLAMA_MODEL_REASON}}"]
 
-# =============================================================================
 # General Settings
-# =============================================================================
 general_settings:
   # Master key for API authentication (set via LITELLM_MASTER_KEY env var)
   master_key: os.environ/LITELLM_MASTER_KEY
@@ -62,9 +50,7 @@ general_settings:
   store_model_in_db: true
   store_prompts_in_spend_logs: false
 
-# =============================================================================
 # LiteLLM Settings
-# =============================================================================
 litellm_settings:
   drop_params: false
   set_verbose: false

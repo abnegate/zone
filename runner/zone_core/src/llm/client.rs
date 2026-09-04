@@ -18,6 +18,28 @@ pub enum LlmError {
     Stream(String),
 }
 
+impl LlmError {
+    /// Whether the provider explicitly rejected this model's tool capability.
+    /// LiteLLM wraps Ollama's capability rejection as APIConnectionError (500).
+    pub fn unsupported_tools(&self) -> bool {
+        let Self::Api {
+            status: 400 | 500,
+            message,
+        } = self
+        else {
+            return false;
+        };
+        let Ok(error) = serde_json::from_str::<serde_json::Value>(message) else {
+            return false;
+        };
+        error
+            .pointer("/error/message")
+            .or_else(|| error.get("error"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("does not support tools"))
+    }
+}
+
 /// Configuration for the LLM client
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
@@ -213,7 +235,45 @@ impl LlmClient {
 mod tests {
     use super::*;
 
-    // ==================== LlmConfig Tests ====================
+    #[test]
+    fn classifies_explicit_tool_capability_rejections() {
+        for (status, message) in [
+            (400, r#"{"error":"llava:7b does not support tools"}"#),
+            (
+                500,
+                r#"{"error":{"message":"Ollama_chatException - llava:7b does not support tools"}}"#,
+            ),
+        ] {
+            assert!(
+                LlmError::Api {
+                    status,
+                    message: message.into()
+                }
+                .unsupported_tools()
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_authentication_transport_and_schema_failures() {
+        for (status, message) in [
+            (401, r#"{"error":{"message":"does not support tools"}}"#),
+            (403, r#"{"error":{"message":"does not support tools"}}"#),
+            (429, r#"{"error":{"message":"does not support tools"}}"#),
+            (500, r#"{"error":{"message":"Connection refused"}}"#),
+            (400, r#"{"error":{"message":"Invalid tool schema"}}"#),
+            (500, "does not support tools"),
+        ] {
+            assert!(
+                !LlmError::Api {
+                    status,
+                    message: message.into()
+                }
+                .unsupported_tools()
+            );
+        }
+        assert!(!LlmError::Stream("does not support tools".into()).unsupported_tools());
+    }
 
     #[test]
     fn test_llm_config_default_values() {
@@ -272,8 +332,6 @@ mod tests {
         assert!(debug_str.contains("default_model"));
     }
 
-    // ==================== LlmClient Tests ====================
-
     #[test]
     fn test_llm_client_creation() {
         let config = LlmConfig::default();
@@ -329,8 +387,6 @@ mod tests {
         assert!(debug_str.contains("LlmClient"));
         assert!(debug_str.contains("config"));
     }
-
-    // ==================== LlmError Tests ====================
 
     #[test]
     fn test_llm_error_api_display() {
