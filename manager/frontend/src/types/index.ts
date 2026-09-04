@@ -31,6 +31,7 @@ export type {
   Message,
   MessageRole,
   SendMessageRequest,
+  UpdateChatRequest,
 } from '../features/chats/types';
 // Knowledge Base Types - re-exported from features/knowledge
 export type {

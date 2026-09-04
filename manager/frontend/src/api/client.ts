@@ -47,6 +47,7 @@ import type {
   SessionsResponse,
   Subscription,
   UpdateAiSettingsRequest,
+  UpdateChatRequest,
   UpdateOrganizationRequest,
   UpdateOrgMemberRequest,
   UpdateWorkspaceMemberRequest,
@@ -172,8 +173,8 @@ class Client {
     return chatsApi.createChat(request);
   }
 
-  async updateChatTitle(id: string, title: string): Promise<Chat> {
-    return chatsApi.updateChatTitle(id, title);
+  async updateChat(id: string, request: UpdateChatRequest): Promise<Chat> {
+    return chatsApi.updateChat(id, request);
   }
 
   async deleteChat(id: string): Promise<void> {

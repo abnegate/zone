@@ -67,6 +67,8 @@ describe('useChats', () => {
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z',
       archived: false,
+      agent_enabled: false,
+      agent_sandboxed: true,
     },
     {
       id: '2',
@@ -75,6 +77,8 @@ describe('useChats', () => {
       created_at: '2024-01-02T00:00:00Z',
       updated_at: '2024-01-02T00:00:00Z',
       archived: false,
+      agent_enabled: false,
+      agent_sandboxed: true,
     },
   ];
 
@@ -111,6 +115,8 @@ describe('useChats', () => {
         created_at: '2024-01-03T00:00:00Z',
         updated_at: '2024-01-03T00:00:00Z',
         archived: true,
+        agent_enabled: false,
+        agent_sandboxed: true,
       },
     ];
     mockGetChats.mockResolvedValue(archivedChats);
@@ -147,6 +153,8 @@ describe('useChats', () => {
       created_at: '2024-01-03T00:00:00Z',
       updated_at: '2024-01-03T00:00:00Z',
       archived: false,
+      agent_enabled: false,
+      agent_sandboxed: true,
     };
     mockGetChats.mockResolvedValue(mockChats);
     mockCreateChat.mockResolvedValue(newChat);
@@ -242,6 +250,8 @@ describe('useChats', () => {
         created_at: '2024-01-03T00:00:00Z',
         updated_at: '2024-01-03T00:00:00Z',
         archived: false,
+        agent_enabled: false,
+        agent_sandboxed: true,
       },
     ];
     mockGetChats.mockResolvedValue(updatedChats);
