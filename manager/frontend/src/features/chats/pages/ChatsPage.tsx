@@ -30,6 +30,11 @@ export default function ChatsPage() {
   const [newChatAgent, setNewChatAgent] = useState(false);
   const [newChatSandboxed, setNewChatSandboxed] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [title, setTitle] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const renamePending = useRef(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [messageInput, setMessageInput] = useState('');
@@ -62,6 +67,8 @@ export default function ChatsPage() {
     archiveChat: archiveChatFn,
     unarchiveChat: unarchiveChatFn,
     refresh: refreshChats,
+    renameChat,
+    updateTitle: updateListTitle,
   } = useChats({ archived: showArchived });
 
   const {
@@ -73,7 +80,8 @@ export default function ChatsPage() {
     cancelGeneration,
     setAgentEnabled: setAgentEnabledFn,
     setAgentSandboxed: setAgentSandboxedFn,
-  } = useChat(selectedChatId);
+    updateTitle,
+  } = useChat(selectedChatId, updateListTitle);
 
   const {
     results: searchResults,
@@ -122,6 +130,7 @@ export default function ChatsPage() {
       const chat = await createChat({
         workspace_id: currentWorkspace.id,
         title: `Chat with ${newChatModel}`,
+        automatic_title: true,
         model_name: newChatModel,
         agent_enabled: newChatAgent,
         agent_sandboxed: newChatSandboxed,
@@ -143,6 +152,29 @@ export default function ChatsPage() {
       await setAgentEnabledFn(!displayedChat.agent_enabled);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to change agent mode');
+    }
+  };
+
+  const handleRename = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    if (!renameId || renamePending.current || !isAuthenticated) return;
+    const trimmed = title.trim();
+    if (!trimmed) {
+      setRenameError('Enter a chat name');
+      return;
+    }
+    renamePending.current = true;
+    setRenaming(true);
+    setRenameError(null);
+    try {
+      const updated = await renameChat(renameId, trimmed);
+      updateTitle(updated.id, updated.title);
+      setRenameId(null);
+    } catch (error) {
+      setRenameError(error instanceof Error ? error.message : 'Failed to rename chat');
+    } finally {
+      renamePending.current = false;
+      setRenaming(false);
     }
   };
 
@@ -401,7 +433,9 @@ export default function ChatsPage() {
                 key={chat.id}
                 className={`chat-item ${selectedChatId === chat.id ? 'active' : ''}`}
                 onClick={() => selectChat(chat.id)}
-                onKeyDown={(e) => e.key === 'Enter' && selectChat(chat.id)}
+                onKeyDown={(e) =>
+                  e.target === e.currentTarget && e.key === 'Enter' && selectChat(chat.id)
+                }
                 role="button"
                 tabIndex={0}
               >
@@ -412,6 +446,30 @@ export default function ChatsPage() {
                   </span>
                 </div>
                 <div className="chat-item-actions">
+                  <button
+                    className="btn btn-icon btn-xs"
+                    type="button"
+                    title="Rename"
+                    aria-label={`Rename ${chat.title}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setRenameId(chat.id);
+                      setTitle(chat.title);
+                      setRenameError(null);
+                    }}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      width="14"
+                      height="14"
+                      aria-hidden="true"
+                    >
+                      <path d="m16 3 5 5-12 12H4v-5L16 3ZM14 5l5 5" />
+                    </svg>
+                  </button>
                   {showArchived ? (
                     <button
                       className="btn btn-icon btn-xs"
@@ -810,6 +868,40 @@ export default function ChatsPage() {
             </Button>
             <Button type="submit" variant="primary" disabled={!newChatModel}>
               Create Chat
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={renameId !== null}
+        onClose={() => {
+          if (!renamePending.current) setRenameId(null);
+        }}
+        title="Rename chat"
+      >
+        <form onSubmit={handleRename}>
+          <label htmlFor="chat-name">Chat name</label>
+          <input
+            id="chat-name"
+            className="form-input"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            disabled={renaming}
+            aria-invalid={renameError ? true : undefined}
+            aria-describedby={renameError ? 'rename-error' : undefined}
+          />
+          {renameError && (
+            <div id="rename-error" className="chats-error" role="alert">
+              {renameError}
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button variant="secondary" disabled={renaming} onClick={() => setRenameId(null)}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={renaming || !title.trim()}>
+              {renaming ? 'Saving…' : 'Save name'}
             </Button>
           </div>
         </form>

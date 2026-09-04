@@ -1,7 +1,3 @@
-// =============================================================================
-// Chat Types
-// =============================================================================
-
 export type MessageRole = 'user' | 'assistant' | 'system';
 
 export interface MessageAttachment {
@@ -64,6 +60,7 @@ export interface CreateChatRequest {
   title: string;
   model_name: string;
   first_message?: string;
+  automatic_title?: boolean;
   agent_enabled?: boolean;
   agent_sandboxed?: boolean;
 }
@@ -78,10 +75,6 @@ export interface SendMessageRequest {
   content: string;
   metadata?: MessageMetadata;
 }
-
-// =============================================================================
-// Chat Search Types
-// =============================================================================
 
 export interface ChatSearchResult {
   message_id: string;

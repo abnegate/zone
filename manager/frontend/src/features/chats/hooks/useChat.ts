@@ -14,6 +14,7 @@ import type {
 // /ws/chats/:id. Posting to /api/chats/:id/messages only stores the user's
 // message, so sending over the socket is what produces a reply.
 type ServerMessage =
+  | { type: 'title_updated'; chat_id: string; title: string }
   | { type: 'init'; chat_id: string; status: string }
   | {
       type: 'message_saved';
@@ -56,7 +57,10 @@ type ServerMessage =
   | { type: 'error'; message: string }
   | { type: 'status'; message: string };
 
-export function useChat(chatId: string | null) {
+export function useChat(
+  chatId: string | null,
+  onTitleUpdated?: (id: string, title: string) => void
+) {
   const [chat, setChat] = useState<ChatWithMessages | null>(null);
   const [loading, setLoading] = useState(Boolean(chatId));
   const [error, setError] = useState<string | null>(null);
@@ -67,10 +71,20 @@ export function useChat(chatId: string | null) {
   const pendingUserIdRef = useRef<string | null>(null);
   const supersededPendingIdsRef = useRef<Set<string>>(new Set());
   const activeGenerationRef = useRef(false);
+  const titleCallback = useRef(onTitleUpdated);
+  titleCallback.current = onTitleUpdated;
+  const titles = useRef(new Map<string, { title: string; revision: number }>());
+  const revision = useRef(0);
+
+  const updateTitle = useCallback((id: string, title: string): void => {
+    titles.current.set(id, { title, revision: ++revision.current });
+    setChat((previous) => (previous?.id === id ? { ...previous, title } : previous));
+  }, []);
 
   const fetchChat = useCallback(
     async (opts?: { silent?: boolean }) => {
       const requestId = ++requestIdRef.current;
+      const currentRevision = revision.current;
       if (!chatId) {
         setChat(null);
         setLoading(false);
@@ -85,7 +99,8 @@ export function useChat(chatId: string | null) {
       try {
         const data = await chatsApi.getChat(chatId);
         if (requestId !== requestIdRef.current) return;
-        setChat(data);
+        const title = titles.current.get(data.id);
+        setChat(title && title.revision > currentRevision ? { ...data, title: title.title } : data);
       } catch (err) {
         if (requestId !== requestIdRef.current) return;
         setError(err instanceof Error ? err.message : 'Failed to fetch chat');
@@ -241,6 +256,7 @@ export function useChat(chatId: string | null) {
     };
 
     socket.onmessage = (event) => {
+      if (socket !== socketRef.current) return;
       let payload: ServerMessage;
       try {
         payload = JSON.parse(event.data);
@@ -249,6 +265,12 @@ export function useChat(chatId: string | null) {
       }
 
       switch (payload.type) {
+        case 'title_updated':
+          if (payload.chat_id === chatId) {
+            updateTitle(payload.chat_id, payload.title);
+            titleCallback.current?.(payload.chat_id, payload.title);
+          }
+          break;
         case 'message_saved':
           applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
           break;
@@ -361,7 +383,7 @@ export function useChat(chatId: string | null) {
       socket.close();
       socketRef.current = null;
     };
-  }, [chatId, upsertMessage, applySavedUserMessage, patchToolCall]);
+  }, [chatId, upsertMessage, applySavedUserMessage, patchToolCall, updateTitle]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     // Numeric readyState values stay valid for test doubles that do not
@@ -484,5 +506,6 @@ export function useChat(chatId: string | null) {
     setAgentSandboxed,
     deleteMessage,
     refresh,
+    updateTitle,
   };
 }

@@ -106,6 +106,44 @@ describe('useChat', () => {
     mockUpdateChat.mockReset();
   });
 
+  it('keeps a title event that arrives before the initial fetch resolves', async () => {
+    let resolve: (chat: ChatWithMessages) => void = () => {};
+    mockGetChat.mockImplementation(
+      () =>
+        new Promise<ChatWithMessages>((done) => {
+          resolve = done;
+        })
+    );
+    const updated = mock();
+    const { result } = renderHook(() => useChat('1', updated), { wrapper: createWrapper() });
+    act(() => lastSocket!.emit({ type: 'title_updated', chat_id: '1', title: 'Generated title' }));
+    await act(async () => {
+      resolve(mockChat);
+    });
+    expect(result.current.chat?.title).toBe('Generated title');
+    expect(result.current.chat?.messages).toEqual(mockMessages);
+    expect(updated).toHaveBeenCalledWith('1', 'Generated title');
+  });
+
+  it('ignores a stale socket callback after selection changes', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const updated = mock();
+    const { result, rerender } = renderHook(({ id }) => useChat(id, updated), {
+      initialProps: { id: '1' },
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current.chat?.id).toBe('1'));
+    const stale = lastSocket!.onmessage!;
+    mockGetChat.mockResolvedValue({ ...mockChat, id: '2', title: 'Second chat' });
+    rerender({ id: '2' });
+    await waitFor(() => expect(result.current.chat?.id).toBe('2'));
+    act(() =>
+      stale({ data: JSON.stringify({ type: 'title_updated', chat_id: '1', title: 'Old title' }) })
+    );
+    expect(result.current.chat?.title).toBe('Second chat');
+    expect(updated).not.toHaveBeenCalled();
+  });
+
   it('should fetch chat on mount', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

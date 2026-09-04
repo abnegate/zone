@@ -1,9 +1,7 @@
-/* =============================================================================
-   Chats - shadcn/ui composition
+/* Chats - shadcn/ui composition.
    Flat surfaces separated by borders, one accent colour, a single centred
    reading column. Long assistant replies read as prose rather than as a slab;
-   the accent is spent on the reader's own messages and the primary action.
-   ============================================================================= */
+   the accent is spent on the reader's own messages and the primary action. */
 
 .chats-page {
   --chat-column: 52rem;
@@ -15,7 +13,7 @@
   color: var(--ui-text-primary);
 }
 
-/* Sidebar ------------------------------------------------------------------ */
+/* Sidebar */
 
 .chats-sidebar {
   width: 18rem;
@@ -216,8 +214,15 @@
 }
 
 .chat-item:hover .chat-item-actions,
+.chat-item:focus-within .chat-item-actions,
 .chat-item.active .chat-item-actions {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .chat-item-actions {
+    opacity: 1;
+  }
 }
 
 /* States */
@@ -283,7 +288,7 @@
   color: var(--ui-text-secondary);
 }
 
-/* Main column -------------------------------------------------------------- */
+/* Main column */
 
 .chats-main {
   flex: 1;
@@ -371,7 +376,7 @@
   color: var(--ui-warning, #b45309);
 }
 
-/* Messages ----------------------------------------------------------------- */
+/* Messages */
 
 .messages-container {
   flex: 1;
@@ -456,7 +461,7 @@
   word-wrap: break-word;
 }
 
-/* Tool trace ---------------------------------------------------------------
+/* Tool trace.
    The work behind a reply, shown above it. Deliberately quiet: it is context
    for a reader who wants to check the answer, not part of the answer. */
 
@@ -651,7 +656,7 @@
   color: var(--ui-error);
 }
 
-/* Markdown ---------------------------------------------------------------- */
+/* Markdown */
 
 .message-markdown > :first-child {
   margin-top: 0;
@@ -784,7 +789,7 @@
   border-color: color-mix(in srgb, var(--ui-text-inverse) 20%, transparent);
 }
 
-/* Composer ----------------------------------------------------------------- */
+/* Composer */
 
 .message-form {
   display: flex;
@@ -934,7 +939,7 @@
   outline: none;
 }
 
-/* Placeholder -------------------------------------------------------------- */
+/* Placeholder */
 
 .chat-placeholder {
   flex: 1;
@@ -963,9 +968,29 @@
   font-size: var(--ui-text-sm);
 }
 
-/* Responsive --------------------------------------------------------------- */
+/* Responsive */
 
 @media (max-width: 768px) {
+  .chat-header {
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    height: auto;
+    padding: var(--ui-space-3) var(--ui-space-4);
+  }
+
+  .chat-header-info {
+    flex-basis: 100%;
+    flex-direction: column;
+  }
+
+  .chat-header-info h3 {
+    max-width: 100%;
+  }
+
+  .chat-header .agent-toggle {
+    margin-left: 0;
+  }
+
   .chats-sidebar {
     width: 14rem;
     min-width: 14rem;

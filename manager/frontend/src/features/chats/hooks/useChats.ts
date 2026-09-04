@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import type { Chat, CreateChatRequest } from '../types';
@@ -14,9 +14,25 @@ export function useChats(options: UseChatsOptions = {}) {
   const [chats, setChats] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const titles = useRef(new Map<string, { title: string; revision: number }>());
+  const revision = useRef(0);
+  const request = useRef(0);
+
+  const updateTitle = useCallback((id: string, title: string): void => {
+    titles.current.set(id, { title, revision: ++revision.current });
+    setChats((previous) => previous.map((chat) => (chat.id === id ? { ...chat, title } : chat)));
+  }, []);
+
+  const renameChat = async (id: string, title: string): Promise<Chat> => {
+    const updated = await chatsApi.updateChat(id, { title });
+    updateTitle(id, updated.title);
+    return updated;
+  };
 
   const fetchChats = useCallback(
     async (opts?: { silent?: boolean }) => {
+      const currentRequest = ++request.current;
+      const currentRevision = revision.current;
       if (!workspaceId) {
         setChats([]);
         setLoading(false);
@@ -28,11 +44,20 @@ export function useChats(options: UseChatsOptions = {}) {
       setError(null);
       try {
         const data = await chatsApi.getChats(workspaceId, archived);
-        setChats(data);
+        if (currentRequest !== request.current) return;
+        setChats(
+          data.map((chat) => {
+            const updated = titles.current.get(chat.id);
+            return updated && updated.revision > currentRevision
+              ? { ...chat, title: updated.title }
+              : chat;
+          })
+        );
       } catch (err) {
+        if (currentRequest !== request.current) return;
         setError(err instanceof Error ? err.message : 'Failed to fetch chats');
       } finally {
-        setLoading(false);
+        if (currentRequest === request.current) setLoading(false);
       }
     },
     [workspaceId, archived]
@@ -76,5 +101,7 @@ export function useChats(options: UseChatsOptions = {}) {
     archiveChat,
     unarchiveChat,
     refresh,
+    renameChat,
+    updateTitle,
   };
 }

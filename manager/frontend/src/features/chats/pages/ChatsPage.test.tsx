@@ -289,6 +289,98 @@ describe('ChatsPage', () => {
     mockClient.getChat.mockResolvedValue(mockChatWithMessages);
   });
 
+  describe('chat names', () => {
+    it('renames the active chat without replacing its streaming messages', async () => {
+      mockUpdateChat.mockResolvedValue({ ...mockChats[0], title: 'New name' });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      act(() => {
+        socket.emit({ type: 'message_start', message_id: 'stream', role: 'assistant' });
+        socket.emit({ type: 'chunk', content: 'Still writing', index: 0 });
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 1' }));
+      expect(screen.getByLabelText('Chat name')).toHaveValue('Chat 1');
+      fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: '  New name  ' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+      await screen.findByRole('heading', { name: 'New name' });
+      expect(mockUpdateChat).toHaveBeenCalledWith('chat-1', { title: 'New name' });
+      expect(screen.getAllByText('New name')).toHaveLength(2);
+      expect(screen.getByText('Still writing')).toBeInTheDocument();
+    });
+
+    it('keeps failed input, rejects blank names, and cancels without an update', async () => {
+      mockUpdateChat.mockRejectedValue(new Error('Rename unavailable'));
+      renderChatsPage();
+      fireEvent.click(await screen.findByRole('button', { name: 'Rename Chat 1' }));
+      fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: '   ' } });
+      expect(screen.getByRole('button', { name: 'Save name' })).toBeDisabled();
+      fireEvent.change(screen.getByLabelText('Chat name'), { target: { value: 'Try again' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+      await screen.findByText('Rename unavailable');
+      expect(screen.getByLabelText('Chat name')).toHaveValue('Try again');
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(mockUpdateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('renames nonactive chats without changing selection and persists unchanged names', async () => {
+      mockUpdateChat.mockResolvedValue(mockChats[1]);
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 2' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(mockUpdateChat).toHaveBeenCalledWith('chat-2', { title: 'Chat 2' });
+      expect(screen.getByRole('heading', { name: mockChatWithMessages.title })).toBeInTheDocument();
+    });
+
+    it('updates both titles from a socket event while preserving the response', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      act(() => {
+        socket.emit({ type: 'message_start', message_id: 'stream', role: 'assistant' });
+        socket.emit({ type: 'chunk', content: 'First chunk', index: 0 });
+        socket.emit({ type: 'title_updated', chat_id: 'chat-1', title: 'Summary title' });
+        socket.emit({ type: 'chunk', content: ' continues', index: 1 });
+      });
+      expect(screen.getAllByText('Summary title')).toHaveLength(2);
+      expect(screen.getByText('First chunk continues')).toBeInTheDocument();
+      act(() => socket.emit({ type: 'title_updated', chat_id: 'chat-2', title: 'Wrong chat' }));
+      expect(screen.queryByText('Wrong chat')).not.toBeInTheDocument();
+    });
+  });
+
+  it('prevents duplicate submissions and does not apply a late rename to another selection', async () => {
+    let resolve: (chat: Chat) => void = () => {};
+    mockUpdateChat.mockImplementation(
+      () =>
+        new Promise<Chat>((done) => {
+          resolve = done;
+        })
+    );
+    renderChatsPage();
+    fireEvent.click(await screen.findByText('Chat 1'));
+    await screen.findByText('Hi there!');
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Chat 1' }));
+    const input = screen.getByLabelText('Chat name');
+    fireEvent.change(input, { target: { value: 'Renamed first' } });
+    const form = input.closest('form')!;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(mockUpdateChat).toHaveBeenCalledTimes(1);
+    mockGetChat.mockResolvedValue(mockChatEmpty);
+    fireEvent.click(screen.getByText('Chat 2'));
+    await screen.findByRole('heading', { name: 'Empty Chat', hidden: true });
+    await act(async () => {
+      resolve({ ...mockChats[0]!, title: 'Renamed first' });
+    });
+    expect(screen.getByRole('heading', { name: 'Empty Chat' })).toBeInTheDocument();
+    expect(screen.getByText('Renamed first')).toBeInTheDocument();
+  });
+
   describe('rendering', () => {
     it('renders sidebar with chats heading', async () => {
       renderChatsPage();
@@ -611,6 +703,7 @@ describe('ChatsPage', () => {
         expect(mockClient.createChat).toHaveBeenCalledWith({
           workspace_id: 'ws-1',
           title: 'Chat with llama2',
+          automatic_title: true,
           model_name: 'llama2',
           agent_enabled: false,
           agent_sandboxed: true,
