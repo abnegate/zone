@@ -6,6 +6,7 @@ const mockCreatePullWebSocket = mock();
 // State container for auth mock that can be updated per test
 let authState = {
   isAuthenticated: true,
+  accessToken: 'access-token',
 };
 
 mock.module('../../../api/models', () => ({
@@ -17,6 +18,7 @@ mock.module('../../../api/models', () => ({
 mock.module('../../../features/auth', () => ({
   useAuth: () => ({
     isAuthenticated: authState.isAuthenticated,
+    accessToken: authState.accessToken,
   }),
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
@@ -57,6 +59,7 @@ describe('usePull', () => {
     // Reset auth state to default
     authState = {
       isAuthenticated: true,
+      accessToken: 'access-token',
     };
   });
 
@@ -70,7 +73,7 @@ describe('usePull', () => {
   });
 
   it('does not pull when not authenticated', async () => {
-    authState = { isAuthenticated: false };
+    authState = { isAuthenticated: false, accessToken: '' };
 
     const { result } = renderHook(() => usePull());
 
@@ -144,7 +147,7 @@ describe('usePull', () => {
     expect(result.current.pulling).toBe(true);
   });
 
-  it('sends pull request on WebSocket open', async () => {
+  it('authenticates before requesting the model', async () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
@@ -159,7 +162,9 @@ describe('usePull', () => {
       mockWs.onopen?.();
     });
 
-    expect(mockWs.send).toHaveBeenCalledWith(JSON.stringify({ model: 'llama2' }));
+    expect(mockWs.send).toHaveBeenCalledWith(
+      JSON.stringify({ type: 'auth', token: 'access-token' })
+    );
   });
 
   it('handles authenticated message and sends pull request', async () => {
@@ -424,5 +429,68 @@ describe('usePull', () => {
     });
 
     expect(mockCreatePullWebSocket).toHaveBeenCalledWith('llama2');
+  });
+});
+
+describe('pull lifecycle regressions', () => {
+  beforeEach(() => {
+    authState = { isAuthenticated: true, accessToken: 'access-token' };
+  });
+
+  for (const outcome of ['close', 'cancel', 'unmount'] as const) {
+    it(`settles on ${outcome}`, async () => {
+      const socket = createMockWebSocket();
+      mockCreatePullWebSocket.mockReturnValueOnce(socket);
+      const { result, unmount } = renderHook(() => usePull());
+      let pending!: Promise<boolean>;
+      act(() => {
+        pending = result.current.pull('llama2');
+      });
+      act(() => {
+        if (outcome === 'close') socket.onclose?.();
+        else if (outcome === 'cancel') result.current.cancel();
+        else unmount();
+      });
+      expect(
+        await Promise.race([
+          pending,
+          new Promise((resolve) => setTimeout(() => resolve('unsettled'), 20)),
+        ])
+      ).toBe(false);
+    });
+  }
+
+  it('settles connection construction failure', async () => {
+    mockCreatePullWebSocket.mockImplementationOnce(() => {
+      throw new Error('blocked');
+    });
+    const { result } = renderHook(() => usePull());
+    await act(async () => {
+      expect(await result.current.pull('llama2')).toBe(false);
+    });
+    expect(result.current.pulling).toBe(false);
+  });
+
+  it('sends the model only once and ignores a replaced connection', async () => {
+    const first = createMockWebSocket();
+    const second = createMockWebSocket();
+    mockCreatePullWebSocket.mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const { result } = renderHook(() => usePull());
+    let pending!: Promise<boolean>;
+    act(() => {
+      pending = result.current.pull('old');
+    });
+    const late = first.onmessage;
+    act(() => {
+      result.current.pull('new');
+    });
+    expect(await pending).toBe(false);
+    act(() => {
+      late?.({ data: JSON.stringify({ type: 'error', message: 'Old error' }) } as MessageEvent);
+      second.onmessage?.({ data: JSON.stringify({ type: 'authenticated' }) } as MessageEvent);
+      second.onmessage?.({ data: JSON.stringify({ type: 'authenticated' }) } as MessageEvent);
+    });
+    expect(result.current.result).toBeNull();
+    expect(second.send).toHaveBeenCalledTimes(1);
   });
 });

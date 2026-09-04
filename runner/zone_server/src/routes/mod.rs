@@ -92,6 +92,7 @@ pub fn create_router(state: AppState) -> Router {
             post(webhooks::linear_webhook),
         )
         // WebSocket routes (auth via first message)
+        .route("/ws/pull", get(ws::handle_pull_ws))
         .route("/ws/chats/{chat_id}", get(ws::handle_chat_ws))
         .route("/ws/tasks/runs/{run_id}", get(ws::handle_task_ws))
         .route("/ws/context/{gathering_id}", get(ws::handle_context_ws));
