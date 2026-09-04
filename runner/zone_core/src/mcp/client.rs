@@ -1,5 +1,6 @@
 //! Live connections to stdio MCP servers.
 
+use futures::future::join_all;
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
 use rmcp::service::RunningService;
@@ -58,23 +59,27 @@ impl McpHub {
     }
 
     async fn connect_with_timeout(config: &McpConfig, limit: Duration) -> Self {
+        let results =
+            join_all(
+                config.servers.iter().cloned().map(|spec| async move {
+                    McpSession::connect_with_timeout(&spec, limit).await
+                }),
+            )
+            .await;
+
         let mut hub = Self::new();
-        for spec in &config.servers {
-            match McpSession::connect_with_timeout(spec, limit).await {
+        for result in results {
+            match result {
                 Ok(session) => {
                     tracing::info!(
-                        server = %spec.name,
+                        server = %session.name,
                         tools = session.remote_tools.len(),
                         "Connected MCP server"
                     );
                     hub.sessions.push(Arc::new(session));
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        server = %spec.name,
-                        error = %error,
-                        "MCP server unavailable"
-                    );
+                    tracing::warn!(error = %error, "MCP server unavailable");
                 }
             }
         }
@@ -126,6 +131,16 @@ pub(crate) struct McpSession {
 
 impl McpSession {
     async fn connect_with_timeout(spec: &McpServerSpec, limit: Duration) -> Result<Self, McpError> {
+        match tokio::time::timeout(limit, Self::handshake(spec)).await {
+            Ok(result) => result,
+            Err(_) => Err(McpError::Handshake {
+                server: spec.name.clone(),
+                message: "handshake timed out".to_string(),
+            }),
+        }
+    }
+
+    async fn handshake(spec: &McpServerSpec) -> Result<Self, McpError> {
         let mut command = Command::new(&spec.command);
         command.kill_on_drop(true);
         let transport = TokioChildProcess::new(command.configure(|cmd| {
@@ -142,23 +157,17 @@ impl McpSession {
             source,
         })?;
 
-        let client = tokio::time::timeout(limit, ().serve(transport))
-            .await
-            .map_err(|_| McpError::Handshake {
-                server: spec.name.clone(),
-                message: "handshake timed out".to_string(),
-            })?
-            .map_err(|error| McpError::Handshake {
-                server: spec.name.clone(),
-                message: error.to_string(),
-            })?;
+        let client =
+            ().serve(transport)
+                .await
+                .map_err(|error| McpError::Handshake {
+                    server: spec.name.clone(),
+                    message: error.to_string(),
+                })?;
 
-        let remote_tools = tokio::time::timeout(limit, client.list_all_tools())
+        let remote_tools = client
+            .list_all_tools()
             .await
-            .map_err(|_| McpError::Handshake {
-                server: spec.name.clone(),
-                message: "tool listing timed out".to_string(),
-            })?
             .map_err(|error| McpError::Handshake {
                 server: spec.name.clone(),
                 message: error.to_string(),
@@ -330,17 +339,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn sleepy_spec(name: &str) -> McpServerSpec {
+        McpServerSpec {
+            name: name.to_string(),
+            command: "/bin/sleep".to_string(),
+            args: vec!["60".to_string()],
+            env: HashMap::new(),
+            cwd: None,
+            disabled: false,
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn connect_times_out_unresponsive_server() {
         let config = McpConfig {
-            servers: vec![McpServerSpec {
-                name: "sleepy".to_string(),
-                command: "/bin/sleep".to_string(),
-                args: vec!["60".to_string()],
-                env: HashMap::new(),
-                cwd: None,
-                disabled: false,
-            }],
+            servers: vec![sleepy_spec("sleepy")],
         };
         let started = std::time::Instant::now();
         let hub = McpHub::connect_with_timeout(&config, Duration::from_millis(400)).await;
@@ -348,6 +362,22 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "handshake timeout should fail fast, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_times_out_unresponsive_servers_in_parallel() {
+        let config = McpConfig {
+            servers: vec![sleepy_spec("a"), sleepy_spec("b")],
+        };
+        let started = std::time::Instant::now();
+        let hub = McpHub::connect_with_timeout(&config, Duration::from_millis(700)).await;
+        assert!(hub.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_millis(1200),
+            "silent servers should share one wall-clock budget, took {:?}",
             started.elapsed()
         );
     }
