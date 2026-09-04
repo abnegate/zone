@@ -99,9 +99,9 @@ function clientSuite(name: string, options: { mobile: boolean; viewport?: { widt
 
     test('setup form posts the server URL and returns home', async ({ page }) => {
       await mockZoneInfo(page, { client: true, host: 'https://old.example.com' });
+      await mockChangeServerPage(page);
       await mockCommonEndpoints(page);
       await setupAuth(page);
-      await page.goto('/');
 
       let savedHost = '';
       await routeApi(page, '**/api/setup', async (route) => {
@@ -113,19 +113,21 @@ function clientSuite(name: string, options: { mobile: boolean; viewport?: { widt
         });
       });
 
-      await page.setContent(setupHtml, { waitUntil: 'domcontentloaded' });
+      await page.goto('/__zone/change-server');
+      await expect(page).toHaveURL(/\/__zone\/change-server$/);
       await expect(page.getByLabel('Server URL')).toHaveValue('https://old.example.com');
       await page.getByLabel('Server URL').fill('https://zone.example.com');
       await page.getByRole('button', { name: 'Continue' }).click();
       await expect.poll(() => savedHost).toBe('https://zone.example.com');
       await expect(page).toHaveURL(/\/$/);
+      await expect(page).not.toHaveURL(/__zone\/change-server/);
     });
 
     test('setup form shows an error when the server rejects the URL', async ({ page }) => {
       await mockZoneInfo(page, { client: true, host: 'https://zone.example.com' });
+      await mockChangeServerPage(page);
       await mockCommonEndpoints(page);
       await setupAuth(page);
-      await page.goto('/');
 
       await routeApi(page, '**/api/setup', async (route) => {
         await route.fulfill({
@@ -135,10 +137,11 @@ function clientSuite(name: string, options: { mobile: boolean; viewport?: { widt
         });
       });
 
-      await page.setContent(setupHtml, { waitUntil: 'domcontentloaded' });
+      await page.goto('/__zone/change-server');
       await page.getByRole('button', { name: 'Continue' }).click();
       await expect(page.locator('.error')).toHaveText('Enter a valid Zone server URL');
       await expect(page.getByRole('button', { name: 'Continue' })).toBeEnabled();
+      await expect(page).toHaveURL(/\/__zone\/change-server$/);
     });
   });
 }

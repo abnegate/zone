@@ -78,6 +78,8 @@ mod tests {
         assert!(html.contains("width=device-width"));
         assert!(html.contains("/api/setup"));
         assert!(html.contains("/__zone/info"));
+        assert!(html.contains("const initialHost"));
+        assert!(html.contains("host.value === initialHost"));
         assert!(html.contains("Change Server"));
         assert!(html.contains("Android and iOS"));
         assert!(html.contains("Zone menu on desktop"));

@@ -6,6 +6,7 @@ on:
       - 'manager/frontend/**'
       - 'installer/frontend/**'
       - 'packages/ui/**'
+      - '.github/workflows/visual-regression.yml'
   push:
     branches:
       - main
@@ -13,6 +14,7 @@ on:
       - 'manager/frontend/**'
       - 'installer/frontend/**'
       - 'packages/ui/**'
+      - '.github/workflows/visual-regression.yml'
 
 permissions:
   actions: read
@@ -161,10 +163,13 @@ jobs:
       - name: Comment on PR
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         if: always()
+        env:
+          CHANGED_COUNT: ${{ steps.compare.outputs.changed_count }}
+          CHANGES: ${{ steps.compare.outputs.changes }}
         with:
           script: |
-            const changedCount = '${{ steps.compare.outputs.changed_count }}';
-            const changes = `${{ steps.compare.outputs.changes }}`;
+            const changedCount = process.env.CHANGED_COUNT || '';
+            const changes = process.env.CHANGES || '';
 
             let body = '';
 
@@ -365,10 +370,13 @@ jobs:
       - name: Comment on PR
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         if: always()
+        env:
+          CHANGED_COUNT: ${{ steps.compare.outputs.changed_count }}
+          CHANGES: ${{ steps.compare.outputs.changes }}
         with:
           script: |
-            const changedCount = '${{ steps.compare.outputs.changed_count }}';
-            const changes = `${{ steps.compare.outputs.changes }}`;
+            const changedCount = process.env.CHANGED_COUNT || '';
+            const changes = process.env.CHANGES || '';
 
             let body = '';
 

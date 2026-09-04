@@ -235,15 +235,8 @@ async fn missing_frontend_returns_not_found_in_console_mode() {
 async fn setup_write_failure_is_internal_error() {
     let root = tempfile::tempdir().unwrap();
     let manager = write_manager(root.path());
-    let blocked = root.path().join("blocked-dir");
-    fs::create_dir_all(&blocked).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&blocked).unwrap().permissions();
-        perms.set_mode(0o555);
-        fs::set_permissions(&blocked, perms).unwrap();
-    }
+    let blocked = root.path().join("blocked-file");
+    fs::write(&blocked, "not a directory").unwrap();
     let config_path = blocked.join("nested/config.toml");
     let app = desktop_app(manager, config_path, "https://manager.localhost".into()).await;
 
@@ -254,17 +247,6 @@ async fn setup_write_failure_is_internal_error() {
         Some(r#"{"host":"https://zone.example.com"}"#),
     )
     .await;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&blocked).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&blocked, perms).unwrap();
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains("Could not save server URL"));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (status, body);
-    }
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(body.contains("Could not save server URL"));
 }

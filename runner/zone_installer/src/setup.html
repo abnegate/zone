@@ -93,10 +93,11 @@
       const form = document.getElementById("setup");
       const host = document.getElementById("host");
       const error = document.getElementById("error");
+      const initialHost = host.value;
       fetch("/__zone/info")
         .then((response) => (response.ok ? response.json() : null))
         .then((data) => {
-          if (data && data.host) {
+          if (data && data.host && host.value === initialHost) {
             host.value = data.host;
           }
         })
