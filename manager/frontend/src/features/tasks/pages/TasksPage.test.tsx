@@ -635,6 +635,23 @@ describe('TasksPage', () => {
     expect(screen.getByRole('button', { name: 'Try Again' })).toBeInTheDocument();
   });
 
+  it('preserves a start failure when only historical completed runs exist', async () => {
+    const latest: TaskRun = { ...running, status: 'completed' };
+    const older: TaskRun = { ...latest, id: 'older', started_at: '2025-01-01T00:00:00Z' };
+    mockGetTaskRuns.mockResolvedValue([latest, older]);
+    mockGetTaskRun.mockResolvedValue(latest);
+    mockRunTask.mockRejectedValueOnce(new Error('Worker unavailable'));
+    renderTasksPage();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    const button = await screen.findByRole('button', { name: 'Run Again' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    expect(await screen.findByText('Worker unavailable')).toBeInTheDocument();
+    await waitFor(() => expect(mockGetTaskRuns).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeEnabled();
+    expect(mockGetTaskRun).toHaveBeenCalledTimes(1);
+  });
+
   it('restores an active run and its real activity on reopen', async () => {
     mockGetTaskRuns.mockResolvedValue([running]);
     mockGetTaskRunLogs.mockResolvedValue([

@@ -27,6 +27,7 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
   const controller = useRef<AbortController | null>(null);
   const busy = useRef(false);
   const submitted = useRef<TaskRun | null>(null);
+  const known = useRef(new Set<string>());
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision explicitly refreshes the monitor after a start or user retry
   useEffect(() => {
@@ -58,6 +59,7 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
       try {
         const runs = await tasksApi.getTaskRuns(task.id, request.signal);
         if (request.signal.aborted) return;
+        known.current = new Set(runs.map((entry) => entry.id));
         const latest =
           runs.find(active) ??
           submitted.current ??
@@ -103,7 +105,7 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
       try {
         const runs = await tasksApi.getTaskRuns(task.id, request.signal);
         if (request.signal.aborted) return;
-        const accepted = runs.find((entry) => active(entry) || entry.id !== run?.id);
+        const accepted = runs.find((entry) => active(entry) || !known.current.has(entry.id));
         if (accepted) {
           submitted.current = accepted;
           setRun(accepted);

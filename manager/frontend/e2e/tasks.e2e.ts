@@ -557,7 +557,7 @@ test.describe('Tasks Page', () => {
       await expect(dialog).not.toBeVisible();
     });
 
-    test('starts a real run and restores it on reopen', async ({ page }) => {
+    test('starts a real run and restores it on reopen', async ({ page }, testInfo) => {
       let started = false;
       await routeApi(page, '**/api/tasks/task-1/runs', (route) =>
         route.fulfill({ json: { runs: started ? [run] : [] } })
@@ -587,6 +587,7 @@ test.describe('Tasks Page', () => {
       await page.getByRole('button', { name: 'Start Execution' }).click();
       await expect(page.getByText('Reading project files')).toBeVisible();
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath('task-running.png'), fullPage: true });
       await expect(page.getByRole('button', { name: 'Stop Execution' })).toHaveCount(0);
       await page.getByRole('button', { name: 'Close', exact: true }).click();
       await page.getByRole('button', { name: 'Execute', exact: true }).first().click();
