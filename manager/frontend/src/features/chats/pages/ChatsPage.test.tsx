@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Chat, ChatSearchResult, ChatWithMessages, Message } from '../types';
 
@@ -15,6 +15,22 @@ const mockSearchChatMessages = mock();
 const mockUpdateChat = mock();
 const mockWsSend = mock();
 const mockWsClose = mock();
+
+class FakeSocket {
+  readyState = 1;
+  send = mockWsSend;
+  close = mockWsClose;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  addEventListener(): void {}
+  emit(payload: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(payload) });
+  }
+}
+
+let socket: FakeSocket;
 
 // Mock scrollIntoView
 Element.prototype.scrollIntoView = mock();
@@ -35,16 +51,10 @@ mock.module('../../../api/chats', () => ({
     updateChat: mockUpdateChat,
     deleteMessage: mock(),
     chatAccessToken: () => 'test-token',
-    createChatWebSocket: () => ({
-      readyState: 1,
-      send: mockWsSend,
-      close: mockWsClose,
-      onopen: null,
-      onmessage: null,
-      onerror: null,
-      onclose: null,
-      addEventListener() {},
-    }),
+    createChatWebSocket: () => {
+      socket = new FakeSocket();
+      return socket;
+    },
   },
 }));
 
@@ -659,6 +669,68 @@ describe('ChatsPage', () => {
         const errorMessages = screen.getAllByText('Failed to create');
         expect(errorMessages.length).toBeGreaterThan(0);
       });
+    });
+  });
+
+  describe('generation feedback', () => {
+    async function sendPrompt(): Promise<HTMLTextAreaElement> {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        'Type a message, or drop a file...'
+      );
+      fireEvent.change(input, { target: { value: 'Generate an image of a rooster' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(input.value).toBe(''));
+      return input;
+    }
+
+    it('keeps pending feedback and blocks another send until the response ends', async () => {
+      const input = await sendPrompt();
+      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
+      fireEvent.change(input, { target: { value: 'another prompt' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(mockWsSend).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+      act(() => socket.emit({ type: 'status', message: 'Generating image…' }));
+      expect(screen.getByRole('status')).toHaveTextContent('Generating image…');
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+      expect(screen.getByText('Done')).toBeInTheDocument();
+    });
+
+    it('shows image generation errors in the active conversation and permits retry', async () => {
+      const input = await sendPrompt();
+      act(() => socket.emit({ type: 'error', message: 'Image service is unavailable' }));
+      expect(screen.getByRole('alert')).toHaveTextContent('Image service is unavailable');
+      expect(screen.getByRole('alert').closest('.chats-main')).not.toBeNull();
+      expect(screen.getByText('Hi there!')).toBeInTheDocument();
+      expect(screen.getByText('Generate an image of a rooster')).toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+      fireEvent.change(input, { target: { value: 'Try again' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(mockWsSend).toHaveBeenCalledTimes(2));
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+    });
+
+    it('keeps the response pending until Stop is acknowledged', async () => {
+      await sendPrompt();
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      expect(mockWsSend).toHaveBeenLastCalledWith(JSON.stringify({ type: 'cancel' }));
+      expect(screen.getByRole('status')).toBeInTheDocument();
+      act(() => socket.emit({ type: 'cancelled', message_id: null }));
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
+      expect(screen.getByText('Hi there!')).toBeInTheDocument();
     });
   });
 

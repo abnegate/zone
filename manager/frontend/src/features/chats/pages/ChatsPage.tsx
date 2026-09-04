@@ -67,8 +67,10 @@ export default function ChatsPage() {
   const {
     chat: activeChat,
     error: chatError,
+    streaming,
     status: chatStatus,
     sendMessage: sendMessageFn,
+    cancelGeneration,
     setAgentEnabled: setAgentEnabledFn,
     setAgentSandboxed: setAgentSandboxedFn,
   } = useChat(selectedChatId);
@@ -91,10 +93,10 @@ export default function ChatsPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll when messages change
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages and generation feedback visible
   useEffect(() => {
     scrollToBottom();
-  }, [activeChat?.messages, scrollToBottom]);
+  }, [activeChat?.messages, chatError, chatStatus, streaming, scrollToBottom]);
 
   const selectChat = (chatId: string) => {
     setSelectedChatId(chatId);
@@ -157,7 +159,7 @@ export default function ChatsPage() {
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     const sendable = attachments.filter(isSendable);
-    if (!isAuthenticated || !activeChat || sending) return;
+    if (!isAuthenticated || !displayedChat || sending || streaming) return;
     if (!messageInput.trim() && sendable.length === 0) return;
 
     setSending(true);
@@ -608,9 +610,14 @@ export default function ChatsPage() {
                   );
                 })
               )}
-              {chatStatus ? (
+              {chatError ? (
+                <div className="chats-error" role="alert">
+                  {chatError}
+                </div>
+              ) : null}
+              {streaming || chatStatus ? (
                 <div className="message-status" role="status">
-                  {chatStatus}
+                  {chatStatus || 'Generating response…'}
                 </div>
               ) : null}
               <div ref={messagesEndRef} />
@@ -714,20 +721,28 @@ export default function ChatsPage() {
                   disabled={sending}
                   rows={1}
                 />
-                <Button
-                  type="submit"
-                  variant="primary"
-                  loading={sending}
-                  disabled={!messageInput.trim() && !attachments.some(isSendable)}
-                >
-                  Send
-                </Button>
+                {streaming ? (
+                  <Button type="button" variant="secondary" onClick={cancelGeneration}>
+                    Stop
+                  </Button>
+                ) : (
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    loading={sending}
+                    disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                  >
+                    Send
+                  </Button>
+                )}
               </div>
             </form>
           </>
         ) : selectedChatId && chatError ? (
           <div className="chat-placeholder">
-            <div className="chats-error">{chatError}</div>
+            <div className="chats-error" role="alert">
+              {chatError}
+            </div>
           </div>
         ) : selectedChatId ? (
           <div className="chat-placeholder">

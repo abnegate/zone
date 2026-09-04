@@ -217,11 +217,15 @@ export function useChat(chatId: string | null) {
   );
 
   useEffect(() => {
+    activeGenerationRef.current = false;
+    pendingUserIdRef.current = null;
+    supersededPendingIdsRef.current.clear();
+    setStreaming(false);
+    setStatus(null);
     if (!chatId) {
       return;
     }
 
-    setStatus(null);
     const socket = chatsApi.createChatWebSocket(chatId);
     socketRef.current = socket;
     let assistantId: string | null = null;
@@ -337,6 +341,10 @@ export function useChat(chatId: string | null) {
     };
 
     return () => {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
       socket.close();
       socketRef.current = null;
     };
@@ -375,6 +383,9 @@ export function useChat(chatId: string | null) {
       throw new Error('Chat connection is not open');
     }
     await waitForOpen(socket);
+    if (socket !== socketRef.current) {
+      throw new Error('Chat selection changed before the message was sent');
+    }
     if (activeGenerationRef.current) {
       throw new Error('Wait for the current response to finish');
     }

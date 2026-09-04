@@ -21,6 +21,7 @@ export type ChatSendPayload = { type: 'send'; content: string; metadata?: unknow
 
 export type ChatSocketController = {
   setOnSend: (handler: (payload: ChatSendPayload) => Promise<void> | void) => void;
+  setOnCancel: (handler: () => Promise<void> | void) => void;
   emit: (frame: ChatSocketFrame) => Promise<void>;
 };
 
@@ -30,6 +31,7 @@ export type ChatSocketController = {
  */
 export async function installChatSocketMock(page: Page): Promise<ChatSocketController> {
   let onSend: ((payload: ChatSendPayload) => Promise<void> | void) | null = null;
+  let onCancel: (() => Promise<void> | void) | null = null;
 
   await page.exposeFunction('__forwardChatSocketMessage', async (raw: string) => {
     let payload: { type?: string };
@@ -40,6 +42,8 @@ export async function installChatSocketMock(page: Page): Promise<ChatSocketContr
     }
     if (payload.type === 'send' && onSend) {
       await onSend(payload as ChatSendPayload);
+    } else if (payload.type === 'cancel' && onCancel) {
+      await onCancel();
     }
   });
 
@@ -50,6 +54,7 @@ export async function installChatSocketMock(page: Page): Promise<ChatSocketContr
       WebSocket: unknown;
     };
     class MockChatSocket {
+      static OPEN = 1;
       readyState = 1;
       url: string;
       onopen: ((event?: unknown) => void) | null = null;
@@ -90,6 +95,9 @@ export async function installChatSocketMock(page: Page): Promise<ChatSocketContr
   return {
     setOnSend(handler) {
       onSend = handler;
+    },
+    setOnCancel(handler) {
+      onCancel = handler;
     },
     async emit(frame) {
       await page.evaluate((payload) => {

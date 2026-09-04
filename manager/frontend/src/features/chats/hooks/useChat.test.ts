@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode, StrictMode } from 'react';
 import type { ChatWithMessages, Message } from '../types';
 
@@ -591,6 +591,54 @@ describe('useChat', () => {
       expect(result.current.chat).toBeNull();
       expect(result.current.loading).toBe(false);
     });
+  });
+
+  it('does not send to a previous chat after waiting for the connection', async () => {
+    mockGetChat.mockImplementation((id: string) => Promise.resolve({ ...mockChat, id }));
+    const { result, rerender } = renderHook(({ id }) => useChat(id), {
+      wrapper: createWrapper(),
+      initialProps: { id: '1' },
+    });
+    await waitFor(() => expect(result.current.chat?.id).toBe('1'));
+    const previous = lastSocket;
+    const sending = result.current.sendMessage({ content: 'old chat prompt' });
+    rerender({ id: '2' });
+    await expect(sending).rejects.toThrow('Chat selection changed before the message was sent');
+    await waitFor(() => expect(result.current.chat?.id).toBe('2'));
+    expect(previous?.sent).toHaveLength(0);
+    expect(result.current.streaming).toBe(false);
+  });
+
+  it('resets generation state when selecting another chat and ignores the old socket', async () => {
+    mockGetChat.mockImplementation((id: string) => Promise.resolve({ ...mockChat, id }));
+    const { result, rerender } = renderHook(({ id }) => useChat(id), {
+      wrapper: createWrapper(),
+      initialProps: { id: '1' as string | null },
+    });
+    await waitFor(() => expect(result.current.chat?.id).toBe('1'));
+    await act(() => result.current.sendMessage({ content: 'first chat' }));
+    const previous = lastSocket;
+    act(() => previous?.emit({ type: 'status', message: 'Generating image…' }));
+    expect(result.current.streaming).toBe(true);
+
+    rerender({ id: '2' });
+    await waitFor(() => expect(result.current.chat?.id).toBe('2'));
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.status).toBeNull();
+    await act(() => result.current.sendMessage({ content: 'second chat' }));
+    act(() => {
+      previous?.onclose?.();
+      previous?.emit({ type: 'error', message: 'Old generation failed' });
+      previous?.emit({ type: 'status', message: 'Old generation status' });
+    });
+    expect(result.current.streaming).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.status).toBeNull();
+
+    rerender({ id: null });
+    await waitFor(() => expect(result.current.chat).toBeNull());
+    expect(result.current.streaming).toBe(false);
+    expect(result.current.status).toBeNull();
   });
 
   it('should not apply a stale response after chatId changes', async () => {
