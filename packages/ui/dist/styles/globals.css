@@ -442,17 +442,20 @@
 
 .ui-checkbox-wrapper {
   display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.ui-checkbox-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  align-items: flex-start;
+  gap: 0.75rem;
+  width: 100%;
+  min-width: 0;
 }
 
 .ui-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  appearance: none;
+  margin: 0.125rem 0 0;
+  padding: 0;
   height: 1rem;
   width: 1rem;
   flex-shrink: 0;
@@ -462,6 +465,18 @@
   cursor: pointer;
   transition: background-color var(--ui-duration-fast) var(--ui-ease-out),
     border-color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.ui-checkbox-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.ui-checkbox-copy .ui-label {
+  line-height: 1.25;
+  cursor: pointer;
 }
 
 .ui-checkbox:focus-visible {
@@ -492,9 +507,22 @@
 }
 
 .ui-checkbox-help-text {
+  margin: 0;
   font-size: var(--ui-text-sm);
+  line-height: 1.5;
   color: var(--ui-text-secondary);
-  margin-left: 1.5rem;
+  overflow-wrap: break-word;
+}
+
+.ui-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+.ui-form > .modal-actions {
+  margin-top: 0;
 }
 
 /* =============================================================================
@@ -697,6 +725,10 @@
   padding: 1.5rem;
   box-shadow: var(--ui-shadow-lg);
   border-radius: var(--ui-radius-lg);
+}
+
+.ui-dialog-content > * {
+  min-width: 0;
 }
 
 /* One animation owns transform+opacity. Fill-mode both applies the

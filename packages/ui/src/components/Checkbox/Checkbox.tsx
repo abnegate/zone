@@ -54,36 +54,43 @@ const Checkbox = forwardRef<React.ElementRef<typeof CheckboxPrimitive.Root>, Che
 
     return (
       <div className="ui-checkbox-wrapper">
-        <div className="ui-checkbox-row">
-          <CheckboxPrimitive.Root
-            ref={ref}
-            id={checkboxId}
-            className={cn('ui-checkbox', className)}
-            checked={checked}
-            defaultChecked={defaultChecked}
-            disabled={disabled}
-            name={name}
-            value={value}
-            onCheckedChange={handleCheckedChange}
-            {...props}
-          >
-            <CheckboxPrimitive.Indicator className="ui-checkbox-indicator">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="ui-checkbox-icon"
-              >
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            </CheckboxPrimitive.Indicator>
-          </CheckboxPrimitive.Root>
-          {label && <Label htmlFor={checkboxId}>{label}</Label>}
-        </div>
-        {helpText && <p className="ui-checkbox-help-text">{helpText}</p>}
+        <CheckboxPrimitive.Root
+          ref={ref}
+          id={checkboxId}
+          className={cn('ui-checkbox', className)}
+          checked={checked}
+          defaultChecked={defaultChecked}
+          disabled={disabled}
+          name={name}
+          value={value}
+          onCheckedChange={handleCheckedChange}
+          aria-describedby={helpText && checkboxId ? `${checkboxId}-help` : undefined}
+          {...props}
+        >
+          <CheckboxPrimitive.Indicator className="ui-checkbox-indicator">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="ui-checkbox-icon"
+            >
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </CheckboxPrimitive.Indicator>
+        </CheckboxPrimitive.Root>
+        {(label || helpText) && (
+          <div className="ui-checkbox-copy">
+            {label && <Label htmlFor={checkboxId}>{label}</Label>}
+            {helpText && (
+              <p id={checkboxId ? `${checkboxId}-help` : undefined} className="ui-checkbox-help-text">
+                {helpText}
+              </p>
+            )}
+          </div>
+        )}
       </div>
     );
   }

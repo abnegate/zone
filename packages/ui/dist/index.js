@@ -427,38 +427,39 @@ var Checkbox = (0, import_react5.forwardRef)(
       [name, onChange, onCheckedChange, value]
     );
     return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "ui-checkbox-wrapper", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "ui-checkbox-row", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-          CheckboxPrimitive.Root,
-          {
-            ref,
-            id: checkboxId,
-            className: cn("ui-checkbox", className),
-            checked,
-            defaultChecked,
-            disabled,
-            name,
-            value,
-            onCheckedChange: handleCheckedChange,
-            ...props,
-            children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(CheckboxPrimitive.Indicator, { className: "ui-checkbox-indicator", children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-              "svg",
-              {
-                viewBox: "0 0 24 24",
-                fill: "none",
-                stroke: "currentColor",
-                strokeWidth: "3",
-                strokeLinecap: "round",
-                strokeLinejoin: "round",
-                className: "ui-checkbox-icon",
-                children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("polyline", { points: "20 6 9 17 4 12" })
-              }
-            ) })
-          }
-        ),
-        label && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(Label, { htmlFor: checkboxId, children: label })
-      ] }),
-      helpText && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("p", { className: "ui-checkbox-help-text", children: helpText })
+      /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        CheckboxPrimitive.Root,
+        {
+          ref,
+          id: checkboxId,
+          className: cn("ui-checkbox", className),
+          checked,
+          defaultChecked,
+          disabled,
+          name,
+          value,
+          onCheckedChange: handleCheckedChange,
+          "aria-describedby": helpText && checkboxId ? `${checkboxId}-help` : void 0,
+          ...props,
+          children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(CheckboxPrimitive.Indicator, { className: "ui-checkbox-indicator", children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+            "svg",
+            {
+              viewBox: "0 0 24 24",
+              fill: "none",
+              stroke: "currentColor",
+              strokeWidth: "3",
+              strokeLinecap: "round",
+              strokeLinejoin: "round",
+              className: "ui-checkbox-icon",
+              children: /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("polyline", { points: "20 6 9 17 4 12" })
+            }
+          ) })
+        }
+      ),
+      (label || helpText) && /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "ui-checkbox-copy", children: [
+        label && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(Label, { htmlFor: checkboxId, children: label }),
+        helpText && /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("p", { id: checkboxId ? `${checkboxId}-help` : void 0, className: "ui-checkbox-help-text", children: helpText })
+      ] })
     ] });
   }
 );

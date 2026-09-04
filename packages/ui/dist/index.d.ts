@@ -4,6 +4,7 @@ import React__default, { ReactNode } from 'react';
 import { VariantProps } from 'class-variance-authority';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import * as CheckboxPrimitive from '@radix-ui/react-checkbox';
+import * as react_jsx_runtime from 'react/jsx-runtime';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import * as ProgressPrimitive from '@radix-ui/react-progress';
 import * as LabelPrimitive from '@radix-ui/react-label';
@@ -133,8 +134,8 @@ declare const DialogPortal: React__default.FC<DialogPrimitive.DialogPortalProps>
 declare const DialogClose: React__default.ForwardRefExoticComponent<DialogPrimitive.DialogCloseProps & React__default.RefAttributes<HTMLButtonElement>>;
 declare const DialogOverlay: React__default.ForwardRefExoticComponent<Omit<DialogPrimitive.DialogOverlayProps & React__default.RefAttributes<HTMLDivElement>, "ref"> & React__default.RefAttributes<HTMLDivElement>>;
 declare const DialogContent: React__default.ForwardRefExoticComponent<Omit<DialogPrimitive.DialogContentProps & React__default.RefAttributes<HTMLDivElement>, "ref"> & React__default.RefAttributes<HTMLDivElement>>;
-declare const DialogHeader: ({ className, ...props }: React__default.HTMLAttributes<HTMLDivElement>) => React__default.JSX.Element;
-declare const DialogFooter: ({ className, ...props }: React__default.HTMLAttributes<HTMLDivElement>) => React__default.JSX.Element;
+declare const DialogHeader: ({ className, ...props }: React__default.HTMLAttributes<HTMLDivElement>) => react_jsx_runtime.JSX.Element;
+declare const DialogFooter: ({ className, ...props }: React__default.HTMLAttributes<HTMLDivElement>) => react_jsx_runtime.JSX.Element;
 declare const DialogTitle: React__default.ForwardRefExoticComponent<Omit<DialogPrimitive.DialogTitleProps & React__default.RefAttributes<HTMLHeadingElement>, "ref"> & React__default.RefAttributes<HTMLHeadingElement>>;
 declare const DialogDescription: React__default.ForwardRefExoticComponent<Omit<DialogPrimitive.DialogDescriptionProps & React__default.RefAttributes<HTMLParagraphElement>, "ref"> & React__default.RefAttributes<HTMLParagraphElement>>;
 
@@ -173,7 +174,7 @@ declare const badgeVariants: (props?: ({
 } & class_variance_authority_types.ClassProp) | undefined) => string;
 interface BadgeProps extends React.HTMLAttributes<HTMLDivElement>, VariantProps<typeof badgeVariants> {
 }
-declare function Badge({ className, variant, ...props }: BadgeProps): React.JSX.Element;
+declare function Badge({ className, variant, ...props }: BadgeProps): react_jsx_runtime.JSX.Element;
 
 declare const Tabs: React.ForwardRefExoticComponent<TabsPrimitive.TabsProps & React.RefAttributes<HTMLDivElement>>;
 declare const TabsList: React.ForwardRefExoticComponent<Omit<TabsPrimitive.TabsListProps & React.RefAttributes<HTMLDivElement>, "ref"> & React.RefAttributes<HTMLDivElement>>;
@@ -196,7 +197,7 @@ interface EmptyStateProps {
  * EmptyState component for displaying placeholder content when a list or section is empty.
  * Provides a consistent layout with icon, title, description, and optional action button.
  */
-declare function EmptyState({ icon, title, description, action, className, }: EmptyStateProps): React.JSX.Element;
+declare function EmptyState({ icon, title, description, action, className, }: EmptyStateProps): react_jsx_runtime.JSX.Element;
 
 declare function cn(...inputs: ClassValue[]): string;
 

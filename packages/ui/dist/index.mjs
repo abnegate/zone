@@ -336,38 +336,39 @@ var Checkbox = forwardRef4(
       [name, onChange, onCheckedChange, value]
     );
     return /* @__PURE__ */ jsxs4("div", { className: "ui-checkbox-wrapper", children: [
-      /* @__PURE__ */ jsxs4("div", { className: "ui-checkbox-row", children: [
-        /* @__PURE__ */ jsx5(
-          CheckboxPrimitive.Root,
-          {
-            ref,
-            id: checkboxId,
-            className: cn("ui-checkbox", className),
-            checked,
-            defaultChecked,
-            disabled,
-            name,
-            value,
-            onCheckedChange: handleCheckedChange,
-            ...props,
-            children: /* @__PURE__ */ jsx5(CheckboxPrimitive.Indicator, { className: "ui-checkbox-indicator", children: /* @__PURE__ */ jsx5(
-              "svg",
-              {
-                viewBox: "0 0 24 24",
-                fill: "none",
-                stroke: "currentColor",
-                strokeWidth: "3",
-                strokeLinecap: "round",
-                strokeLinejoin: "round",
-                className: "ui-checkbox-icon",
-                children: /* @__PURE__ */ jsx5("polyline", { points: "20 6 9 17 4 12" })
-              }
-            ) })
-          }
-        ),
-        label && /* @__PURE__ */ jsx5(Label, { htmlFor: checkboxId, children: label })
-      ] }),
-      helpText && /* @__PURE__ */ jsx5("p", { className: "ui-checkbox-help-text", children: helpText })
+      /* @__PURE__ */ jsx5(
+        CheckboxPrimitive.Root,
+        {
+          ref,
+          id: checkboxId,
+          className: cn("ui-checkbox", className),
+          checked,
+          defaultChecked,
+          disabled,
+          name,
+          value,
+          onCheckedChange: handleCheckedChange,
+          "aria-describedby": helpText && checkboxId ? `${checkboxId}-help` : void 0,
+          ...props,
+          children: /* @__PURE__ */ jsx5(CheckboxPrimitive.Indicator, { className: "ui-checkbox-indicator", children: /* @__PURE__ */ jsx5(
+            "svg",
+            {
+              viewBox: "0 0 24 24",
+              fill: "none",
+              stroke: "currentColor",
+              strokeWidth: "3",
+              strokeLinecap: "round",
+              strokeLinejoin: "round",
+              className: "ui-checkbox-icon",
+              children: /* @__PURE__ */ jsx5("polyline", { points: "20 6 9 17 4 12" })
+            }
+          ) })
+        }
+      ),
+      (label || helpText) && /* @__PURE__ */ jsxs4("div", { className: "ui-checkbox-copy", children: [
+        label && /* @__PURE__ */ jsx5(Label, { htmlFor: checkboxId, children: label }),
+        helpText && /* @__PURE__ */ jsx5("p", { id: checkboxId ? `${checkboxId}-help` : void 0, className: "ui-checkbox-help-text", children: helpText })
+      ] })
     ] });
   }
 );

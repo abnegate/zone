@@ -766,7 +766,7 @@ export default function ChatsPage() {
 
       {/* New Chat Modal */}
       <Modal isOpen={showNewChatModal} onClose={() => setShowNewChatModal(false)} title="New Chat">
-        <form onSubmit={handleCreateChat}>
+        <form className="ui-form" onSubmit={handleCreateChat}>
           {operationError && <div className="modal-error">{operationError}</div>}
           <Select
             label="Select Model"
