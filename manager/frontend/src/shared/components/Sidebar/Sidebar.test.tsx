@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
@@ -91,6 +91,7 @@ mock.module('../../context/ThemeContext', () => ({
 }));
 
 let Sidebar: typeof import('./Sidebar').default;
+const fetch = globalThis.fetch;
 
 beforeAll(async () => {
   Sidebar = (await import('./Sidebar')).default;
@@ -123,9 +124,14 @@ const renderSidebar = () => {
 
 describe('Sidebar', () => {
   beforeEach(() => {
+    globalThis.fetch = mock(async () => new Response(null, { status: 404 })) as typeof fetch;
     localStorage.clear();
     localStorage.setItem('manager_theme', 'light');
     document.documentElement.removeAttribute('data-sidebar-collapsed');
+  });
+
+  afterEach(() => {
+    globalThis.fetch = fetch;
   });
 
   describe('rendering', () => {
