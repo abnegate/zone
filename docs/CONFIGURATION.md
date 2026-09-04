@@ -22,10 +22,10 @@ For production, regenerate secrets for security.
 
 ### `DOMAIN_HOST_WEBUI`
 - **Default**: `webui.localhost`
-- **Description**: Hostname for the Open WebUI interface
+- **Description**: Shared base domain for service hostnames
 - **Example**: `ai.yourdomain.com`
 - **Usage**: Configure DNS A record or add to /etc/hosts
-- **Note**: LiteLLM API is internal-only, accessed via OpenWebUI
+- **Note**: Retained variable name for compatibility; Zone chat is at `https://manager.<domain>/chats`
 
 ---
 
@@ -47,7 +47,7 @@ For production, regenerate secrets for security.
 - **Description**: Master API key for authenticating to LiteLLM
 - **Security**: **Insecure default** - change for production!
 - **Generate**: `openssl rand -base64 32`
-- **Usage**: Used by Open WebUI to authenticate to LiteLLM
+- **Usage**: Used by Manager to authenticate to LiteLLM
 
 ### `LITELLM_SALT_KEY`
 - **Default**: `dev-insecure-salt-change-for-production`
@@ -160,99 +160,47 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ---
 
-## 💬 Open WebUI Configuration
-
-### `WEBUI_AUTH`
-- **Default**: `false`
-- **Description**: Enable Open WebUI's built-in user authentication
-- **Note**: We use Traefik basic auth instead by default
-- **Set to `true`**: If you want per-user accounts in the UI
-
-### `OPENAI_API_BASE_URL`
-- **Default**: `http://litellm:4000/v1`
-- **Description**: Internal URL for LiteLLM API endpoint
-- **Usage**: Don't change unless customizing architecture
-
-### `OPENAI_API_KEY`
-- **Default**: *auto-set from LITELLM_MASTER_KEY*
-- **Description**: API key for OpenAI-compatible requests
-- **Usage**: Automatically configured by setup script
-
-### `ENABLE_PERSISTENT_CONFIG`
-- **Default**: `false`
-- **Description**: Store config in database vs environment variables
-- **Recommendation**: Keep `false` for infrastructure-as-code approach
-
-### `ENABLE_SIGNUP`
-- **Default**: `false`
-- **Description**: Allow new users to create accounts
-- **Set to `true`**: For multi-user installations
-
-### `DEFAULT_LOCALE`
-- **Default**: `en-US`
-- **Description**: Default language for the interface
-- **Options**: `en-US`, `es-ES`, `fr-FR`, `de-DE`, etc.
-
-### `ENABLE_OLLAMA_API`
-- **Default**: `false`
-- **Description**: Enable direct Ollama API access in UI
-- **Usage**: Keep `false` since we use LiteLLM proxy
-
-### `ENABLE_OPENAI_API`
-- **Default**: `true`
-- **Description**: Enable OpenAI-compatible API in UI
-- **Usage**: Must be `true` for LiteLLM integration
-
----
-
 ## 🔍 Web Search Configuration
 
-### `ENABLE_RAG_WEB_SEARCH`
+### `SEARCH_ENABLE_WEB_SEARCH`
 - **Default**: `true`
-- **Description**: Enable web search in RAG (Retrieval Augmented Generation)
-- **Note**: Only works when VPN profile is enabled
+- **Description**: Enable Zone chat web search through SearXNG
+- **Note**: Requires the VPN profile
 
-### `RAG_WEB_SEARCH_ENGINE`
-- **Default**: `searxng`
-- **Description**: Search engine to use for web search
-- **Options**: `searxng` (only supported option)
-
-### `RAG_WEB_SEARCH_RESULT_COUNT`
+### `SEARCH_RESULT_COUNT`
 - **Default**: `5`
-- **Description**: Number of search results to fetch per query
-- **Range**: 1-20 (higher = more context, slower)
+- **Description**: Number of search results supplied to chat
 
-### `RAG_WEB_SEARCH_CONCURRENT_REQUESTS`
-- **Default**: `8`
-- **Description**: Maximum concurrent search requests
-- **Range**: 1-16 (higher = faster parallel searches, more load)
-
-### `SEARXNG_QUERY_URL`
+### `SEARCH_SEARXNG_QUERY_URL`
 - **Default**: `"http://gluetun:8080/search?q=<query>&format=json"`
-- **Description**: SearXNG API endpoint URL
-- **Note**: Quotes required for `<query>` placeholder
-- **Usage**: Routes through Gluetun VPN container
+- **Description**: Internal SearXNG API endpoint; SearXNG shares Gluetun's VPN network
 
-### `SEARXNG_BASE_URL`
-- **Default**: `"http://gluetun:8080"`
-- **Description**: SearXNG base URL (through VPN)
-- **Usage**: Internal routing through Gluetun
-
-### `SEARXNG_SERVER_BASE_URL`
+### `SEARCH_SEARXNG_SERVER_BASE_URL`
 - **Default**: `http://localhost:8080`
-- **Description**: SearXNG's own base URL configuration
-- **Usage**: SearXNG internal setting
+- **Description**: SearXNG's own base URL setting
 
-### `SEARXNG_INSTANCE_NAME`
+### `SEARCH_SEARXNG_INSTANCE_NAME`
 - **Default**: `Zone Search`
-- **Description**: Display name for SearXNG instance
-- **Example**: `My Private Search`
+- **Description**: SearXNG instance display name
 
 ### `MODEL_SEARCH_PROXY_URL`
 - **Default**: empty (direct catalog requests)
 - **Description**: Optional HTTP proxy for remote model catalog searches from Manager
 - **VPN value**: `http://gluetun:8888`
-- **Usage**: `make up-vpn` and `make up-all` save this in `.env` automatically so rebuilds retain it; `make up` clears it for direct catalog requests
+
+### `TOOL_RUNNER_PROXY_URL`
+- **Default**: empty (existing subprocess environment)
+- **Description**: Optional HTTP proxy for proxy-aware command tools and MCP subprocesses
+- **VPN value**: `http://gluetun:8888`
+
+`make up-vpn` and `make up-all` save both proxy URLs in `.env` so rebuilds retain
+routing; `make up` clears both for a direct launch. A configured proxy does not
+silently fall back to a direct connection when unavailable. The runner applies
+its proxy settings after command and MCP environment overlays. Loopback and
+internal service names bypass the proxy. Clients must honor proxy environment
+variables; this is not a network sandbox for raw sockets or other clients that
+ignore them. Tool HTTP requests go directly to Gluetun's proxy, while chat search
+queries go to SearXNG.
 
 ### Manager / zone-server chat
 
@@ -376,11 +324,6 @@ Inside Docker the manager image does not include magents. Install it on the host
 - **Description**: SearXNG metasearch engine version
 - **Note**: Only used when VPN profile is enabled
 
-### `DOCKER_VERSION_OPENWEBUI`
-- **Default**: `v0.11.3`
-- **Description**: Open WebUI chat interface version
-- **Note**: Paired with `DOCKER_DIGEST_OPENWEBUI` for immutable resolution
-
 Every external image version has a matching `DOCKER_DIGEST_*` variable in
 `.env.example`. Keep each tag and digest together when overriding an image.
 
@@ -452,7 +395,6 @@ Regenerate secrets for production:
 | Domain | No | ✅ Yes |
 | Security | No* | ✅ Yes (insecure) |
 | Ollama Models | No | ✅ Yes |
-| Open WebUI | No | ✅ Yes |
 | Web Search | No | ✅ Yes |
 | VPN (optional) | No | ✅ Yes (empty OK) |
 | Docker Versions | No | ✅ Yes |
@@ -489,8 +431,8 @@ make up-vpn
 
 Need to find a specific config? Quick lookup:
 
-- **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE, WEBUI_AUTH
-- **Docker Versions**: DOCKER_VERSION_TRAEFIK, DOCKER_VERSION_OLLAMA, DOCKER_VERSION_POSTGRES, DOCKER_VERSION_LITELLM, DOCKER_VERSION_GLUETUN, DOCKER_VERSION_SEARXNG, DOCKER_VERSION_OPENWEBUI, COMFYUI_COMMIT
+- **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE
+- **Docker Versions**: DOCKER_VERSION_TRAEFIK, DOCKER_VERSION_OLLAMA, DOCKER_VERSION_POSTGRES, DOCKER_VERSION_LITELLM, DOCKER_VERSION_GLUETUN, DOCKER_VERSION_SEARXNG, COMFYUI_COMMIT
 - **Domains**: DOMAIN_HOST_WEBUI
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED

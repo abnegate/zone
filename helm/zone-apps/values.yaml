@@ -23,6 +23,8 @@ commonEnv:
   LITELLM_HOST: "http://litellm:4000"
   OLLAMA_HOST: "http://ollama:11434"
   EMBEDDING_ENGINE: "ollama"
+  MODEL_SEARCH_PROXY_URL: ""
+  TOOL_RUNNER_PROXY_URL: ""
   VALKEY_HOST: "valkey"
   VALKEY_PORT: "6379"
 
@@ -232,46 +234,11 @@ networkPolicy:
   # CIDR containing commonEnv.DB_HOST; required for external databases when enabled.
   externalDatabaseCIDR: ""
 
-openwebui:
-  enabled: true
-  replicaCount: 1
-
-  image:
-    repository: ghcr.io/open-webui/open-webui
-    tag: v0.11.3@sha256:751b617714b91e4cfd0186a509c72480c858e012976103b09a30dad053c36175
-    pullPolicy: IfNotPresent
-
-  service:
-    type: ClusterIP
-    port: 8080
-    targetPort: 8080
-
-  config:
-    auth: true
-    signup: true
-    ragWebSearch: true
-    defaultModels: "llama3.1:8b"
-    corsAllowOrigin: "http://localhost:8080,http://webui.localhost"
-
-  litellm:
-    host: "http://litellm:4000/v1"
-    secretName: "zone-secrets"
-    secretKey: "litellm-master-key"
-
-  persistence:
-    enabled: true
-    size: 5Gi
-    storageClass: ""
-
-  resources:
-    limits:
-      cpu: 1000m
-      memory: 1Gi
-    requests:
-      cpu: 250m
-      memory: 256Mi
-
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    fsGroup: 1000
+# Preserve an existing claim when retiring the former chat service.
+# A connected Helm upgrade looks up the claim automatically. Offline renderers
+# must supply its exact metadata and spec (see helm/QUICK_START.md).
+retainedStorage:
+  openwebui:
+    enabled: false
+    metadata: {}
+    spec: {}

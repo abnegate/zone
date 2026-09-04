@@ -7,7 +7,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 ### AI & LLM
 - **Local LLM Inference**: Run powerful language models locally with Ollama
 - **Intelligent Routing**: Automatic model selection based on query complexity (LiteLLM)
-- **ChatGPT-like Interface**: Modern web UI with conversation history (Open WebUI)
+- **Zone Chat**: Built-in conversations, history, web search, and agent tools
 - **Private Web Search** (optional): VPN-protected metasearch engine (SearXNG + Gluetun)
 
 ### Platform Management
@@ -26,42 +26,19 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                 Internet                                     │
-└─────────────────────────────────────┬───────────────────────────────────────┘
-                                      │
-                               ┌──────▼────────┐
-                               │    Traefik    │  (Reverse Proxy + TLS)
-                               │  Basic Auth   │
-                               └───┬───┬───┬───┘
-                                   │   │   │
-          ┌────────────────────────┘   │   └────────────────────────┐
-          │                            │                            │
-     ┌────▼─────┐               ┌──────▼──────┐              ┌──────▼──────┐
-     │  Manager │               │   Open      │              │  Grafana    │
-     │  Console │               │   WebUI     │              │  Dashboards │
-     │ (React)  │               │             │              │             │
-     └────┬─────┘               └──────┬──────┘              └─────────────┘
-          │                            │
-     ┌────▼─────┐               ┌──────▼──────┐
-     │  Manager │               │   LiteLLM   │  (Semantic Routing)
-     │   API    │               │    Proxy    │
-     │  (Rust)  │               └──────┬──────┘
-     └────┬─────┘                      │
-          │                     ┌──────▼──────┐
-     ┌────▼─────┐               │   Ollama    │  (LLM Inference)
-     │PostgreSQL│               │             │  + GPU Support
-     │ + Valkey │               └─────────────┘
-     └──────────┘
-
-     ┌────────────────┐
-     │   Gluetun      │  (VPN Tunnel - Optional)
-     │                │
-     │  ┌──────────┐  │
-     │  │ SearXNG  │  │  (Private Search)
-     │  └──────────┘  │
-     └────────────────┘
+```mermaid
+flowchart TD
+    Browser --> Traefik
+    Traefik --> Console[Zone console and chat]
+    Console --> Manager[Manager API]
+    Manager --> LiteLLM --> Ollama
+    Manager --> PostgreSQL
+    Manager --> Valkey
+    Manager --> SearXNG
+    Manager --> Proxy[Gluetun HTTP proxy]
+    SearXNG --> VPN[Gluetun VPN tunnel]
+    Proxy --> VPN
+    Traefik --> Grafana
 ```
 
 ## Quick Start
@@ -78,7 +55,7 @@ make up
 
 Access the services:
 - **Console**: `https://manager.localhost` (workspace management)
-- **WebUI**: `https://webui.localhost` (chat interface)
+- **Chat**: `https://manager.localhost/chats` (conversations and agent tools)
 - **API**: `https://manager.localhost/api/`
 
 ### Prerequisites
@@ -155,7 +132,7 @@ docker compose --profile bundled-ollama up -d
 2. **Access the services**
 
    - Console: `https://manager.localhost` - Manage workspaces, projects, tasks
-   - WebUI: `https://webui.localhost` - Chat with AI models
+   - Chat: `https://manager.localhost/chats` - Chat with AI models
 
 ## Services
 
@@ -164,8 +141,7 @@ docker compose --profile bundled-ollama up -d
 | Service | Description | Port | Tech Stack |
 |---------|-------------|------|------------|
 | **Manager API** | Backend API for platform management | 8000 | Rust, Axum, sqlx |
-| **Manager Console** | Web frontend for workspace management | 5173 | React 19, TypeScript, Tailwind |
-| **Open WebUI** | ChatGPT-like interface | 8080 | Python, Svelte |
+| **Manager Console** | Web frontend for workspace management and chat | 5173 | React 19, TypeScript, Tailwind |
 | **LiteLLM** | LLM proxy with semantic routing | 4000 | Python |
 | **Ollama** | Local LLM inference engine | 11434 | Go |
 | **PostgreSQL** | Database with pgvector | 5432 | PostgreSQL 16 |
@@ -196,16 +172,24 @@ Browse more models at [Ollama Library](https://ollama.com/library).
 
 ### VPN Configuration (Optional)
 
-VPN is optional. The system works without it — Open WebUI and Manager chat just won't have private web search.
+VPN is optional. Zone chat works without it; private web search requires the VPN profile. VPN launches also route remote model catalogs and proxy-aware tool subprocess HTTP requests through Gluetun.
 
 To enable VPN-protected search:
 ```bash
 # Add VPN credentials to .env
-# Save the model catalog proxy in .env and start the VPN profile
+# Save model and tool proxy settings in .env and start the VPN profile
 make up-vpn
 ```
 
 Supported providers: Surfshark, NordVPN, ExpressVPN, ProtonVPN, Mullvad, and more. See [Gluetun Wiki](https://github.com/qdm12/gluetun-wiki).
+
+### Existing installations
+
+Zone chat replaces the former Open WebUI service. After updating Compose, remove
+only its retired container with `docker stop openwebui && docker rm openwebui`.
+The existing `zone_openwebui_data` volume remains on disk; do not delete or prune
+it if you need the old history. Zone chat stores its own history in PostgreSQL.
+The shared `DOMAIN_HOST_WEBUI` base-domain setting remains compatible.
 
 ### Monitoring
 
@@ -554,7 +538,6 @@ receive free [CodeRabbit](https://coderabbit.ai) AI reviews.
 
 - [Ollama](https://ollama.com/) - Local LLM inference
 - [LiteLLM](https://github.com/BerriAI/litellm) - LLM proxy and routing
-- [Open WebUI](https://github.com/open-webui/open-webui) - Web interface
 - [SearXNG](https://github.com/searxng/searxng) - Metasearch engine
 - [Gluetun](https://github.com/qdm12/gluetun) - VPN client
 - [Traefik](https://traefik.io/) - Reverse proxy

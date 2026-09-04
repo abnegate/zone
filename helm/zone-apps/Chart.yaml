@@ -1,6 +1,6 @@
 apiVersion: v2
 name: zone-apps
-description: Application services for Zone - server, manager console, and OpenWebUI
+description: Application services for Zone - server and manager console
 type: application
 version: 0.1.0
 appVersion: "1.0.0"
@@ -9,7 +9,6 @@ keywords:
   - ai
   - rust
   - react
-  - openwebui
 home: https://github.com/abnegate/zone
 maintainers:
   - name: Zone Team

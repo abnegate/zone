@@ -1,18 +1,37 @@
-{{- if and .Values.openwebui.enabled .Values.openwebui.persistence.enabled }}
+{{- $storage := .Values.retainedStorage | default dict -}}
+{{- $retention := $storage.openwebui | default dict -}}
+{{- $existing := lookup "v1" "PersistentVolumeClaim" .Release.Namespace "openwebui-pvc" -}}
+{{- if or $existing $retention.enabled -}}
+{{- $metadata := deepCopy ($retention.metadata | default dict) -}}
+{{- $spec := $retention.spec -}}
+{{- if $existing -}}
+{{- $metadata = deepCopy $existing.metadata -}}
+{{- $spec = $existing.spec -}}
+{{- end -}}
+{{- if not $spec -}}
+{{- fail "retainedStorage.openwebui.spec must contain the existing claim spec for offline retention" -}}
+{{- end -}}
+{{- $annotations := $metadata.annotations | default dict -}}
+{{- $_ := set $annotations "helm.sh/resource-policy" "keep" -}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: openwebui-pvc
+  namespace: {{ .Release.Namespace }}
+  {{- with $metadata.labels }}
   labels:
-    {{- include "zone-apps.labels" . | nindent 4 }}
-    app.kubernetes.io/component: openwebui
-spec:
-  accessModes:
-    - ReadWriteOnce
-  {{- if .Values.openwebui.persistence.storageClass }}
-  storageClassName: {{ .Values.openwebui.persistence.storageClass }}
+    {{- toYaml . | nindent 4 }}
   {{- end }}
-  resources:
-    requests:
-      storage: {{ .Values.openwebui.persistence.size }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+  {{- with $metadata.finalizers }}
+  finalizers:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $metadata.ownerReferences }}
+  ownerReferences:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
 {{- end }}

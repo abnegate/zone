@@ -35,14 +35,3 @@ migration:
 
 ingress:
   enabled: false
-
-openwebui:
-  persistence:
-    enabled: true
-  resources:
-    requests:
-      cpu: 50m
-      memory: 256Mi
-    limits:
-      cpu: 1000m
-      memory: 2Gi

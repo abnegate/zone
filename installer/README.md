@@ -10,12 +10,13 @@ A web-based configuration wizard for the Zone AI Stack.
 
 ## Features
 
-- 7-step configuration wizard
+- Configuration wizard for Zone chat and services
 - One-click secret generation
 - Inline form validation
 - Live installation progress
 - Mobile-responsive UI
 - OpenVPN & WireGuard support
+- Completion link to Zone chat at `/chats`
 
 ## Development
 

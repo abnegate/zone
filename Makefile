@@ -3,7 +3,7 @@
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
 	verify-comfyui-model validate test \
 	up-vpn up-monitoring up-comfyui up-all dev rebuild update \
-	shell-ollama shell-litellm shell-openwebui shell-manager shell-console \
+	shell-ollama shell-litellm shell-manager shell-console \
 	shell-postgres shell-valkey db-shell db-migrate \
 	test-server test-console test-console-coverage test-e2e test-e2e-ui \
 	lint-console format-console check-console \
@@ -96,14 +96,14 @@ build: ## Build all services
 up: ## Start all services (without VPN or monitoring)
 	@echo "$(GREEN)Starting services...$(NC)"
 	@sh scripts/configure-model-proxy.sh .env direct
-	MODEL_SEARCH_PROXY_URL= $(DOCKER_COMPOSE) up -d
+	MODEL_SEARCH_PROXY_URL= TOOL_RUNNER_PROXY_URL= $(DOCKER_COMPOSE) up -d
 	@echo "$(GREEN)Services started! Check status with: make ps$(NC)"
 	@echo "$(YELLOW)Note: VPN not enabled. For VPN-protected search, use: make up-vpn$(NC)"
 
 up-vpn: ## Start all services with VPN-protected search
 	@echo "$(GREEN)Starting services with VPN...$(NC)"
 	@sh scripts/configure-model-proxy.sh
-	MODEL_SEARCH_PROXY_URL=http://gluetun:8888 $(DOCKER_COMPOSE) --profile vpn up -d
+	MODEL_SEARCH_PROXY_URL=http://gluetun:8888 TOOL_RUNNER_PROXY_URL=http://gluetun:8888 $(DOCKER_COMPOSE) --profile vpn up -d
 	@echo "$(GREEN)Services started with VPN! Check status with: make ps$(NC)"
 
 up-monitoring: ## Start all services with monitoring (Prometheus + Grafana)
@@ -120,7 +120,7 @@ up-comfyui: verify-comfyui-model ## Start the bundled NVIDIA ComfyUI runtime
 up-all: ## Start all services with VPN and monitoring
 	@echo "$(GREEN)Starting all services (VPN + monitoring)...$(NC)"
 	@sh scripts/configure-model-proxy.sh
-	MODEL_SEARCH_PROXY_URL=http://gluetun:8888 $(DOCKER_COMPOSE) --profile vpn --profile monitoring up -d
+	MODEL_SEARCH_PROXY_URL=http://gluetun:8888 TOOL_RUNNER_PROXY_URL=http://gluetun:8888 $(DOCKER_COMPOSE) --profile vpn --profile monitoring up -d
 	@echo "$(GREEN)All services started! Check status with: make ps$(NC)"
 
 down: ## Stop all services
@@ -280,7 +280,6 @@ backup: ## Backup volumes to ./backups directory
 	@DATE=$$(date +%Y%m%d_%H%M%S); \
 	docker run --rm \
 		-v zone_ollama_data:/data/ollama:ro \
-		-v zone_openwebui_data:/data/openwebui:ro \
 		-v zone_postgres_data:/data/postgres:ro \
 		-v zone_valkey_data:/data/valkey:ro \
 		-v zone_manager_repos:/data/manager_repos:ro \
@@ -301,7 +300,6 @@ restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_
 	@echo "$(YELLOW)Restoring from $(BACKUP)...$(NC)"
 	@docker run --rm \
 		-v zone_ollama_data:/data/ollama \
-		-v zone_openwebui_data:/data/openwebui \
 		-v zone_postgres_data:/data/postgres \
 		-v zone_valkey_data:/data/valkey \
 		-v zone_manager_repos:/data/manager_repos \
@@ -358,9 +356,6 @@ shell-ollama: ## Open the host Ollama CLI (or a bundled container shell)
 shell-litellm: ## Open shell in litellm container
 	@docker exec -it litellm /bin/sh
 
-shell-openwebui: ## Open shell in openwebui container
-	@docker exec -it openwebui /bin/bash
-
 shell-manager: ## Open shell in manager container
 	@docker exec -it manager /bin/sh
 
@@ -381,8 +376,6 @@ test: ## Run basic smoke tests for all services
 	@curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "$(GREEN)✓ Ollama$(NC)" || echo "$(RED)✗ Ollama$(NC)"
 	@echo "Testing LiteLLM API..."
 	@curl -sf http://localhost:4000/health >/dev/null 2>&1 && echo "$(GREEN)✓ LiteLLM$(NC)" || echo "$(RED)✗ LiteLLM$(NC)"
-	@echo "Testing Open WebUI..."
-	@curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "$(GREEN)✓ Open WebUI$(NC)" || echo "$(RED)✗ Open WebUI$(NC)"
 	@echo "Testing Manager API..."
 	@curl -sf http://localhost:8000/api/health >/dev/null 2>&1 && echo "$(GREEN)✓ Manager$(NC)" || echo "$(RED)✗ Manager$(NC)"
 	@echo "Testing Console..."
@@ -627,8 +620,7 @@ urls: ## Show access URLs for services
 	@echo "$(BLUE)Service URLs:$(NC)"
 	@if [ -f .env ]; then \
 		. ./.env; \
-		echo "  Web UI:       https://$$DOMAIN_HOST_WEBUI"; \
-		echo "  Manager:      https://manager.localhost"; \
+		echo "  Zone chat:    https://manager.localhost/chats"; \
 		echo "  Manager (alt): https://manager.$$DOMAIN_HOST_WEBUI"; \
 		echo "  LiteLLM:      https://litellm.$$DOMAIN_HOST_WEBUI"; \
 		echo "  Traefik:      https://traefik.$$DOMAIN_HOST_WEBUI"; \

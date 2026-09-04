@@ -20,12 +20,18 @@ fi
 temporary=$(mktemp "${file}.XXXXXX")
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
 awk -v proxy="$proxy" '
-    /^[[:space:]]*(export[[:space:]]+)?MODEL_SEARCH_PROXY_URL[[:space:]]*=/ {
-        if (!written) print "MODEL_SEARCH_PROXY_URL=" proxy
-        written = 1
+    /^[[:space:]]*(export[[:space:]]+)?(MODEL_SEARCH_PROXY_URL|TOOL_RUNNER_PROXY_URL)[[:space:]]*=/ {
+        name = $0
+        sub(/^[[:space:]]*(export[[:space:]]+)?/, "", name)
+        sub(/[[:space:]]*=.*/, "", name)
+        if (!written[name]) print name "=" proxy
+        written[name] = 1
         next
     }
     { print }
-    END { if (!written) print "MODEL_SEARCH_PROXY_URL=" proxy }
+    END {
+        if (!written["MODEL_SEARCH_PROXY_URL"]) print "MODEL_SEARCH_PROXY_URL=" proxy
+        if (!written["TOOL_RUNNER_PROXY_URL"]) print "TOOL_RUNNER_PROXY_URL=" proxy
+    }
 ' "$file" > "$temporary"
 mv "$temporary" "$file"

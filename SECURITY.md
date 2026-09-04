@@ -113,9 +113,9 @@ networks:
 ### Edge Network
 The `zone_edge` network connects:
 - Traefik (reverse proxy)
-- Open WebUI (user interface)
+- Zone console (chat and workspace interface)
 - LiteLLM (API gateway)
-- Manager (admin interface)
+- Manager API
 
 Only Traefik should have ports exposed to the host.
 
@@ -128,14 +128,10 @@ Traefik uses HTTP Basic Authentication for:
 
 Credentials are stored in `./auth/users.htpasswd` using bcrypt hashing.
 
-### WebUI Authentication
-Open WebUI authentication is **ENABLED** by default (`WEBUI_AUTH=true`).
+### Zone Chat Authentication
 
-First user to register becomes admin. To restrict access:
-```env
-WEBUI_ENABLE_SIGNUP=false
-WEBUI_DEFAULT_USER_ROLE=pending
-```
+Zone chat uses Manager's account authentication and workspace access controls.
+Chat history and agent actions belong to the authenticated user's workspace.
 
 ### API Authentication
 LiteLLM requires API key authentication via `SECURITY_LITELLM_MASTER_KEY`.
@@ -143,14 +139,23 @@ LiteLLM requires API key authentication via `SECURITY_LITELLM_MASTER_KEY`.
 **Master Key Distribution**:
 The master key is shared with:
 1. **LiteLLM** - API gateway (generates the key)
-2. **Open WebUI** - User interface (needs to call LiteLLM)
-3. **Manager** - Admin interface (needs to register models in LiteLLM)
+2. **Manager** - Backend model registration and inference requests
 
 This distribution is minimized to only services that require it. The key is:
 - Not exposed to the host
 - Not exposed via environment variables to untrusted containers
 - Transmitted only over internal Docker networks
 - Never logged or stored in application logs
+
+## Tool HTTP Routing
+
+`TOOL_RUNNER_PROXY_URL` sets proxy environment variables for command tools and
+MCP subprocesses after their normal environment overlays. VPN launches configure
+Gluetun's HTTP proxy. Proxy-aware clients fail if that configured proxy is
+unavailable; loopback and internal service destinations bypass it. This covers
+clients that honor the proxy environment, not raw sockets or clients that ignore
+it. SearXNG handles chat search queries; generic tool HTTP requests use Gluetun's
+proxy directly.
 
 ## Privacy Considerations
 
@@ -215,7 +220,7 @@ Before deploying to production:
 - [ ] Review network isolation settings
 - [ ] Disable unnecessary services
 - [ ] Configure firewall rules
-- [ ] Enable WebUI authentication
+- [ ] Verify Manager authentication and workspace access
 - [ ] Restrict signup or user registration
 - [ ] Review prompt logging settings
 - [ ] Update all Docker images

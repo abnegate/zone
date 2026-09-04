@@ -6,7 +6,7 @@ Zone ships three charts:
 |-------|-----------------|
 | `helm/zone-infra` | CloudNativePG PostgreSQL + Valkey |
 | `helm/zone-ai` | Ollama + LiteLLM |
-| `helm/zone-apps` | zone-server (Rust API), manager console, Open WebUI |
+| `helm/zone-apps` | zone-server (Rust API), manager console and chat |
 
 ## Kind development
 
@@ -86,3 +86,34 @@ kubectl -n cnpg-system get pods
 ```
 
 The PostgreSQL service is `zone-postgres-rw`, not `zone-postgres`.
+
+## Retired chat storage
+
+Open WebUI workloads and services are removed. A connected Helm upgrade looks up
+`openwebui-pvc` in the release namespace, retains its existing spec, labels, and
+annotations, and adds `helm.sh/resource-policy: keep`. Fresh installs create no
+retired application or claim. Do not delete the retained claim if you need its
+old history; Zone chat stores its own history in PostgreSQL.
+
+Offline renderers (including GitOps rendering without cluster access) must pass
+an explicit copy of the existing claim to keep it in their desired manifest:
+
+```yaml
+retainedStorage:
+  openwebui:
+    enabled: true
+    metadata:
+      labels: {} # Copy existing labels.
+      annotations: {} # Copy existing annotations.
+    spec: {} # Copy the entire existing PVC spec, including volumeName/storageClassName.
+```
+
+Export the existing claim with `kubectl -n zone get pvc openwebui-pvc -o yaml`
+and copy its metadata and full spec into the retention values before updating.
+Do not enable offline retention with an empty spec. Retain these values in your
+GitOps configuration until the old data is intentionally retired. The Helm keep
+annotation does not override a separate GitOps controller's prune policy.
+
+Run `python3 scripts/test-app-storage.py` (Helm and PyYAML required) to verify
+fresh rendering, explicit offline retention, and connected lookup against a
+local test API without contacting a real cluster.

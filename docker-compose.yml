@@ -303,8 +303,9 @@ services:
       - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
       - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
       - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
-      # Set by the VPN launch targets so remote model catalogs use Gluetun.
+      # Set by VPN launch targets for model catalogs and tool subprocesses.
       - MODEL_SEARCH_PROXY_URL=${MODEL_SEARCH_PROXY_URL:-}
+      - TOOL_RUNNER_PROXY_URL=${TOOL_RUNNER_PROXY_URL:-}
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://host.docker.internal:8188}
       - COMFYUI_API_TOKEN=${COMFYUI_API_TOKEN:-}
@@ -389,61 +390,7 @@ services:
       retries: 3
       start_period: 10s
 
-  openwebui:
-    image: ghcr.io/open-webui/open-webui:${DOCKER_VERSION_OPENWEBUI:-v0.11.3}@${DOCKER_DIGEST_OPENWEBUI:-sha256:751b617714b91e4cfd0186a509c72480c858e012976103b09a30dad053c36175}
-    container_name: openwebui
-    restart: unless-stopped
-    depends_on:
-      litellm:
-        condition: service_healthy
-    environment:
-      - OPENAI_API_BASE_URLS=http://litellm:4000/v1
-      - OPENAI_API_KEYS=${SECURITY_LITELLM_MASTER_KEY}
-      - ENABLE_OLLAMA_API=false
-      - ENABLE_OPENAI_API=true
-      - TASK_MODEL_EXTERNAL=${WEBUI_TASK_MODEL_EXTERNAL}
-      - ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
-      - WEB_SEARCH_ENGINE=${SEARCH_ENGINE}
-      - WEB_SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT}
-      - WEB_SEARCH_CONCURRENT_REQUESTS=${SEARCH_CONCURRENT_REQUESTS}
-      - SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL}
-      - WEBUI_AUTH=${WEBUI_AUTH}
-      - ENABLE_SIGNUP=${WEBUI_ENABLE_SIGNUP}
-      - DEFAULT_USER_ROLE=${WEBUI_DEFAULT_USER_ROLE:-pending}
-      - DEFAULT_LOCALE=${WEBUI_DEFAULT_LOCALE}
-      - ENABLE_PERSISTENT_CONFIG=${WEBUI_ENABLE_PERSISTENT_CONFIG}
-      - CORS_ALLOW_ORIGIN=${WEBUI_CORS_ALLOW_ORIGIN}
-      - USER_AGENT=${WEBUI_USER_AGENT:-zone/1.0}
-      - TZ=${ADVANCED_TZ}
-    volumes:
-      - openwebui_data:/app/backend/data
-    networks:
-      - internal
-      - edge
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=zone_edge
-      - traefik.http.services.openwebui.loadbalancer.server.port=8080
-      - traefik.http.routers.openwebui.rule=Host(`${DOMAIN_HOST_WEBUI}`)
-      - traefik.http.routers.openwebui.entrypoints=web
-      - traefik.http.routers.openwebui.service=openwebui
-      - traefik.http.routers.openwebui.middlewares=security-headers
-      - traefik.http.routers.openwebui-secure.rule=Host(`${DOMAIN_HOST_WEBUI}`)
-      - traefik.http.routers.openwebui-secure.entrypoints=websecure
-      - traefik.http.routers.openwebui-secure.service=openwebui
-      - traefik.http.routers.openwebui-secure.middlewares=security-headers
-      - traefik.http.routers.openwebui-secure.tls=true
-      - traefik.http.routers.openwebui-secure.tls.certresolver=letsencrypt
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
-
-  # =============================================================================
-  # VPN & Search (vpn profile)
-  # =============================================================================
+  # VPN and search use the optional vpn profile.
   gluetun:
     image: ghcr.io/thecfu/gluetun-exporter:${DOCKER_VERSION_GLUETUN_BUNDLED:-0.1.1-bundled}@${DOCKER_DIGEST_GLUETUN_BUNDLED:-sha256:bc0d59e2307c8aa1e16d6d0e5173ebd7fb568caceacff8ed29ea87931b61515e}
     container_name: gluetun
@@ -470,7 +417,7 @@ services:
       # Do not include 10.0.0.0/8 — overlaps Surfshark WG (10.14.0.2/16)
       - FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12,192.168.0.0/16
       - FIREWALL_INPUT_PORTS=8080,8001
-      # Expose Gluetun's HTTP proxy for remote model catalog requests.
+      # Expose Gluetun's HTTP proxy for remote model catalogs and tool requests.
       - HTTPPROXY=on
       - UPDATER_PERIOD=24h
     networks:
@@ -511,9 +458,7 @@ services:
       retries: 3
       start_period: 30s
 
-  # =============================================================================
   # Monitoring (monitoring profile)
-  # =============================================================================
   prometheus:
     image: prom/prometheus:${DOCKER_VERSION_PROMETHEUS:-v3.14.0}@${DOCKER_DIGEST_PROMETHEUS:-sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0}
     container_name: prometheus
@@ -655,9 +600,7 @@ services:
     networks:
       - internal
 
-  # =============================================================================
   # Utilities (installer profile)
-  # =============================================================================
   installer:
     build:
       context: .
@@ -719,8 +662,6 @@ volumes:
     name: zone_manager_artifacts
   manager_embed_cache:
     name: zone_manager_embed_cache
-  openwebui_data:
-    name: zone_openwebui_data
   prometheus_data:
     name: zone_prometheus_data
   grafana_data:

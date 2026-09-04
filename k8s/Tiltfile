@@ -1,13 +1,10 @@
-# =============================================================================
 # Zone Development Tiltfile
-# =============================================================================
 # Usage:
 #   make tilt-up                     # Generate secrets and start Tilt
 #   tilt up -- --only=infra          # Start a subset of resources
 #   tilt up -- --only=apps           # Apps plus required infra and AI
-#   tilt up -- --only=server         # Alias for apps (also openwebui)
+#   tilt up -- --only=server         # Alias for apps
 #   tilt down                        # Stop Tilt-managed resources
-# =============================================================================
 
 load('ext://namespace', 'namespace_create')
 
@@ -18,7 +15,6 @@ cfg = config.parse()
 # Resource names that live inside the apps chart must pull the same graph.
 _ONLY_ALIASES = {
     "server": "apps",
-    "openwebui": "apps",
 }
 only = [_ONLY_ALIASES.get(selection, selection) for selection in cfg.get("only", [])]
 
@@ -37,9 +33,7 @@ k8s_yaml('secrets.yaml')
 k8s_resource('zone-secrets', labels=['infrastructure'])
 k8s_resource('zone-postgres-superuser', labels=['infrastructure'])
 
-# =============================================================================
 # Infrastructure (zone-infra chart)
-# =============================================================================
 if should_run("infra"):
     k8s_yaml(helm(
         '../helm/zone-infra',
@@ -63,9 +57,7 @@ if should_run("infra"):
         resource_deps=['zone-secrets'],
     )
 
-# =============================================================================
 # AI Services (zone-ai chart)
-# =============================================================================
 if should_run("ai"):
     k8s_yaml(helm(
         '../helm/zone-ai',
@@ -86,9 +78,7 @@ if should_run("ai"):
         resource_deps=['ollama', 'postgres'],
     )
 
-# =============================================================================
 # Application Services
-# =============================================================================
 if should_run("manager") or should_run("apps"):
     docker_build(
         'zone/server',
@@ -123,15 +113,7 @@ if should_run("apps"):
         labels=['apps'],
         resource_deps=['postgres', 'valkey', 'litellm'],
     )
-    k8s_resource(
-        'openwebui',
-        port_forwards=['8080:8080'],
-        labels=['apps'],
-        resource_deps=['litellm'],
-        links=[
-            link('http://localhost:8080', 'Open WebUI'),
-        ],
-    )
+
 
 update_settings(
     max_parallel_updates=3,
@@ -147,7 +129,6 @@ if config.tilt_subcommand == 'up':
     print('Services:')
     print('  Console (dev):    http://localhost:3001')
     print('  Server API:       http://localhost:8000')
-    print('  Open WebUI:       http://localhost:8080')
     print('  LiteLLM:          http://localhost:4000')
     print('  Ollama:           http://localhost:11434')
     print('')

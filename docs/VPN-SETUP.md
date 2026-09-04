@@ -11,7 +11,7 @@ The Zone AI stack works perfectly **without VPN**. You only need VPN if you want
 
 ```bash
 sh scripts/configure-model-proxy.sh .env direct
-MODEL_SEARCH_PROXY_URL= docker compose up -d
+MODEL_SEARCH_PROXY_URL= TOOL_RUNNER_PROXY_URL= docker compose up -d
 # or
 make up
 ```
@@ -20,7 +20,7 @@ make up
 - ✅ Chat with local models
 - ✅ Semantic routing (auto/fast/reason)
 - ✅ All core functionality
-- ❌ Web search (SearXNG not available — Open WebUI RAG and Manager chat)
+- ❌ Web search (SearXNG not available — Zone chat)
 
 ## Running With VPN
 
@@ -29,8 +29,8 @@ make up
 Edit `.env` and add your VPN credentials:
 
 ```bash
-OPENVPN_USER=your_surfshark_username
-OPENVPN_PASSWORD=your_surfshark_password
+VPN_OPENVPN_USER=your_surfshark_username
+VPN_OPENVPN_PASSWORD=your_surfshark_password
 ```
 
 ### Step 2: Start with VPN Profile
@@ -39,18 +39,25 @@ OPENVPN_PASSWORD=your_surfshark_password
 make up-vpn
 ```
 
-The VPN launch enables Gluetun's HTTP proxy and routes remote model catalog
-searches through it. The target saves `MODEL_SEARCH_PROXY_URL=http://gluetun:8888`
-in `.env` so rebuilds preserve the proxy. For direct Compose usage, save that
-setting in `.env` before running `docker compose --profile vpn up -d`.
+The VPN launch saves both `MODEL_SEARCH_PROXY_URL=http://gluetun:8888` and
+`TOOL_RUNNER_PROXY_URL=http://gluetun:8888` in `.env`. Model catalogs and
+proxy-aware command and MCP subprocesses use Gluetun's HTTP proxy. Chat web
+search queries use SearXNG, which shares Gluetun's VPN network. Rebuilds preserve
+the selection. For direct Compose usage, run
+`sh scripts/configure-model-proxy.sh .env vpn` before
+`docker compose --profile vpn up -d`.
+
 When disabling the VPN, run `make down && make up`. The direct launch clears
-`MODEL_SEARCH_PROXY_URL` in `.env` and starts Manager with an empty proxy setting.
+both proxy URLs. When a proxy URL is configured, an unavailable proxy causes
+proxy-aware HTTP requests to fail; they do not retry directly. Internal service
+and loopback destinations bypass the proxy. This environment-based policy
+covers clients that honor it, not raw sockets or clients that ignore proxies.
 
 **What works**: Everything including web search
 - ✅ Chat with local models
 - ✅ Semantic routing
 - ✅ All core functionality
-- ✅ Private web search via VPN (Open WebUI and Manager chat, through SearXNG on Gluetun)
+- ✅ Private web search via VPN (Zone chat, through SearXNG on Gluetun)
 
 ## Supported VPN Providers
 
@@ -153,7 +160,7 @@ docker compose --profile vpn down
 
 # Start without VPN
 sh scripts/configure-model-proxy.sh .env direct
-MODEL_SEARCH_PROXY_URL= docker compose up -d
+MODEL_SEARCH_PROXY_URL= TOOL_RUNNER_PROXY_URL= docker compose up -d
 ```
 
 ## Performance Impact
@@ -171,5 +178,5 @@ MODEL_SEARCH_PROXY_URL= docker compose up -d
 
 **Without VPN**:
 - No web search capability (SearXNG not running)
-- All other features are local and private
-- No telemetry or external connections (except model downloads)
+- Remote model catalogs and tool HTTP requests use their normal direct route
+- Local inference remains local

@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =============================================================================
 # Zone Setup Script
-# =============================================================================
 # This script helps you set up your Zone AI stack by:
 # 1. Checking prerequisites
 # 2. Generating secure secrets
 # 3. Creating basic auth credentials
 # 4. Setting up your .env file
-# =============================================================================
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly PROJECT_ROOT
 readonly ENV_FILE="${PROJECT_ROOT}/.env"
 readonly ENV_EXAMPLE="${PROJECT_ROOT}/.env.example"
 readonly AUTH_DIR="${PROJECT_ROOT}/auth"
@@ -126,13 +125,18 @@ setup_env_file() {
     cp "${ENV_EXAMPLE}" "${ENV_FILE}"
 
     log_info "Generating secure secrets..."
-    local litellm_key=$(generate_secret)
-    local litellm_salt=$(generate_secret)
-    local searxng_secret=$(generate_secret)
-    local postgres_password=$(generate_secret)
+    local litellm_key
+    litellm_key=$(generate_secret)
+    local litellm_salt
+    litellm_salt=$(generate_secret)
+    local searxng_secret
+    searxng_secret=$(generate_secret)
+    local postgres_password
+    postgres_password=$(generate_secret)
     local postgres_password_encoded
     postgres_password_encoded=$(url_encode "${postgres_password}")
-    local manager_api_key=$(generate_secret)
+    local manager_api_key
+    manager_api_key=$(generate_secret)
 
     # Use sed to replace empty values with new prefixed names
     if ! sed -i.bak "s|^SECURITY_LITELLM_MASTER_KEY=.*|SECURITY_LITELLM_MASTER_KEY=${litellm_key}|" "${ENV_FILE}"; then
@@ -158,23 +162,6 @@ setup_env_file() {
     if ! sed -i.bak "s|^SECURITY_MANAGER_API_KEY=.*|SECURITY_MANAGER_API_KEY=${manager_api_key}|" "${ENV_FILE}"; then
         log_error "Failed to update SECURITY_MANAGER_API_KEY"
         exit 1
-    fi
-
-    # Fix WEBUI_OPENAI_API_KEY to use actual value
-    if ! sed -i.bak "s|^WEBUI_OPENAI_API_KEY=.*|WEBUI_OPENAI_API_KEY=${litellm_key}|" "${ENV_FILE}"; then
-        log_error "Failed to update WEBUI_OPENAI_API_KEY"
-        exit 1
-    fi
-
-    # Set WEBUI_CORS_ALLOW_ORIGIN based on DOMAIN_HOST_WEBUI
-    local domain_host
-    domain_host=$(grep "^DOMAIN_HOST_WEBUI=" "${ENV_FILE}" | cut -d'=' -f2)
-    if [ -n "${domain_host}" ]; then
-        if ! sed -i.bak "s|^WEBUI_CORS_ALLOW_ORIGIN=.*|WEBUI_CORS_ALLOW_ORIGIN=http://${domain_host}|" "${ENV_FILE}"; then
-            log_error "Failed to update WEBUI_CORS_ALLOW_ORIGIN"
-            exit 1
-        fi
-        log_info "Set WEBUI_CORS_ALLOW_ORIGIN to http://${domain_host}"
     fi
 
     rm -f "${ENV_FILE}.bak"
@@ -395,7 +382,7 @@ main_menu() {
     echo "5) Validate configuration"
     echo "6) Exit"
     echo ""
-    read -p "Select option [1-6]: " choice
+    read -r -p "Select option [1-6]: " choice
 
     case $choice in
         1)
