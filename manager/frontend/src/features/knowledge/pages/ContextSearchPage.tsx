@@ -66,8 +66,8 @@ const FolderIcon = () => (
 
 const SparklesIcon = () => (
   <svg
-    width="48"
-    height="48"
+    width="40"
+    height="40"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
@@ -85,8 +85,8 @@ const SparklesIcon = () => (
 
 const SearchEmptyIcon = () => (
   <svg
-    width="48"
-    height="48"
+    width="40"
+    height="40"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
@@ -197,166 +197,169 @@ export default function ContextSearchPage() {
   };
 
   return (
-    <div className="page context-search-page">
-      <header className="flex justify-between items-start mb-6">
+    <div className="page page--workspace context-search-page">
+      <header className="context-search-header">
         <div>
-          <h1 className="text-2xl font-semibold text-foreground">Context Search</h1>
-          <p className="text-muted-foreground mt-1">
+          <h1 className="context-search-title">Context Search</h1>
+          <p className="context-search-subtitle">
             Search across all your connected knowledge sources
           </p>
         </div>
       </header>
 
       {/* Search Section */}
-      <div className="search-section">
-        <form onSubmit={handleSearch} className="search-form">
-          <div className="search-input-wrapper">
-            <div className="search-icon-wrapper">
-              <SearchIcon />
-            </div>
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search your knowledge base..."
-              className="search-input"
-              disabled={loading}
-            />
-            <Button type="submit" disabled={loading || !query.trim()}>
-              {loading ? <span className="ui-btn-spinner" /> : 'Search'}
-            </Button>
-          </div>
-        </form>
-
-        {/* Filters */}
-        <div className="search-filters">
-          <div className="filter-group">
-            <span className="filter-label">Mode</span>
-            <Tabs value={mode} onValueChange={(v) => setMode(v as SearchMode)}>
-              <TabsList>
-                <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
-                <TabsTrigger value="semantic">Semantic</TabsTrigger>
-                <TabsTrigger value="keyword">Keyword</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
-
-          {sources.length > 0 && (
-            <div className="filter-group">
-              <span className="filter-label">Sources</span>
-              <div className="source-pills">
-                {sourcesLoading ? (
-                  <span className="text-muted-foreground text-sm">Loading...</span>
-                ) : (
-                  sources.map((source) => (
-                    <button
-                      key={source.id}
-                      type="button"
-                      className={`source-pill ${selectedSources.includes(source.id) ? 'active' : ''}`}
-                      onClick={() => toggleSource(source.id)}
-                      disabled={loading}
-                    >
-                      {source.name}
-                    </button>
-                  ))
-                )}
+      <div className="context-search-workspace">
+        <div className="search-section">
+          <form onSubmit={handleSearch} className="search-form">
+            <div className="search-input-wrapper">
+              <div className="search-icon-wrapper">
+                <SearchIcon />
               </div>
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search your knowledge base..."
+                className="search-input"
+                disabled={loading}
+              />
+              <Button type="submit" disabled={loading || !query.trim()}>
+                {loading ? <span className="ui-btn-spinner" /> : 'Search'}
+              </Button>
             </div>
-          )}
-        </div>
-      </div>
+          </form>
 
-      {/* Error State */}
-      {error && (
-        <div className="error-banner" role="alert">
-          <span>{error}</span>
-          <Button variant="ghost" size="sm" onClick={() => search({ query, mode, limit: 20 })}>
-            Retry
-          </Button>
-        </div>
-      )}
+          {/* Filters */}
+          <div className="search-filters">
+            <div className="filter-group">
+              <span className="filter-label">Mode</span>
+              <Tabs value={mode} onValueChange={(v) => setMode(v as SearchMode)}>
+                <TabsList>
+                  <TabsTrigger value="hybrid">Hybrid</TabsTrigger>
+                  <TabsTrigger value="semantic">Semantic</TabsTrigger>
+                  <TabsTrigger value="keyword">Keyword</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
 
-      {/* Results */}
-      {results.length > 0 && (
-        <div className="results-section">
-          <div className="results-header">
-            <h2 className="text-lg font-medium text-foreground">Results</h2>
-            <Badge variant="secondary">{total} found</Badge>
-          </div>
-
-          <div className="results-grid">
-            {results.map((result, index) => (
-              <Card
-                key={result.id}
-                className="result-card"
-                style={{ animationDelay: `${index * 50}ms` }}
-              >
-                <CardContent className="result-card-content">
-                  <div className="result-card-header">
-                    <div className="result-source">
-                      <FolderIcon />
-                      <span>{result.source_name}</span>
-                    </div>
-                    <Badge
-                      variant={
-                        getRelevanceLevel(result.relevance_score) === 'high'
-                          ? 'success'
-                          : getRelevanceLevel(result.relevance_score) === 'medium'
-                            ? 'warning'
-                            : 'secondary'
-                      }
-                    >
-                      {getRelevanceLabel(result.relevance_score)}
-                    </Badge>
-                  </div>
-
-                  <div
-                    className="result-snippet"
-                    // biome-ignore lint/security/noDangerouslySetInnerHtml: Sanitized with DOMPurify
-                    dangerouslySetInnerHTML={{ __html: highlightText(result.snippet) }}
-                  />
-
-                  {result.metadata.type === 'file' && typeof result.metadata.path === 'string' && (
-                    <div className="result-meta">
-                      <FileIcon />
-                      <span className="result-path">{result.metadata.path}</span>
-                    </div>
+            {sources.length > 0 && (
+              <div className="filter-group">
+                <span className="filter-label">Sources</span>
+                <div className="source-pills">
+                  {sourcesLoading ? (
+                    <span className="text-muted-foreground text-sm">Loading...</span>
+                  ) : (
+                    sources.map((source) => (
+                      <button
+                        key={source.id}
+                        type="button"
+                        className={`source-pill ${selectedSources.includes(source.id) ? 'active' : ''}`}
+                        onClick={() => toggleSource(source.id)}
+                        disabled={loading}
+                      >
+                        {source.name}
+                      </button>
+                    ))
                   )}
-
-                  <div className="relevance-indicator">
-                    <div
-                      className={`relevance-bar ${getRelevanceLevel(result.relevance_score)}`}
-                      style={{ width: `${result.relevance_score * 100}%` }}
-                    />
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      )}
 
-      {/* Empty States */}
-      {!loading && results.length === 0 && query && !error && (
-        <EmptyState
-          icon={<SearchEmptyIcon />}
-          title="No results found"
-          description="Try adjusting your search terms or broadening your filters"
-          action={
-            <Button variant="outline" onClick={() => setQuery('')}>
-              Clear search
+        {/* Error State */}
+        {error && (
+          <div className="error-banner" role="alert">
+            <span>{error}</span>
+            <Button variant="ghost" size="sm" onClick={() => search({ query, mode, limit: 20 })}>
+              Retry
             </Button>
-          }
-        />
-      )}
+          </div>
+        )}
 
-      {!loading && !query && (
-        <EmptyState
-          icon={<SparklesIcon />}
-          title="Search your knowledge"
-          description="Enter a query to search across all your connected sources using semantic, keyword, or hybrid search"
-        />
-      )}
+        {/* Results */}
+        {results.length > 0 && (
+          <div className="results-section">
+            <div className="results-header">
+              <h2 className="results-title">Results</h2>
+              <Badge variant="secondary">{total} found</Badge>
+            </div>
+
+            <div className="results-grid">
+              {results.map((result, index) => (
+                <Card
+                  key={result.id}
+                  className="result-card"
+                  style={{ animationDelay: `${index * 50}ms` }}
+                >
+                  <CardContent className="result-card-content">
+                    <div className="result-card-header">
+                      <div className="result-source">
+                        <FolderIcon />
+                        <span>{result.source_name}</span>
+                      </div>
+                      <Badge
+                        variant={
+                          getRelevanceLevel(result.relevance_score) === 'high'
+                            ? 'success'
+                            : getRelevanceLevel(result.relevance_score) === 'medium'
+                              ? 'warning'
+                              : 'secondary'
+                        }
+                      >
+                        {getRelevanceLabel(result.relevance_score)}
+                      </Badge>
+                    </div>
+
+                    <div
+                      className="result-snippet"
+                      // biome-ignore lint/security/noDangerouslySetInnerHtml: Sanitized with DOMPurify
+                      dangerouslySetInnerHTML={{ __html: highlightText(result.snippet) }}
+                    />
+
+                    {result.metadata.type === 'file' &&
+                      typeof result.metadata.path === 'string' && (
+                        <div className="result-meta">
+                          <FileIcon />
+                          <span className="result-path">{result.metadata.path}</span>
+                        </div>
+                      )}
+
+                    <div className="relevance-indicator">
+                      <div
+                        className={`relevance-bar ${getRelevanceLevel(result.relevance_score)}`}
+                        style={{ width: `${result.relevance_score * 100}%` }}
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Empty States */}
+        {!loading && results.length === 0 && query && !error && (
+          <EmptyState
+            icon={<SearchEmptyIcon />}
+            title="No results found"
+            description="Try adjusting your search terms or broadening your filters"
+            action={
+              <Button variant="outline" onClick={() => setQuery('')}>
+                Clear search
+              </Button>
+            }
+          />
+        )}
+
+        {!loading && !query && (
+          <EmptyState
+            icon={<SparklesIcon />}
+            title="Search your knowledge"
+            description="Enter a query to search across all your connected sources using semantic, keyword, or hybrid search"
+          />
+        )}
+      </div>
     </div>
   );
 }

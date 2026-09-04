@@ -137,8 +137,8 @@ export default function WikiPage() {
               fill="none"
               stroke="currentColor"
               strokeWidth="1.5"
-              width="48"
-              height="48"
+              width="40"
+              height="40"
             >
               <path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
             </svg>
@@ -278,7 +278,7 @@ export default function WikiPage() {
       {/* View Entry Modal */}
       {selectedEntry && !showCreateWizard && (
         <div
-          className="modal-overlay"
+          className="wiki-dialog-overlay"
           onClick={() => setSelectedEntry(null)}
           onKeyDown={(e) => {
             if (e.key === 'Escape') {
@@ -289,22 +289,23 @@ export default function WikiPage() {
           tabIndex={0}
         >
           <div
-            className="modal"
+            className="wiki-dialog"
             onClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
+            aria-labelledby="knowledge-entry-title"
           >
-            <div className="modal-header">
+            <div className="wiki-dialog-header">
               <div className="flex items-center gap-3">
-                <h2>{selectedEntry.title}</h2>
+                <h2 id="knowledge-entry-title">{selectedEntry.title}</h2>
                 <Badge variant={selectedEntry.type === 'url' ? 'info' : 'secondary'}>
                   {selectedEntry.type}
                 </Badge>
               </div>
               <button
                 type="button"
-                className="modal-close"
+                className="wiki-dialog-close"
                 onClick={() => setSelectedEntry(null)}
                 aria-label="Close modal"
               >
@@ -318,7 +319,7 @@ export default function WikiPage() {
                 </svg>
               </button>
             </div>
-            <div className="modal-body">
+            <div className="wiki-dialog-body">
               {selectedEntry.type === 'url' && (
                 <div className="form-group">
                   <span className="form-label">URL</span>
@@ -335,7 +336,7 @@ export default function WikiPage() {
 
               <div className="form-group">
                 <span className="form-label">Content</span>
-                <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)' }}>
+                <div className="wiki-dialog-content">
                   {selectedEntry.type === 'url' && selectedEntry.fetched_content
                     ? selectedEntry.fetched_content
                     : selectedEntry.content}
@@ -357,7 +358,7 @@ export default function WikiPage() {
 
               <div className="form-group">
                 <span className="form-label">Details</span>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                <div className="wiki-dialog-details">
                   <p>Created: {formatDate(selectedEntry.created_at)}</p>
                   <p>Updated: {formatDate(selectedEntry.updated_at)}</p>
                   {selectedEntry.type === 'url' && selectedEntry.last_refreshed_at && (
@@ -366,7 +367,7 @@ export default function WikiPage() {
                 </div>
               </div>
             </div>
-            <div className="modal-footer">
+            <div className="wiki-dialog-footer">
               {selectedEntry.type === 'url' && (
                 <Button
                   variant="secondary"

@@ -271,7 +271,7 @@ export default function ChatsPage() {
   };
 
   return (
-    <div className="page page--workspace chats-page">
+    <div className={`page page--workspace chats-page ${selectedChatId ? 'has-chat' : ''}`}>
       <div className="chats-sidebar">
         <div className="chats-sidebar-header">
           <h1>Chats</h1>
@@ -541,9 +541,27 @@ export default function ChatsPage() {
       </div>
 
       <div className="chats-main">
+        {selectedChatId && !displayedChat && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="chat-back chat-back-state"
+            onClick={() => setSelectedChatId(null)}
+          >
+            Back to chats
+          </Button>
+        )}
         {displayedChat ? (
           <>
             <div className="chat-header">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="chat-back"
+                onClick={() => setSelectedChatId(null)}
+              >
+                Back to chats
+              </Button>
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
                 <span className="chat-model">{displayedChat.model_name}</span>
@@ -814,8 +832,8 @@ export default function ChatsPage() {
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.5"
-                width="64"
-                height="64"
+                width="40"
+                height="40"
               >
                 <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
               </svg>

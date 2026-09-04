@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { Source } from '../types';
 
 // Create mock functions for the sources API
@@ -231,7 +231,9 @@ describe('SourcesPage', () => {
     });
 
     fireEvent.click(screen.getByRole('button', { name: '+ Add Source' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Close wizard' }));
+    fireEvent.click(
+      within(screen.getByRole('dialog')).getByRole('button', { name: 'Close wizard' })
+    );
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: 'Add Source' })).not.toBeInTheDocument();
     });

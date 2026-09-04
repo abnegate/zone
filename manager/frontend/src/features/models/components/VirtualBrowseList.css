@@ -28,13 +28,15 @@
 }
 
 .virtual-browse-item-wrapper {
-  padding: 0 2px 2px 0;
+  padding: 0;
 }
 
 .virtual-browse-item-wrapper .browse-item {
-  min-height: 76px;
+  min-height: var(--ui-control-height);
   box-sizing: border-box;
   align-items: center;
+  padding: var(--ui-row-padding);
+  gap: var(--ui-space-4);
 }
 
 .browse-specs {
@@ -64,4 +66,13 @@
   gap: var(--ui-space-2);
   color: var(--ui-text-secondary);
   font-size: var(--ui-text-sm);
+}
+
+@media (max-width: 768px) {
+  .virtual-browse-item-wrapper .browse-item {
+    align-items: flex-start;
+  }
+  .browse-item .btn {
+    flex-shrink: 0;
+  }
 }
