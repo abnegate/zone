@@ -463,7 +463,7 @@
   }
 }
 
-@media (max-width: 639px) {
+@media (max-width: 768px) {
   :root {
     --ui-gutter: 1rem;
     --ui-panel-padding: 1rem;
