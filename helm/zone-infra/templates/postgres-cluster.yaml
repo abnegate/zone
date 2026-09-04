@@ -12,9 +12,11 @@ spec:
 
   imageName: {{ .Values.postgres.image }}
 
+  {{- if .Values.postgres.sharedPreloadLibraries }}
   postgresql:
     shared_preload_libraries:
       {{- toYaml .Values.postgres.sharedPreloadLibraries | nindent 6 }}
+  {{- end }}
 
   bootstrap:
     initdb:
@@ -22,14 +24,13 @@ spec:
       owner: {{ .Values.postgres.owner }}
       secret:
         name: {{ include "zone-infra.secretsName" . }}
-        key: postgres-password
-      {{- if .Values.postgres.postInitSQL }}
-      postInitSQL:
-        {{- toYaml .Values.postgres.postInitSQL | nindent 8 }}
+      {{- if .Values.postgres.postInitTemplateSQL }}
+      postInitTemplateSQL:
+        {{- toYaml .Values.postgres.postInitTemplateSQL | nindent 8 }}
       {{- end }}
 
   superuserSecret:
-    name: zone-postgres-superuser
+    name: {{ .Values.postgres.superuser.secretName }}
 
   storage:
     size: {{ .Values.postgres.storage.size }}
@@ -44,8 +45,4 @@ spec:
 
   monitoring:
     enablePodMonitor: {{ .Values.postgres.monitoring.enabled }}
-
-  nodeMaintenanceWindow:
-    inProgress: false
-    reusePVC: true
 {{- end }}

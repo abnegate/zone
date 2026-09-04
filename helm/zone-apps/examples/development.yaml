@@ -1,42 +1,34 @@
 # Development deployment example for Zone
-# This configuration is suitable for local development and testing
-
 environment: development
 
 global:
-  externalDatabase: false  # Can use in-cluster PostgreSQL
-  securityContexts: false  # Relaxed security for dev
+  externalDatabase: false
+  securityContexts: false
 
-# Development environment variables
 commonEnv:
-  DB_HOST: "localhost"
+  DB_HOST: "zone-postgres-rw"
   DB_PORT: "5432"
-  DB_NAME: "zone_dev"
-  DB_USER: "zone_dev"
+  DB_NAME: "manager"
+  DB_USER: "zone"
   RUST_LOG: "debug"
+  LITELLM_HOST: "http://litellm:4000"
+  OLLAMA_HOST: "http://ollama:11434"
 
-# Simple secrets for development
 secrets:
-  dbPassword: "devpassword"
-  jwtSecret: "dev-jwt-secret-not-for-production"
-  encryptionKey: "dev-encryption-key-32-characters"
-  stripeSecretKey: "sk_test_..."
-  smtpPassword: ""
+  create: false
+  existingSecret: zone-secrets
 
-# Server configuration - minimal resources
 server:
   enabled: true
   replicaCount: 1
-
   image:
     repository: zone/server
     tag: latest
-    pullPolicy: Always
-
+    pullPolicy: IfNotPresent
   service:
     type: ClusterIP
-    port: 8080
-
+    port: 8000
+    targetPort: 8000
   resources:
     limits:
       cpu: 500m
@@ -44,27 +36,22 @@ server:
     requests:
       cpu: 100m
       memory: 128Mi
-
   autoscaling:
     enabled: false
-
   podDisruptionBudget:
     enabled: false
 
-# Manager configuration - minimal resources
 manager:
   enabled: true
   replicaCount: 1
-
   image:
     repository: zone/manager
     tag: latest
-    pullPolicy: Always
-
+    pullPolicy: IfNotPresent
   service:
     type: ClusterIP
-    port: 3000
-
+    port: 3001
+    targetPort: 3001
   resources:
     limits:
       cpu: 250m
@@ -72,40 +59,26 @@ manager:
     requests:
       cpu: 50m
       memory: 64Mi
-
   autoscaling:
     enabled: false
-
   podDisruptionBudget:
     enabled: false
 
-# Simple ingress without TLS
 ingress:
   enabled: true
-  className: ""
-  annotations: {}
+  className: haproxy
   hosts:
     - host: zone.localhost
       paths:
         - path: /api
           pathType: Prefix
           service: server
+        - path: /ws
+          pathType: Prefix
+          service: server
         - path: /
           pathType: Prefix
           service: manager
-  tls: []
 
-# Migration job
 migration:
-  enabled: true
-  backoffLimit: 0
-  activeDeadlineSeconds: 300  # 5 minutes
-  ttlSecondsAfterFinished: 300  # Clean up after 5 minutes
-
-  resources:
-    limits:
-      cpu: 250m
-      memory: 256Mi
-    requests:
-      cpu: 100m
-      memory: 128Mi
+  enabled: false

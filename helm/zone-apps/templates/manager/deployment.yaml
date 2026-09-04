@@ -50,13 +50,11 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-            - name: API_URL
-              value: "http://{{ include "zone-apps.fullname" . }}-server:{{ .Values.server.service.port }}"
           livenessProbe:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -73,12 +71,8 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: cache
-              mountPath: /var/cache/nginx
       volumes:
         - name: tmp
-          emptyDir: {}
-        - name: cache
           emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector:

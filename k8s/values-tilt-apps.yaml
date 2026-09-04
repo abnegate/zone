@@ -1,0 +1,48 @@
+# Kind / Tilt overrides for zone-apps
+environment: development
+
+global:
+  securityContexts: false
+
+secrets:
+  create: false
+  existingSecret: zone-secrets
+
+server:
+  replicaCount: 1
+  image:
+    repository: zone/server
+    tag: dev
+    pullPolicy: Never
+  autoscaling:
+    enabled: false
+  podDisruptionBudget:
+    enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+# Console is the Tilt local_resource on :3001 (bun run dev), not this Deployment.
+manager:
+  enabled: false
+
+migration:
+  enabled: false
+
+ingress:
+  enabled: false
+
+openwebui:
+  persistence:
+    enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi

@@ -2,36 +2,41 @@
 # PostgreSQL (CNPG) and Valkey configuration
 
 global:
-  # Namespace for all resources
   namespace: zone
 
 # PostgreSQL via CloudNativePG
 postgres:
   enabled: true
 
-  # CNPG Cluster configuration
   instances: 1
+  # Official CNPG image already ships pgvector. Build postgres/cnpg/Dockerfile
+  # if you need a newer extension build.
   image: ghcr.io/cloudnative-pg/postgresql:16.15@sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a
 
-  # Database initialization
-  database: zone
+  # Application role created by initdb. Credentials come from secrets.existingSecret
+  # (must contain username + password).
+  database: litellm
   owner: zone
 
-  # Extensions to load
-  sharedPreloadLibraries:
-    - vector
+  extraDatabases:
+    - manager
 
-  # Post-init SQL
-  postInitSQL:
+  sharedPreloadLibraries: []
+
+  postInitTemplateSQL:
     - CREATE EXTENSION IF NOT EXISTS vector
     - CREATE EXTENSION IF NOT EXISTS pg_trgm
 
-  # Storage
+  superuser:
+    create: false
+    secretName: zone-postgres-superuser
+    username: postgres
+    password: ""
+
   storage:
     size: 10Gi
-    storageClass: ""  # Use default
+    storageClass: ""
 
-  # Resources
   resources:
     requests:
       memory: "256Mi"
@@ -40,7 +45,6 @@ postgres:
       memory: "1Gi"
       cpu: "1000m"
 
-  # Monitoring
   monitoring:
     enabled: false
 
@@ -53,23 +57,19 @@ valkey:
     tag: "8.1.10-alpine@sha256:b21fd94099dcd4bc6b2b9230daef69b6558b887ad4a2a1afe56ff6e745a88cdb"
     pullPolicy: IfNotPresent
 
-  # Configuration
   maxMemory: "256mb"
   maxMemoryPolicy: "allkeys-lru"
 
-  # Authentication - password from secret
   auth:
     enabled: true
-    existingSecret: ""  # If empty, uses zone-secrets
+    existingSecret: ""
     secretKey: "valkey-password"
 
-  # Storage
   persistence:
     enabled: true
     size: 1Gi
     storageClass: ""
 
-  # Resources
   resources:
     requests:
       memory: "128Mi"
@@ -78,13 +78,12 @@ valkey:
       memory: "512Mi"
       cpu: "500m"
 
-  # Security context
   securityContext:
     runAsNonRoot: true
     runAsUser: 999
     fsGroup: 999
 
-# Secrets configuration
+# Existing Secret used by CNPG (username/password) and Valkey (valkey-password).
+# Created by scripts/tilt-up.sh for Kind, or by the operator for other environments.
 secrets:
-  # Existing secret name
   existingSecret: "zone-secrets"

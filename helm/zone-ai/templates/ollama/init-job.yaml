@@ -2,18 +2,18 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: ollama-init
+  name: ollama-init-{{ .Values.ollama.models | toJson | sha256sum | trunc 10 }}
   namespace: {{ include "zone-ai.namespace" . }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation
   labels:
     {{- include "zone-ai.labels" . | nindent 4 }}
     app.kubernetes.io/component: initialization
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "10"
-    "helm.sh/hook-delete-policy": before-hook-creation
 spec:
   ttlSecondsAfterFinished: 3600
   backoffLimit: 3
+  activeDeadlineSeconds: 7200
   template:
     metadata:
       labels:
@@ -49,11 +49,16 @@ spec:
               echo "Ollama is ready. Pulling models..."
 
               {{- range .Values.ollama.models }}
-              echo "Pulling {{ . }}..."
-              curl -f -X POST http://ollama:11434/api/pull -d {{ list "name" . | dict | toJson | squote }}
+              echo "Pulling configured model..."
+              curl -f --retry 5 --retry-delay 5 -X POST http://ollama:11434/api/pull --data-binary @- <<'JSON'
+              {{ dict "name" . | toJson }}
+              JSON
               {{- end }}
 
               echo "Model initialization complete!"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               memory: "64Mi"
@@ -61,4 +66,7 @@ spec:
             limits:
               memory: "128Mi"
               cpu: "100m"
+      volumes:
+        - name: tmp
+          emptyDir: {}
 {{- end }}

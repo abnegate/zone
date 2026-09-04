@@ -25,14 +25,14 @@ Get the application URLs by running these commands:
 
 {{- if .Values.server.enabled }}
   export SERVER_POD=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "zone-apps.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=server" -o jsonpath="{.items[0].metadata.name}")
-  echo "Server API: http://127.0.0.1:8080"
-  kubectl --namespace {{ .Release.Namespace }} port-forward $SERVER_POD 8080:{{ .Values.server.service.port }}
+  echo "Server API: http://127.0.0.1:8000"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $SERVER_POD 8000:{{ .Values.server.service.port }}
 {{- end }}
 
 {{- if .Values.manager.enabled }}
   export MANAGER_POD=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "zone-apps.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=manager" -o jsonpath="{.items[0].metadata.name}")
-  echo "Manager UI: http://127.0.0.1:3000"
-  kubectl --namespace {{ .Release.Namespace }} port-forward $MANAGER_POD 3000:{{ .Values.manager.service.port }}
+  echo "Manager UI: http://127.0.0.1:3001"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $MANAGER_POD 3001:{{ .Values.manager.service.port }}
 {{- end }}
 {{- end }}
 
@@ -45,15 +45,10 @@ Check migration status:
   kubectl logs --namespace {{ .Release.Namespace }} -l app.kubernetes.io/component=migration
 {{- end }}
 
-{{- if eq .Values.secrets.dbPassword "changeme" }}
+{{- if and .Values.secrets.create (eq .Values.secrets.dbPassword "changeme") }}
 
 WARNING: You are using the default database password!
-Please update your secrets in production:
-
-  helm upgrade {{ .Release.Name }} {{ .Chart.Name }} \
-    --set secrets.dbPassword=YOUR_SECURE_PASSWORD \
-    --set secrets.jwtSecret=YOUR_JWT_SECRET \
-    --set secrets.encryptionKey=YOUR_ENCRYPTION_KEY
+Please update your secrets in production.
 {{- end }}
 
 {{- if not .Values.global.externalDatabase }}
@@ -66,13 +61,13 @@ Monitor your deployment:
 
   kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/instance={{ .Release.Name }}" -w
 
-{{- if .Values.server.autoscaling.enabled }}
+{{- if and .Values.server.enabled .Values.server.autoscaling.enabled }}
 
 Horizontal Pod Autoscaler is enabled for the server:
   kubectl get hpa --namespace {{ .Release.Namespace }} {{ include "zone-apps.fullname" . }}-server
 {{- end }}
 
-{{- if .Values.manager.autoscaling.enabled }}
+{{- if and .Values.manager.enabled .Values.manager.autoscaling.enabled }}
 
 Horizontal Pod Autoscaler is enabled for the manager:
   kubectl get hpa --namespace {{ .Release.Namespace }} {{ include "zone-apps.fullname" . }}-manager

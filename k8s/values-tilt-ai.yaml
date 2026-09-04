@@ -1,0 +1,28 @@
+# Kind / Tilt overrides for zone-ai
+ollama:
+  init:
+    enabled: false
+  models:
+    - nomic-embed-text
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 100m
+    limits:
+      memory: 8Gi
+      cpu: 2000m
+
+litellm:
+  workers: 2
+  models:
+    - name: nomic-embed-text
+      provider: ollama
+      timeout: 30
+  defaultModel: nomic-embed-text
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 100m
+    limits:
+      memory: 2Gi
+      cpu: 1000m

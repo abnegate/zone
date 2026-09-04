@@ -13,32 +13,28 @@ ollama:
     tag: "0.33.2@sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2"
     pullPolicy: IfNotPresent
 
-  # Environment configuration
   config:
     host: "0.0.0.0:11434"
     keepAlive: "24h"
     maxLoadedModels: "3"
 
-  # Models to pull on init
   models:
     - nomic-embed-text
     - llama3.1:8b
 
-  # Init job configuration
   init:
     enabled: true
     image:
       repository: curlimages/curl
       tag: "8.22.0@sha256:58adaa4e8dca9c988bae2aba4ab3434a0bb2da16bbe3f92dec39ec7785166777"
 
-  # Storage for models
   persistence:
     enabled: true
     size: 50Gi
     storageClass: ""
-    mountPath: /home/ollama/.ollama
+    # Official ollama image stores models under /root/.ollama and runs as root.
+    mountPath: /root/.ollama
 
-  # Resources
   resources:
     requests:
       memory: "4Gi"
@@ -46,16 +42,13 @@ ollama:
     limits:
       memory: "16Gi"
       cpu: "4000m"
-      # Uncomment for GPU support
-      # nvidia.com/gpu: 1
 
-  # Security context
+  # Official image is rootful; non-root breaks model storage.
   securityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    fsGroup: 1000
+    runAsNonRoot: false
+    runAsUser: 0
+    fsGroup: 0
 
-  # Probes
   startupProbe:
     initialDelaySeconds: 10
     periodSeconds: 10
@@ -70,10 +63,8 @@ litellm:
     tag: "v1.99.1@sha256:a53a7d3ffebede1925bd3ee8a21e4a7b9b63e2e68ec883af136edcccb6eeb82c"
     pullPolicy: IfNotPresent
 
-  # Number of workers
   workers: 4
 
-  # Model configuration
   models:
     - name: "llama3.1:8b"
       provider: ollama
@@ -82,22 +73,18 @@ litellm:
       provider: ollama
       timeout: 30
 
-  # Default model
   defaultModel: "llama3.1:8b"
 
-  # Router settings
   router:
     retries: 2
     timeout: 180
 
-  # Secrets reference
   secrets:
     existingSecret: "zone-secrets"
     masterKeyKey: "litellm-master-key"
     saltKeyKey: "litellm-salt-key"
-    databaseUrlKey: "database-url"
+    databaseUrlKey: "litellm-database-url"
 
-  # Resources
   resources:
     requests:
       memory: "256Mi"
@@ -106,7 +93,6 @@ litellm:
       memory: "1Gi"
       cpu: "1000m"
 
-  # Security context
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000

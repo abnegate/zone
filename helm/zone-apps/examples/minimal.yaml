@@ -1,17 +1,13 @@
 # Minimal deployment example for Zone
-# This configuration uses absolute minimum resources for testing
-
-environment: testing
+environment: development
 
 global:
   externalDatabase: true
   securityContexts: true
 
-# Only override what's necessary
 secrets:
-  dbPassword: "testpassword"
-  jwtSecret: "test-jwt-secret"
-  encryptionKey: "test-encryption-key-32-chars!!"
+  create: false
+  existingSecret: "zone-minimal-secrets"
 
 server:
   enabled: true
@@ -33,4 +29,4 @@ ingress:
   enabled: false
 
 migration:
-  enabled: true
+  enabled: false

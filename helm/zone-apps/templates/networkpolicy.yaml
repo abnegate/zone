@@ -62,19 +62,19 @@ spec:
         - protocol: UDP
           port: 53
     # Allow database connections
+    {{- if .Values.global.externalDatabase }}
+    {{- $externalDatabaseCIDR := required "networkPolicy.externalDatabaseCIDR is required when networkPolicy.enabled=true and global.externalDatabase=true" .Values.networkPolicy.externalDatabaseCIDR }}
     - to:
-        - podSelector:
-            matchLabels:
-              app: postgres
+        - ipBlock:
+            cidr: {{ $externalDatabaseCIDR | quote }}
       ports:
         - protocol: TCP
-          port: 5432
-    {{- if not .Values.global.externalDatabase }}
-    # Allow connections to in-cluster postgres
+          port: {{ .Values.commonEnv.DB_PORT | int }}
+    {{- else }}
     - to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: postgresql
+              cnpg.io/cluster: zone-postgres
       ports:
         - protocol: TCP
           port: 5432
