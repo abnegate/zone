@@ -22,7 +22,6 @@ services:
     build:
       context: .
       dockerfile: manager/Dockerfile.dev
-    container_name: manager-dev
     ports:
       - "8000:8000"
     volumes:
@@ -69,23 +68,26 @@ services:
     build:
       context: .
       dockerfile: manager/frontend/Dockerfile.dev
-    container_name: console-dev
+    init: true
     ports:
       - "3001:3001"
     volumes:
-      # Mount frontend source for HMR
-      - ./manager/frontend/src:/app/src:cached
-      - ./manager/frontend/public:/app/public:cached
-      - ./manager/frontend/index.html:/app/index.html:cached
-      - ./manager/frontend/vite.config.ts:/app/vite.config.ts:cached
-      - ./manager/frontend/tsconfig.json:/app/tsconfig.json:cached
-      # Mount shared UI package source for development
-      - ./packages/ui/src:/ui/src:cached
-      # Preserve node_modules from image build
-      - console-node-modules:/app/node_modules
+      - ./manager/frontend/src:/workspace/manager/frontend/src
+      - ./manager/frontend/public:/workspace/manager/frontend/public
+      - ./manager/frontend/index.html:/workspace/manager/frontend/index.html
+      - ./manager/frontend/vite.config.ts:/workspace/manager/frontend/vite.config.ts
+      - ./manager/frontend/tsconfig.json:/workspace/manager/frontend/tsconfig.json
+      - ./packages/ui/src:/workspace/packages/ui/src
+      - console-workspace-modules:/workspace/node_modules
     environment:
       - VITE_API_URL=
       - VITE_PROXY_TARGET=http://manager:8000
+      - VITE_USE_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
+      - CHOKIDAR_INTERVAL=300
+    networks:
+      - edge
+      - internal
     depends_on:
       manager:
         condition: service_started
@@ -94,7 +96,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 60s
 
 networks:
   internal:
@@ -111,5 +113,5 @@ volumes:
     name: zone_dev_cargo_target
   embed-cache:
     name: zone_dev_embed_cache
-  console-node-modules:
-    name: zone_dev_console_node_modules
+  console-workspace-modules:
+    name: zone_dev_console_workspace_modules

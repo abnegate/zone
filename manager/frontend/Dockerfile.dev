@@ -1,30 +1,26 @@
-# Development Dockerfile for Vite HMR
+# syntax=docker/dockerfile:1
+# Development image: Vite HMR with the bun workspace layout preserved so
+# @zone/ui resolves the same way it does on the host.
 FROM oven/bun:1.4.0-alpine@sha256:07235578f79ef8c6f97d94aee7938e76f5cdba5f21ae5dbfdd3d3d38058437eb
 
-# Build shared UI package first
-WORKDIR /ui
-COPY --chown=bun:bun packages/ui/package.json ./
-RUN bun install
-COPY --chown=bun:bun packages/ui/ ./
-RUN bun run build
+WORKDIR /workspace
 
-# Setup frontend application
-WORKDIR /app
+COPY --chown=bun:bun package.json bun.lock ./
+COPY --chown=bun:bun packages/ui/package.json packages/ui/package.json
+COPY --chown=bun:bun installer/frontend/package.json installer/frontend/package.json
+COPY --chown=bun:bun manager/frontend/package.json manager/frontend/package.json
+RUN bun install --frozen-lockfile
 
-# Copy package.json and install dependencies
-COPY --chown=bun:bun manager/frontend/package.json ./package.json.orig
+# Seed sources so the image can boot without bind mounts. Compose overlays these.
+COPY --chown=bun:bun packages/ui/src packages/ui/src
+COPY --chown=bun:bun manager/frontend manager/frontend
 
-# Remove workspace reference to @zone/ui and install dependencies
-RUN sed 's/"@zone\/ui": "workspace:0.1.0",//' package.json.orig > package.json && \
-    bun install
+WORKDIR /workspace/manager/frontend
 
-# Add the built UI package
-RUN bun add /ui
-
-# Copy config files (source will be mounted as volumes)
-COPY --chown=bun:bun manager/frontend/tsconfig.json manager/frontend/index.html ./
+ENV VITE_USE_POLLING=true
+ENV CHOKIDAR_USEPOLLING=true
+ENV CHOKIDAR_INTERVAL=300
 
 EXPOSE 3001
 
-# Run Vite dev server with host binding for Docker
-CMD ["bun", "run", "dev", "--host", "0.0.0.0"]
+CMD ["bun", "run", "dev", "--host", "0.0.0.0", "--port", "3001"]

@@ -28,6 +28,7 @@ NC := \033[0m
 
 # Docker compose command (try both v1 and v2)
 DOCKER_COMPOSE := $(shell which docker-compose 2>/dev/null || echo "docker compose")
+COMPOSE_DEV := $(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 
 ##@ Setup & Configuration
 
@@ -121,7 +122,7 @@ up-all: ## Start all services with VPN and monitoring
 
 down: ## Stop all services
 	@echo "$(YELLOW)Stopping services...$(NC)"
-	$(DOCKER_COMPOSE) --profile vpn --profile monitoring --profile installer \
+	$(COMPOSE_DEV) --profile vpn --profile monitoring --profile installer \
 		--profile bundled-comfyui --profile comfyui-model-setup down
 
 restart: ## Restart all services
@@ -249,7 +250,7 @@ db-reset: ## DANGER: Reset database (requires confirmation)
 
 clean: ## Stop services and remove containers (keeps volumes)
 	@echo "$(YELLOW)Cleaning up containers...$(NC)"
-	$(DOCKER_COMPOSE) --profile vpn --profile monitoring --profile installer down --remove-orphans
+	$(COMPOSE_DEV) --profile vpn --profile monitoring --profile installer down --remove-orphans
 	@echo "$(GREEN)Cleanup complete (volumes preserved)$(NC)"
 
 clean-volumes: ## DANGER: Remove all data volumes (requires confirmation)
@@ -257,7 +258,7 @@ clean-volumes: ## DANGER: Remove all data volumes (requires confirmation)
 	@read -p "Are you sure? Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" = "yes" ]; then \
 		echo "$(RED)Removing volumes...$(NC)"; \
-		$(DOCKER_COMPOSE) --profile vpn --profile monitoring --profile installer down -v; \
+		$(COMPOSE_DEV) --profile vpn --profile monitoring --profile installer down -v; \
 		echo "$(RED)All data deleted!$(NC)"; \
 	else \
 		echo "$(GREEN)Cancelled.$(NC)"; \
@@ -311,9 +312,10 @@ restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_
 
 ##@ Development
 
-dev: ## Start in development mode with live logs
-	@echo "$(BLUE)Starting in development mode...$(NC)"
-	$(DOCKER_COMPOSE) up
+dev: ## Start with Docker hot reload (Vite HMR + cargo-watch)
+	@echo "$(BLUE)Starting development stack with hot reload...$(NC)"
+	@echo "$(GREEN)Console: http://localhost:3001$(NC)"
+	$(COMPOSE_DEV) up
 
 dev-console: ## Start console frontend in development mode
 	@echo "$(BLUE)Starting console frontend dev server...$(NC)"
