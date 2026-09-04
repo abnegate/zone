@@ -97,8 +97,7 @@ export const modelsApi = {
   async getModelInfo(
     modelId: string
   ): Promise<{ content: string | null; gguf_size: number | null }> {
-    // modelId may contain slashes (e.g., "author/model"), don't encode them
-    const response = await fetch(`${API_BASE}/api/models/${modelId}`, {
+    const response = await fetch(`${API_BASE}/api/models/${encodeURIComponent(modelId)}`, {
       headers: client.getHeaders(),
     });
     if (!response.ok) {

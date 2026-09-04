@@ -38,7 +38,11 @@ class RoutingTest(unittest.TestCase):
             router = Router(model_list=configuration['model_list'])
             base = ('http://ollama:11434' if name == 'helm'
                     else 'http://configured-ollama:11434')
-            for model in ['qwen3.8:27b', 'organization/custom-model:v2.1']:
+            for model in [
+                'qwen3.8:27b',
+                'organization/custom-model:v2.1',
+                'hf.co/owner/repository:Q4_K_M',
+            ]:
                 with self.subTest(configuration=name, model=model):
                     parameters = router.get_available_deployment(
                         model=model
