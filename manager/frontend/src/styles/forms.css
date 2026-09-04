@@ -56,6 +56,11 @@ input[type="search"] {
     box-shadow var(--ui-transition-fast);
 }
 
+.chat-search input[type="text"] {
+  padding-right: 2rem;
+  padding-left: 2.25rem;
+}
+
 .wiki-search input[type="text"],
 .wiki-search input[type="search"] {
   height: 2.25rem;

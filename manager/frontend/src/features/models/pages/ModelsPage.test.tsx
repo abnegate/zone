@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 
 // Create mock functions
@@ -662,6 +662,83 @@ describe('ModelsPage', () => {
   });
 
   describe('browse model installation', () => {
+    for (const source of ['openrouter', 'gpt4all'] as const) {
+      it(`does not pull ${source} catalog identifiers even if an install callback fires`, async () => {
+        const pullMock = mock(() => Promise.resolve(true));
+        mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
+        mockUseBrowse.mockReturnValue({
+          ...defaultBrowseHook,
+          models: [{ id: 'remote', name: 'qwen/qwen3.8-27b', source }],
+        });
+        renderModelsPage();
+        fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'Install' }));
+
+        expect(pullMock).not.toHaveBeenCalled();
+        expect(screen.queryByText('Install command')).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Install Model' })).not.toBeInTheDocument();
+        expect(screen.getByText(/cannot be installed through Ollama/)).toBeInTheDocument();
+      });
+
+      it(`uses the ${source} tab when a catalog result has no source`, async () => {
+        const pullMock = mock(() => Promise.resolve(true));
+        mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
+        mockUseBrowse.mockReturnValue({
+          ...defaultBrowseHook,
+          source,
+          models: [{ id: 'remote', name: 'qwen/qwen3.8-27b' }],
+        });
+        renderModelsPage();
+        fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'Install' }));
+
+        expect(pullMock).not.toHaveBeenCalled();
+      });
+    }
+
+    it('pulls HuggingFace browse names with the Ollama registry prefix', async () => {
+      const pullMock = mock(() => Promise.resolve(true));
+      mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        models: [{ id: 'gguf', name: 'Qwen/Qwen3-GGUF:Q4_K_M', source: 'huggingface' }],
+      });
+      renderModelsPage();
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
+      await act(async () => {
+        fireEvent.click(await screen.findByRole('button', { name: 'Install' }));
+      });
+
+      expect(pullMock).toHaveBeenCalledWith('hf.co/Qwen/Qwen3-GGUF:Q4_K_M');
+    });
+
+    it('keeps a timestamped HuggingFace result installable from its details', async () => {
+      const pullMock = mock(() => Promise.resolve(true));
+      mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
+      mockGetModelInfo.mockResolvedValue({ content: 'Model card', gguf_size: 123 });
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        models: [
+          {
+            id: 'gguf',
+            name: 'Qwen/Qwen3-GGUF:Q4_K_M',
+            source: 'huggingface',
+            modified_at: '2026-09-01T00:00:00Z',
+          },
+        ],
+      });
+      renderModelsPage();
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Browse' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Details' }));
+
+      expect(await screen.findByText('hf.co/Qwen/Qwen3-GGUF:Q4_K_M')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Delete Model' })).not.toBeInTheDocument();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Install Model' }));
+      });
+      expect(pullMock).toHaveBeenCalledWith('hf.co/Qwen/Qwen3-GGUF:Q4_K_M');
+    });
+
     it('installs model from browse list', async () => {
       const pullMock = mock(() => Promise.resolve(true));
       mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });

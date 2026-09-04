@@ -121,7 +121,7 @@ test.describe('Browse Models - Virtual Scrolling', () => {
 
       if (offset > 0) {
         // Delay for load more
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
       route.fulfill({
@@ -549,14 +549,12 @@ test.describe('Browse Models - HuggingFace Specific', () => {
 
   test('HuggingFace details shows install command', async ({ page }) => {
     const hfModel = {
-      id: 'TheBloke/Model-GGUF',
-      name: 'Model-GGUF',
+      name: 'TheBloke/Model-GGUF',
       description: 'A great model',
       downloads: 500000,
       likes: 1000,
       tags: ['gguf'],
       author: 'TheBloke',
-      install_name: 'hf.co/TheBloke/Model-GGUF',
       url: 'https://huggingface.co/TheBloke/Model-GGUF',
     };
 
@@ -592,8 +590,7 @@ test.describe('Browse Models - HuggingFace Specific', () => {
     await page.click('button[role="tab"]:has-text("HuggingFace")');
     await page.locator('.browse-item').first().click();
 
-    // Install command shows the model name
-    await expect(page.locator('.details-install code')).toHaveText('Model-GGUF');
+    await expect(page.locator('.details-install code')).toHaveText('hf.co/TheBloke/Model-GGUF');
   });
 });
 

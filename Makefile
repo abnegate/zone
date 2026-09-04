@@ -95,13 +95,15 @@ build: ## Build all services
 
 up: ## Start all services (without VPN or monitoring)
 	@echo "$(GREEN)Starting services...$(NC)"
-	$(DOCKER_COMPOSE) up -d
+	@sh scripts/configure-model-proxy.sh .env direct
+	MODEL_SEARCH_PROXY_URL= $(DOCKER_COMPOSE) up -d
 	@echo "$(GREEN)Services started! Check status with: make ps$(NC)"
 	@echo "$(YELLOW)Note: VPN not enabled. For VPN-protected search, use: make up-vpn$(NC)"
 
 up-vpn: ## Start all services with VPN-protected search
 	@echo "$(GREEN)Starting services with VPN...$(NC)"
-	$(DOCKER_COMPOSE) --profile vpn up -d
+	@sh scripts/configure-model-proxy.sh
+	MODEL_SEARCH_PROXY_URL=http://gluetun:8888 $(DOCKER_COMPOSE) --profile vpn up -d
 	@echo "$(GREEN)Services started with VPN! Check status with: make ps$(NC)"
 
 up-monitoring: ## Start all services with monitoring (Prometheus + Grafana)
@@ -117,7 +119,8 @@ up-comfyui: verify-comfyui-model ## Start the bundled NVIDIA ComfyUI runtime
 
 up-all: ## Start all services with VPN and monitoring
 	@echo "$(GREEN)Starting all services (VPN + monitoring)...$(NC)"
-	$(DOCKER_COMPOSE) --profile vpn --profile monitoring up -d
+	@sh scripts/configure-model-proxy.sh
+	MODEL_SEARCH_PROXY_URL=http://gluetun:8888 $(DOCKER_COMPOSE) --profile vpn --profile monitoring up -d
 	@echo "$(GREEN)All services started! Check status with: make ps$(NC)"
 
 down: ## Stop all services

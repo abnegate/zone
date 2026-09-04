@@ -184,6 +184,34 @@ describe('VirtualBrowseList', () => {
     expect(onItemClick).not.toHaveBeenCalled();
   });
 
+  for (const source of ['openrouter', 'gpt4all'] as const) {
+    it(`explains why ${source} models cannot be installed through Ollama`, () => {
+      const model: BrowseModel = { name: 'qwen/qwen3.8-27b', source };
+      render(
+        <VirtualBrowseList
+          models={[model]}
+          onItemClick={onItemClick}
+          onInstall={onInstall}
+          hasMore={false}
+          loadingMore={false}
+          onLoadMore={onLoadMore}
+        />
+      );
+
+      expect(screen.queryByRole('button', { name: 'Install' })).not.toBeInTheDocument();
+      expect(screen.getByText(/cannot be installed through Ollama/)).toBeInTheDocument();
+      const action = screen.getByRole('button', {
+        name: source === 'openrouter' ? 'Remote API' : 'Download unavailable',
+      });
+      expect(action).toBeDisabled();
+      fireEvent.click(action);
+      expect(onInstall).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByText(model.name));
+      expect(onItemClick).toHaveBeenCalledWith(model);
+    });
+  }
+
   it('shows loading indicator when loadingMore', () => {
     render(
       <VirtualBrowseList

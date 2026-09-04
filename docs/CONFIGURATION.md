@@ -248,9 +248,15 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Display name for SearXNG instance
 - **Example**: `My Private Search`
 
+### `MODEL_SEARCH_PROXY_URL`
+- **Default**: empty (direct catalog requests)
+- **Description**: Optional HTTP proxy for remote model catalog searches from Manager
+- **VPN value**: `http://gluetun:8888`
+- **Usage**: `make up-vpn` and `make up-all` save this in `.env` automatically so rebuilds retain it; `make up` clears it for direct catalog requests
+
 ### Manager / zone-server chat
 
-Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). When `SEARCH_ENABLE_WEB_SEARCH` is true, Manager chat automatically queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. A message can force search on or off with `metadata.web_search`.
+Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). When `SEARCH_ENABLE_WEB_SEARCH` is true, Manager chat automatically queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. Remote model catalog searches use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search`.
 
 ---
 

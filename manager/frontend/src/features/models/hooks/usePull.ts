@@ -36,6 +36,13 @@ export function usePull() {
           if (finishRef.current === finish) finishRef.current = null;
           if (update) {
             setPulling(false);
+            setSteps((previous) =>
+              previous.map((step) =>
+                step.status === 'pending'
+                  ? { ...step, status: success ? 'success' : 'error' }
+                  : step
+              )
+            );
             setResult({ success, message });
           }
           if (socket) {

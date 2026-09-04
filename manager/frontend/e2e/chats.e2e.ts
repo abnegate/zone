@@ -107,6 +107,37 @@ test.describe('Chats Page', () => {
     await expect(page).toHaveURL('/chats');
   });
 
+  for (const width of [390, 769, 820, 1280]) {
+    test(`search text clears the search and clear icons at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const input = page.getByTestId('chat-search-input');
+      await input.fill('Search spacing');
+
+      const spacing = await input.evaluate((element) => {
+        const field = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const icon = document.querySelector('.chat-search-icon')!.getBoundingClientRect();
+        const clear = document
+          .querySelector('.chat-search-clear')!
+          .getBoundingClientRect();
+        return {
+          start: field.left + Number.parseFloat(style.paddingLeft),
+          end: field.right - Number.parseFloat(style.paddingRight),
+          icon: icon.right,
+          clear: clear.left,
+        };
+      });
+
+      expect(spacing.start).toBeGreaterThan(spacing.icon);
+      expect(spacing.end).toBeLessThan(spacing.clear);
+      await page.screenshot({ path: test.info().outputPath('chats.png') });
+      await page.getByTestId('clear-search-btn').click();
+      await expect(input).toHaveValue('');
+    });
+  }
+
   test.describe('Empty State', () => {
     test('shows empty state when no chats exist', async ({ page }) => {
       await expect(page.getByText('No chats yet')).toBeVisible();

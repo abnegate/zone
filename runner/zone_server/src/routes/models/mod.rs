@@ -7,7 +7,7 @@ mod types;
 
 pub use providers::{
     DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider, MAX_PAGE_SIZE, ModelProvider,
-    ProviderError, get_provider,
+    ProviderError, get_provider, get_provider_with_proxy,
 };
 pub use types::{
     BrowseQuery, BrowseResponse, ErrorResponse, ListModelsQuery, ModelDetails, ModelResponse,
@@ -27,15 +27,11 @@ use std::time::Duration;
 use crate::auth::AuthUser;
 use crate::state::AppState;
 
-// =============================================================================
 // Constants
-// =============================================================================
 
 const MAX_MODEL_NAME_LENGTH: usize = 256;
 
-// =============================================================================
 // Shared HTTP Client for Ollama API calls
-// =============================================================================
 
 static OLLAMA_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -45,9 +41,7 @@ static OLLAMA_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("Failed to build Ollama HTTP client")
 });
 
-// =============================================================================
 // Validation
-// =============================================================================
 
 /// Validate model name to prevent injection attacks
 fn validate_model_name(name: &str) -> Result<(), ErrorResponse> {
@@ -75,6 +69,7 @@ pub async fn list(
 ) -> impl IntoResponse {
     let source = query.source.as_deref().unwrap_or("ollama");
     let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE).min(MAX_PAGE_SIZE);
+    let proxy_url = state.config().model_search_proxy_url.clone();
 
     // Check if we're in "browse" mode (source param explicitly provided)
     let is_browse_mode = query.source.is_some();
@@ -83,7 +78,7 @@ pub async fn list(
         "ollama" => {
             if is_browse_mode {
                 // Browse the Ollama library for available models
-                match get_provider("ollama") {
+                match get_provider_with_proxy("ollama", proxy_url.as_deref()) {
                     Ok(provider) => match provider.search(query.to_browse_query(limit)).await {
                         Ok(response) => Json(response).into_response(),
                         Err(e) => e.into_response(),
@@ -96,20 +91,32 @@ pub async fn list(
             }
         }
         "gpt4all" => {
-            let provider = Gpt4AllProvider::new(state.config().gpt4all_models_url.clone());
+            let provider = match Gpt4AllProvider::with_proxy(
+                state.config().gpt4all_models_url.clone(),
+                proxy_url.as_deref(),
+            ) {
+                Ok(provider) => provider,
+                Err(error) => return error.into_response(),
+            };
             match provider.search(query.to_browse_query(limit)).await {
                 Ok(response) => Json(response).into_response(),
                 Err(e) => e.into_response(),
             }
         }
         "huggingface" => {
-            let provider = HuggingFaceProvider::new(state.config().huggingface_models_url.clone());
+            let provider = match HuggingFaceProvider::with_proxy(
+                state.config().huggingface_models_url.clone(),
+                proxy_url.as_deref(),
+            ) {
+                Ok(provider) => provider,
+                Err(error) => return error.into_response(),
+            };
             match provider.search(query.to_browse_query(limit)).await {
                 Ok(response) => Json(response).into_response(),
                 Err(e) => e.into_response(),
             }
         }
-        "openrouter" => match get_provider(source) {
+        "openrouter" => match get_provider_with_proxy(source, proxy_url.as_deref()) {
             Ok(provider) => match provider.search(query.to_browse_query(limit)).await {
                 Ok(response) => Json(response).into_response(),
                 Err(e) => e.into_response(),
@@ -207,9 +214,7 @@ struct OllamaModelDetails {
     quantization_level: Option<String>,
 }
 
-// =============================================================================
 // Model Details & Management
-// =============================================================================
 
 /// GET /api/models/:name
 pub async fn get(

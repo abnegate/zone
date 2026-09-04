@@ -1,3 +1,4 @@
+export { modelDownload } from './download';
 export {
   defaultDownloadName,
   formatBytes,

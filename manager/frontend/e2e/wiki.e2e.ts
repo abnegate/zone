@@ -85,6 +85,50 @@ test.describe('Wiki Page', () => {
     await expect(page).toHaveURL('/wiki');
   });
 
+  for (const width of [390, 769, 820, 1280]) {
+    test(`search controls stay separated at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const wiki = page.getByRole('searchbox', { name: 'Search knowledge' });
+      await wiki.fill('Search spacing');
+      const spacing = await wiki.evaluate((element) => {
+        const field = element.getBoundingClientRect();
+        const icon = document.querySelector('.wiki-search-icon')!.getBoundingClientRect();
+        return (
+          field.left +
+          Number.parseFloat(getComputedStyle(element).paddingLeft) -
+          icon.right
+        );
+      });
+      expect(spacing).toBeGreaterThan(0);
+      await page.screenshot({ path: test.info().outputPath('wiki.png') });
+      await routeApi(page, '**/api/workspaces/*/sources?*', (route) =>
+        route.fulfill({ json: { sources: [] } })
+      );
+      await page.goto('/search');
+      const input = page.getByPlaceholder('Search your knowledge base...');
+      await input.fill('Search spacing');
+      const geometry = await input.evaluate((element) => {
+        const field = element.getBoundingClientRect();
+        const wrapper = element.parentElement!;
+        const bounds = wrapper.getBoundingClientRect();
+        const icon = wrapper.querySelector('.search-icon-wrapper')!.getBoundingClientRect();
+        const button = wrapper.querySelector('button')!.getBoundingClientRect();
+        return {
+          icon: icon.width === 0 || icon.right < field.left,
+          input: field.right,
+          button: button.right,
+          bounds: bounds.right,
+          separated: field.right <= button.left || field.bottom <= button.top,
+        };
+      });
+      expect(geometry.bounds).toBeLessThanOrEqual(width);
+      expect(geometry.input).toBeLessThanOrEqual(geometry.bounds);
+      expect(geometry.button).toBeLessThanOrEqual(geometry.bounds);
+      expect(geometry.separated).toBe(true);
+      expect(geometry.icon).toBe(true);
+    });
+  }
+
   test.describe('Page Header', () => {
     test('displays page title', async ({ page }) => {
       await expect(page.getByRole('heading', { name: 'Knowledge Base' })).toBeVisible();
