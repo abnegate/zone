@@ -32,6 +32,9 @@ const LARGE_CONTAINER_LINES: usize = 100;
 /// Drop uncovered top-level blocks smaller than this
 const MIN_TOP_LEVEL_CHARS: usize = 15;
 
+/// Max identifiers listed in a bag so embed prefixes stay small
+const MAX_IDENTIFIER_BAG_ITEMS: usize = 32;
+
 // ============================================================================
 // Language Support
 // ============================================================================
@@ -694,6 +697,8 @@ pub fn chunk_code_with_config(
     if chunks.is_empty() {
         return fallback_to_text_chunks(content, config, false);
     }
+
+    chunks = enforce_max_chunk_size(chunks, config);
 
     for (idx, chunk) in chunks.iter_mut().enumerate() {
         chunk.index = idx;
@@ -1931,32 +1936,43 @@ fn format_identifier_bag(identifiers: &IdentifierBag) -> String {
     if !identifiers.parameters.is_empty() {
         text.push_str(&format!(
             "// params: {}\n",
-            identifiers.parameters.join(", ")
+            format_identifier_list(&identifiers.parameters)
         ));
     }
 
     if !identifiers.referenced_types.is_empty() {
         text.push_str(&format!(
             "// types: {}\n",
-            identifiers.referenced_types.join(", ")
+            format_identifier_list(&identifiers.referenced_types)
         ));
     }
 
     if !identifiers.referenced_functions.is_empty() {
         text.push_str(&format!(
             "// calls: {}\n",
-            identifiers.referenced_functions.join(", ")
+            format_identifier_list(&identifiers.referenced_functions)
         ));
     }
 
     if !identifiers.key_strings.is_empty() {
         text.push_str(&format!(
             "// keys: {}\n",
-            identifiers.key_strings.join(", ")
+            format_identifier_list(&identifiers.key_strings)
         ));
     }
 
     text
+}
+
+fn format_identifier_list(items: &[String]) -> String {
+    if items.len() <= MAX_IDENTIFIER_BAG_ITEMS {
+        return items.join(", ");
+    }
+    format!(
+        "{}, … ({} more)",
+        items[..MAX_IDENTIFIER_BAG_ITEMS].join(", "),
+        items.len() - MAX_IDENTIFIER_BAG_ITEMS
+    )
 }
 
 /// Get relevant imports for a chunk (Rule 8)
@@ -2154,37 +2170,48 @@ fn build_uncovered_chunks(
         } else {
             content.len()
         };
-        let mut chunk_text = String::new();
+        let mut header = String::new();
         if let Some(ref path) = config.file_path {
-            chunk_text.push_str(&format!("File: {path}\npath: {path}\n"));
+            header.push_str(&format!("File: {path}\npath: {path}\n"));
         }
-        chunk_text.push_str(&format!(
+        header.push_str(&format!(
             "Language: {}\nkind: top_level\n\n",
             language.as_str()
         ));
-        chunk_text.push_str(&text);
-        let content_hash = compute_hash(&chunk_text);
-        uncovered.push(CodeChunk {
-            index: 0,
-            chunk_type: CodeChunkType::TopLevel,
-            text: chunk_text,
-            start_offset,
-            end_offset,
-            metadata: ChunkMetadata {
-                path: config.file_path.clone(),
-                symbol: None,
-                kind: Some(SymbolKind::Other),
-                visibility: Visibility::Private,
-                parents: Vec::new(),
-                module: None,
-                is_test: false,
-                is_generated: false,
-                start_byte: start_offset,
-                end_byte: end_offset,
-                content_hash,
-            },
-            identifiers: IdentifierBag::default(),
-        });
+        let pieces = if estimate_tokens(&text) > config.max_tokens {
+            chunk_text(&text, config.max_tokens, (config.max_tokens / 10).max(1))
+                .into_iter()
+                .map(|piece| piece.text)
+                .collect()
+        } else {
+            vec![text]
+        };
+        for piece in pieces {
+            let mut chunk_body = header.clone();
+            chunk_body.push_str(&piece);
+            let content_hash = compute_hash(&chunk_body);
+            uncovered.push(CodeChunk {
+                index: 0,
+                chunk_type: CodeChunkType::TopLevel,
+                text: chunk_body,
+                start_offset,
+                end_offset,
+                metadata: ChunkMetadata {
+                    path: config.file_path.clone(),
+                    symbol: None,
+                    kind: Some(SymbolKind::Other),
+                    visibility: Visibility::Private,
+                    parents: Vec::new(),
+                    module: None,
+                    is_test: false,
+                    is_generated: false,
+                    start_byte: start_offset,
+                    end_byte: end_offset,
+                    content_hash,
+                },
+                identifiers: IdentifierBag::default(),
+            });
+        }
     }
 
     uncovered
@@ -2205,6 +2232,30 @@ fn byte_to_line(line_starts: &[usize], byte: usize) -> usize {
         Ok(index) => index,
         Err(index) => index.saturating_sub(1),
     }
+}
+
+/// Split leftover chunks that still exceed the embed-safe size
+fn enforce_max_chunk_size(chunks: Vec<CodeChunk>, config: &ChunkConfig) -> Vec<CodeChunk> {
+    let max_chars = config.max_tokens.saturating_mul(6).max(512);
+    let mut out = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        if chunk.text.chars().count() <= max_chars {
+            out.push(chunk);
+            continue;
+        }
+        let overlap = (config.max_tokens / 10).max(1);
+        for piece in chunk_text(&chunk.text, config.max_tokens, overlap) {
+            let mut split = chunk.clone();
+            split.text = piece.text;
+            split.start_offset = chunk.start_offset.saturating_add(piece.start_offset);
+            split.end_offset = chunk.start_offset.saturating_add(piece.end_offset);
+            split.metadata.start_byte = split.start_offset;
+            split.metadata.end_byte = split.end_offset;
+            split.metadata.content_hash = compute_hash(&split.text);
+            out.push(split);
+        }
+    }
+    out
 }
 
 /// Fallback to simple text chunking
@@ -2771,5 +2822,27 @@ class Greeter {
             }),
             "PHP class/method symbols should be extracted"
         );
+    }
+
+    #[test]
+    fn test_oversized_uncovered_block_is_split() {
+        let mut code = String::from("fn tiny() {}\n\n");
+        for i in 0..400 {
+            code.push_str(&format!("const VALUE_{i}: &str = \"{}\";\n", "x".repeat(40)));
+        }
+        let chunks = chunk_code(&code, CodeLanguage::Rust, 80);
+        assert!(chunks.len() > 1);
+        let max_chars = 80usize.saturating_mul(6).max(512);
+        assert!(
+            chunks.iter().all(|chunk| chunk.text.chars().count() <= max_chars + 80),
+            "every chunk should stay near the embed-safe size"
+        );
+    }
+
+    #[test]
+    fn test_identifier_bag_is_capped() {
+        let many: Vec<String> = (0..80).map(|i| format!("Type{i}")).collect();
+        assert!(format_identifier_list(&many).contains("48 more"));
+        assert_eq!(format_identifier_list(&["A".into(), "B".into()]), "A, B");
     }
 }

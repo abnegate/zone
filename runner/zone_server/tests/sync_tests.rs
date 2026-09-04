@@ -52,6 +52,7 @@ async fn setup_test_state() -> AppState {
         app_base_url: "http://localhost:3000".to_string(),
         web_search: Default::default(),
         comfyui: Default::default(),
+        source_index: Default::default(),
     };
 
     AppState::new(config, pool.inner().clone(), None)

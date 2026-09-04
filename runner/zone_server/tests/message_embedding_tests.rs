@@ -50,6 +50,7 @@ fn test_config() -> Config {
         app_base_url: "http://localhost:3000".to_string(),
         web_search: Default::default(),
         comfyui: Default::default(),
+        source_index: Default::default(),
     }
 }
 

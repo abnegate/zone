@@ -170,8 +170,9 @@ async fn main() {
 
     // Start background workers
     zone_server::workers::knowledge_refresh::start_refresh_worker(state.clone());
+    zone_server::workers::source_resync::start_resync_worker(state.clone());
     zone_server::workers::reminders::spawn(state.clone());
-    tracing::info!("Started knowledge refresh worker");
+    tracing::info!("Started knowledge refresh and source resync workers");
 
     // Configure CORS based on environment
     let cors_layer = if config.cors_origins.len() == 1 && config.cors_origins[0] == "*" {

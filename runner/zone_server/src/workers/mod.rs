@@ -15,5 +15,6 @@ pub mod indexing;
 pub mod knowledge_refresh;
 pub mod pr;
 pub mod reminders;
+pub mod source_resync;
 pub mod task;
 pub mod titles;

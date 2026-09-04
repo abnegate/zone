@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use url::Url;
 
+use crate::content::{embed_char_budget, truncate_chars};
 use crate::embeddings::EmbeddingService;
 use crate::embeddings::providers::AiSettings;
 use crate::error::{ContextError, Result};
@@ -132,20 +133,16 @@ impl OllamaProvider {
 
         Self::new(&base_url, &model, dimension, settings.litellm_key.clone())
     }
-}
 
-#[async_trait]
-impl EmbeddingService for OllamaProvider {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+    async fn embed_prompt(&self, prompt: &str) -> Result<Vec<f32>> {
         let url = format!("{}/api/embeddings", self.base_url);
         let request_body = EmbeddingRequest {
             model: self.model.clone(),
-            prompt: text.to_string(),
+            prompt: prompt.to_string(),
         };
 
         let mut request = self.client.post(&url).json(&request_body);
 
-        // Add authorization header if API key is provided
         if let Some(ref key) = self.api_key {
             request = request.header("Authorization", format!("Bearer {}", key));
         }
@@ -155,7 +152,6 @@ impl EmbeddingService for OllamaProvider {
             .await
             .map_err(|e| ContextError::Embedding(format!("Request failed: {}", e)))?;
 
-        // C2: Improved error handling with status-specific errors
         let status = response.status();
         if !status.is_success() {
             let body = response
@@ -184,7 +180,6 @@ impl EmbeddingService for OllamaProvider {
             .await
             .map_err(|e| ContextError::Embedding(format!("Failed to parse response: {}", e)))?;
 
-        // M3: Validate dimension matches expected
         let actual_len = embedding_response.embedding.len();
         if actual_len != self.dimension {
             return Err(ContextError::EmbeddingDimensionMismatch {
@@ -194,6 +189,37 @@ impl EmbeddingService for OllamaProvider {
         }
 
         Ok(embedding_response.embedding)
+    }
+}
+
+#[async_trait]
+impl EmbeddingService for OllamaProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let budget = embed_char_budget(self.max_tokens());
+        let mut prompt = truncate_chars(text, budget);
+        let mut last_err = None;
+        for attempt in 0..3 {
+            match self.embed_prompt(&prompt).await {
+                Ok(vector) => return Ok(vector),
+                Err(err) if err.is_context_length() => {
+                    last_err = Some(err);
+                    prompt = truncate_chars(&prompt, prompt.chars().count() / 2);
+                    if prompt.is_empty() {
+                        break;
+                    }
+                    tracing::warn!(
+                        model = %self.model,
+                        attempt,
+                        chars = prompt.chars().count(),
+                        "retrying embedding after context-length error"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            ContextError::Embedding("input exceeds embedding context length".to_string())
+        }))
     }
 
     async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {

@@ -9,6 +9,7 @@ use chrono::Utc;
 use glob::Pattern;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -673,7 +674,7 @@ impl GitLabAdapter {
             .unwrap_or(path)
             .to_string();
 
-        let uri = format!("gitlab://{}/{}@{}", project, path, branch);
+        let uri = Self::file_uri(project, path, branch);
         let content_type = Self::get_content_type(path);
 
         let mut item = ContentItem::new(source_id, ContentCategory::File, uri, file_name)
@@ -727,6 +728,25 @@ impl GitLabAdapter {
         // GitLab tree API doesn't include file sizes, so we use a conservative estimate
         // This will be updated when we fetch the actual file
         2048 // 2KB default estimate
+    }
+
+    fn file_uri(project: &str, path: &str, branch: &str) -> String {
+        format!("gitlab://{project}/{path}@{branch}")
+    }
+
+    fn tree_version(entries: &[GitLabTreeEntry]) -> String {
+        let mut hasher = Sha256::new();
+        for entry in entries {
+            if entry.entry_type == "blob" {
+                hasher.update(entry.path.as_bytes());
+                hasher.update(entry.id.as_bytes());
+            }
+        }
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -889,12 +909,29 @@ impl SourceAdapter for GitLabAdapter {
             .collect();
 
         let total_files = files.len();
-        let mut result = FetchResult::new(source.id, false);
+        let mut result = FetchResult::new(source.id, fetch_config.last_version.is_some());
+        result.version = Some(Self::tree_version(&tree));
+        result.live_uris = files
+            .iter()
+            .map(|entry| Self::file_uri(&config.project, &entry.path, &branch))
+            .collect();
 
         match strategy {
             FetchStrategy::Full => {
-                progress.on_message(&format!("Fetching {} files from GitLab", total_files));
-                for (idx, entry) in files.iter().enumerate() {
+                let to_fetch: Vec<&&GitLabTreeEntry> = files
+                    .iter()
+                    .filter(|entry| {
+                        let uri = Self::file_uri(&config.project, &entry.path, &branch);
+                        !fetch_config.should_skip_blob(&uri, &entry.id)
+                    })
+                    .collect();
+                result.stats.items_skipped = total_files.saturating_sub(to_fetch.len());
+                progress.on_message(&format!(
+                    "Fetching {} changed files from GitLab ({} unchanged)",
+                    to_fetch.len(),
+                    result.stats.items_skipped
+                ));
+                for (idx, entry) in to_fetch.iter().enumerate() {
                     let file_content = self
                         .get_file_content(
                             &config.project,
@@ -932,7 +969,7 @@ impl SourceAdapter for GitLabAdapter {
 
                     progress.on_item(&item);
                     result.add_item(item);
-                    progress.on_progress(idx + 1, Some(total_files));
+                    progress.on_progress(idx + 1, Some(to_fetch.len().max(1)));
                 }
             }
             FetchStrategy::MetadataOnly => {
@@ -1120,11 +1157,19 @@ impl SourceAdapter for GitLabAdapter {
             .as_deref()
             .unwrap_or(&project_info.default_branch);
 
-        // For GitLab, we could fetch the latest commit SHA, but for now we'll use timestamp
+        let tree = self
+            .get_tree_cached(
+                &config.project,
+                branch,
+                config.path.as_deref(),
+                config.token.as_deref(),
+            )
+            .await?;
+
         Ok(SyncState {
             source_id: source.id,
             last_sync_at: Some(Utc::now()),
-            version: Some(branch.to_string()),
+            version: Some(Self::tree_version(&tree)),
             ..Default::default()
         })
     }

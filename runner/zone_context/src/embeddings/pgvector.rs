@@ -287,6 +287,77 @@ impl PgVectorStore {
         Ok(result.rows_affected() as usize)
     }
 
+    /// Blob SHAs and embedding coverage for incremental Git fetches
+    pub async fn list_indexed_blobs(
+        &self,
+        source_id: Uuid,
+    ) -> Result<std::collections::HashMap<String, crate::content::IndexedBlob>> {
+        #[derive(sqlx::FromRow)]
+        struct BlobRow {
+            uri: String,
+            blob_sha: Option<String>,
+            has_embeddings: bool,
+        }
+
+        let rows: Vec<BlobRow> = sqlx::query_as(
+            r#"
+            SELECT
+                ci.uri,
+                ci.metadata->>'commit_hash' AS blob_sha,
+                EXISTS(
+                    SELECT 1 FROM embeddings e WHERE e.content_item_id = ci.id
+                ) AS has_embeddings
+            FROM content_items ci
+            WHERE ci.source_id = $1
+            "#,
+        )
+        .bind(source_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.uri,
+                    crate::content::IndexedBlob {
+                        blob_sha: row.blob_sha,
+                        has_embeddings: row.has_embeddings,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    /// Last persisted source version (tree SHA / fingerprint)
+    pub async fn load_sync_version(&self, source_id: Uuid) -> Result<Option<String>> {
+        let version: Option<Option<String>> =
+            sqlx::query_scalar("SELECT version FROM source_sync_state WHERE source_id = $1")
+                .bind(source_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(version.flatten())
+    }
+
+    /// Persist the source version after a successful index pass
+    pub async fn save_sync_version(&self, source_id: Uuid, version: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO source_sync_state (source_id, last_sync_at, version, extra)
+            VALUES ($1, NOW(), $2, '{}'::jsonb)
+            ON CONFLICT (source_id) DO UPDATE SET
+                last_sync_at = NOW(),
+                version = EXCLUDED.version,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(source_id)
+        .bind(version)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Get a content item by ID
     pub async fn get_content_item(&self, id: Uuid) -> Result<Option<ContentItem>> {
         #[derive(sqlx::FromRow)]

@@ -7,9 +7,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 use crate::adapters::{ProgressCallback, RateLimitConfig, SourceAdapter, SyncState};
@@ -302,7 +304,7 @@ impl FilesystemAdapter {
             .unwrap_or("unknown")
             .to_string();
 
-        let uri = format!("file://{}", file_path.display());
+        let uri = Self::file_uri(file_path);
         let content_type = Self::get_content_type(file_path);
 
         let modified_at = metadata.modified().ok().and_then(|t| {
@@ -327,6 +329,7 @@ impl FilesystemAdapter {
         let mut content_metadata = ContentMetadata {
             size_bytes: Some(file_size),
             extension,
+            commit_hash: Self::file_fingerprint(file_path),
             ..Default::default()
         };
 
@@ -364,6 +367,36 @@ impl FilesystemAdapter {
         }
 
         Ok(item)
+    }
+
+    pub(crate) fn file_uri(file_path: &Path) -> String {
+        format!("file://{}", file_path.display())
+    }
+
+    pub(crate) fn file_fingerprint(file_path: &Path) -> Option<String> {
+        let metadata = fs::symlink_metadata(file_path).ok()?;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        Some(format!("{}:{}", metadata.len(), mtime))
+    }
+
+    fn tree_version(files: &[PathBuf]) -> String {
+        let mut hasher = Sha256::new();
+        for path in files {
+            hasher.update(path.to_string_lossy().as_bytes());
+            if let Some(fingerprint) = Self::file_fingerprint(path) {
+                hasher.update(fingerprint.as_bytes());
+            }
+        }
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -451,16 +484,35 @@ impl SourceAdapter for FilesystemAdapter {
         )?;
 
         let total_files = files.len();
-        let mut result = FetchResult::new(source.id, false);
+        let mut result = FetchResult::new(source.id, fetch_config.last_version.is_some());
+        result.version = Some(Self::tree_version(&files));
+        result.live_uris = files.iter().map(|file| Self::file_uri(file)).collect();
 
         match strategy {
             FetchStrategy::Full => {
-                progress.on_message(&format!("Fetching {} files", total_files));
-                for (idx, file_path) in files.iter().enumerate() {
+                let to_fetch: Vec<&PathBuf> = files
+                    .iter()
+                    .filter(|file_path| {
+                        let uri = Self::file_uri(file_path);
+                        match Self::file_fingerprint(file_path) {
+                            Some(fingerprint) => {
+                                !fetch_config.should_skip_blob(&uri, &fingerprint)
+                            }
+                            None => true,
+                        }
+                    })
+                    .collect();
+                result.stats.items_skipped = total_files.saturating_sub(to_fetch.len());
+                progress.on_message(&format!(
+                    "Fetching {} changed files ({} unchanged)",
+                    to_fetch.len(),
+                    result.stats.items_skipped
+                ));
+                for (idx, file_path) in to_fetch.iter().enumerate() {
                     let item = self.create_content_item(source.id, path, file_path, false)?;
                     progress.on_item(&item);
                     result.add_item(item);
-                    progress.on_progress(idx + 1, Some(total_files));
+                    progress.on_progress(idx + 1, Some(to_fetch.len().max(1)));
                 }
             }
             FetchStrategy::MetadataOnly => {
@@ -562,9 +614,18 @@ impl SourceAdapter for FilesystemAdapter {
     }
 
     async fn get_sync_state(&self, source: &Source) -> Result<SyncState> {
+        let config = self.parse_config(source)?;
+        let path = Path::new(&config.path);
+        let files = self.collect_files(
+            path,
+            config.recursive,
+            &[],
+            &FetchConfig::default_exclude_patterns(),
+        )?;
         Ok(SyncState {
             source_id: source.id,
             last_sync_at: Some(Utc::now()),
+            version: Some(Self::tree_version(&files)),
             ..Default::default()
         })
     }
@@ -981,6 +1042,40 @@ mod tests {
         assert!(sync_state.is_ok());
         let state = sync_state.unwrap();
         assert!(state.last_sync_at.is_some());
+        assert!(state.version.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_filesystem_adapter_skips_unchanged_blobs() {
+        let adapter = FilesystemAdapter::new();
+        let temp_dir = create_test_directory();
+        create_test_file(temp_dir.path(), "file.txt", "content");
+        let file_path = temp_dir.path().join("file.txt");
+        let uri = FilesystemAdapter::file_uri(&file_path);
+        let fingerprint = FilesystemAdapter::file_fingerprint(&file_path).unwrap();
+
+        let source = create_test_source(json!({
+            "path": temp_dir.path().to_str().unwrap(),
+            "recursive": true
+        }));
+
+        let mut config = FetchConfig::default();
+        config.known_blobs.insert(
+            uri,
+            crate::content::IndexedBlob {
+                blob_sha: Some(fingerprint),
+                has_embeddings: true,
+            },
+        );
+
+        let result = adapter
+            .fetch(&source, &config, FetchStrategy::Full, &NoOpProgress)
+            .await
+            .unwrap();
+        assert!(result.items.is_empty());
+        assert_eq!(result.stats.items_skipped, 1);
+        assert_eq!(result.live_uris.len(), 1);
+        assert!(result.version.is_some());
     }
 
     #[tokio::test]

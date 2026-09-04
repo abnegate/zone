@@ -354,6 +354,104 @@ pub async fn get_source_index_status(
     })
 }
 
+/// Active source that the resync worker can consider
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ActiveIndexSource {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub source_type: String,
+    pub name: String,
+    pub config: serde_json::Value,
+    pub credentials_encrypted: Option<String>,
+    pub is_active: Option<bool>,
+    pub last_verified_at: Option<NaiveDateTime>,
+    pub created_at: Option<NaiveDateTime>,
+    pub updated_at: Option<NaiveDateTime>,
+    pub sync_version: Option<String>,
+    pub last_sync_at: Option<NaiveDateTime>,
+    pub user_id: Option<Uuid>,
+}
+
+impl ActiveIndexSource {
+    pub fn as_source_row(&self) -> SourceRow {
+        SourceRow {
+            id: self.id,
+            name: self.name.clone(),
+            source_type: self.source_type.clone(),
+            config: self.config.clone(),
+            credentials_encrypted: self.credentials_encrypted.clone(),
+            description: None,
+            url: None,
+            is_active: self.is_active,
+            last_verified_at: self.last_verified_at,
+            last_error: None,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            workspace_id: Some(self.workspace_id),
+        }
+    }
+}
+
+/// All active workspace sources for scheduled / change-driven reindex
+pub async fn list_active_index_sources(pool: &PgPool) -> DbResult<Vec<ActiveIndexSource>> {
+    sqlx::query_as::<_, ActiveIndexSource>(
+        r#"
+        SELECT
+            s.id,
+            s.workspace_id,
+            s.source_type,
+            s.name,
+            s.config,
+            s.credentials_encrypted,
+            s.is_active,
+            s.last_verified_at,
+            s.created_at,
+            s.updated_at,
+            ss.version AS sync_version,
+            ss.last_sync_at,
+            (
+                SELECT wm.user_id
+                FROM workspace_members wm
+                WHERE wm.workspace_id = s.workspace_id
+                  AND wm.is_active
+                  AND wm.role IN ('owner', 'admin', 'member')
+                ORDER BY
+                    CASE wm.role
+                        WHEN 'owner' THEN 0
+                        WHEN 'admin' THEN 1
+                        ELSE 2
+                    END,
+                    wm.created_at
+                LIMIT 1
+            ) AS user_id
+        FROM sources s
+        LEFT JOIN source_sync_state ss ON ss.source_id = s.id
+        WHERE COALESCE(s.is_active, TRUE) = TRUE
+          AND s.workspace_id IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Content items that have text but no embeddings (failed or partial index)
+pub async fn count_items_missing_embeddings(pool: &PgPool, source_id: Uuid) -> DbResult<i64> {
+    sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM content_items ci
+        WHERE ci.source_id = $1
+          AND COALESCE(ci.metadata_only, FALSE) = FALSE
+          AND NOT EXISTS (
+              SELECT 1 FROM embeddings e WHERE e.content_item_id = ci.id
+          )
+        "#,
+    )
+    .bind(source_id)
+    .fetch_one(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

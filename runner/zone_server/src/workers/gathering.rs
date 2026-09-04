@@ -188,63 +188,9 @@ pub async fn execute_gathering(
         }
     };
 
-    // Convert database sources to zone_core::Source
     let sources: Vec<Source> = db_sources
         .into_iter()
-        .filter_map(|db_source| {
-            // Parse source_type string to enum
-            let source_type = match db_source.source_type.as_str() {
-                "text" => zone_core::SourceType::Text,
-                "filesystem" => zone_core::SourceType::Filesystem,
-                "github" => zone_core::SourceType::GitHub,
-                "gitlab" => zone_core::SourceType::GitLab,
-                "google_calendar" => zone_core::SourceType::GoogleCalendar,
-                "google_mail" => zone_core::SourceType::GoogleMail,
-                "notion" => zone_core::SourceType::Notion,
-                "slack" => zone_core::SourceType::Slack,
-                "web" => zone_core::SourceType::Web,
-                _ => {
-                    tracing::warn!("Unknown source type: {}", db_source.source_type);
-                    return None;
-                }
-            };
-
-            let category = source_type.category();
-
-            // Decrypt credentials and inject into config
-            let mut config = db_source.config.clone();
-            if let Some(encrypted_creds) = &db_source.credentials_encrypted {
-                match crate::crypto::decrypt(state.encryption_key(), encrypted_creds) {
-                    Ok(decrypted) => {
-                        // Inject decrypted credentials as "token" field in config
-                        // This works for GitHub, GitLab, and other adapters that expect a token
-                        if let Some(config_obj) = config.as_object_mut() {
-                            config_obj.insert("token".to_string(), serde_json::Value::String(decrypted));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to decrypt credentials for source {}: {}. Source will be skipped.",
-                            db_source.id,
-                            e
-                        );
-                        return None;
-                    }
-                }
-            }
-
-            Some(Source {
-                id: db_source.id,
-                name: db_source.name,
-                source_type,
-                category,
-                config,
-                is_active: db_source.is_active.unwrap_or(true),
-                last_synced_at: db_source.last_verified_at.map(|dt| dt.and_utc()),
-                created_at: db_source.created_at.map(|dt| dt.and_utc()).unwrap_or_else(chrono::Utc::now),
-                updated_at: db_source.updated_at.map(|dt| dt.and_utc()).unwrap_or_else(chrono::Utc::now),
-            })
-        })
+        .filter_map(|db_source| core_source_from_row(state, db_source))
         .collect();
 
     if sources.is_empty() {
@@ -340,6 +286,17 @@ pub async fn execute_gathering(
                     e
                 );
             }
+            for source in &sources {
+                if let Err(e) =
+                    sources::update_verification(state.db(), source.id, workspace_id, None).await
+                {
+                    tracing::warn!(
+                        source_id = %source.id,
+                        error = %e,
+                        "failed to record last_verified_at after index"
+                    );
+                }
+            }
         }
         Ok(Err(e)) => {
             // Gathering failed with error
@@ -385,6 +342,66 @@ pub async fn execute_gathering(
             }
         }
     }
+}
+
+/// Convert a database source row into a core `Source`, decrypting credentials.
+pub(crate) fn core_source_from_row(
+    state: &AppState,
+    db_source: sources::SourceRow,
+) -> Option<Source> {
+    let source_type = match db_source.source_type.as_str() {
+        "text" => zone_core::SourceType::Text,
+        "filesystem" => zone_core::SourceType::Filesystem,
+        "github" => zone_core::SourceType::GitHub,
+        "gitlab" => zone_core::SourceType::GitLab,
+        "google_calendar" => zone_core::SourceType::GoogleCalendar,
+        "google_mail" => zone_core::SourceType::GoogleMail,
+        "notion" => zone_core::SourceType::Notion,
+        "slack" => zone_core::SourceType::Slack,
+        "web" => zone_core::SourceType::Web,
+        _ => {
+            tracing::warn!("Unknown source type: {}", db_source.source_type);
+            return None;
+        }
+    };
+
+    let category = source_type.category();
+    let mut config = db_source.config.clone();
+    if let Some(encrypted_creds) = &db_source.credentials_encrypted {
+        match crate::crypto::decrypt(state.encryption_key(), encrypted_creds) {
+            Ok(decrypted) => {
+                if let Some(config_obj) = config.as_object_mut() {
+                    config_obj.insert("token".to_string(), serde_json::Value::String(decrypted));
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to decrypt credentials for source {}: {}. Source will be skipped.",
+                    db_source.id,
+                    e
+                );
+                return None;
+            }
+        }
+    }
+
+    Some(Source {
+        id: db_source.id,
+        name: db_source.name,
+        source_type,
+        category,
+        config,
+        is_active: db_source.is_active.unwrap_or(true),
+        last_synced_at: db_source.last_verified_at.map(|dt| dt.and_utc()),
+        created_at: db_source
+            .created_at
+            .map(|dt| dt.and_utc())
+            .unwrap_or_else(chrono::Utc::now),
+        updated_at: db_source
+            .updated_at
+            .map(|dt| dt.and_utc())
+            .unwrap_or_else(chrono::Utc::now),
+    })
 }
 
 // Integration tests are in zone_server/tests/gathering_worker_tests.rs

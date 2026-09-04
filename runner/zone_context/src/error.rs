@@ -149,6 +149,23 @@ impl ContextError {
             _ => None,
         }
     }
+
+    /// Whether this embedding error is a model context-window rejection
+    pub fn is_context_length(&self) -> bool {
+        let message = self.to_string().to_ascii_lowercase();
+        message.contains("context length")
+            || message.contains("context window")
+            || message.contains("input length")
+            || message.contains("too many tokens")
+    }
+
+    /// Embedding failures that should abort the whole file, not one chunk
+    pub fn is_fatal_embedding(&self) -> bool {
+        matches!(
+            self,
+            Self::Auth(_) | Self::RateLimited { .. } | Self::CredentialsRequired(_)
+        )
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ContextError>;
@@ -170,6 +187,19 @@ mod tests {
             err.to_string(),
             "Adapter error for github: API rate limit exceeded"
         );
+    }
+
+    #[test]
+    fn test_context_length_and_fatal_embedding() {
+        let err = ContextError::Embedding(
+            "API returned error 500: the input length exceeds the context length".to_string(),
+        );
+        assert!(err.is_context_length());
+        assert!(!err.is_fatal_embedding());
+
+        let auth = ContextError::Auth("nope".to_string());
+        assert!(!auth.is_context_length());
+        assert!(auth.is_fatal_embedding());
     }
 
     #[test]

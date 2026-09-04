@@ -13,6 +13,7 @@ pub use tokenizer::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 // Re-export SourceCategory as ContentCategory for domain clarity
@@ -208,6 +209,15 @@ impl ContentChunk {
     }
 }
 
+/// Previously indexed blob used to skip unchanged downloads
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexedBlob {
+    /// Provider blob SHA, filesystem fingerprint, or equivalent
+    pub blob_sha: Option<String>,
+    /// Whether searchable embeddings already exist for this URI
+    pub has_embeddings: bool,
+}
+
 /// Configuration for content fetching
 ///
 /// Fetch/index writes the same content store as chat gathering, so the
@@ -230,9 +240,20 @@ pub struct FetchConfig {
     pub allow_metadata_only: bool,
     /// Index the whole source instead of gathering prompt context
     pub index_mode: bool,
+    /// Last persisted source version (tree SHA / fingerprint)
+    pub last_version: Option<String>,
+    /// Indexed files keyed by content URI so adapters can skip unchanged blobs
+    pub known_blobs: HashMap<String, IndexedBlob>,
 }
 
 impl FetchConfig {
+    /// Skip downloading a blob that is already indexed at this SHA
+    pub fn should_skip_blob(&self, uri: &str, blob_sha: &str) -> bool {
+        self.known_blobs.get(uri).is_some_and(|known| {
+            known.has_embeddings && known.blob_sha.as_deref() == Some(blob_sha)
+        })
+    }
+
     /// Default exclude globs shared by context gathering and source indexing
     pub fn default_exclude_patterns() -> Vec<String> {
         vec![
@@ -295,6 +316,8 @@ impl Default for FetchConfig {
             exclude_patterns: Self::default_exclude_patterns(),
             allow_metadata_only: false,
             index_mode: false,
+            last_version: None,
+            known_blobs: HashMap::new(),
         }
     }
 }
@@ -327,6 +350,10 @@ pub struct FetchResult {
     pub fetched_at: DateTime<Utc>,
     /// Fetch statistics
     pub stats: FetchStats,
+    /// Every live file URI in the source (used to retain the index)
+    pub live_uris: Vec<String>,
+    /// Provider version after this fetch (tree SHA / fingerprint)
+    pub version: Option<String>,
 }
 
 impl FetchResult {
@@ -339,6 +366,8 @@ impl FetchResult {
             is_incremental,
             fetched_at: Utc::now(),
             stats: FetchStats::default(),
+            live_uris: Vec::new(),
+            version: None,
         }
     }
 
@@ -468,6 +497,24 @@ mod tests {
         );
         assert!(FetchConfig::for_source_indexing().index_mode);
         assert!(!FetchConfig::for_source_indexing().allow_metadata_only);
+    }
+
+    #[test]
+    fn test_should_skip_blob_requires_matching_sha_and_embeddings() {
+        let uri = "github://owner/repo/src/lib.rs@main";
+        let mut config = FetchConfig::default();
+        config.known_blobs.insert(
+            uri.to_string(),
+            IndexedBlob {
+                blob_sha: Some("abc".to_string()),
+                has_embeddings: true,
+            },
+        );
+
+        assert!(config.should_skip_blob(uri, "abc"));
+        assert!(!config.should_skip_blob(uri, "def"));
+        config.known_blobs.get_mut(uri).unwrap().has_embeddings = false;
+        assert!(!config.should_skip_blob(uri, "abc"));
     }
 
     #[test]

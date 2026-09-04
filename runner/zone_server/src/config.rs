@@ -50,6 +50,39 @@ pub struct Config {
     pub web_search: WebSearchConfig,
     /// Direct ComfyUI image generation and artifact storage.
     pub comfyui: ComfyUiConfig,
+    /// Background source reindex (schedule + change detection)
+    pub source_index: SourceIndexConfig,
+}
+
+/// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceIndexConfig {
+    /// Master switch for the resync worker
+    pub enabled: bool,
+    /// How often to poll sources for remote changes
+    pub poll_interval_secs: u64,
+    /// How old a non-incremental source can be before it is fetched again
+    pub interval_secs: u64,
+}
+
+impl Default for SourceIndexConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: 300,
+            interval_secs: 3600,
+        }
+    }
+}
+
+impl SourceIndexConfig {
+    pub fn from_env() -> Self {
+        Self {
+            enabled: env_truthy("SOURCE_RESYNC_ENABLED", true),
+            poll_interval_secs: env_u64("SOURCE_RESYNC_POLL_SECS", 300, 30, 86_400),
+            interval_secs: env_u64("SOURCE_RESYNC_INTERVAL_SECS", 3600, 60, 7 * 86_400),
+        }
+    }
 }
 
 /// Direct image generation settings loaded from `COMFYUI_*` environment variables.
@@ -295,6 +328,7 @@ impl Config {
             app_base_url,
             web_search: WebSearchConfig::from_env(),
             comfyui: ComfyUiConfig::from_env(),
+            source_index: SourceIndexConfig::from_env(),
         })
     }
 }
@@ -325,6 +359,7 @@ impl std::fmt::Debug for Config {
             .field("app_base_url", &self.app_base_url)
             .field("web_search", &self.web_search)
             .field("comfyui", &self.comfyui)
+            .field("source_index", &self.source_index)
             .finish()
     }
 }
@@ -367,6 +402,7 @@ mod tests {
             app_base_url: "http://localhost:3000".to_string(),
             web_search: WebSearchConfig::default(),
             comfyui: ComfyUiConfig::default(),
+            source_index: SourceIndexConfig::default(),
         }
     }
 

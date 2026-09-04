@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::adapters::{AdapterRegistry, ProgressCallback};
 use crate::content::{
-    CHUNK_OVERLAP_TOKENS, ContentChunk, ContentItem, FetchConfig, MAX_CHUNK_TOKENS, smart_chunk,
+    CHUNK_OVERLAP_TOKENS, ContentChunk, ContentItem, FetchConfig, MAX_CHUNK_TOKENS,
+    embed_char_budget, smart_chunk, split_for_embedding,
 };
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
 use crate::embeddings::{
@@ -158,6 +159,26 @@ impl ContextService {
                 continue;
             }
 
+            let mut source_fetch_config = fetch_config.clone();
+            if source_fetch_config.index_mode {
+                match self.vector_store.list_indexed_blobs(source.id).await {
+                    Ok(blobs) => source_fetch_config.known_blobs = blobs,
+                    Err(e) => tracing::warn!(
+                        source_id = %source.id,
+                        error = %e,
+                        "failed to load indexed blobs for incremental fetch"
+                    ),
+                }
+                match self.vector_store.load_sync_version(source.id).await {
+                    Ok(version) => source_fetch_config.last_version = version,
+                    Err(e) => tracing::warn!(
+                        source_id = %source.id,
+                        error = %e,
+                        "failed to load source sync version"
+                    ),
+                }
+            }
+
             // Estimate tokens and decide strategy
             let estimated_tokens = match adapter.estimate_tokens(source).await {
                 Ok(tokens) => tokens,
@@ -166,12 +187,13 @@ impl ContextService {
                     0
                 }
             };
-            let strategy = fetch_config.fetch_strategy(estimated_tokens);
+            let strategy = source_fetch_config.fetch_strategy(estimated_tokens);
             tracing::debug!(
                 source_id = %source.id,
                 estimated_tokens,
-                index_mode = fetch_config.index_mode,
-                allow_metadata_only = fetch_config.allow_metadata_only,
+                index_mode = source_fetch_config.index_mode,
+                allow_metadata_only = source_fetch_config.allow_metadata_only,
+                known_blobs = source_fetch_config.known_blobs.len(),
                 ?strategy,
                 "chose fetch strategy"
             );
@@ -185,7 +207,7 @@ impl ContextService {
 
             // Fetch content
             let fetch_result = match adapter
-                .fetch(source, &fetch_config, strategy, &progress)
+                .fetch(source, &source_fetch_config, strategy, &progress)
                 .await
             {
                 Ok(r) => r,
@@ -202,12 +224,17 @@ impl ContextService {
             };
 
             result.items_gathered += fetch_result.items.len();
-            if fetch_config.index_mode {
-                let uris: Vec<String> = fetch_result
-                    .items
-                    .iter()
-                    .map(|item| item.uri.clone())
-                    .collect();
+            result.items_unchanged += fetch_result.stats.items_skipped;
+            if source_fetch_config.index_mode {
+                let uris = if fetch_result.live_uris.is_empty() {
+                    fetch_result
+                        .items
+                        .iter()
+                        .map(|item| item.uri.clone())
+                        .collect()
+                } else {
+                    fetch_result.live_uris.clone()
+                };
                 if let Err(e) = self
                     .vector_store
                     .retain_content_uris(source.id, &uris)
@@ -219,6 +246,18 @@ impl ContextService {
                         e
                     );
                 }
+            }
+            if let Some(version) = fetch_result.version.clone()
+                && let Err(e) = self
+                    .vector_store
+                    .save_sync_version(source.id, &version)
+                    .await
+            {
+                tracing::warn!(
+                    source_id = %source.id,
+                    error = %e,
+                    "failed to persist source sync version"
+                );
             }
             total_items.extend(fetch_result.items);
 
@@ -595,35 +634,31 @@ impl ContextService {
         }
 
         let item_id = self.vector_store.store_content_item(item).await?;
-        let persisted_chunks: Vec<ContentChunk> = chunks
-            .iter()
-            .enumerate()
-            .map(|(index, chunk)| ContentChunk {
-                id: chunk.id,
-                content_item_id: item_id,
-                chunk_index: index,
-                text: chunk.text.clone(),
-                token_count: chunk.token_count,
-                start_offset: chunk.start_offset,
-                end_offset: chunk.end_offset,
-            })
-            .collect();
+        let max_chars = embed_char_budget(self.embedding_service.max_tokens());
+        let persisted_chunks = expand_chunks_for_embedding(item_id, chunks, max_chars);
 
         self.vector_store
             .replace_content_chunks(item_id, &persisted_chunks)
             .await?;
 
-        let texts: Vec<&str> = persisted_chunks.iter().map(|c| c.text.as_str()).collect();
-        let vectors = self.embedding_service.embed_batch(&texts).await?;
-        let embeddings: Vec<Embedding> = persisted_chunks
-            .iter()
-            .zip(vectors.iter())
+        let pairs = self
+            .embed_chunks_resilient(item, &persisted_chunks)
+            .await?;
+        if pairs.is_empty() {
+            return Err(ContextError::Embedding(format!(
+                "no chunks could be embedded for {}",
+                item.uri
+            )));
+        }
+
+        let embeddings: Vec<Embedding> = pairs
+            .into_iter()
             .map(|(chunk, vector)| {
                 Embedding::new(
                     chunk.id,
                     item_id,
                     item.source_id,
-                    vector.clone(),
+                    vector,
                     self.embedding_service.model(),
                 )
             })
@@ -632,6 +667,87 @@ impl ContextService {
         self.vector_store.store_batch(&embeddings).await?;
         Ok(StoreOutcome::Embedded(embeddings.len()))
     }
+
+    async fn embed_chunks_resilient(
+        &self,
+        item: &ContentItem,
+        chunks: &[ContentChunk],
+    ) -> Result<Vec<(ContentChunk, Vec<f32>)>> {
+        let texts: Vec<&str> = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+        match self.embedding_service.embed_batch(&texts).await {
+            Ok(vectors) if vectors.len() == chunks.len() => Ok(chunks
+                .iter()
+                .cloned()
+                .zip(vectors)
+                .collect()),
+            Ok(_) => Err(ContextError::Embedding(
+                "embedding batch size did not match chunk count".to_string(),
+            )),
+            Err(err) if err.is_fatal_embedding() => Err(err),
+            Err(err) => {
+                tracing::warn!(
+                    uri = %item.uri,
+                    error = %err,
+                    "batch embed failed; retrying chunks individually"
+                );
+                let mut ok = Vec::new();
+                for chunk in chunks {
+                    match self.embedding_service.embed(&chunk.text).await {
+                        Ok(vector) => ok.push((chunk.clone(), vector)),
+                        Err(chunk_err) if chunk_err.is_context_length() => {
+                            tracing::warn!(
+                                uri = %item.uri,
+                                chunk_index = chunk.chunk_index,
+                                chars = chunk.text.chars().count(),
+                                "skipping chunk that exceeds embedding context"
+                            );
+                        }
+                        Err(chunk_err) if chunk_err.is_fatal_embedding() => return Err(chunk_err),
+                        Err(chunk_err) => {
+                            tracing::warn!(
+                                uri = %item.uri,
+                                chunk_index = chunk.chunk_index,
+                                error = %chunk_err,
+                                "skipping chunk after embed failure"
+                            );
+                        }
+                    }
+                }
+                Ok(ok)
+            }
+        }
+    }
+}
+
+fn expand_chunks_for_embedding(
+    item_id: Uuid,
+    chunks: &[ContentChunk],
+    max_chars: usize,
+) -> Vec<ContentChunk> {
+    let mut out = Vec::new();
+    for chunk in chunks {
+        if chunk.text.chars().count() <= max_chars {
+            out.push(chunk.clone());
+            continue;
+        }
+        for piece in split_for_embedding(&chunk.text, max_chars) {
+            out.push(ContentChunk::new(
+                item_id,
+                0,
+                piece,
+                chunk.start_offset,
+                chunk.end_offset,
+            ));
+        }
+    }
+    out.into_iter()
+        .enumerate()
+        .map(|(index, mut chunk)| {
+            chunk.content_item_id = item_id;
+            chunk.chunk_index = index;
+            chunk
+        })
+        .collect()
 }
 
 /// Adapter to convert ProgressCallback to GatheringCallback

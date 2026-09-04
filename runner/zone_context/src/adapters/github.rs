@@ -683,7 +683,7 @@ impl GitHubAdapter {
             .unwrap_or(path)
             .to_string();
 
-        let uri = format!("github://{}/{}/{}@{}", owner, repo, path, branch);
+        let uri = Self::file_uri(owner, repo, path, branch);
         let content_type = Self::get_content_type(path);
 
         let mut item = ContentItem::new(source_id, ContentCategory::File, uri, file_name)
@@ -730,6 +730,10 @@ impl GitHubAdapter {
         }
 
         Ok(item)
+    }
+
+    fn file_uri(owner: &str, repo: &str, path: &str, branch: &str) -> String {
+        format!("github://{owner}/{repo}/{path}@{branch}")
     }
 }
 
@@ -907,12 +911,30 @@ impl SourceAdapter for GitHubAdapter {
             .collect();
 
         let total_files = files.len();
-        let mut result = FetchResult::new(source.id, false);
+        let mut result = FetchResult::new(source.id, fetch_config.last_version.is_some());
+        result.version = Some(tree.sha.clone());
+        result.live_uris = files
+            .iter()
+            .map(|entry| Self::file_uri(&config.owner, &config.repo, &entry.path, &branch))
+            .collect();
 
         match strategy {
             FetchStrategy::Full => {
-                progress.on_message(&format!("Fetching {} files from GitHub", total_files));
-                for (idx, entry) in files.iter().enumerate() {
+                let to_fetch: Vec<&&GitHubTreeEntry> = files
+                    .iter()
+                    .filter(|entry| {
+                        let uri =
+                            Self::file_uri(&config.owner, &config.repo, &entry.path, &branch);
+                        !fetch_config.should_skip_blob(&uri, &entry.sha)
+                    })
+                    .collect();
+                result.stats.items_skipped = total_files.saturating_sub(to_fetch.len());
+                progress.on_message(&format!(
+                    "Fetching {} changed files from GitHub ({} unchanged)",
+                    to_fetch.len(),
+                    result.stats.items_skipped
+                ));
+                for (idx, entry) in to_fetch.iter().enumerate() {
                     if let Some(item) = self
                         .fetch_file_item(source.id, &config, &branch, entry)
                         .await?
@@ -920,7 +942,7 @@ impl SourceAdapter for GitHubAdapter {
                         progress.on_item(&item);
                         result.add_item(item);
                     }
-                    progress.on_progress(idx + 1, Some(total_files));
+                    progress.on_progress(idx + 1, Some(to_fetch.len().max(1)));
                 }
             }
             FetchStrategy::MetadataOnly => {
@@ -1385,6 +1407,10 @@ mod tests {
         assert!(!item.metadata_only);
         assert_eq!(item.metadata.commit_hash, Some("abc123".to_string()));
         assert_eq!(item.metadata.branch, Some("main".to_string()));
+        assert_eq!(
+            GitHubAdapter::file_uri("owner", "repo", "src/lib.rs", "main"),
+            item.uri
+        );
     }
 
     #[test]
