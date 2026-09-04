@@ -516,7 +516,9 @@ test.describe('Sources Page', () => {
           route.fulfill({
             status: 200,
             contentType: 'application/json',
-            body: JSON.stringify({ sources: mockSources }),
+            body: JSON.stringify({
+              sources: [{ ...mockSources[0], last_verified_at: null }, ...mockSources.slice(1)],
+            }),
           });
         } else {
           route.continue();
@@ -567,6 +569,7 @@ test.describe('Sources Page', () => {
         });
 
         const card = page.locator('.source-card').first();
+        await expect(card.locator('.source-status')).toContainText('Unverified');
         const button = card.getByRole('button', { name: 'Verify', exact: true });
         await button.click();
         await expect(card.getByRole('button', { name: 'Verifying...' })).toBeVisible();
