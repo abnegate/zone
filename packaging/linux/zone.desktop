@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Zone
+Comment=Self-hosted AI platform
+Exec=zone-desktop
+Icon=zone
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true

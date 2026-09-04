@@ -76,23 +76,23 @@ jobs:
           PGPASSWORD: postgres
 
       - name: Build
-        run: cargo build --all-targets
+        run: cargo build --workspace --exclude zone_desktop --all-targets
 
       - name: Run unit tests
-        run: cargo test --lib --all-features
+        run: cargo test --workspace --exclude zone_desktop --lib --all-features
         env:
           DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
           TEST_DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
 
       - name: Run integration tests
-        run: cargo test --test '*' --all-features
+        run: cargo test --workspace --exclude zone_desktop --test '*' --all-features
         env:
           DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
           TEST_DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
           RUST_BACKTRACE: 1
 
       - name: Run doc tests
-        run: cargo test --doc
+        run: cargo test --workspace --exclude zone_desktop --doc
         env:
           DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
           TEST_DATABASE_URL: ${{ runner.os == 'Linux' && 'postgres://postgres:postgres@localhost:5432/zone_test' || '' }}
@@ -125,4 +125,4 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Check MSRV
-        run: cargo check --all-targets
+        run: cargo check --workspace --exclude zone_desktop --all-targets

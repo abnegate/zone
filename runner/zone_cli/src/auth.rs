@@ -126,6 +126,11 @@ impl AuthManager {
         };
         self.store_token(METADATA_KEY, &serde_json::to_string(&metadata)?)?;
 
+        if let Ok(mut cfg) = crate::config::Config::load() {
+            cfg.host = Some(host.trim_end_matches('/').to_string());
+            let _ = cfg.save();
+        }
+
         Ok(metadata)
     }
 

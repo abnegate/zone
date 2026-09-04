@@ -298,14 +298,40 @@ curl https://manager.yourdomain.com/api/workspaces \
   -H "Authorization: Bearer ${JWT_TOKEN}"
 ```
 
-### Zone CLI
+### Zone app & CLI
 
-The `zone` CLI tool allows you to interact with the Zone platform from your terminal:
+The Zone desktop app ships the manager console. On first launch it asks for your Zone server URL. The `zone` CLI is linked on your PATH.
+
+**Homebrew** (macOS):
 
 ```bash
-# Install the CLI
-make install-cli
+brew tap abnegate/tap
+brew install --cask zone
+```
 
+**APT** (Debian / Ubuntu):
+
+```bash
+curl -fsSL https://abnegate.github.io/apt-repo/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/abnegate.gpg
+echo "deb [signed-by=/usr/share/keyrings/abnegate.gpg] https://abnegate.github.io/apt-repo stable main" | sudo tee /etc/apt/sources.list.d/abnegate.list
+sudo apt update && sudo apt install zone
+```
+
+Then open **Zone.app** (macOS) or run `zone-desktop` (Linux). First launch is a short configurator; after that the app serves the bundled manager frontend and proxies API traffic to the saved server (`host` in `~/.zone/config.toml`). Use **Change Server…** in the app menu to point at a different host.
+
+**From source:**
+
+```bash
+make install-cli
+```
+
+Desktop app (after the manager frontend build):
+
+```bash
+cd runner && cargo run --release --package zone_desktop
+```
+
+```bash
 # Login to your Zone server
 zone login https://zone.example.com
 
