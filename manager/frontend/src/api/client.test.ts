@@ -964,12 +964,12 @@ describe('Client', () => {
     it('verifySource verifies source', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true, message: 'Verified' }),
+        json: async () => ({ verified: true, message: 'Verified' }),
       });
 
       const result = await client.verifySource(testWorkspaceId, '1');
 
-      expect(result.success).toBe(true);
+      expect(result.verified).toBe(true);
     });
   });
 
