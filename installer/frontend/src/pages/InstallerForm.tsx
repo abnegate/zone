@@ -314,9 +314,6 @@ export default function InstallerForm() {
       });
     }
     reset();
-    if (typeof window !== 'undefined') {
-      window.close();
-    }
   }, [completedAt, isComplete, methods, reset]);
 
   useKeyboardNavigation({

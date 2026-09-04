@@ -202,17 +202,29 @@ fn mock_gpt4all_catalog() -> Json<serde_json::Value> {
     }]))
 }
 
-async fn start_gpt4all_catalog_server() -> SocketAddr {
+async fn start_gpt4all_catalog_server() -> String {
     let router = Router::new().route("/models3.json", get(|| async { mock_gpt4all_catalog() }));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}/models3.json");
 
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    addr
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap();
+    for _ in 0..50 {
+        if let Ok(response) = client.get(&url).send().await {
+            if response.status().is_success() {
+                return url;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("GPT4All catalog mock did not become ready at {url}");
 }
 
 static GPT4ALL_MOCK_READY: OnceCell<()> = OnceCell::const_new();
@@ -220,11 +232,8 @@ static GPT4ALL_MOCK_READY: OnceCell<()> = OnceCell::const_new();
 async fn use_local_gpt4all_catalog() {
     GPT4ALL_MOCK_READY
         .get_or_init(|| async {
-            let addr = start_gpt4all_catalog_server().await;
-            let url = format!("http://{addr}/models3.json");
-            unsafe {
-                std::env::set_var("GPT4ALL_MODELS_URL", url);
-            }
+            let url = start_gpt4all_catalog_server().await;
+            zone_server::routes::models::set_gpt4all_models_url(url);
         })
         .await;
 }

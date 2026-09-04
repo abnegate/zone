@@ -5,7 +5,10 @@
 mod providers;
 mod types;
 
-pub use providers::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ModelProvider, ProviderError, get_provider};
+pub use providers::{
+    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, ModelProvider, ProviderError, get_provider,
+    set_gpt4all_models_url,
+};
 pub use types::{
     BrowseQuery, BrowseResponse, ErrorResponse, ListModelsQuery, ModelDetails, ModelResponse,
     ModelSizeFilter, ModelSort,

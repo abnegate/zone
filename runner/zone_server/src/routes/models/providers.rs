@@ -5,6 +5,7 @@ use axum::{Json, http::StatusCode, response::IntoResponse};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use scraper::{Html, Selector};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::types::{
@@ -880,8 +881,20 @@ pub struct Gpt4AllProvider;
 const GPT4ALL_MODELS_URL: &str =
     "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
 
+static GPT4ALL_MODELS_URL_OVERRIDE: OnceLock<String> = OnceLock::new();
+
+/// Override the GPT4All catalog URL. Tests should use this instead of
+/// `std::env::set_var`, which is racy after the cargo test runtime starts.
+pub fn set_gpt4all_models_url(url: impl Into<String>) {
+    let _ = GPT4ALL_MODELS_URL_OVERRIDE.set(url.into());
+}
+
 fn gpt4all_models_url() -> String {
-    std::env::var("GPT4ALL_MODELS_URL").unwrap_or_else(|_| GPT4ALL_MODELS_URL.to_string())
+    GPT4ALL_MODELS_URL_OVERRIDE
+        .get()
+        .cloned()
+        .or_else(|| std::env::var("GPT4ALL_MODELS_URL").ok())
+        .unwrap_or_else(|| GPT4ALL_MODELS_URL.to_string())
 }
 
 #[async_trait]

@@ -112,11 +112,7 @@ test.describe('Installation Process', () => {
 
     // Dialog chrome also exposes a Close control; target the footer action.
     await page.getByRole('dialog').locator('button.w-full', { hasText: 'Close' }).click();
-    // handleCloseModal calls window.close(); Chromium ignores it on a
-    // non-script-opened tab, Firefox honors it and tears the page down.
-    if (page.isClosed()) {
-      return;
-    }
     await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Installation complete' })).toBeVisible();
   });
 });
