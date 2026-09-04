@@ -1,6 +1,6 @@
 //! HTTP routers for install, console, and desktop modes.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use axum::{
@@ -130,14 +130,29 @@ async fn serve_spa(State(state): State<AppState>, uri: Uri) -> Response {
     let root = state.active_frontend();
     let path = uri.path().trim_start_matches('/');
     let candidate = if path.is_empty() {
-        root.join("index.html")
+        Some(root.join("index.html"))
     } else {
-        root.join(path)
+        safe_join(&root, path)
     };
-    if candidate.is_file() {
+    if let Some(candidate) = candidate
+        && candidate.is_file()
+    {
         return serve_file(candidate).await;
     }
     serve_file(root.join("index.html")).await
+}
+
+fn safe_join(root: &Path, request_path: &str) -> Option<PathBuf> {
+    let mut relative = PathBuf::new();
+    for component in Path::new(request_path).components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    let candidate = root.join(relative);
+    candidate.starts_with(root).then_some(candidate)
 }
 
 async fn serve_file(path: PathBuf) -> Response {
@@ -202,5 +217,22 @@ mod tests {
         assert_eq!(state.mode(), AppMode::Setup);
         state.set_proxy_target("https://other.example".into());
         assert_eq!(state.proxy_target(), "https://other.example");
+    }
+
+    #[test]
+    fn safe_join_keeps_assets_inside_root() {
+        let root = PathBuf::from("/tmp/zone-manager");
+        assert_eq!(
+            safe_join(&root, "assets/app.js").unwrap(),
+            root.join("assets/app.js")
+        );
+    }
+
+    #[test]
+    fn safe_join_rejects_parent_and_absolute_paths() {
+        let root = PathBuf::from("/tmp/zone-manager");
+        assert_eq!(safe_join(&root, "../etc/passwd"), None);
+        assert_eq!(safe_join(&root, "/etc/passwd"), None);
+        assert_eq!(safe_join(&root, "assets/../../etc/passwd"), None);
     }
 }
