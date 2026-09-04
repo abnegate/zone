@@ -508,7 +508,8 @@ MIT License - See [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines. Pull requests
+receive free [CodeRabbit](https://coderabbit.ai) AI reviews.
 
 ## Acknowledgments
 
