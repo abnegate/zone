@@ -19,6 +19,7 @@ import { TasksPage } from './features/tasks';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { Layout, ProtectedRoute } from './shared/components';
 import { ThemeProvider, WorkspaceProvider } from './shared/context';
+import { WorkspaceTheme } from './shared/context/WorkspaceTheme';
 import { PERMISSIONS } from './shared/types/permissions';
 import './App.css';
 
@@ -27,6 +28,7 @@ function App() {
     <ThemeProvider>
       <AuthProvider>
         <WorkspaceProvider>
+          <WorkspaceTheme />
           <BrowserRouter>
             <Routes>
               {/* Public routes */}

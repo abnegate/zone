@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { WorkspaceTheme } from '../../types';
 import { FONT_MAP, RADIUS_MAP, ThemeProvider, useTheme } from './ThemeContext';
 
@@ -123,7 +123,7 @@ describe('ThemeContext', () => {
   });
 
   describe('Workspace Theme', () => {
-    it('loads workspace theme from localStorage', () => {
+    it('ignores legacy unscoped workspace themes', () => {
       const storedTheme = {
         primary_color_light: '#007bff',
         primary_color_dark: '#0056b3',
@@ -142,7 +142,8 @@ describe('ThemeContext', () => {
         </ThemeProvider>
       );
 
-      expect(screen.getByTestId('workspace-theme')).toHaveTextContent('set');
+      expect(screen.getByTestId('workspace-theme')).toHaveTextContent('null');
+      expect(localStorage.getItem('manager_workspace_theme')).toBeNull();
     });
 
     it('handles invalid JSON in localStorage', () => {
@@ -158,7 +159,7 @@ describe('ThemeContext', () => {
       expect(screen.getByTestId('workspace-theme')).toHaveTextContent('null');
     });
 
-    it('sets workspace theme and persists to localStorage', () => {
+    it('keeps saved workspace themes scoped to the session', () => {
       localStorage.setItem('manager_theme', 'light');
 
       render(
@@ -172,7 +173,7 @@ describe('ThemeContext', () => {
       fireEvent.click(screen.getByText('Set Workspace Theme'));
 
       expect(screen.getByTestId('workspace-theme')).toHaveTextContent('set');
-      expect(localStorage.getItem('manager_workspace_theme')).not.toBeNull();
+      expect(localStorage.getItem('manager_workspace_theme')).toBeNull();
     });
 
     it('clears workspace theme', () => {
@@ -215,8 +216,8 @@ describe('ThemeContext', () => {
       fireEvent.click(screen.getByText('Set Workspace Theme'));
 
       const root = document.documentElement;
-      expect(root.style.getPropertyValue('--color-primary')).toBe('#ff0000');
-      expect(root.style.getPropertyValue('--font-family')).toBe(FONT_MAP.inter);
+      expect(root.style.getPropertyValue('--ui-accent')).toBe('#ff0000');
+      expect(root.style.getPropertyValue('--ui-font-body')).toBe(FONT_MAP.inter);
     });
 
     it('removes CSS variables when workspace theme is cleared', () => {
@@ -229,10 +230,10 @@ describe('ThemeContext', () => {
       );
 
       fireEvent.click(screen.getByText('Set Workspace Theme'));
-      expect(document.documentElement.style.getPropertyValue('--color-primary')).toBe('#ff0000');
+      expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('#ff0000');
 
       fireEvent.click(screen.getByText('Clear Workspace Theme'));
-      expect(document.documentElement.style.getPropertyValue('--color-primary')).toBe('');
+      expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('');
     });
 
     it('uses dark colors when in dark mode', () => {
@@ -246,7 +247,7 @@ describe('ThemeContext', () => {
 
       fireEvent.click(screen.getByText('Set Workspace Theme'));
 
-      expect(document.documentElement.style.getPropertyValue('--color-primary')).toBe('#cc0000');
+      expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('#cc0000');
     });
   });
 
@@ -281,5 +282,80 @@ describe('ThemeContext', () => {
       expect(RADIUS_MAP.medium.lg).toBe('0.75rem');
       expect(RADIUS_MAP.large.lg).toBe('1rem');
     });
+  });
+});
+
+describe('Workspace theme overrides', () => {
+  let context: ReturnType<typeof useTheme>;
+  function Capture() {
+    context = useTheme();
+    return null;
+  }
+  beforeEach(() => {
+    localStorage.clear();
+    localStorage.setItem('manager_theme', 'light');
+    document.documentElement.style.cssText = '';
+    render(
+      <ThemeProvider>
+        <Capture />
+      </ThemeProvider>
+    );
+  });
+
+  it('previews without changing saved state and restores saved appearance', () => {
+    const saved = { primary_color_light: '#123' } as WorkspaceTheme;
+    act(() => context.setWorkspaceTheme(saved));
+    act(() => context.previewWorkspaceTheme({ primary_color_light: '#fff' } as WorkspaceTheme));
+    expect(context.workspaceTheme).toEqual(saved);
+    expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('#ffffff');
+    expect(document.documentElement.style.getPropertyValue('--ui-accent-foreground')).toBe(
+      '#000000'
+    );
+    act(() => context.previewWorkspaceTheme(null));
+    expect(document.documentElement.style.getPropertyValue('--ui-accent')).toBe('#112233');
+    expect(document.documentElement.style.getPropertyValue('--ui-accent-foreground')).toBe(
+      '#ffffff'
+    );
+  });
+
+  it('applies secondary colors, both fonts, rem scaling and all radius sizes', () => {
+    act(() =>
+      context.setWorkspaceTheme({
+        secondary_color_light: '#abc',
+        font_family: 'nunito',
+        font_size_base: '18px',
+        border_radius: 'none',
+      } as WorkspaceTheme)
+    );
+    const style = document.documentElement.style;
+    expect(style.getPropertyValue('--ui-secondary')).toBe('#aabbcc');
+    expect(style.getPropertyValue('--ui-secondary-foreground')).toBe('#000000');
+    expect(style.getPropertyValue('--ui-font-body')).toBe(FONT_MAP.nunito);
+    expect(style.getPropertyValue('--ui-font-display')).toBe(FONT_MAP.nunito);
+    expect(style.fontSize).toBe('18px');
+    for (const size of ['sm', 'md', 'lg', 'xl', '2xl', '3xl'])
+      expect(style.getPropertyValue(`--ui-radius-${size}`)).toBe('0');
+    act(() => context.setWorkspaceTheme(null));
+    expect(style.cssText).toBe('');
+  });
+
+  it('restores native defaults for null and invalid stored values', () => {
+    act(() =>
+      context.setWorkspaceTheme({
+        primary_color_light: '#123',
+        font_family: 'inter',
+        border_radius: 'small',
+      } as WorkspaceTheme)
+    );
+    act(() =>
+      context.setWorkspaceTheme({
+        primary_color_light: 'red; color: black',
+        secondary_color_light: null,
+        font_family: 'missing',
+        font_size_base: '-5px',
+        border_radius: 'missing',
+      } as unknown as WorkspaceTheme)
+    );
+    expect(document.documentElement.style.cssText).toBe('');
   });
 });

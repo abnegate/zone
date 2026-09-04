@@ -1,9 +1,3 @@
-/* =============================================================================
-   Buttons - shadcn/ui defaults
-   Flat surfaces, one accent colour, contrast carried by --ui-text-inverse so
-   both themes stay legible. No gradients or glows.
-   ============================================================================= */
-
 .btn {
   display: inline-flex;
   align-items: center;
@@ -38,24 +32,25 @@
   pointer-events: none;
 }
 
-/* Variants ---------------------------------------------------------------- */
-
-.btn-primary {
+.btn-primary,
+.ui-btn-primary {
   background-color: var(--ui-accent);
-  color: var(--ui-text-inverse);
+  color: var(--ui-accent-foreground, var(--ui-text-inverse));
 }
 
 .btn-primary:hover:not(:disabled) {
   background-color: var(--ui-accent-hover);
 }
 
-.btn-secondary {
-  background-color: var(--ui-bg-surface);
-  color: var(--ui-text-primary);
+.btn-secondary,
+.ui-btn-secondary {
+  background-color: var(--ui-secondary, var(--ui-bg-surface));
+  color: var(--ui-secondary-foreground, var(--ui-text-primary));
 }
 
-.btn-secondary:hover:not(:disabled) {
-  background-color: var(--ui-bg-hover);
+.btn-secondary:hover:not(:disabled),
+.ui-btn-secondary:hover:not(:disabled) {
+  background-color: var(--ui-secondary-hover, var(--ui-bg-hover));
 }
 
 .btn-danger {
@@ -117,8 +112,6 @@
 .btn-link:hover:not(:disabled) {
   text-decoration: underline;
 }
-
-/* Sizes ------------------------------------------------------------------- */
 
 .btn-xs {
   height: 1.75rem;
@@ -184,8 +177,6 @@
   pointer-events: none;
 }
 
-/* Groups ------------------------------------------------------------------ */
-
 .btn-group {
   display: inline-flex;
   gap: var(--ui-space-2);
@@ -208,8 +199,6 @@
   border-top-right-radius: var(--ui-radius-md);
   border-bottom-right-radius: var(--ui-radius-md);
 }
-
-/* Spinner ----------------------------------------------------------------- */
 
 .btn-spinner {
   width: 0.875rem;
