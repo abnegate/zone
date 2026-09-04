@@ -1,6 +1,4 @@
-# =============================================================================
-# Stage 1: Build Rust application
-# =============================================================================
+# syntax=docker/dockerfile:1
 # glibc, not musl: zone_server's `local-embeddings` feature links ONNX Runtime,
 # which publishes no musl prebuilts.
 FROM rust:1.97.1-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c AS builder
@@ -13,34 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev g++ \
     && rm -rf /var/lib/apt/lists/*
 
-COPY runner/Cargo.toml runner/Cargo.lock ./runner/
-
-COPY runner/tool_runner/Cargo.toml ./runner/tool_runner/
-COPY runner/zone_runner/Cargo.toml ./runner/zone_runner/
-COPY runner/zone_core/Cargo.toml ./runner/zone_core/
-COPY runner/zone_context/Cargo.toml ./runner/zone_context/
-COPY runner/zone_server/Cargo.toml ./runner/zone_server/
-COPY runner/zone_cli/Cargo.toml ./runner/zone_cli/
-COPY runner/zone_installer/Cargo.toml ./runner/zone_installer/
-COPY runner/zone_desktop/Cargo.toml ./runner/zone_desktop/
-
-RUN mkdir -p runner/tool_runner/src runner/zone_runner/src runner/zone_core/src \
-    runner/zone_context/src runner/zone_server/src runner/zone_cli/src \
-    runner/zone_installer/src runner/zone_desktop/src && \
-    echo "fn main() {}" > runner/tool_runner/src/lib.rs && \
-    echo "fn main() {}" > runner/zone_runner/src/main.rs && \
-    echo "fn main() {}" > runner/zone_core/src/lib.rs && \
-    echo "fn main() {}" > runner/zone_context/src/lib.rs && \
-    echo "fn main() {}" > runner/zone_server/src/lib.rs && \
-    echo "fn main() {}" > runner/zone_server/src/main.rs && \
-    echo "fn main() {}" > runner/zone_cli/src/main.rs && \
-    echo "fn main() {}" > runner/zone_installer/src/main.rs && \
-    echo "fn main() {}" > runner/zone_desktop/src/lib.rs && \
-    echo "fn main() {}" > runner/zone_desktop/src/main.rs
-
 WORKDIR /build/runner
-RUN cargo build --release --package zone_server --package zone_runner 2>/dev/null || true
+ARG TARGETARCH
+ARG TARGETVARIANT
 
+COPY runner/Cargo.toml runner/Cargo.lock ./
 COPY runner/tool_runner ./tool_runner/
 COPY runner/zone_runner ./zone_runner/
 COPY runner/zone_core ./zone_core/
@@ -48,21 +23,24 @@ COPY runner/zone_context ./zone_context/
 COPY runner/zone_server ./zone_server/
 COPY runner/zone_cli ./zone_cli/
 COPY runner/zone_installer ./zone_installer/
+COPY runner/zone_desktop/Cargo.toml ./zone_desktop/
+COPY runner/zone_desktop/src ./zone_desktop/src/
 COPY runner/.sqlx ./.sqlx
 
-COPY runner/zone_server/migrations ./zone_server/migrations/
 # Packaged workflow is compiled into zone_server via include_str! from repo root.
 COPY comfyui/workflows /build/comfyui/workflows
 
-# Touch all source files to ensure Cargo detects changes from dummy files
-RUN find . -name "*.rs" -exec touch {} +
-
 ENV SQLX_OFFLINE=true
-RUN cargo build --release --package zone_server --package zone_runner
+# Source mtimes can precede cached artifacts after a checkout or file restore.
+# Refresh workspace sources so Cargo cannot reuse a stale application binary.
+RUN --mount=type=cache,id=zone-manager-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=zone-manager-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=zone-manager-target-${TARGETARCH}${TARGETVARIANT},target=/build/runner/target,sharing=locked \
+    find . -path './target' -prune -o -name '*.rs' -exec touch {} + \
+    && cargo build --locked --release --package zone_server --package zone_runner \
+    && mkdir -p /build/bin \
+    && cp target/release/zone-server target/release/zone-runner /build/bin/
 
-# =============================================================================
-# Stage 2: Runtime
-# =============================================================================
 # Must match the builder's Debian release so the glibc the binaries were
 # linked against is present. libstdc++6 backs the statically linked ONNX Runtime.
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
@@ -76,8 +54,8 @@ RUN groupadd --system zone \
 
 WORKDIR /app
 
-COPY --from=builder /build/runner/target/release/zone-server /app/zone-server
-COPY --from=builder /build/runner/target/release/zone-runner /app/zone-runner
+COPY --from=builder /build/bin/zone-server /app/zone-server
+COPY --from=builder /build/bin/zone-runner /app/zone-runner
 COPY --from=builder /build/runner/zone_server/migrations /app/migrations
 COPY --from=builder /build/comfyui/workflows /app/comfyui/workflows
 

@@ -3,7 +3,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { useAuth } from '../../../features/auth';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { useModels } from '../../models';
-import { AuthenticatedImage, MessageContent, ToolTrace } from '../components';
+import { AuthenticatedImage, Generation, MessageContent, ToolTrace } from '../components';
 import { useChat, useChatSearch, useChats } from '../hooks';
 import type { ChatSearchResult } from '../types';
 import {
@@ -674,9 +674,7 @@ export default function ChatsPage() {
                 </div>
               ) : null}
               {streaming || chatStatus ? (
-                <div className="message-status" role="status">
-                  {chatStatus || 'Generating response…'}
-                </div>
+                <Generation key={selectedChatId} status={chatStatus || 'Generating response…'} />
               ) : null}
               <div ref={messagesEndRef} />
             </div>

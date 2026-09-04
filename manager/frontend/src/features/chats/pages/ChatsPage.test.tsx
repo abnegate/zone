@@ -821,6 +821,40 @@ describe('ChatsPage', () => {
       return input;
     }
 
+    it('keeps elapsed time through status changes and resets it for the next request', async () => {
+      const input = await sendPrompt();
+      expect(screen.getByRole('timer')).toHaveTextContent('0:00');
+      expect(screen.getByRole('status').contains(screen.getByRole('timer'))).toBe(false);
+      await waitFor(() => expect(screen.getByRole('timer')).toHaveTextContent('0:01'), {
+        timeout: 2500,
+      });
+      act(() => socket.emit({ type: 'status', message: 'Generating image…' }));
+      expect(screen.getByRole('timer')).toHaveTextContent('0:01');
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      expect(screen.getByRole('timer')).toHaveTextContent('0:01');
+      act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
+      expect(screen.queryByRole('timer')).not.toBeInTheDocument();
+      fireEvent.change(input, { target: { value: 'Generate another image' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
+      act(() => socket.emit({ type: 'error', message: 'Generation failed' }));
+      expect(screen.queryByRole('timer')).not.toBeInTheDocument();
+    });
+
+    it('removes elapsed feedback when switching chats and starts fresh on return', async () => {
+      await sendPrompt();
+      await waitFor(() => expect(screen.getByRole('timer')).toHaveTextContent('0:01'), {
+        timeout: 2500,
+      });
+      fireEvent.click(screen.getByText('Chat 2'));
+      expect(screen.queryByRole('timer')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByText('Chat 1'));
+      const input = await screen.findByPlaceholderText('Type a message, or drop a file...');
+      fireEvent.change(input, { target: { value: 'New image' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
+    });
+
     it('keeps pending feedback and blocks another send until the response ends', async () => {
       const input = await sendPrompt();
       expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
@@ -886,6 +920,7 @@ describe('ChatsPage', () => {
       expect(mockWsSend).toHaveBeenLastCalledWith(JSON.stringify({ type: 'cancel' }));
       expect(screen.getByRole('status')).toBeInTheDocument();
       act(() => socket.emit({ type: 'cancelled', message_id: null }));
+      expect(screen.queryByRole('timer')).not.toBeInTheDocument();
       expect(screen.queryByText('Generate an image of a rooster')).not.toBeInTheDocument();
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
