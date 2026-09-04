@@ -24,7 +24,7 @@ const LOADING_ROW_HEIGHT = 56;
 function browseItemHeight(model: BrowseModel): number {
   let height = 76;
   if (model.description) height += 40;
-  if (hasUseCases(model) || model.downloads) height += 28;
+  if (hasUseCases(model) || model.downloads != null) height += 28;
   return height;
 }
 
@@ -90,14 +90,14 @@ function BrowseRow({
             </div>
           )}
           {model.description && <p className="browse-description">{model.description}</p>}
-          {(useCases.length > 0 || model.downloads) && (
+          {(useCases.length > 0 || model.downloads != null) && (
             <div className="browse-tags">
               {useCases.slice(0, 4).map((useCase) => (
                 <span key={useCase} className="tag">
                   {useCase}
                 </span>
               ))}
-              {model.downloads ? (
+              {model.downloads != null ? (
                 <span className="browse-downloads">
                   {formatNumber(model.downloads)}
                   {model.source === 'ollama' ? ' pulls' : ' downloads'}

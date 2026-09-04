@@ -103,6 +103,26 @@ describe('VirtualBrowseList', () => {
     expect(screen.getByText('28.7K downloads')).toBeInTheDocument();
   });
 
+  it('renders zero downloads with source-aware labels', () => {
+    render(
+      <VirtualBrowseList
+        models={[
+          { name: 'ollama-zero', downloads: 0, source: 'ollama' },
+          { name: 'huggingface-zero', downloads: 0, source: 'huggingface' },
+        ]}
+        onItemClick={onItemClick}
+        onInstall={onInstall}
+        hasMore={false}
+        loadingMore={false}
+        onLoadMore={onLoadMore}
+      />
+    );
+
+    expect(screen.getByText('0 pulls')).toBeInTheDocument();
+    expect(screen.getByText('0 downloads')).toBeInTheDocument();
+    expect(document.querySelectorAll('.browse-tags')).toHaveLength(2);
+  });
+
   it('prefers display name when present', () => {
     render(
       <VirtualBrowseList
