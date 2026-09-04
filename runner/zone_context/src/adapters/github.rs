@@ -907,49 +907,57 @@ impl SourceAdapter for GitHubAdapter {
                     max_tokens
                 ));
                 let mut budget = TokenBudget::new(max_tokens);
+                let paths_with_sizes: Vec<(String, Option<usize>)> = files
+                    .iter()
+                    .map(|entry| (entry.path.clone(), entry.size))
+                    .collect();
+                let prioritized = prioritize_paths(&paths_with_sizes);
+                let files_by_path: HashMap<&str, &&GitHubTreeEntry> = files
+                    .iter()
+                    .map(|entry| (entry.path.as_str(), entry))
+                    .collect();
 
-                for (idx, entry) in files.iter().enumerate() {
-                    // Estimate tokens from size
+                for (idx, score) in prioritized.iter().enumerate() {
+                    let Some(entry) = files_by_path.get(score.path.as_str()) else {
+                        continue;
+                    };
                     let estimated_tokens = estimate_tokens_from_bytes(entry.size.unwrap_or(0));
 
-                    // Check if it fits in budget
-                    if budget.can_fit(estimated_tokens) {
-                        let content_response = self
-                            .get_file_content(
-                                &config.owner,
-                                &config.repo,
-                                &entry.path,
-                                &branch,
-                                config.token.as_deref(),
-                            )
-                            .await?;
-
-                        let content = if let Some(ref encoded) = content_response.content {
-                            Some(Self::decode_content(encoded)?)
-                        } else {
-                            None
-                        };
-
-                        let item = Self::create_content_item(
-                            source.id,
-                            &config.owner,
-                            &config.repo,
-                            &branch,
-                            &entry.path,
-                            &entry.sha,
-                            entry.size.unwrap_or(0),
-                            content,
-                            false,
-                        )?;
-
-                        budget.try_add(&entry.path, item.token_count);
-                        progress.on_item(&item);
-                        result.add_item(item);
-                    } else {
-                        // Budget exhausted
+                    if !budget.can_fit(estimated_tokens) {
                         break;
                     }
 
+                    let content_response = self
+                        .get_file_content(
+                            &config.owner,
+                            &config.repo,
+                            &entry.path,
+                            &branch,
+                            config.token.as_deref(),
+                        )
+                        .await?;
+
+                    let content = if let Some(ref encoded) = content_response.content {
+                        Some(Self::decode_content(encoded)?)
+                    } else {
+                        None
+                    };
+
+                    let item = Self::create_content_item(
+                        source.id,
+                        &config.owner,
+                        &config.repo,
+                        &branch,
+                        &entry.path,
+                        &entry.sha,
+                        entry.size.unwrap_or(0),
+                        content,
+                        false,
+                    )?;
+
+                    budget.try_add(&entry.path, item.token_count);
+                    progress.on_item(&item);
+                    result.add_item(item);
                     progress.on_progress(idx + 1, Some(total_files));
                 }
             }

@@ -357,6 +357,7 @@ pub async fn gather(
             workspace_id,
             source_ids,
             force_refresh,
+            false,
         ))
         .catch_unwind()
         .await;

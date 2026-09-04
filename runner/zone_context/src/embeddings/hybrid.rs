@@ -157,10 +157,13 @@ pub async fn hybrid_search(
     )
     .await?;
 
+    let query_embedding = crate::embeddings::align_vector(query_embedding)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
     // 2. Perform semantic search
     let semantic_results = semantic_search(
         pool,
-        query_embedding,
+        &query_embedding,
         fetch_limit,
         workspace_id,
         source_ids,
@@ -455,9 +458,12 @@ pub async fn semantic_only_search(
     let workspace_id = filters.as_ref().and_then(|f| f.workspace_id);
     let source_ids = filters.as_ref().and_then(|f| f.source_ids.as_deref());
 
+    let query_embedding = crate::embeddings::align_vector(query_embedding)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
     let results = semantic_search(
         pool,
-        query_embedding,
+        &query_embedding,
         limit,
         workspace_id,
         source_ids,

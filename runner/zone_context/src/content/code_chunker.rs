@@ -26,6 +26,12 @@ const MAX_SYMBOL_TOKENS: usize = 512;
 /// Import block budget (cap imports included in chunks)
 const MAX_IMPORT_TOKENS: usize = 100;
 
+/// Split a container into skeleton + children once it is larger than this
+const LARGE_CONTAINER_LINES: usize = 100;
+
+/// Drop uncovered top-level blocks smaller than this
+const MIN_TOP_LEVEL_CHARS: usize = 15;
+
 // ============================================================================
 // Language Support
 // ============================================================================
@@ -37,6 +43,7 @@ pub enum CodeLanguage {
     Python,
     JavaScript,
     TypeScript,
+    Tsx,
     Go,
     Java,
     C,
@@ -58,7 +65,8 @@ impl CodeLanguage {
             "rs" => Self::Rust,
             "py" | "pyw" | "pyi" => Self::Python,
             "js" | "mjs" | "cjs" | "jsx" => Self::JavaScript,
-            "ts" | "mts" | "cts" | "tsx" => Self::TypeScript,
+            "ts" | "mts" | "cts" => Self::TypeScript,
+            "tsx" => Self::Tsx,
             "go" => Self::Go,
             "java" => Self::Java,
             "c" | "h" => Self::C,
@@ -83,6 +91,8 @@ impl CodeLanguage {
             Self::Python
         } else if ct.contains("javascript") {
             Self::JavaScript
+        } else if ct.contains("tsx") {
+            Self::Tsx
         } else if ct.contains("typescript") {
             Self::TypeScript
         } else if ct.contains("golang") || ct.contains("/go") {
@@ -119,6 +129,9 @@ impl CodeLanguage {
             Self::Python => Some(tree_sitter_python::LANGUAGE.into()),
             Self::JavaScript => Some(tree_sitter_javascript::LANGUAGE.into()),
             Self::TypeScript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+            Self::Tsx => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
+            Self::Ruby => Some(tree_sitter_ruby::LANGUAGE.into()),
+            Self::Php => Some(tree_sitter_php::LANGUAGE_PHP.into()),
             Self::Go => Some(tree_sitter_go::LANGUAGE.into()),
             Self::Java => Some(tree_sitter_java::LANGUAGE.into()),
             Self::C => Some(tree_sitter_c::LANGUAGE.into()),
@@ -128,7 +141,48 @@ impl CodeLanguage {
             Self::Sql => Some(tree_sitter_sequel::LANGUAGE.into()),
             Self::Json => Some(tree_sitter_json::LANGUAGE.into()),
             Self::Yaml => Some(tree_sitter_yaml::LANGUAGE.into()),
-            Self::Ruby | Self::Php | Self::Unknown => None,
+            Self::Unknown => None,
+        }
+    }
+
+    /// Stable language label for embedding prefixes
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
+            Self::Go => "go",
+            Self::Java => "java",
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::Kotlin => "kotlin",
+            Self::Swift => "swift",
+            Self::Sql => "sql",
+            Self::Json => "json",
+            Self::Yaml => "yaml",
+            Self::Ruby => "ruby",
+            Self::Php => "php",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn is_container_node(self, node_type: &str) -> bool {
+        match self {
+            Self::Rust => matches!(node_type, "impl_item" | "mod_item" | "trait_item"),
+            Self::Python => matches!(node_type, "class_definition"),
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                matches!(node_type, "class_declaration")
+            }
+            Self::Java | Self::Kotlin | Self::Php => matches!(node_type, "class_declaration"),
+            Self::Cpp => matches!(node_type, "class_specifier" | "namespace_definition"),
+            Self::Ruby => matches!(node_type, "class" | "module"),
+            Self::Swift => matches!(
+                node_type,
+                "class_declaration" | "protocol_declaration" | "extension_declaration"
+            ),
+            _ => false,
         }
     }
 
@@ -152,7 +206,7 @@ impl CodeLanguage {
                 "class_definition",
                 "decorated_definition",
             ],
-            Self::JavaScript | Self::TypeScript => &[
+            Self::JavaScript | Self::TypeScript | Self::Tsx => &[
                 "function_declaration",
                 "class_declaration",
                 "method_definition",
@@ -213,7 +267,16 @@ impl CodeLanguage {
             ],
             Self::Json => &["object", "array"],
             Self::Yaml => &["block_mapping", "block_sequence"],
-            Self::Ruby | Self::Php | Self::Unknown => &[],
+            Self::Ruby => &["method", "singleton_method", "class", "module"],
+            Self::Php => &[
+                "function_definition",
+                "method_declaration",
+                "class_declaration",
+                "interface_declaration",
+                "trait_declaration",
+                "enum_declaration",
+            ],
+            Self::Unknown => &[],
         }
     }
 
@@ -222,7 +285,9 @@ impl CodeLanguage {
         match self {
             Self::Rust => &["use_declaration", "extern_crate_declaration"],
             Self::Python => &["import_statement", "import_from_statement"],
-            Self::JavaScript | Self::TypeScript => &["import_statement", "import_declaration"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                &["import_statement", "import_declaration"]
+            }
             Self::Go => &["import_declaration", "import_spec"],
             Self::Java => &["import_declaration", "package_declaration"],
             Self::C | Self::Cpp => &["preproc_include", "preproc_import"],
@@ -230,7 +295,9 @@ impl CodeLanguage {
             Self::Swift => &["import_declaration"],
             Self::Sql => &[],
             Self::Json | Self::Yaml => &[],
-            Self::Ruby | Self::Php | Self::Unknown => &[],
+            Self::Ruby => &["identifier"],
+            Self::Php => &["namespace_use_declaration", "namespace_definition"],
+            Self::Unknown => &[],
         }
     }
 
@@ -239,7 +306,7 @@ impl CodeLanguage {
         match self {
             Self::Rust => &["line_comment", "block_comment", "doc_comment"],
             Self::Python => &["comment", "string"], // Python uses docstrings
-            Self::JavaScript | Self::TypeScript => &["comment", "block_comment"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => &["comment", "block_comment"],
             Self::Go => &["comment"],
             Self::Java => &["line_comment", "block_comment"],
             Self::C | Self::Cpp => &["comment"],
@@ -255,7 +322,9 @@ impl CodeLanguage {
         match self {
             Self::Rust => &["visibility_modifier"],
             Self::Python => &[], // Python uses naming conventions
-            Self::JavaScript | Self::TypeScript => &["accessibility_modifier", "export"],
+            Self::JavaScript | Self::TypeScript | Self::Tsx => {
+                &["accessibility_modifier", "export"]
+            }
             Self::Go => &[], // Go uses capitalization
             Self::Java => &["modifiers"],
             Self::C | Self::Cpp => &["storage_class_specifier", "type_qualifier"],
@@ -295,6 +364,7 @@ pub enum SymbolKind {
     Enum,
     Interface,
     Trait,
+    Impl,
     Module,
     Constant,
     Variable,
@@ -309,7 +379,7 @@ impl SymbolKind {
         match language {
             CodeLanguage::Rust => match node_type {
                 "function_item" => Self::Function,
-                "impl_item" => Self::Struct,
+                "impl_item" => Self::Impl,
                 "struct_item" => Self::Struct,
                 "enum_item" => Self::Enum,
                 "mod_item" => Self::Module,
@@ -326,12 +396,29 @@ impl SymbolKind {
                 "import_statement" | "import_from_statement" => Self::Import,
                 _ => Self::Other,
             },
-            CodeLanguage::JavaScript | CodeLanguage::TypeScript => match node_type {
-                "function_declaration" | "arrow_function" => Self::Function,
+            CodeLanguage::JavaScript | CodeLanguage::TypeScript | CodeLanguage::Tsx => {
+                match node_type {
+                    "function_declaration" | "arrow_function" => Self::Function,
+                    "class_declaration" => Self::Class,
+                    "method_definition" => Self::Method,
+                    "interface_declaration" => Self::Interface,
+                    "import_statement" => Self::Import,
+                    _ => Self::Other,
+                }
+            }
+            CodeLanguage::Ruby => match node_type {
+                "method" | "singleton_method" => Self::Function,
+                "class" => Self::Class,
+                "module" => Self::Module,
+                _ => Self::Other,
+            },
+            CodeLanguage::Php => match node_type {
+                "function_definition" => Self::Function,
+                "method_declaration" => Self::Method,
                 "class_declaration" => Self::Class,
-                "method_definition" => Self::Method,
                 "interface_declaration" => Self::Interface,
-                "import_statement" => Self::Import,
+                "trait_declaration" => Self::Trait,
+                "enum_declaration" => Self::Enum,
                 _ => Self::Other,
             },
             CodeLanguage::Go => match node_type {
@@ -538,17 +625,17 @@ pub fn chunk_code_with_config(
     language: CodeLanguage,
     config: &ChunkConfig,
 ) -> Vec<CodeChunk> {
-    // Check for generated/vendored/minified content
-    if is_likely_generated_or_minified(content) {
+    if is_likely_generated_or_minified(content)
+        || config.file_path.as_deref().is_some_and(is_generated_path)
+    {
         tracing::debug!("Content appears generated/minified, using simple chunking");
-        return fallback_to_text_chunks(content, config.max_tokens, true);
+        return fallback_to_text_chunks(content, config, true);
     }
 
-    // Try to parse with tree-sitter
     let tree = match parse_code(content, language) {
         Some(tree) => tree,
         None => {
-            return fallback_to_text_chunks(content, config.max_tokens, false);
+            return fallback_to_text_chunks(content, config, false);
         }
     };
 
@@ -591,17 +678,25 @@ pub fn chunk_code_with_config(
             && let Some(api_chunk) = build_api_surface_chunk(&public_symbols, config, language)
             && !seen_hashes.contains(&api_chunk.metadata.content_hash)
         {
+            seen_hashes.insert(api_chunk.metadata.content_hash.clone());
             chunks.push(api_chunk);
         }
     }
 
-    // Re-index sequentially
-    for (idx, chunk) in chunks.iter_mut().enumerate() {
-        chunk.index = idx;
+    let uncovered = build_uncovered_chunks(content, &chunks, config, language);
+    for chunk in uncovered {
+        if !seen_hashes.contains(&chunk.metadata.content_hash) {
+            seen_hashes.insert(chunk.metadata.content_hash.clone());
+            chunks.push(chunk);
+        }
     }
 
     if chunks.is_empty() {
-        return fallback_to_text_chunks(content, config.max_tokens, false);
+        return fallback_to_text_chunks(content, config, false);
+    }
+
+    for (idx, chunk) in chunks.iter_mut().enumerate() {
+        chunk.index = idx;
     }
 
     chunks
@@ -748,6 +843,13 @@ fn extract_symbols(
 
             symbols.push(symbol);
         } else {
+            // Wrapper nodes (declaration_list, export bodies) must still be walked
+            symbols.extend(extract_symbols(
+                &current,
+                source,
+                language,
+                parent_names.clone(),
+            ));
             prev_comment = None;
         }
 
@@ -761,6 +863,14 @@ fn extract_symbols(
 
 /// Extract symbol name
 fn extract_name(node: &Node, source: &[u8], language: CodeLanguage) -> Option<String> {
+    if language == CodeLanguage::Rust
+        && node.kind() == "impl_item"
+        && let Some(type_node) = node.child_by_field_name("type")
+        && let Ok(text) = type_node.utf8_text(source)
+    {
+        return Some(text.to_string());
+    }
+
     // Try common field names
     for field in &["name", "declarator", "identifier"] {
         if let Some(name_node) = node.child_by_field_name(field) {
@@ -864,7 +974,7 @@ fn extract_signature(node: &Node, source: &[u8], language: CodeLanguage) -> Stri
             }
             full_text.lines().next().unwrap_or("").to_string()
         }
-        CodeLanguage::JavaScript | CodeLanguage::TypeScript => {
+        CodeLanguage::JavaScript | CodeLanguage::TypeScript | CodeLanguage::Tsx => {
             if let Some(brace_pos) = full_text.find('{') {
                 return full_text[..brace_pos].trim().to_string();
             }
@@ -996,7 +1106,7 @@ fn is_keyword(ident: &str, language: CodeLanguage) -> bool {
             "try", "except", "finally", "with", "lambda", "yield", "True", "False", "None", "and",
             "or", "not", "in", "is", "async", "await", "self",
         ],
-        CodeLanguage::JavaScript | CodeLanguage::TypeScript => &[
+        CodeLanguage::JavaScript | CodeLanguage::TypeScript | CodeLanguage::Tsx => &[
             "function",
             "const",
             "let",
@@ -1172,14 +1282,20 @@ fn process_symbols(
 
     for symbol in symbols {
         let token_count = symbol.token_count();
+        let line_count = symbol.body.lines().count();
+        let is_container = language.is_container_node(&symbol.node_type);
+        let large_container = is_container
+            && !symbol.nested_symbols.is_empty()
+            && (token_count > config.max_tokens || line_count > LARGE_CONTAINER_LINES);
 
-        if token_count < config.min_tokens {
-            // Rule 4: Merge small symbols with same-scope siblings
+        let kind = classify_symbol_kind(symbol, language);
+        let keep_named_callable =
+            matches!(kind, SymbolKind::Function | SymbolKind::Method) && symbol.name.is_some();
+        if token_count < config.min_tokens && !large_container && !keep_named_callable {
             pending_small.push(symbol);
             continue;
         }
 
-        // Flush pending small symbols first
         if !pending_small.is_empty() {
             chunks.extend(merge_small_symbols(
                 &pending_small,
@@ -1190,16 +1306,27 @@ fn process_symbols(
             pending_small.clear();
         }
 
-        if token_count <= config.max_tokens {
-            // Symbol fits in one chunk
-            chunks.push(build_body_chunk(symbol, config, language, file_context));
-
-            // Generate skeleton view (Rule 10)
+        if large_container {
             if config.generate_skeletons {
                 chunks.push(build_skeleton_chunk(symbol, config, language));
             }
+            chunks.extend(process_symbols(
+                &symbol.nested_symbols,
+                source,
+                config,
+                language,
+                file_context,
+            ));
+            continue;
+        }
+
+        if token_count <= config.max_tokens {
+            chunks.push(build_body_chunk(symbol, config, language, file_context));
+
+            if config.generate_skeletons && !is_container {
+                chunks.push(build_skeleton_chunk(symbol, config, language));
+            }
         } else {
-            // Rule 3: Split large symbol
             chunks.extend(split_large_symbol(
                 symbol,
                 source,
@@ -1209,7 +1336,6 @@ fn process_symbols(
             ));
         }
 
-        // Process nested symbols recursively
         if !symbol.nested_symbols.is_empty() {
             chunks.extend(process_symbols(
                 &symbol.nested_symbols,
@@ -1279,7 +1405,7 @@ fn build_body_chunk(
         metadata: ChunkMetadata {
             path: config.file_path.clone(),
             symbol: symbol.name.clone(),
-            kind: Some(SymbolKind::from_node_type(&symbol.node_type, language)),
+            kind: Some(classify_symbol_kind(symbol, language)),
             visibility: symbol.visibility.clone(),
             parents: symbol.parent_names.clone(),
             module: None,
@@ -1350,7 +1476,7 @@ fn build_skeleton_chunk(
         metadata: ChunkMetadata {
             path: config.file_path.clone(),
             symbol: symbol.name.clone(),
-            kind: Some(SymbolKind::from_node_type(&symbol.node_type, language)),
+            kind: Some(classify_symbol_kind(symbol, language)),
             visibility: symbol.visibility.clone(),
             parents: symbol.parent_names.clone(),
             module: None,
@@ -1736,6 +1862,15 @@ fn split_large_symbol(
 // Utility Functions
 // ============================================================================
 
+fn classify_symbol_kind(symbol: &ParsedSymbol, language: CodeLanguage) -> SymbolKind {
+    let kind = SymbolKind::from_node_type(&symbol.node_type, language);
+    if !symbol.parent_names.is_empty() && kind == SymbolKind::Function {
+        SymbolKind::Method
+    } else {
+        kind
+    }
+}
+
 /// Format chunk header (Rule 20)
 fn format_chunk_header(
     symbol: &ParsedSymbol,
@@ -1745,8 +1880,10 @@ fn format_chunk_header(
     let mut header = String::new();
 
     if let Some(ref path) = config.file_path {
+        header.push_str(&format!("File: {}\n", path));
         header.push_str(&format!("path: {}\n", path));
     }
+    header.push_str(&format!("Language: {}\n", language.as_str()));
 
     if let Some(ref name) = symbol.name {
         let parent_str = if symbol.parent_names.is_empty() {
@@ -1755,13 +1892,19 @@ fn format_chunk_header(
             format!("{}.", symbol.parent_names.join("."))
         };
         header.push_str(&format!("symbol: {}{}\n", parent_str, name));
+        header.push_str(&format!("Symbol: {}{}\n", parent_str, name));
     }
 
-    let kind = SymbolKind::from_node_type(&symbol.node_type, language);
+    let kind = classify_symbol_kind(symbol, language);
     header.push_str(&format!("kind: {:?}\n", kind));
 
     if !symbol.parent_names.is_empty() {
+        header.push_str(&format!("Parent: {}\n", symbol.parent_names.join(".")));
         header.push_str(&format!("parents: {}\n", symbol.parent_names.join(".")));
+    }
+
+    if !symbol.signature.is_empty() {
+        header.push_str(&format!("Signature: {}\n", symbol.signature.trim()));
     }
 
     header
@@ -1845,6 +1988,16 @@ fn get_relevant_imports(body: &str, all_imports: &str, config: &ChunkConfig) -> 
         }
     }
 
+    if relevant.is_empty() {
+        for line in all_imports.lines() {
+            if tokens >= config.max_import_tokens {
+                break;
+            }
+            tokens += estimate_tokens(line);
+            relevant.push(line);
+        }
+    }
+
     relevant.join("\n")
 }
 
@@ -1860,7 +2013,7 @@ fn is_test_code(code: &str, language: CodeLanguage) -> bool {
                 || code.contains("unittest")
                 || code.contains("pytest")
         }
-        CodeLanguage::JavaScript | CodeLanguage::TypeScript => {
+        CodeLanguage::JavaScript | CodeLanguage::TypeScript | CodeLanguage::Tsx => {
             code.contains("describe(")
                 || code.contains("it(")
                 || code.contains("test(")
@@ -1923,33 +2076,176 @@ fn compute_hash(content: &str) -> String {
         .collect()
 }
 
-/// Fallback to simple text chunking
-fn fallback_to_text_chunks(content: &str, max_tokens: usize, is_generated: bool) -> Vec<CodeChunk> {
-    let overlap = max_tokens / 10;
-    let text_chunks = chunk_text(content, max_tokens, overlap);
+fn is_generated_path(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("/generated/")
+        || lower.contains("\\generated\\")
+        || lower.contains("/vendor/")
+        || lower.ends_with(".pb.go")
+        || lower.contains(".min.")
+}
 
-    text_chunks
-        .into_iter()
-        .map(|tc| CodeChunk {
-            index: tc.index,
+fn build_uncovered_chunks(
+    content: &str,
+    chunks: &[CodeChunk],
+    config: &ChunkConfig,
+    language: CodeLanguage,
+) -> Vec<CodeChunk> {
+    let line_starts = line_start_offsets(content);
+    if line_starts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut covered = vec![false; line_starts.len()];
+    for chunk in chunks {
+        if matches!(
+            chunk.chunk_type,
+            CodeChunkType::Skeleton | CodeChunkType::ApiSurface
+        ) {
+            continue;
+        }
+        let start_line = byte_to_line(&line_starts, chunk.start_offset);
+        let end_line = byte_to_line(&line_starts, chunk.end_offset.saturating_sub(1));
+        for line in start_line..=end_line.min(covered.len().saturating_sub(1)) {
+            covered[line] = true;
+        }
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    let mut block_start: Option<usize> = None;
+    let mut blank_run = 0usize;
+
+    for (index, line) in lines.iter().enumerate() {
+        if covered.get(index).copied().unwrap_or(false) {
+            if let Some(start) = block_start.take() {
+                blocks.push((start, index));
+            }
+            blank_run = 0;
+            continue;
+        }
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run >= 2
+                && let Some(start) = block_start.take()
+            {
+                blocks.push((start, index.saturating_sub(1)));
+            }
+            continue;
+        }
+        blank_run = 0;
+        if block_start.is_none() {
+            block_start = Some(index);
+        }
+    }
+    if let Some(start) = block_start {
+        blocks.push((start, lines.len()));
+    }
+
+    let mut uncovered = Vec::new();
+    for (start_line, end_line) in blocks {
+        let text = lines[start_line..end_line].join("\n");
+        if text.trim().len() < MIN_TOP_LEVEL_CHARS {
+            continue;
+        }
+        let start_offset = *line_starts.get(start_line).unwrap_or(&0);
+        let end_offset = if end_line < line_starts.len() {
+            line_starts[end_line]
+        } else {
+            content.len()
+        };
+        let mut chunk_text = String::new();
+        if let Some(ref path) = config.file_path {
+            chunk_text.push_str(&format!("File: {path}\npath: {path}\n"));
+        }
+        chunk_text.push_str(&format!(
+            "Language: {}\nkind: top_level\n\n",
+            language.as_str()
+        ));
+        chunk_text.push_str(&text);
+        let content_hash = compute_hash(&chunk_text);
+        uncovered.push(CodeChunk {
+            index: 0,
             chunk_type: CodeChunkType::TopLevel,
-            text: tc.text.clone(),
-            start_offset: tc.start_offset,
-            end_offset: tc.end_offset,
+            text: chunk_text,
+            start_offset,
+            end_offset,
             metadata: ChunkMetadata {
-                path: None,
+                path: config.file_path.clone(),
                 symbol: None,
-                kind: None,
+                kind: Some(SymbolKind::Other),
                 visibility: Visibility::Private,
                 parents: Vec::new(),
                 module: None,
                 is_test: false,
-                is_generated,
-                start_byte: tc.start_offset,
-                end_byte: tc.end_offset,
-                content_hash: compute_hash(&tc.text),
+                is_generated: false,
+                start_byte: start_offset,
+                end_byte: end_offset,
+                content_hash,
             },
             identifiers: IdentifierBag::default(),
+        });
+    }
+
+    uncovered
+}
+
+fn line_start_offsets(content: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (index, byte) in content.bytes().enumerate() {
+        if byte == b'\n' && index + 1 < content.len() {
+            starts.push(index + 1);
+        }
+    }
+    starts
+}
+
+fn byte_to_line(line_starts: &[usize], byte: usize) -> usize {
+    match line_starts.binary_search(&byte) {
+        Ok(index) => index,
+        Err(index) => index.saturating_sub(1),
+    }
+}
+
+/// Fallback to simple text chunking
+fn fallback_to_text_chunks(
+    content: &str,
+    config: &ChunkConfig,
+    is_generated: bool,
+) -> Vec<CodeChunk> {
+    let overlap = config.max_tokens / 10;
+    let text_chunks = chunk_text(content, config.max_tokens, overlap);
+
+    text_chunks
+        .into_iter()
+        .map(|tc| {
+            let mut text = String::new();
+            if let Some(ref path) = config.file_path {
+                text.push_str(&format!("File: {path}\npath: {path}\n"));
+            }
+            text.push_str(&tc.text);
+            let content_hash = compute_hash(&text);
+            CodeChunk {
+                index: tc.index,
+                chunk_type: CodeChunkType::TopLevel,
+                text,
+                start_offset: tc.start_offset,
+                end_offset: tc.end_offset,
+                metadata: ChunkMetadata {
+                    path: config.file_path.clone(),
+                    symbol: None,
+                    kind: None,
+                    visibility: Visibility::Private,
+                    parents: Vec::new(),
+                    module: None,
+                    is_test: false,
+                    is_generated,
+                    start_byte: tc.start_offset,
+                    end_byte: tc.end_offset,
+                    content_hash,
+                },
+                identifiers: IdentifierBag::default(),
+            }
         })
         .collect()
 }
@@ -1978,6 +2274,9 @@ mod tests {
         assert_eq!(CodeLanguage::from_extension("py"), CodeLanguage::Python);
         assert_eq!(CodeLanguage::from_extension("js"), CodeLanguage::JavaScript);
         assert_eq!(CodeLanguage::from_extension("ts"), CodeLanguage::TypeScript);
+        assert_eq!(CodeLanguage::from_extension("tsx"), CodeLanguage::Tsx);
+        assert_eq!(CodeLanguage::from_extension("rb"), CodeLanguage::Ruby);
+        assert_eq!(CodeLanguage::from_extension("php"), CodeLanguage::Php);
         assert_eq!(CodeLanguage::from_extension("go"), CodeLanguage::Go);
         assert_eq!(CodeLanguage::from_extension("java"), CodeLanguage::Java);
         assert_eq!(CodeLanguage::from_extension("kt"), CodeLanguage::Kotlin);
@@ -2373,5 +2672,104 @@ fn same() {}
             );
             hashes.insert(chunk.metadata.content_hash.clone());
         }
+    }
+
+    #[test]
+    fn test_impl_methods_are_extracted() {
+        let code = r#"
+pub struct Point {
+    x: i32,
+}
+
+impl Point {
+    pub fn new(x: i32) -> Self {
+        Self { x }
+    }
+
+    pub fn magnitude(&self) -> i32 {
+        self.x
+    }
+}
+
+fn standalone() {}
+"#;
+        let chunks = chunk_code_with_config(
+            code,
+            CodeLanguage::Rust,
+            &ChunkConfig {
+                file_path: Some("src/point.rs".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let symbols: Vec<_> = chunks
+            .iter()
+            .filter_map(|chunk| chunk.metadata.symbol.as_deref())
+            .collect();
+        assert!(
+            symbols
+                .iter()
+                .any(|name| name.contains("new") || *name == "new"),
+            "impl methods should be extracted, got {symbols:?}"
+        );
+        assert!(
+            chunks.iter().any(|chunk| {
+                chunk.text.contains("Language: rust") && chunk.text.contains("src/point.rs")
+            }),
+            "embedding text should include path and language"
+        );
+    }
+
+    #[test]
+    fn test_uncovered_top_level_statements() {
+        let code = r#"
+fn ready() {}
+
+let startup = initialize();
+run(startup);
+"#;
+        let chunks = chunk_code(code, CodeLanguage::Rust, 512);
+        let top_level: Vec<_> = chunks
+            .iter()
+            .filter(|chunk| chunk.chunk_type == CodeChunkType::TopLevel)
+            .collect();
+        assert!(
+            top_level
+                .iter()
+                .any(|chunk| chunk.text.contains("initialize")),
+            "uncovered executable lines should become top-level chunks: {top_level:?}"
+        );
+    }
+
+    #[test]
+    fn test_tsx_and_php_are_parsed() {
+        let tsx = r#"
+export function Hello({ name }: { name: string }) {
+  return <div>Hello {name}</div>;
+}
+"#;
+        let tsx_chunks = chunk_code(tsx, CodeLanguage::Tsx, 512);
+        assert!(!tsx_chunks.is_empty());
+
+        let php = r#"
+<?php
+class Greeter {
+    public function hello($name) {
+        return "Hello $name";
+    }
+}
+"#;
+        let php_chunks = chunk_code(php, CodeLanguage::Php, 512);
+        assert!(!php_chunks.is_empty());
+        assert!(
+            php_chunks.iter().any(|chunk| {
+                chunk
+                    .metadata
+                    .symbol
+                    .as_deref()
+                    .is_some_and(|name| name.contains("hello") || name.contains("Greeter"))
+            }),
+            "PHP class/method symbols should be extracted"
+        );
     }
 }

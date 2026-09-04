@@ -13,7 +13,29 @@ use crate::error::{ContextError, Result};
 use super::{Embedding, SearchFilters, SearchResult, VectorStore};
 
 /// Vector dimension hardcoded to match database schema vector(1536)
-const VECTOR_DIMENSION: usize = 1536;
+pub const VECTOR_DIMENSION: usize = 1536;
+
+/// Pad shorter embedding models (e.g. nomic 768) to the schema width.
+/// Cosine similarity is preserved when query and document use the same padding.
+pub fn align_vector(vector: &[f32]) -> Result<Vec<f32>> {
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(ContextError::VectorStore(
+            "Embedding contains non-finite values".to_string(),
+        ));
+    }
+    if vector.len() == VECTOR_DIMENSION {
+        return Ok(vector.to_vec());
+    }
+    if vector.len() < VECTOR_DIMENSION {
+        let mut padded = vector.to_vec();
+        padded.resize(VECTOR_DIMENSION, 0.0);
+        return Ok(padded);
+    }
+    Err(ContextError::EmbeddingDimensionMismatch {
+        expected: VECTOR_DIMENSION,
+        actual: vector.len(),
+    })
+}
 
 /// Maximum search limit to prevent excessive resource usage
 const MAX_SEARCH_LIMIT: usize = 1000;
@@ -59,17 +81,24 @@ impl PgVectorStore {
         let result: IdRow = sqlx::query_as(
             r#"
             INSERT INTO content_items (
-                id, source_id, category, uri, title, content, content_type,
+                id, source_id, workspace_id, category, uri, title, content, content_type,
                 token_count, metadata_only, content_hash, metadata, modified_at, fetched_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES (
+                $1, $2, (SELECT workspace_id FROM sources WHERE id = $2),
+                $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+            )
             ON CONFLICT (source_id, uri) DO UPDATE SET
-                content = $6,
-                token_count = $8,
-                content_hash = $10,
-                metadata = $11,
-                modified_at = $12,
-                fetched_at = $13,
+                title = EXCLUDED.title,
+                content = EXCLUDED.content,
+                content_type = EXCLUDED.content_type,
+                token_count = EXCLUDED.token_count,
+                metadata_only = EXCLUDED.metadata_only,
+                content_hash = EXCLUDED.content_hash,
+                metadata = EXCLUDED.metadata,
+                modified_at = EXCLUDED.modified_at,
+                fetched_at = EXCLUDED.fetched_at,
+                workspace_id = COALESCE(content_items.workspace_id, EXCLUDED.workspace_id),
                 updated_at = NOW()
             RETURNING id
             "#,
@@ -150,6 +179,112 @@ impl PgVectorStore {
 
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Existing content hash for incremental indexing
+    pub async fn content_item_hash(
+        &self,
+        source_id: Uuid,
+        uri: &str,
+    ) -> Result<Option<(Uuid, String)>> {
+        #[derive(sqlx::FromRow)]
+        struct HashRow {
+            id: Uuid,
+            content_hash: String,
+        }
+
+        let row: Option<HashRow> = sqlx::query_as(
+            "SELECT id, content_hash FROM content_items WHERE source_id = $1 AND uri = $2",
+        )
+        .bind(source_id)
+        .bind(uri)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| (row.id, row.content_hash)))
+    }
+
+    /// Whether an item already has searchable embeddings
+    pub async fn content_item_has_embeddings(&self, content_item_id: Uuid) -> Result<bool> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM embeddings WHERE content_item_id = $1")
+                .bind(content_item_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count > 0)
+    }
+
+    /// Replace all chunks for an item so embedding IDs stay consistent
+    pub async fn replace_content_chunks(
+        &self,
+        item_id: Uuid,
+        chunks: &[ContentChunk],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM content_chunks WHERE content_item_id = $1")
+            .bind(item_id)
+            .execute(&mut *tx)
+            .await?;
+
+        for chunk in chunks {
+            let chunk_index: i32 = chunk.chunk_index.try_into().map_err(|_| {
+                ContextError::Parse(format!(
+                    "chunk_index {} exceeds i32::MAX",
+                    chunk.chunk_index
+                ))
+            })?;
+            let token_count: i32 = chunk.token_count.try_into().map_err(|_| {
+                ContextError::Parse(format!(
+                    "token_count {} exceeds i32::MAX",
+                    chunk.token_count
+                ))
+            })?;
+            let start_offset: i32 = chunk.start_offset.try_into().map_err(|_| {
+                ContextError::Parse(format!(
+                    "start_offset {} exceeds i32::MAX",
+                    chunk.start_offset
+                ))
+            })?;
+            let end_offset: i32 = chunk.end_offset.try_into().map_err(|_| {
+                ContextError::Parse(format!("end_offset {} exceeds i32::MAX", chunk.end_offset))
+            })?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO content_chunks (id, content_item_id, chunk_index, text, token_count, start_offset, end_offset)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                "#,
+            )
+            .bind(chunk.id)
+            .bind(item_id)
+            .bind(chunk_index)
+            .bind(&chunk.text)
+            .bind(token_count)
+            .bind(start_offset)
+            .bind(end_offset)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Drop indexed files that were not present in the latest successful fetch
+    pub async fn retain_content_uris(&self, source_id: Uuid, uris: &[String]) -> Result<usize> {
+        let result = if uris.is_empty() {
+            sqlx::query("DELETE FROM content_items WHERE source_id = $1")
+                .bind(source_id)
+                .execute(&self.pool)
+                .await?
+        } else {
+            sqlx::query("DELETE FROM content_items WHERE source_id = $1 AND NOT (uri = ANY($2))")
+                .bind(source_id)
+                .bind(uris)
+                .execute(&self.pool)
+                .await?
+        };
+        Ok(result.rows_affected() as usize)
     }
 
     /// Get a content item by ID
@@ -254,24 +389,18 @@ fn vector_to_pg_string(v: &[f32]) -> String {
 #[async_trait]
 impl VectorStore for PgVectorStore {
     async fn store(&self, embedding: &Embedding) -> Result<()> {
-        // Validate dimension
-        if embedding.dimension != VECTOR_DIMENSION {
-            return Err(ContextError::EmbeddingDimensionMismatch {
-                expected: VECTOR_DIMENSION,
-                actual: embedding.dimension,
-            });
-        }
-
-        let vector_str = vector_to_pg_string(&embedding.vector);
+        let aligned = align_vector(&embedding.vector)?;
+        let vector_str = vector_to_pg_string(&aligned);
         let created_at = embedding.created_at.naive_utc();
 
         sqlx::query(
             r#"
-            INSERT INTO embeddings (id, chunk_id, content_item_id, source_id, vector, model, created_at)
-            VALUES ($1, $2, $3, $4, $5::vector, $6, $7)
+            INSERT INTO embeddings (id, chunk_id, content_item_id, source_id, workspace_id, vector, model, created_at)
+            VALUES ($1, $2, $3, $4, (SELECT workspace_id FROM sources WHERE id = $4), $5::vector, $6, $7)
             ON CONFLICT (chunk_id) DO UPDATE SET
                 vector = EXCLUDED.vector,
-                model = EXCLUDED.model
+                model = EXCLUDED.model,
+                workspace_id = COALESCE(embeddings.workspace_id, EXCLUDED.workspace_id)
             "#
         )
         .bind(embedding.id)
@@ -288,31 +417,26 @@ impl VectorStore for PgVectorStore {
     }
 
     async fn store_batch(&self, embeddings: &[Embedding]) -> Result<()> {
-        // CRITICAL: Validate ALL embedding dimensions BEFORE starting transaction
-        // If validation fails mid-batch, the caller would get inconsistent state
-        for embedding in embeddings {
-            if embedding.dimension != VECTOR_DIMENSION {
-                return Err(ContextError::EmbeddingDimensionMismatch {
-                    expected: VECTOR_DIMENSION,
-                    actual: embedding.dimension,
-                });
-            }
-        }
+        let aligned: Result<Vec<Vec<f32>>> = embeddings
+            .iter()
+            .map(|embedding| align_vector(&embedding.vector))
+            .collect();
+        let aligned = aligned?;
 
-        // Now start the transaction after all validation passes
         let mut tx = self.pool.begin().await?;
 
-        for embedding in embeddings {
-            let vector_str = vector_to_pg_string(&embedding.vector);
+        for (embedding, vector) in embeddings.iter().zip(aligned.iter()) {
+            let vector_str = vector_to_pg_string(vector);
             let created_at = embedding.created_at.naive_utc();
 
             sqlx::query(
                 r#"
-                INSERT INTO embeddings (id, chunk_id, content_item_id, source_id, vector, model, created_at)
-                VALUES ($1, $2, $3, $4, $5::vector, $6, $7)
+                INSERT INTO embeddings (id, chunk_id, content_item_id, source_id, workspace_id, vector, model, created_at)
+                VALUES ($1, $2, $3, $4, (SELECT workspace_id FROM sources WHERE id = $4), $5::vector, $6, $7)
                 ON CONFLICT (chunk_id) DO UPDATE SET
                     vector = EXCLUDED.vector,
-                    model = EXCLUDED.model
+                    model = EXCLUDED.model,
+                    workspace_id = COALESCE(embeddings.workspace_id, EXCLUDED.workspace_id)
                 "#
             )
             .bind(embedding.id)
@@ -337,18 +461,12 @@ impl VectorStore for PgVectorStore {
         threshold: Option<f32>,
         filters: Option<SearchFilters>,
     ) -> Result<Vec<SearchResult>> {
-        // Validate query dimension
-        if query_embedding.len() != VECTOR_DIMENSION {
-            return Err(ContextError::EmbeddingDimensionMismatch {
-                expected: VECTOR_DIMENSION,
-                actual: query_embedding.len(),
-            });
-        }
+        let aligned = align_vector(query_embedding)?;
 
         // Clamp limit to prevent excessive resource usage
         let limit = limit.min(MAX_SEARCH_LIMIT);
 
-        let vector_str = vector_to_pg_string(query_embedding);
+        let vector_str = vector_to_pg_string(&aligned);
         let threshold = threshold.unwrap_or(0.7);
 
         // Extract filter values
@@ -484,6 +602,26 @@ mod tests {
         let vec = vec![-0.5, 0.5, -1.0];
         let result = vector_to_pg_string(&vec);
         assert_eq!(result, "[-0.5,0.5,-1]");
+    }
+
+    #[test]
+    fn test_align_vector_pads_shorter_models() {
+        let padded = align_vector(&[0.5; 768]).expect("pad 768");
+        assert_eq!(padded.len(), VECTOR_DIMENSION);
+        assert_eq!(&padded[..768], &[0.5; 768]);
+        assert!(padded[768..].iter().all(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn test_align_vector_rejects_wider_models() {
+        let result = align_vector(&vec![0.1; 3072]);
+        assert!(matches!(
+            result,
+            Err(ContextError::EmbeddingDimensionMismatch {
+                expected: 1536,
+                actual: 3072
+            })
+        ));
     }
 
     // Note: Database-dependent tests are in integration tests

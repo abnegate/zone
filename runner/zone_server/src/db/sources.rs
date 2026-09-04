@@ -324,18 +324,26 @@ pub async fn get_source_index_status(
     .fetch_optional(pool)
     .await?;
 
-    // Count indexed items
-    let item_count: Option<i64> =
-        sqlx::query_scalar("SELECT COUNT(*) FROM content_items WHERE source_id = $1")
-            .bind(source_id)
-            .fetch_optional(pool)
-            .await?;
+    let item_count: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(DISTINCT content_items.id)
+        FROM content_items
+        INNER JOIN content_chunks ON content_chunks.content_item_id = content_items.id
+        INNER JOIN embeddings ON embeddings.chunk_id = content_chunks.id
+        WHERE content_items.source_id = $1
+        "#,
+    )
+    .bind(source_id)
+    .fetch_optional(pool)
+    .await?;
 
-    // Determine status
+    let searchable = item_count.unwrap_or(0) > 0;
     let status = match gathering {
         Some(ref g) if g.status == "running" => IndexStatus::Indexing,
-        Some(ref g) if g.status == "completed" => IndexStatus::Indexed,
         Some(ref g) if g.status == "failed" => IndexStatus::Failed,
+        Some(ref g) if g.status == "completed" && searchable => IndexStatus::Indexed,
+        Some(ref g) if g.status == "completed" => IndexStatus::Failed,
+        _ if searchable => IndexStatus::Indexed,
         _ => IndexStatus::Pending,
     };
 

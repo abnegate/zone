@@ -209,11 +209,15 @@ impl ContentChunk {
 }
 
 /// Configuration for content fetching
+///
+/// Fetch/index writes the same content store as chat gathering, so the
+/// default is an uncapped full fetch. Prompt assembly uses
+/// `ContextConfig.token_budget` (50k), not this struct.
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
-    /// Maximum tokens to fetch (full content threshold)
+    /// Optional cap for an explicitly budgeted `Partial` fetch
     pub max_tokens: usize,
-    /// Token budget for this fetch operation
+    /// Budget used only when `allow_metadata_only` is on
     pub token_budget: usize,
     /// Since timestamp for incremental fetching
     pub since: Option<DateTime<Utc>>,
@@ -221,28 +225,76 @@ pub struct FetchConfig {
     pub include_patterns: Vec<String>,
     /// File patterns to exclude (glob syntax)
     pub exclude_patterns: Vec<String>,
-    /// Whether to fetch metadata only for large items
+    /// Allow `MetadataOnly` when a source is larger than 10× `token_budget`.
+    /// Off by default so large repos are never stored as empty shells.
     pub allow_metadata_only: bool,
+    /// Index the whole source instead of gathering prompt context
+    pub index_mode: bool,
+}
+
+impl FetchConfig {
+    /// Default exclude globs shared by context gathering and source indexing
+    pub fn default_exclude_patterns() -> Vec<String> {
+        vec![
+            "node_modules/**".to_string(),
+            "vendor/**".to_string(),
+            ".git/**".to_string(),
+            "target/**".to_string(),
+            "dist/**".to_string(),
+            "build/**".to_string(),
+            "__pycache__/**".to_string(),
+            "*.lock".to_string(),
+            "*.min.js".to_string(),
+            "*.min.css".to_string(),
+            "*.pb.go".to_string(),
+            "*.generated.*".to_string(),
+        ]
+    }
+
+    /// Full fetch for chat/context assembly (prompt budget is applied later)
+    pub fn for_context_gathering(force_refresh: bool) -> Self {
+        Self {
+            since: if force_refresh {
+                None
+            } else {
+                Some(Utc::now() - chrono::Duration::days(30))
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Full-source fetch for search indexing
+    pub fn for_source_indexing() -> Self {
+        Self {
+            index_mode: true,
+            since: None,
+            ..Self::default()
+        }
+    }
+
+    /// Choose how much of a source to pull.
+    ///
+    /// Indexing and default fetch always take `Full`. A 100k-style
+    /// metadata-only fallback is only used when a caller opts in.
+    pub fn fetch_strategy(&self, estimated_tokens: usize) -> FetchStrategy {
+        if self.index_mode || !self.allow_metadata_only {
+            FetchStrategy::Full
+        } else {
+            decide_fetch_strategy(estimated_tokens, self.token_budget)
+        }
+    }
 }
 
 impl Default for FetchConfig {
     fn default() -> Self {
         Self {
-            max_tokens: 100_000,
-            token_budget: 100_000,
+            max_tokens: usize::MAX,
+            token_budget: usize::MAX,
             since: None,
             include_patterns: vec![],
-            exclude_patterns: vec![
-                "node_modules/**".to_string(),
-                ".git/**".to_string(),
-                "target/**".to_string(),
-                "dist/**".to_string(),
-                "build/**".to_string(),
-                "*.lock".to_string(),
-                "*.min.js".to_string(),
-                "*.min.css".to_string(),
-            ],
-            allow_metadata_only: true,
+            exclude_patterns: Self::default_exclude_patterns(),
+            allow_metadata_only: false,
+            index_mode: false,
         }
     }
 }
@@ -405,12 +457,49 @@ mod tests {
     #[test]
     fn test_fetch_config_default() {
         let config = FetchConfig::default();
-        assert_eq!(config.max_tokens, 100_000);
+        assert_eq!(config.max_tokens, usize::MAX);
+        assert_eq!(config.token_budget, usize::MAX);
+        assert!(!config.allow_metadata_only);
+        assert!(!config.index_mode);
         assert!(
             config
                 .exclude_patterns
                 .contains(&"node_modules/**".to_string())
         );
+        assert!(FetchConfig::for_source_indexing().index_mode);
+        assert!(!FetchConfig::for_source_indexing().allow_metadata_only);
+    }
+
+    #[test]
+    fn test_fetch_config_never_metadata_only_for_persist_paths() {
+        let huge = 5_000_000;
+        assert!(matches!(
+            FetchConfig::default().fetch_strategy(huge),
+            FetchStrategy::Full
+        ));
+        assert!(matches!(
+            FetchConfig::for_context_gathering(true).fetch_strategy(huge),
+            FetchStrategy::Full
+        ));
+        assert!(matches!(
+            FetchConfig::for_source_indexing().fetch_strategy(huge),
+            FetchStrategy::Full
+        ));
+    }
+
+    #[test]
+    fn test_fetch_config_metadata_only_only_when_opted_in() {
+        let config = FetchConfig {
+            max_tokens: 100_000,
+            token_budget: 100_000,
+            allow_metadata_only: true,
+            ..FetchConfig::default()
+        };
+        assert!(matches!(
+            config.fetch_strategy(5_000_000),
+            FetchStrategy::MetadataOnly
+        ));
+        assert!(matches!(config.fetch_strategy(50_000), FetchStrategy::Full));
     }
 
     #[test]

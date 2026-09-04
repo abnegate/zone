@@ -63,6 +63,7 @@ pub fn spawn_index_source(
             workspace_id,
             vec![source_id],
             is_update, // force_refresh = true for updates
+            true,      // index the full source, not a chat token budget
         )
         .await;
 

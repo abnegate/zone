@@ -97,6 +97,7 @@ pub async fn execute_gathering(
     workspace_id: Uuid,
     source_ids: Vec<Uuid>,
     force_refresh: bool,
+    index_mode: bool,
 ) {
     // Acquire semaphore permit to limit concurrent gatherings
     let _permit = match get_semaphore().acquire().await {
@@ -122,11 +123,12 @@ pub async fn execute_gathering(
     };
 
     tracing::info!(
-        "Starting gathering execution: gathering_id={}, workspace_id={}, sources={}, force_refresh={}",
+        "Starting gathering execution: gathering_id={}, workspace_id={}, sources={}, force_refresh={}, index_mode={}",
         gathering_id,
         workspace_id,
         source_ids.len(),
-        force_refresh
+        force_refresh,
+        index_mode
     );
 
     // Update status to running
@@ -269,18 +271,10 @@ pub async fn execute_gathering(
     // Create database callback for event persistence
     let callback = DatabaseCallback::new(state.db().clone(), gathering_id);
 
-    // Configure fetch behavior
-    let fetch_config = FetchConfig {
-        max_tokens: 100_000,
-        token_budget: 100_000, // Default budget
-        allow_metadata_only: true,
-        since: if force_refresh {
-            None
-        } else {
-            Some(chrono::Utc::now() - chrono::Duration::days(30))
-        },
-        include_patterns: vec![],
-        exclude_patterns: vec![],
+    let fetch_config = if index_mode {
+        FetchConfig::for_source_indexing()
+    } else {
+        FetchConfig::for_context_gathering(force_refresh)
     };
 
     // Execute gathering with timeout
@@ -309,6 +303,32 @@ pub async fn execute_gathering(
                     gathering_id,
                     gathering_result.errors.len()
                 );
+            }
+
+            let searchable =
+                gathering_result.embeddings_created > 0 || gathering_result.items_unchanged > 0;
+            if index_mode && gathering_result.items_gathered > 0 && !searchable {
+                let message = format!(
+                    "Indexing produced no searchable chunks ({} items fetched, {} errors)",
+                    gathering_result.items_gathered,
+                    gathering_result.errors.len()
+                );
+                tracing::error!("Gathering {} failed: {}", gathering_id, message);
+                if let Err(e) = context_gatherings::update_gathering_status(
+                    state.db(),
+                    gathering_id,
+                    "failed",
+                    Some(&message),
+                )
+                .await
+                {
+                    tracing::error!(
+                        "CRITICAL: Failed to update gathering {} status: {}",
+                        gathering_id,
+                        e
+                    );
+                }
+                return;
             }
 
             if let Err(e) =

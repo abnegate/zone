@@ -447,16 +447,23 @@ pub fn world() {
 "#;
 
     // Test with extension
-    let chunks = smart_chunk(rust_code, "text/plain", Some("rs"), 512, 50);
+    let chunks = smart_chunk(
+        rust_code,
+        "text/plain",
+        Some("rs"),
+        Some("src/lib.rs"),
+        512,
+        50,
+    );
     assert!(!chunks.is_empty(), "Should detect Rust and produce chunks");
 
     // Test with content type
-    let chunks = smart_chunk(rust_code, "text/x-rust", None, 512, 50);
+    let chunks = smart_chunk(rust_code, "text/x-rust", None, Some("src/lib.rs"), 512, 50);
     assert!(!chunks.is_empty(), "Should detect Rust from content type");
 
     // Test fallback to text
     let plain_text = "This is just plain text without code structure.";
-    let chunks = smart_chunk(plain_text, "text/plain", None, 512, 50);
+    let chunks = smart_chunk(plain_text, "text/plain", None, None, 512, 50);
     assert_eq!(chunks.len(), 1, "Plain text should use text chunking");
 }
 
@@ -516,8 +523,15 @@ mod outer {
 
     let chunks = chunk_code(code, CodeLanguage::Rust, 512);
 
-    // Should handle nested structures
     assert!(!chunks.is_empty(), "Should handle nested structures");
+    let symbols: Vec<_> = chunks
+        .iter()
+        .filter_map(|chunk| chunk.metadata.symbol.clone())
+        .collect();
+    assert!(
+        symbols.iter().any(|name| name.contains("new")),
+        "nested impl methods should be indexed, got {symbols:?}"
+    );
 }
 
 #[test]

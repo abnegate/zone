@@ -10,8 +10,7 @@ use uuid::Uuid;
 
 use crate::adapters::{AdapterRegistry, ProgressCallback};
 use crate::content::{
-    CHUNK_OVERLAP_TOKENS, ContentChunk, ContentItem, FetchConfig, FetchStrategy, MAX_CHUNK_TOKENS,
-    smart_chunk,
+    CHUNK_OVERLAP_TOKENS, ContentChunk, ContentItem, FetchConfig, MAX_CHUNK_TOKENS, smart_chunk,
 };
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
 use crate::embeddings::{
@@ -34,6 +33,8 @@ pub struct GatheringResult {
     pub items_analyzed: usize,
     /// Number of embeddings created
     pub embeddings_created: usize,
+    /// Items skipped because their content hash already matched the index
+    pub items_unchanged: usize,
     /// Errors encountered (source_id, error message)
     pub errors: Vec<(Uuid, String)>,
     /// Total duration in milliseconds
@@ -59,6 +60,11 @@ pub struct SearchResultWithAnalysis {
     pub item_title: String,
     /// Heuristic analysis (if loaded)
     pub analysis: Option<HeuristicAnalysis>,
+}
+
+enum StoreOutcome {
+    Embedded(usize),
+    Unchanged,
 }
 
 /// Context service that orchestrates the full pipeline
@@ -160,15 +166,15 @@ impl ContextService {
                     0
                 }
             };
-            let strategy = if estimated_tokens <= fetch_config.token_budget {
-                FetchStrategy::Full
-            } else if fetch_config.allow_metadata_only {
-                FetchStrategy::MetadataOnly
-            } else {
-                FetchStrategy::Partial {
-                    max_tokens: fetch_config.token_budget,
-                }
-            };
+            let strategy = fetch_config.fetch_strategy(estimated_tokens);
+            tracing::debug!(
+                source_id = %source.id,
+                estimated_tokens,
+                index_mode = fetch_config.index_mode,
+                allow_metadata_only = fetch_config.allow_metadata_only,
+                ?strategy,
+                "chose fetch strategy"
+            );
 
             // Create progress adapter
             let progress = SourceProgressAdapter {
@@ -196,6 +202,24 @@ impl ContextService {
             };
 
             result.items_gathered += fetch_result.items.len();
+            if fetch_config.index_mode {
+                let uris: Vec<String> = fetch_result
+                    .items
+                    .iter()
+                    .map(|item| item.uri.clone())
+                    .collect();
+                if let Err(e) = self
+                    .vector_store
+                    .retain_content_uris(source.id, &uris)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to drop stale indexed files for source {}: {}",
+                        source.id,
+                        e
+                    );
+                }
+            }
             total_items.extend(fetch_result.items);
 
             // Emit source completed
@@ -222,11 +246,11 @@ impl ContextService {
                 _ => continue,
             };
 
-            // Chunk the content using smart chunking (code-aware or text-based)
             let text_chunks = smart_chunk(
                 content,
                 &item.content_type,
                 item.metadata.extension.as_deref(),
+                Some(item.uri.as_str()),
                 MAX_CHUNK_TOKENS,
                 CHUNK_OVERLAP_TOKENS,
             );
@@ -249,15 +273,20 @@ impl ContextService {
                 current_stage: AnalysisStage::Embedding,
             });
 
-            // Store and embed the chunks
-            if let Err(e) = self.store_and_embed(item, &chunks).await {
-                result
-                    .errors
-                    .push((item.source_id, format!("Store/embed failed: {}", e)));
-                continue;
+            match self.store_and_embed(item, &chunks).await {
+                Ok(StoreOutcome::Unchanged) => {
+                    result.items_unchanged += 1;
+                }
+                Ok(StoreOutcome::Embedded(count)) => {
+                    result.embeddings_created += count;
+                }
+                Err(e) => {
+                    result
+                        .errors
+                        .push((item.source_id, format!("Store/embed failed: {}", e)));
+                    continue;
+                }
             }
-
-            result.embeddings_created += chunks.len();
 
             // Run heuristic analysis
             callback.on_event(GatheringEvent::AnalysisProgress {
@@ -540,26 +569,53 @@ impl ContextService {
         Ok(analysis)
     }
 
-    /// Store and embed a content item
-    ///
-    /// Internal helper that:
-    /// 1. Generates embeddings for all chunks
-    /// 2. Stores embeddings in the vector store
-    async fn store_and_embed(&self, item: &ContentItem, chunks: &[ContentChunk]) -> Result<()> {
-        // Collect chunk texts for batch embedding
-        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+    /// Persist a content item, its chunks, and embeddings in FK order
+    async fn store_and_embed(
+        &self,
+        item: &ContentItem,
+        chunks: &[ContentChunk],
+    ) -> Result<StoreOutcome> {
+        if let Some((existing_id, existing_hash)) = self
+            .vector_store
+            .content_item_hash(item.source_id, &item.uri)
+            .await?
+            && existing_hash == item.content_hash()
+            && self
+                .vector_store
+                .content_item_has_embeddings(existing_id)
+                .await?
+        {
+            return Ok(StoreOutcome::Unchanged);
+        }
 
-        // Generate embeddings in batch
+        let item_id = self.vector_store.store_content_item(item).await?;
+        let persisted_chunks: Vec<ContentChunk> = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| ContentChunk {
+                id: chunk.id,
+                content_item_id: item_id,
+                chunk_index: index,
+                text: chunk.text.clone(),
+                token_count: chunk.token_count,
+                start_offset: chunk.start_offset,
+                end_offset: chunk.end_offset,
+            })
+            .collect();
+
+        self.vector_store
+            .replace_content_chunks(item_id, &persisted_chunks)
+            .await?;
+
+        let texts: Vec<&str> = persisted_chunks.iter().map(|c| c.text.as_str()).collect();
         let vectors = self.embedding_service.embed_batch(&texts).await?;
-
-        // Create Embedding objects
-        let embeddings: Vec<Embedding> = chunks
+        let embeddings: Vec<Embedding> = persisted_chunks
             .iter()
             .zip(vectors.iter())
             .map(|(chunk, vector)| {
                 Embedding::new(
                     chunk.id,
-                    item.id,
+                    item_id,
                     item.source_id,
                     vector.clone(),
                     self.embedding_service.model(),
@@ -567,10 +623,8 @@ impl ContextService {
             })
             .collect();
 
-        // Store in vector database
         self.vector_store.store_batch(&embeddings).await?;
-
-        Ok(())
+        Ok(StoreOutcome::Embedded(embeddings.len()))
     }
 }
 
@@ -612,6 +666,7 @@ mod tests {
         assert_eq!(result.items_gathered, 0);
         assert_eq!(result.items_analyzed, 0);
         assert_eq!(result.embeddings_created, 0);
+        assert_eq!(result.items_unchanged, 0);
         assert!(result.errors.is_empty());
         assert_eq!(result.duration_ms, 0);
     }

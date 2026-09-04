@@ -2,9 +2,12 @@
 //!
 //! Provides fast token counting for content sizing decisions.
 
-use super::code_chunker::{CodeLanguage, chunk_code, code_chunk_to_text_chunk};
+use super::code_chunker::{
+    ChunkConfig, CodeLanguage, chunk_code_with_config, code_chunk_to_text_chunk,
+};
 
-/// Default token budget (approximately 100k tokens)
+/// Default token budget for `TokenBudget` / Partial adapter walks.
+/// This is not a source-index or fetch-size cap.
 pub const DEFAULT_TOKEN_BUDGET: usize = 100_000;
 
 /// Maximum chunk size in tokens for embedding
@@ -210,10 +213,10 @@ pub fn smart_chunk(
     content: &str,
     content_type: &str,
     extension: Option<&str>,
+    file_path: Option<&str>,
     max_tokens: usize,
     overlap_tokens: usize,
 ) -> Vec<TextChunk> {
-    // Detect if this is code
     let language = if let Some(ext) = extension {
         CodeLanguage::from_extension(ext)
     } else {
@@ -221,15 +224,17 @@ pub fn smart_chunk(
     };
 
     match language {
-        CodeLanguage::Unknown => {
-            // Fall back to text chunking
-            chunk_text(content, max_tokens, overlap_tokens)
-        }
+        CodeLanguage::Unknown => chunk_text(content, max_tokens, overlap_tokens),
         _ => {
-            // Use code-aware chunking
-            let code_chunks = chunk_code(content, language, max_tokens);
-
-            // Convert CodeChunk to TextChunk
+            let code_chunks = chunk_code_with_config(
+                content,
+                language,
+                &ChunkConfig {
+                    max_tokens,
+                    file_path: file_path.map(str::to_string),
+                    ..ChunkConfig::default()
+                },
+            );
             code_chunks
                 .into_iter()
                 .map(code_chunk_to_text_chunk)
@@ -364,7 +369,7 @@ fn world() {
     println!("World");
 }
 "#;
-        let chunks = smart_chunk(code, "text/plain", Some("rs"), 512, 50);
+        let chunks = smart_chunk(code, "text/plain", Some("rs"), Some("src/lib.rs"), 512, 50);
 
         // Should use code-aware chunking and produce at least one chunk
         // Note: Small functions may be merged together per Rule 4
@@ -380,7 +385,7 @@ def hello():
 def world():
     print("World")
 "#;
-        let chunks = smart_chunk(code, "text/plain", Some("py"), 512, 50);
+        let chunks = smart_chunk(code, "text/plain", Some("py"), Some("app.py"), 512, 50);
 
         // Should use code-aware chunking
         assert!(!chunks.is_empty());
@@ -393,7 +398,7 @@ function hello() {
     console.log("Hello");
 }
 "#;
-        let chunks = smart_chunk(code, "text/javascript", None, 512, 50);
+        let chunks = smart_chunk(code, "text/javascript", None, Some("index.js"), 512, 50);
 
         // Should detect JavaScript from content type
         assert!(!chunks.is_empty());
@@ -402,7 +407,7 @@ function hello() {
     #[test]
     fn test_smart_chunk_fallback_to_text() {
         let text = "This is plain text. It should use text-based chunking.";
-        let chunks = smart_chunk(text, "text/plain", None, 512, 50);
+        let chunks = smart_chunk(text, "text/plain", None, None, 512, 50);
 
         // Should fall back to text chunking
         assert_eq!(chunks.len(), 1);
@@ -412,7 +417,7 @@ function hello() {
     #[test]
     fn test_smart_chunk_unknown_extension() {
         let text = "Some content with unknown extension.";
-        let chunks = smart_chunk(text, "text/plain", Some("xyz"), 512, 50);
+        let chunks = smart_chunk(text, "text/plain", Some("xyz"), None, 512, 50);
 
         // Should fall back to text chunking
         assert_eq!(chunks.len(), 1);

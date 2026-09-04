@@ -11,7 +11,7 @@ pub use hybrid::{
     HybridSearchConfig, HybridSearchResult, hybrid_search, keyword_only_search,
     semantic_only_search,
 };
-pub use pgvector::PgVectorStore;
+pub use pgvector::{PgVectorStore, VECTOR_DIMENSION, align_vector};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

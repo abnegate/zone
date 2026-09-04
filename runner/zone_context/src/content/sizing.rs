@@ -11,6 +11,10 @@ const METADATA_ONLY_THRESHOLD_MULTIPLIER: usize = 10;
 
 /// Decide the fetch strategy based on estimated size vs budget
 ///
+/// Production fetch uses [`FetchConfig::fetch_strategy`], which skips this
+/// unless a caller explicitly allows metadata-only. Kept for budgeted
+/// gathers and adapter tests.
+///
 /// # Strategy Selection
 /// - **Full**: Estimated tokens <= budget (fetch everything)
 /// - **Partial**: Estimated tokens <= budget * 10 (fetch up to budget)
@@ -18,7 +22,7 @@ const METADATA_ONLY_THRESHOLD_MULTIPLIER: usize = 10;
 pub fn decide_fetch_strategy(estimated_tokens: usize, budget: usize) -> FetchStrategy {
     if estimated_tokens <= budget {
         FetchStrategy::Full
-    } else if estimated_tokens <= budget * METADATA_ONLY_THRESHOLD_MULTIPLIER {
+    } else if estimated_tokens <= budget.saturating_mul(METADATA_ONLY_THRESHOLD_MULTIPLIER) {
         FetchStrategy::Partial { max_tokens: budget }
     } else {
         FetchStrategy::MetadataOnly
@@ -242,6 +246,18 @@ mod tests {
     fn test_decide_strategy_metadata_only() {
         let strategy = decide_fetch_strategy(5_000_000, 100_000);
         assert!(matches!(strategy, FetchStrategy::MetadataOnly));
+    }
+
+    #[test]
+    fn test_decide_strategy_unlimited_budget_is_full() {
+        assert!(matches!(
+            decide_fetch_strategy(5_000_000, usize::MAX),
+            FetchStrategy::Full
+        ));
+        assert!(matches!(
+            decide_fetch_strategy(usize::MAX, usize::MAX),
+            FetchStrategy::Full
+        ));
     }
 
     #[test]

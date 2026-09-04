@@ -82,7 +82,15 @@ async fn test_execute_gathering_updates_status_to_running() {
     );
 
     // When: Execute gathering
-    gathering::execute_gathering(&state, gathering_id, workspace_id, vec![source_id], false).await;
+    gathering::execute_gathering(
+        &state,
+        gathering_id,
+        workspace_id,
+        vec![source_id],
+        false,
+        false,
+    )
+    .await;
 
     // Then: Status should be updated to completed or failed (not pending)
     let gathering = context_gatherings::get_gathering(&pool, gathering_id)
@@ -138,7 +146,15 @@ async fn test_execute_gathering_persists_events() {
     );
 
     // When: Execute gathering
-    gathering::execute_gathering(&state, gathering_id, workspace_id, vec![source_id], false).await;
+    gathering::execute_gathering(
+        &state,
+        gathering_id,
+        workspace_id,
+        vec![source_id],
+        false,
+        false,
+    )
+    .await;
 
     // Then: Events should be persisted (poll until started + terminal events show up)
     let events = timeout(Duration::from_secs(2), async {
@@ -207,6 +223,7 @@ async fn test_execute_gathering_handles_missing_source() {
         workspace_id,
         vec![non_existent_source],
         false,
+        false,
     )
     .await;
 
@@ -271,6 +288,7 @@ async fn test_execute_gathering_with_multiple_sources() {
         gathering_id,
         workspace_id,
         vec![source1_id, source2_id],
+        false,
         false,
     )
     .await;
