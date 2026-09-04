@@ -230,7 +230,7 @@ describe('Client', () => {
       const result = await client.getModelInfo('author/model');
 
       expect(result).toEqual(mockInfo);
-      expect(mockFetch).toHaveBeenCalledWith('/api/models/author/model', expect.any(Object));
+      expect(mockFetch).toHaveBeenCalledWith('/api/models/author%2Fmodel', expect.any(Object));
     });
   });
 
