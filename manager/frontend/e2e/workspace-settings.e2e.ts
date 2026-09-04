@@ -1,6 +1,6 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker, routeApiContext } from './test-utils';
+import { blockServiceWorker, routeApi, routeApiContext } from './test-utils';
 
 const mockTheme = {
   id: 'theme-1',
@@ -395,6 +395,65 @@ test.describe('Workspace Settings Page', () => {
 
       // No errors should occur
       await expect(page.locator('.alert-error')).not.toBeVisible();
+    });
+  });
+
+  test.describe('Image Model', () => {
+    test('shows the configured ComfyUI checkpoint', async ({ page }) => {
+      await page.getByRole('tab', { name: 'AI Settings' }).click();
+
+      await expect(page.locator('#model-image')).toHaveValue('flux1-schnell-fp8.safetensors');
+      await expect(
+        page.getByText('ComfyUI checkpoint used when a message asks for an image.')
+      ).toBeVisible();
+    });
+
+    test('saves the selected image model with the other AI settings', async ({ page }) => {
+      let savedBody: { model_image?: string } | undefined;
+      await routeApi(page, '**/api/organizations/**/workspaces/**/settings/ai', (route) => {
+        if (route.request().method() === 'PUT') {
+          savedBody = route.request().postDataJSON();
+        }
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            provider: 'openai',
+            has_litellm_key: false,
+            litellm_host: null,
+            has_openai_api_key: true,
+            openai_base_url: null,
+            has_anthropic_api_key: false,
+            anthropic_base_url: null,
+            bedrock_region: null,
+            bedrock_use_iam_role: false,
+            has_bedrock_credentials: false,
+            model_fast: 'gpt-4o-mini',
+            model_reasoning: 'gpt-4o',
+            model_embedding: 'text-embedding-3-small',
+            model_image: 'flux1-schnell-fp8.safetensors',
+          }),
+        });
+      });
+
+      await page.getByRole('tab', { name: 'AI Settings' }).click();
+      await page
+        .getByRole('tabpanel', { name: 'AI Settings' })
+        .getByRole('button', { name: 'Save Changes' })
+        .click();
+
+      await expect(page.locator('.alert-success')).toContainText('Settings saved successfully');
+      expect(savedBody?.model_image).toBe('flux1-schnell-fp8.safetensors');
+    });
+
+    test('shows the effective image model when the workspace is not overriding', async ({
+      page,
+    }) => {
+      await page.getByRole('tab', { name: 'AI Settings' }).click();
+      await page.getByLabel('Override organization AI settings').uncheck();
+
+      await expect(page.getByText('Image Model:')).toBeVisible();
+      await expect(page.locator('.effective-value').filter({ hasText: 'flux1-schnell-fp8.safetensors' })).toBeVisible();
     });
   });
 });
