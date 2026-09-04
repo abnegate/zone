@@ -1307,27 +1307,13 @@ async fn prepare_chat(
     // Agent mode replaces blind context injection with a `search_knowledge`
     // tool. Doing both would spend the context window on passages the model
     // never asked for and then offer to fetch them again.
-    let tools = agent::ChatTools::build(
-        agent::WorkspaceScope {
-            state: state.clone(),
-            workspace_id,
-            chat_id,
-            user_id,
-        },
-        // A deployment can refuse host tools outright, in which case the
-        // chat's preference does not get a say.
-        chat.agent_sandboxed || !agent::host_tools_allowed(),
-    );
+    let tools = agent::ChatTools::build(agent::WorkspaceScope {
+        state: state.clone(),
+        workspace_id,
+        chat_id,
+        user_id,
+    });
     let agentic = chat.agent_enabled && !tools.is_empty();
-
-    if agentic && !tools.is_sandboxed() {
-        // Worth a line in the log: this turn can write to the host, and the
-        // trace on the message is the only other record of what it did.
-        tracing::warn!(
-            "Chat {} is running an unsandboxed agent turn with host tools",
-            chat_id
-        );
-    }
 
     let mut prompt = if agentic {
         agent::system_prompt(&tools)

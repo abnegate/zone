@@ -485,11 +485,26 @@ async fn web_search_turn(
     assert_eq!(requests[0]["tools"].is_array(), agentic);
     if agentic {
         let definitions = requests[0]["tools"].as_array().unwrap();
-        assert!(!definitions.is_empty());
-        assert!(definitions.iter().all(|tool| !matches!(
-            tool["function"]["name"].as_str(),
-            Some("web_search" | "run_shell" | "read_file" | "write_file")
-        )));
+        for name in [
+            "run_shell",
+            "run_command",
+            "read_file",
+            "write_file",
+            "list_files",
+            "search_code",
+        ] {
+            assert!(
+                definitions
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == name),
+                "{name} is required even for legacy sandboxed chats"
+            );
+        }
+        assert!(
+            definitions
+                .iter()
+                .all(|tool| !matches!(tool["function"]["name"].as_str(), Some("web_search")))
+        );
     }
     assert!(
         requests[0]["messages"]
@@ -547,7 +562,7 @@ fn web_instructions(request: &Value, agentic: bool) -> (&str, &str) {
 }
 
 #[tokio::test]
-async fn web_search_results_reach_plain_and_sandboxed_models_despite_prior_denial() {
+async fn web_search_results_reach_plain_and_agent_models_despite_prior_denial() {
     for agentic in [false, true] {
         let (frames, requests) = web_search_turn(agentic, SearchOutcome::Results, false).await;
         let search = frames

@@ -73,15 +73,12 @@ async fn exercise_messages(
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
     let state = common::create_test_state(common::test_config(), pool);
-    let tools = ChatTools::build(
-        WorkspaceScope {
-            user_id: Uuid::new_v4(),
-            state,
-            workspace_id: Uuid::new_v4(),
-            chat_id: Uuid::new_v4(),
-        },
-        false,
-    );
+    let tools = ChatTools::build(WorkspaceScope {
+        user_id: Uuid::new_v4(),
+        state,
+        workspace_id: Uuid::new_v4(),
+        chat_id: Uuid::new_v4(),
+    });
     // Missing `path` fails validation before read_file accesses the filesystem.
     let events = tokio::time::timeout(
         Duration::from_secs(10),

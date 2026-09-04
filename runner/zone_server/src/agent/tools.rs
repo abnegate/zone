@@ -6,10 +6,9 @@
 //! workspace and chat it was built for, so a call can never reach another
 //! tenant's data no matter what the model puts in the arguments.
 //!
-//! A chat gets one of two tool sets, chosen by its `agent_sandboxed` setting.
-//! Sandboxed, the default, is these workspace tools alone: authorized, all
-//! backed by workspace services. Unsandboxed adds `zone_core`'s file and shell tools
-//! with containment switched off, which is a real shell on the real host.
+//! Every agent chat includes workspace tools and server filesystem and shell tools.
+//! File and shell operations run in the server runtime, inside the container
+//! for Docker deployments, with the server process permissions.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -49,27 +48,7 @@ pub struct WorkspaceScope {
     pub user_id: Uuid,
 }
 
-/// Whether this deployment permits leaving the sandbox at all.
-///
-/// Defaults to allowed, so the per-chat toggle is the only thing most people
-/// need. A shared deployment can take the option away outright.
-pub fn host_tools_allowed() -> bool {
-    allow_host(std::env::var("ZONE_CHAT_AGENT_ALLOW_HOST").ok().as_deref())
-}
-
-/// Split out from the environment lookup so it can be tested without writing
-/// to a global that every other test in the process shares.
-fn allow_host(value: Option<&str>) -> bool {
-    match value {
-        Some(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        None => true,
-    }
-}
-
-/// Where unsandboxed tools start when the model gives a relative path.
+/// Where server tools start when the model gives a relative path.
 fn host_root() -> std::path::PathBuf {
     std::env::var_os("ZONE_CHAT_AGENT_CWD")
         .map(std::path::PathBuf::from)
@@ -81,7 +60,6 @@ fn host_root() -> std::path::PathBuf {
 pub struct ChatTools {
     registry: ToolRegistry,
     context: ToolContext,
-    sandboxed: bool,
     scope: WorkspaceScope,
     workspace: Vec<String>,
 }
@@ -92,10 +70,7 @@ impl ChatTools {
     /// Search tools are omitted when their backing service is absent rather
     /// than advertised and failed at call time, so the model never burns an
     /// iteration on a tool that cannot work.
-    /// `sandboxed` is the effective decision, not the chat's preference: the
-    /// caller is expected to have already folded in [`host_tools_allowed`], so
-    /// that whether a deployment permits host tools is decided in one place.
-    pub fn build(scope: WorkspaceScope, sandboxed: bool) -> Self {
+    pub fn build(scope: WorkspaceScope) -> Self {
         let mut registry = ToolRegistry::new();
 
         if scope.state.context_service().is_some() {
@@ -115,47 +90,23 @@ impl ChatTools {
             .map(|name| name.to_string())
             .collect();
 
-        // The workspace tools stay available outside the sandbox: knowing what
-        // the workspace holds is still the fastest way to answer many
-        // questions, and dropping them would push the model towards the shell
-        // for things that do not need it.
-        if !sandboxed {
-            for tool in ToolRegistry::with_host_tools().into_tools() {
-                registry.register(tool);
-            }
+        for tool in ToolRegistry::with_host_tools().into_tools() {
+            registry.register(tool);
         }
 
-        let context = if sandboxed {
-            // Nothing in the sandboxed set reads the filesystem, so this only
-            // has to be somewhere harmless.
-            ToolContext {
-                cwd: std::env::temp_dir(),
-                env: Default::default(),
-                max_file_size: 0,
-                command_timeout: 0,
-                unrestricted: false,
-            }
-        } else {
-            ToolContext {
-                cwd: host_root(),
-                env: std::env::vars().collect(),
-                unrestricted: true,
-                ..Default::default()
-            }
+        let context = ToolContext {
+            cwd: host_root(),
+            env: std::env::vars().collect(),
+            unrestricted: true,
+            ..Default::default()
         };
 
         Self {
             registry,
             context,
-            sandboxed,
             scope,
             workspace,
         }
-    }
-
-    /// Whether this turn is confined to the workspace tools.
-    pub fn is_sandboxed(&self) -> bool {
-        self.sandboxed
     }
 
     pub fn is_empty(&self) -> bool {
@@ -753,51 +704,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandboxed_chats_get_no_host_tools() {
-        let tools = ChatTools::build(scope(), true);
-
-        assert!(tools.is_sandboxed());
+    async fn agent_chats_always_get_server_tools() {
+        let tools = ChatTools::build(scope());
         assert!(tools.names().contains(&"list_projects".to_string()));
-        for host in ["run_shell", "run_command", "write_file", "read_file"] {
+        for name in [
+            "run_shell",
+            "run_command",
+            "write_file",
+            "read_file",
+            "list_files",
+            "search_code",
+        ] {
             assert!(
-                !tools.names().contains(&host.to_string()),
-                "{host} must not be offered to a sandboxed chat"
-            );
-        }
-        assert!(!tools.context.unrestricted);
-    }
-
-    #[tokio::test]
-    async fn unsandboxed_chats_get_the_host_tools_as_well() {
-        let tools = ChatTools::build(scope(), false);
-
-        assert!(!tools.is_sandboxed());
-        // The workspace tools stay: leaving the sandbox adds reach, it does
-        // not trade one set for the other.
-        assert!(tools.names().contains(&"list_projects".to_string()));
-        for host in ["run_shell", "run_command", "write_file", "read_file"] {
-            assert!(
-                tools.names().contains(&host.to_string()),
-                "{host} should be offered once the sandbox is off"
+                tools.names().contains(&name.to_string()),
+                "{name} must be available"
             );
         }
         assert!(tools.context.unrestricted);
     }
 
-    #[test]
-    fn an_operator_can_refuse_the_host_tools_outright() {
-        for value in ["0", "false", "no", "off", "OFF", " False "] {
-            assert!(!allow_host(Some(value)), "{value} should refuse host tools");
-        }
-        for value in ["1", "true", "yes", "anything"] {
-            assert!(allow_host(Some(value)), "{value} should permit host tools");
-        }
-        assert!(allow_host(None), "the default is to permit");
-    }
-
     #[tokio::test]
     async fn an_unknown_tool_lists_what_is_available() {
-        let tools = ChatTools::build(scope(), true);
+        let tools = ChatTools::build(scope());
         let result = tools.execute("definitely_not_a_tool", "{}").await;
 
         assert!(!result.success);
@@ -808,7 +736,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_arguments_come_back_as_a_readable_failure() {
-        let tools = ChatTools::build(scope(), true);
+        let tools = ChatTools::build(scope());
         let result = tools.execute("list_projects", "{not json").await;
 
         assert!(!result.success);
@@ -816,14 +744,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_tools_run_for_an_unsandboxed_chat() {
-        let tools = ChatTools::build(scope(), false);
+    async fn server_shell_runs_for_an_agent_chat() {
+        let tools = ChatTools::build(scope());
         let result = tools
             .execute("run_shell", r#"{"command":"echo agentic"}"#)
             .await;
 
         assert!(result.success, "{:?}", result.error);
         assert!(result.output.unwrap().contains("agentic"));
+    }
+
+    #[tokio::test]
+    async fn server_files_can_be_written_and_read() {
+        let tools = ChatTools::build(scope());
+        let path = std::env::temp_dir().join(format!("zone-agent-{}.txt", Uuid::new_v4()));
+        let written = tools
+            .execute(
+                "write_file",
+                &json!({"path": path, "content": "agent file round trip"}).to_string(),
+            )
+            .await;
+        let read = tools
+            .execute("read_file", &json!({"path": path}).to_string())
+            .await;
+        let contents = std::fs::read_to_string(&path);
+        let cleanup = std::fs::remove_file(&path);
+        assert!(written.success, "{:?}", written.error);
+        assert!(read.success, "{:?}", read.error);
+        assert!(read.output.unwrap().contains("agent file round trip"));
+        assert_eq!(contents.unwrap(), "agent file round trip");
+        cleanup.unwrap();
     }
 
     #[tokio::test]
@@ -876,7 +826,7 @@ mod tests {
             chat_id: chat,
             user_id: user.id,
         };
-        let tools = ChatTools::build(scope.clone(), true);
+        let tools = ChatTools::build(scope.clone());
         for name in [
             "list_projects",
             "list_sources",
@@ -891,13 +841,10 @@ mod tests {
         }
         let denied = tools.execute("create_document", &json!({"title":"Denied", "content":"Denied", "user_id":Uuid::new_v4(), "workspace_id":workspace.id}).to_string()).await;
         assert!(!denied.success);
-        let invalid = ChatTools::build(
-            WorkspaceScope {
-                chat_id: Uuid::new_v4(),
-                ..scope
-            },
-            true,
-        );
+        let invalid = ChatTools::build(WorkspaceScope {
+            chat_id: Uuid::new_v4(),
+            ..scope
+        });
         assert!(!invalid.execute("list_sources", "{}").await.success);
         workspace_members::remove_member(&pool, workspace.id, user.id)
             .await

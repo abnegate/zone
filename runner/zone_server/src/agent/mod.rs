@@ -6,9 +6,8 @@
 //! happens and stored on the assistant message so reloading the conversation
 //! still shows the work.
 //!
-//! A chat picks one of two tool sets. Sandboxed, the default, is authorized and
-//! scoped to the chat's workspace. Unsandboxed adds [`host`]: a real shell and
-//! real file access, with no allow-list and no path containment.
+//! Agent chats always offer workspace tools and server filesystem and shell tools.
+//! Docker deployments execute these tools inside the server container.
 
 pub mod actions;
 pub mod documents;
@@ -17,7 +16,7 @@ pub mod runner;
 pub mod tools;
 
 pub use runner::{AgentEvent, AgentRun, MAX_ITERATIONS, MAX_TOOL_CALLS, run};
-pub use tools::{ChatTools, WorkspaceScope, host_tools_allowed};
+pub use tools::{ChatTools, WorkspaceScope};
 
 use serde::{Deserialize, Serialize};
 
@@ -67,15 +66,10 @@ pub fn system_prompt(tools: &ChatTools) -> String {
          - Live build, deployment and issue tools cover connected GitHub repositories. Missing or partial checks never prove a green build; deployment records are not a service health check."
     );
 
-    if !tools.is_sandboxed() {
-        // The user turned the sandbox off deliberately, so this is about
-        // working carefully rather than refusing. The model cannot see the
-        // consequences of a command, and the person reading only sees the
-        // trace afterwards.
-        prompt.push_str(
-            "\n\nThis chat is running without a sandbox. run_shell, read_file, write_file and \
-             list_directory act on the real machine this server runs on, as the user that runs \
-             it, and nothing you do through them is undone when the turn ends.\n\
+    prompt.push_str(
+        "\n\nrun_shell, run_command, read_file, write_file, list_files and search_code act in \
+             the server runtime with its process permissions. In Docker they access the container \
+             and mounted paths, not the Docker host. Changes persist after the turn ends.\n\
              - Look before you change: read a file before rewriting it, and check what a \
              directory holds before writing into it.\n\
              - Keep each command narrow and inspectable, and prefer a dry run where one exists.\n\
@@ -83,8 +77,7 @@ pub fn system_prompt(tools: &ChatTools) -> String {
              touch anything outside what the request is about.\n\
              - Say what you changed on disk in your reply. The user sees the tool trace, but the \
              consequences are yours to explain.",
-        );
-    }
+    );
 
     prompt
 }

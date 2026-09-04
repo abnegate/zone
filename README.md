@@ -551,7 +551,7 @@ receive free [CodeRabbit](https://coderabbit.ai) AI reviews.
 
 ## Workspace assistant tools
 
-Agent mode provides workspace-scoped tools in both sandbox modes. The sandbox controls access to the server filesystem and shell; workspace writes require the authenticated member's current permissions and a user request.
+Agent mode always provides workspace tools and server filesystem and shell tools. Commands and file operations run with the server process permissions, inside the container and mounted paths for Docker deployments; they do not grant access to the Docker host. Workspace writes require the authenticated member's current permissions and a user request.
 
 - Tasks and people: `list_tasks`, `create_task`, `update_task`, `list_members`. Tasks support assignment and completion; operational task-run transitions remain separate.
 - Documents: `list_documents` (optional full-text `query`), `read_document`, `create_document`, `update_document`. Local notes are immediately searchable without an embedding service and appear in the knowledge base. Imported documents include snapshot freshness; only local notes can be edited.
@@ -560,4 +560,4 @@ Agent mode provides workspace-scoped tools in both sandbox modes. The sandbox co
 - Live GitHub: `get_build_status`, `list_deployments`, `list_issues`, `read_repository_file`. Configure an active GitHub source in the workspace with `owner` and `repo`, optional `branch` and `path`, and an access token for private repositories. Stored encrypted source credentials take precedence over a configured token. Requests use GitHub's API and resolve file/build/deployment references to immutable commit IDs. Missing or incomplete check evidence never counts as green; deployment records do not establish service health. Other CI providers and ticket systems are not supported by these tools.
 - Existing inventory and search: `list_sources`, `list_projects`, `search_knowledge` when a context service is configured, and `search_chat_history` when an embedding service is configured.
 
-Database migrations run automatically at server startup, including workspace action storage and document search indexes. Keep the server running for scheduled delivery. Sandbox escape remains controlled by the chat setting and `ZONE_CHAT_AGENT_ALLOW_HOST`; disable host access on shared deployments that should only expose workspace tools.
+Database migrations run automatically at server startup, including workspace action storage and document search indexes. Keep the server running for scheduled delivery. Set `ZONE_CHAT_AGENT_CWD` to choose the working directory for server tools. Disable Agent mode for chats that should not use tools.
