@@ -3,7 +3,6 @@ import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { blockServiceWorker, routeApi, routeApiContext } from './test-utils';
 
 const mockTheme = {
-  id: 'theme-1',
   workspace_id: '00000000-0000-0000-0000-000000000001',
   primary_color_light: '#3b82f6',
   secondary_color_light: '#6366f1',
@@ -86,11 +85,7 @@ test.describe('Workspace Settings Page', () => {
           }),
         });
       } else if (method === 'DELETE') {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({ theme: mockTheme }),
-        });
+        route.fulfill({ status: 204 });
       }
     });
 
