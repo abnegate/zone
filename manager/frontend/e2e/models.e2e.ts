@@ -148,6 +148,11 @@ test.describe('Models Page', () => {
     await expect(page.locator('.browse-name').first()).toHaveText('llama3.2');
   });
 
+  test('displays Ollama pull count for browse models', async ({ page }) => {
+    await switchToBrowseTab(page);
+    await expect(page.locator('.browse-item').first()).toContainText('1.5M pulls');
+  });
+
   test('displays model source badge', async ({ page }) => {
     await switchToBrowseTab(page);
     // Models show their source badge
