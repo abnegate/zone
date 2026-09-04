@@ -4,6 +4,8 @@
 # Usage:
 #   make tilt-up                     # Generate secrets and start Tilt
 #   tilt up -- --only=infra          # Start a subset of resources
+#   tilt up -- --only=apps           # Apps plus required infra and AI
+#   tilt up -- --only=server         # Alias for apps (also openwebui)
 #   tilt down                        # Stop Tilt-managed resources
 # =============================================================================
 
@@ -13,7 +15,12 @@ k8s_kind('Cluster', image_json_path='{.spec.imageName}')
 
 config.define_string_list("only", args=True)
 cfg = config.parse()
-only = cfg.get("only", [])
+# Resource names that live inside the apps chart must pull the same graph.
+_ONLY_ALIASES = {
+    "server": "apps",
+    "openwebui": "apps",
+}
+only = [_ONLY_ALIASES.get(selection, selection) for selection in cfg.get("only", [])]
 
 def should_run(name):
     if not only:

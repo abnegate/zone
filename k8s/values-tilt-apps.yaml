@@ -26,6 +26,7 @@ server:
       cpu: 1000m
       memory: 1Gi
 
+# Console is the Tilt local_resource on :3001 (bun run dev), not this Deployment.
 manager:
   enabled: false
 
