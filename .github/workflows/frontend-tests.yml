@@ -12,6 +12,31 @@ on:
       - '.github/workflows/frontend-tests.yml'
 
 jobs:
+  coverage:
+    name: Unit Tests & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run tests with coverage
+        working-directory: manager/frontend
+        run: bun run test:coverage
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: unit-coverage-report
+          path: manager/frontend/coverage/
+          retention-days: 30
+
   test:
     name: Tests (${{ matrix.browser }})
     runs-on: ubuntu-latest
@@ -37,6 +62,15 @@ jobs:
         run: bun run test:e2e
         env:
           BROWSER: ${{ matrix.browser }}
+          COLLECT_COVERAGE: ${{ matrix.browser == 'chromium' }}
+
+      - name: Upload E2E coverage report
+        uses: actions/upload-artifact@v4
+        if: ${{ matrix.browser == 'chromium' && !cancelled() }}
+        with:
+          name: e2e-coverage-report
+          path: manager/frontend/coverage-e2e/
+          retention-days: 30
 
       - name: Upload test report
         uses: actions/upload-artifact@v4
@@ -53,3 +87,48 @@ jobs:
           name: test-results-${{ matrix.browser }}
           path: manager/frontend/test-results/
           retention-days: 7
+
+  merge-coverage:
+    name: Merge Coverage Reports
+    runs-on: ubuntu-latest
+    needs: [coverage, test]
+    if: ${{ !cancelled() && (needs.coverage.result == 'success' || needs.test.result == 'success' || needs.test.result == 'failure') }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download unit coverage
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: unit-coverage-report
+          path: manager/frontend/.nyc_output/unit
+
+      - name: Download E2E coverage
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: e2e-coverage-report
+          path: manager/frontend/.nyc_output/e2e
+
+      - name: Merge coverage reports
+        working-directory: manager/frontend
+        run: |
+          mkdir -p .nyc_output/merged
+          cp .nyc_output/unit/coverage-final.json .nyc_output/merged/unit.json 2>/dev/null || true
+          cp .nyc_output/e2e/coverage-final.json .nyc_output/merged/e2e.json 2>/dev/null || true
+          bunx nyc merge .nyc_output/merged .nyc_output/coverage.json
+          bunx nyc report --reporter=lcov --reporter=text --reporter=text-summary --reporter=html --report-dir=coverage-merged --temp-dir=.nyc_output
+
+      - name: Upload merged coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: merged-coverage-report
+          path: manager/frontend/coverage-merged/
+          retention-days: 30
