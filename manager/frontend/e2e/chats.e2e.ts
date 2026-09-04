@@ -1,15 +1,24 @@
+import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 // Mock data generators
-const generateMockChat = (id: string, title: string, modelName: string, archived = false) => ({
+const generateMockChat = (
+  id: string,
+  title: string,
+  modelName: string,
+  archived = false,
+  options: { agent_enabled?: boolean; agent_sandboxed?: boolean } = {}
+) => ({
   id,
   title,
   model_name: modelName,
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
   archived,
+  agent_enabled: options.agent_enabled ?? false,
+  agent_sandboxed: options.agent_sandboxed ?? true,
 });
 
 const generateMockMessage = (id: string, chatId: string, role: string, content: string) => ({
@@ -533,6 +542,171 @@ test.describe('Chats Page', () => {
 
       await page.keyboard.press('Escape');
       await expect(page.getByRole('dialog', { name: 'New Chat' })).toHaveCount(0);
+    });
+  });
+
+  test.describe('Agentic chat', () => {
+    const mockChat = generateMockChat('chat-1', 'Agent Chat', 'llama3.2');
+
+    const mockChatRoutes = async (
+      page: Page,
+      chat: ReturnType<typeof generateMockChat>,
+      messages: ReturnType<typeof generateMockMessage>[] = []
+    ) => {
+      await page.unroute(/\/api\/chats/);
+      await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+        const url = route.request().url();
+        const method = route.request().method();
+
+        if (method === 'PUT' && url.includes(`/${chat.id}`)) {
+          const body = route.request().postDataJSON() as Record<string, unknown>;
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              chat: { ...chat, ...body, messages },
+            }),
+          });
+          return;
+        }
+
+        if (method === 'GET' && url.includes(`/${chat.id}`)) {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ chat: { ...chat, messages } }),
+          });
+          return;
+        }
+
+        if (method === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ chats: [chat] }),
+          });
+        }
+      });
+    };
+
+    const mockChatSocket = async (page: Page) => {
+      await page.routeWebSocket(/\/ws\/chats\//, (ws) => {
+        ws.onMessage((message) => {
+          const payload = JSON.parse(typeof message === 'string' ? message : message.toString());
+          if (payload.type === 'auth') {
+            ws.send(JSON.stringify({ type: 'init', chat_id: 'chat-1', status: 'connected' }));
+            return;
+          }
+          if (payload.type !== 'send') {
+            return;
+          }
+
+          ws.send(
+            JSON.stringify({
+              type: 'message_saved',
+              message_id: 'msg-user',
+              role: 'user',
+              content: payload.content,
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'message_start',
+              message_id: 'msg-asst',
+              role: 'assistant',
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'tool_call',
+              message_id: 'msg-asst',
+              tool_call_id: 'call_1',
+              name: 'list_projects',
+              arguments: '{}',
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'tool_result',
+              message_id: 'msg-asst',
+              tool_call_id: 'call_1',
+              name: 'list_projects',
+              success: true,
+              detail: 'This workspace has no projects.',
+              duration_ms: 12,
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'chunk',
+              content: 'There are no projects in this workspace.',
+              index: 0,
+            })
+          );
+          ws.send(
+            JSON.stringify({
+              type: 'message_end',
+              message_id: 'msg-asst',
+              content: 'There are no projects in this workspace.',
+              metadata: {
+                tool_calls: [
+                  {
+                    id: 'call_1',
+                    name: 'list_projects',
+                    arguments: '{}',
+                    success: true,
+                    detail: 'This workspace has no projects.',
+                    duration_ms: 12,
+                  },
+                ],
+              },
+            })
+          );
+        });
+      });
+    };
+
+    test('turns on agent mode and shows the sandbox toggle', async ({ page }) => {
+      await mockChatRoutes(page, mockChat);
+      await mockChatSocket(page);
+      await page.reload();
+      await expect(page.locator('.chat-item')).toHaveCount(1);
+      await page.click('.chat-item');
+
+      const agentToggle = page.getByTestId('agent-toggle');
+      await expect(agentToggle).toHaveAttribute('aria-pressed', 'false');
+      await expect(page.getByTestId('sandbox-toggle')).toHaveCount(0);
+
+      await agentToggle.click();
+
+      await expect(agentToggle).toHaveAttribute('aria-pressed', 'true');
+      await expect(page.getByTestId('sandbox-toggle')).toBeVisible();
+      await expect(page.getByTestId('sandbox-toggle')).toHaveText(/Sandboxed/);
+    });
+
+    test('sends a message and renders the tool the agent ran', async ({ page }) => {
+      const agentChat = generateMockChat('chat-1', 'Agent Chat', 'llama3.2', false, {
+        agent_enabled: true,
+      });
+      await mockChatRoutes(page, agentChat);
+      await mockChatSocket(page);
+      await page.reload();
+      await expect(page.locator('.chat-item')).toHaveCount(1);
+      await page.click('.chat-item');
+
+      await expect(page.getByTestId('agent-toggle')).toHaveAttribute('aria-pressed', 'true');
+      await page.fill('.message-form textarea', 'What projects are in this workspace?');
+      await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+
+      const trace = page.getByTestId('tool-trace');
+      await expect(trace).toBeVisible();
+      await expect(trace.getByTestId('tool-call')).toContainText('Listed projects');
+      await expect(trace.getByTestId('tool-call')).toContainText(
+        'This workspace has no projects.'
+      );
+      await expect(page.locator('.message-assistant .message-content')).toContainText(
+        'There are no projects in this workspace.'
+      );
     });
   });
 });
