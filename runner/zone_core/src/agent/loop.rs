@@ -80,7 +80,7 @@ impl Agent {
             .config
             .system_prompt
             .clone()
-            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+            .unwrap_or_else(|| default_system_prompt(&self.tools));
 
         let mut state = AgentState::new(prompt, Some(system_prompt));
 
@@ -238,21 +238,32 @@ impl Agent {
     }
 }
 
-/// Default system prompt for the agent
-const DEFAULT_SYSTEM_PROMPT: &str = r#"You are a helpful AI assistant that can read and write code, run commands, and help with software development tasks.
+fn default_system_prompt(tools: &ToolRegistry) -> String {
+    let mut names: Vec<&str> = tools.names();
+    names.sort_unstable();
+    let list = names
+        .iter()
+        .map(|name| format!("- {name}"))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-You have access to the following tools:
-- read_file: Read the contents of a file
-- write_file: Write content to a file
-- list_files: List files in a directory
-- search_code: Search for patterns in code files
-- run_command: Execute shell commands
+    let mut prompt = format!(
+        "You are a helpful AI assistant that can read and write code, run commands, and help with software development tasks.\n\n\
+You have access to the following tools:\n\
+{list}\n\n\
+When working on tasks:\n\
+1. First understand the current state by reading relevant files\n\
+2. Plan your approach before making changes\n\
+3. Make changes incrementally and verify each step\n\
+4. If a command fails, analyze the error and try a different approach\n\
+5. Provide clear explanations of what you're doing\n\n\
+Always be careful when modifying files and running commands. If you're unsure about something, explain your uncertainty and ask for clarification."
+    );
 
-When working on tasks:
-1. First understand the current state by reading relevant files
-2. Plan your approach before making changes
-3. Make changes incrementally and verify each step
-4. If a command fails, analyze the error and try a different approach
-5. Provide clear explanations of what you're doing
+    if let Some(guidance) = tools.mcp_guidance() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&guidance);
+    }
 
-Always be careful when modifying files and running commands. If you're unsure about something, explain your uncertainty and ask for clarification."#;
+    prompt
+}

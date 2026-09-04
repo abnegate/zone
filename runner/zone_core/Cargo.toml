@@ -27,6 +27,20 @@ async-stream = "=0.3.6"
 
 tool_runner = { path = "../tool_runner" }
 
+# MCP client: talk to stdio servers (magents and anything in mcp.json)
+rmcp = { workspace = true, default-features = false, features = [
+    "client",
+    "transport-child-process",
+] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "=3.27.0"
+rmcp = { workspace = true, default-features = false, features = [
+    "client",
+    "server",
+    "macros",
+    "schemars",
+    "transport-child-process",
+    "transport-async-rw",
+] }
