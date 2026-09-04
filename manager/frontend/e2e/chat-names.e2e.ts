@@ -16,7 +16,6 @@ for (const width of [390, 1280]) {
       updated_at: new Date().toISOString(),
       archived: false,
       agent_enabled: true,
-      agent_sandboxed: true,
       messages: [],
     };
     await routeApi(page, /\/api\/chats($|\?|\/)/i, async (route) => {
@@ -46,11 +45,13 @@ for (const width of [390, 1280]) {
     await page.getByText(chat.title, { exact: true }).click();
     await expect(page.getByRole('heading', { name: chat.title })).toBeVisible();
     const row = page.locator('.chat-item');
+    if (width < 768) await page.getByRole('button', { name: 'Back to chats' }).click();
     await row.hover();
     await expect(row.getByTitle('Archive', { exact: true })).toBeVisible();
     await expect(row.getByTitle('Delete', { exact: true })).toBeVisible();
+    if (width < 768) await row.click();
     await expect(page.getByTestId('agent-toggle')).toBeVisible();
-    await expect(page.getByTestId('sandbox-toggle')).toBeVisible();
+    await expect(page.getByTestId('sandbox-toggle')).toHaveCount(0);
     const input = page.getByPlaceholder('Type a message, or drop a file...');
     await input.fill('What should I plant?');
     await input.press('Enter');
@@ -61,6 +62,7 @@ for (const width of [390, 1280]) {
       path: test.info().outputPath(`automatic-${width}.png`),
       fullPage: true,
     });
+    if (width < 768) await page.getByRole('button', { name: 'Back to chats' }).click();
     await row.getByRole('button', { name: `Rename ${chat.title}` }).click();
     const name = page.getByLabel('Chat name');
     await expect(name).toHaveValue(chat.title);
@@ -71,6 +73,8 @@ for (const width of [390, 1280]) {
       animations: 'disabled',
     });
     await page.getByRole('button', { name: 'Save name' }).click();
+    await expect(row.locator('.chat-title')).toHaveText('Planning a garden');
+    if (width < 768) await row.click();
     await expect(page.getByRole('heading', { name: 'Planning a garden' })).toBeVisible();
     await expect(row.locator('.chat-title')).toHaveText('Planning a garden');
     await page.screenshot({ path: test.info().outputPath(`renamed-${width}.png`), fullPage: true });

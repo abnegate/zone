@@ -48,7 +48,6 @@ export interface Chat {
    * Whether the agent is limited to authorized workspace tools. When false it
    * also gets a shell and file access on the machine running the server.
    */
-  agent_sandboxed: boolean;
 }
 
 export interface ChatWithMessages extends Chat {
@@ -62,13 +61,11 @@ export interface CreateChatRequest {
   first_message?: string;
   automatic_title?: boolean;
   agent_enabled?: boolean;
-  agent_sandboxed?: boolean;
 }
 
 export interface UpdateChatRequest {
   title?: string;
   agent_enabled?: boolean;
-  agent_sandboxed?: boolean;
 }
 
 export interface SendMessageRequest {

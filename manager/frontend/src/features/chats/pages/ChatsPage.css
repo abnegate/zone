@@ -338,16 +338,6 @@
   color: var(--ui-accent);
 }
 
-.agent-toggle + .agent-toggle {
-  margin-left: 0;
-}
-
-.agent-toggle-unsandboxed[aria-pressed='true'] {
-  border-color: color-mix(in srgb, var(--ui-warning, #b45309) 55%, transparent);
-  background: color-mix(in srgb, var(--ui-warning, #b45309) 14%, transparent);
-  color: var(--ui-warning, #b45309);
-}
-
 .messages-container {
   flex: 1;
   overflow-y: auto;

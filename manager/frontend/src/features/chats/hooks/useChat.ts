@@ -488,7 +488,6 @@ export function useChat(
         ? {
             ...prev,
             agent_enabled: updated.agent_enabled,
-            agent_sandboxed: updated.agent_sandboxed,
           }
         : prev
     );
@@ -496,9 +495,6 @@ export function useChat(
 
   const setAgentEnabled = (enabled: boolean): Promise<void> =>
     updateAgentSettings({ agent_enabled: enabled });
-
-  const setAgentSandboxed = (sandboxed: boolean): Promise<void> =>
-    updateAgentSettings({ agent_sandboxed: sandboxed });
 
   const deleteMessage = async (messageId: string): Promise<void> => {
     if (!chatId) {
@@ -523,7 +519,6 @@ export function useChat(
     sendMessage,
     cancelGeneration,
     setAgentEnabled,
-    setAgentSandboxed,
     deleteMessage,
     refresh,
     updateTitle,

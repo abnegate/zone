@@ -31,7 +31,6 @@ export default function ChatsPage() {
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [newChatModel, setNewChatModel] = useState('');
   const [newChatAgent, setNewChatAgent] = useState(false);
-  const [newChatSandboxed, setNewChatSandboxed] = useState(true);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -87,7 +86,6 @@ export default function ChatsPage() {
     sendMessage: sendMessageFn,
     cancelGeneration,
     setAgentEnabled: setAgentEnabledFn,
-    setAgentSandboxed: setAgentSandboxedFn,
     updateTitle,
   } = useChat(selectedChatId, updateListTitle);
 
@@ -141,12 +139,10 @@ export default function ChatsPage() {
         automatic_title: true,
         model_name: newChatModel,
         agent_enabled: newChatAgent,
-        agent_sandboxed: newChatSandboxed,
       });
       setShowNewChatModal(false);
       setNewChatModel('');
       setNewChatAgent(false);
-      setNewChatSandboxed(true);
       selectChat(chat.id);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
@@ -183,16 +179,6 @@ export default function ChatsPage() {
     } finally {
       renamePending.current = false;
       setRenaming(false);
-    }
-  };
-
-  const handleToggleSandbox = async () => {
-    if (!isAuthenticated || !displayedChat) return;
-    setOperationError(null);
-    try {
-      await setAgentSandboxedFn(!displayedChat.agent_sandboxed);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to change sandbox mode');
     }
   };
 
@@ -600,47 +586,6 @@ export default function ChatsPage() {
                 </svg>
                 Agent
               </button>
-              {displayedChat.agent_enabled && (
-                <button
-                  type="button"
-                  className={
-                    displayedChat.agent_sandboxed
-                      ? 'agent-toggle'
-                      : 'agent-toggle agent-toggle-unsandboxed'
-                  }
-                  onClick={handleToggleSandbox}
-                  aria-pressed={!displayedChat.agent_sandboxed}
-                  title={
-                    displayedChat.agent_sandboxed
-                      ? 'Sandboxed: workspace tools can read and make authorized changes'
-                      : 'Unsandboxed: the agent can run shell commands and write files on the server'
-                  }
-                  data-testid="sandbox-toggle"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.75"
-                    width="14"
-                    height="14"
-                    aria-hidden="true"
-                  >
-                    {displayedChat.agent_sandboxed ? (
-                      <>
-                        <rect x="4" y="10.5" width="16" height="10" rx="2" />
-                        <path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" />
-                      </>
-                    ) : (
-                      <>
-                        <rect x="4" y="10.5" width="16" height="10" rx="2" />
-                        <path d="M8 10.5V7a4 4 0 0 1 7.5-2" />
-                      </>
-                    )}
-                  </svg>
-                  {displayedChat.agent_sandboxed ? 'Sandboxed' : 'Host access'}
-                </button>
-              )}
             </div>
 
             <div className="messages-container">
@@ -908,18 +853,10 @@ export default function ChatsPage() {
           />
           <Checkbox
             label="Agent mode"
-            helpText="Let replies search workspace content, check connected GitHub data and manage workspace work when requested. Requires a model that supports tool calling."
+            helpText="Let replies search workspace content, check connected GitHub data and manage workspace work, run shell commands and read and write server files when requested. Requires a model that supports tool calling."
             checked={newChatAgent}
             onCheckedChange={setNewChatAgent}
           />
-          {newChatAgent && (
-            <Checkbox
-              label="Sandboxed"
-              helpText="Sandboxed, the agent can read workspace content and manage tasks, documents, messages and reminders when requested. Unsandboxed, it can also run shell commands and read and write files on the machine running the server, as the user that runs it. Those changes are real and are not undone when the chat ends."
-              checked={newChatSandboxed}
-              onCheckedChange={setNewChatSandboxed}
-            />
-          )}
           <div className="modal-actions">
             <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>
               Cancel

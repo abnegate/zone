@@ -9,7 +9,7 @@ const generateMockChat = (
   title: string,
   modelName: string,
   archived = false,
-  options: { agent_enabled?: boolean; agent_sandboxed?: boolean } = {}
+  options: { agent_enabled?: boolean } = {}
 ) => ({
   id,
   title,
@@ -18,7 +18,6 @@ const generateMockChat = (
   updated_at: new Date().toISOString(),
   archived,
   agent_enabled: options.agent_enabled ?? false,
-  agent_sandboxed: options.agent_sandboxed ?? true,
 });
 
 const generateMockMessage = (id: string, chatId: string, role: string, content: string) => ({
@@ -724,7 +723,7 @@ test.describe('Chats Page', () => {
       });
     };
 
-    test('turns on agent mode and shows the sandbox toggle', async ({ page }, testInfo) => {
+    test('turns on agent mode without a separate access toggle', async ({ page }, testInfo) => {
       await mockChatRoutes(page, mockChat);
       await mockChatSocket(page);
       await page.reload();
@@ -738,14 +737,16 @@ test.describe('Chats Page', () => {
       await agentToggle.click();
 
       await expect(agentToggle).toHaveAttribute('aria-pressed', 'true');
-      await expect(page.getByTestId('sandbox-toggle')).toBeVisible();
-      await expect(page.getByTestId('sandbox-toggle')).toHaveText(/Sandboxed/);
-      await expect(page.getByTestId('sandbox-toggle')).toHaveAttribute('title', 'Sandboxed: workspace tools can read and make authorized changes');
-      await page.screenshot({ path: testInfo.outputPath('workspace-tools-sandbox.png'), fullPage: true, animations: 'disabled' });
+      await expect(page.getByTestId('sandbox-toggle')).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Host access' })).toHaveCount(0);
+      await expect(page.locator('.message-form textarea')).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath('agent-header.png'), fullPage: true, animations: 'disabled' });
       await openNewChatFromSidebar(page);
       await page.getByRole('checkbox', { name: 'Agent mode', exact: true }).check();
-      await expect(page.getByText('Sandboxed, the agent can read workspace content', { exact: false })).toBeVisible();
-      await page.screenshot({ path: testInfo.outputPath('workspace-tools-help.png'), fullPage: true, animations: 'disabled' });
+      await expect(page.getByRole('checkbox', { name: 'Sandboxed' })).toHaveCount(0);
+      await expect(page.getByText('run shell commands and read and write server files', { exact: false })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Create Chat', exact: true })).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath('agent-form.png'), fullPage: true, animations: 'disabled' });
     });
 
     test('sends a message and renders the tool the agent ran', async ({ page }) => {

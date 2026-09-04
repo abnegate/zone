@@ -18,7 +18,6 @@ const mockChat = {
   updated_at: new Date().toISOString(),
   archived: false,
   agent_enabled: false,
-  agent_sandboxed: true,
 };
 
 const userPrompt = {
