@@ -503,6 +503,8 @@ describe('ModelsPage', () => {
       expect(screen.getByRole('group', { name: 'Filter by size' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Llama' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: '≤3B' })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: 'Most downloads' })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: 'Fewest downloads' })).toBeInTheDocument();
     });
 
     it('changes sort when select changes', async () => {
@@ -522,6 +524,11 @@ describe('ModelsPage', () => {
 
       fireEvent.change(screen.getByLabelText('Sort models'), { target: { value: 'name_asc' } });
       expect(setSortMock).toHaveBeenCalledWith('name_asc');
+
+      fireEvent.change(screen.getByLabelText('Sort models'), {
+        target: { value: 'downloads_desc' },
+      });
+      expect(setSortMock).toHaveBeenCalledWith('downloads_desc');
     });
 
     it('filters by family and size pills', async () => {

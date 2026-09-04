@@ -90,6 +90,8 @@ pub struct ModelDetails {
 pub enum ModelSort {
     #[default]
     Relevance,
+    DownloadsDesc,
+    DownloadsAsc,
     NameAsc,
     NameDesc,
     SizeAsc,

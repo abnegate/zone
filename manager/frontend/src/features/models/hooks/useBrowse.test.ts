@@ -486,6 +486,30 @@ describe('useBrowse', () => {
     expect(result.current.models.map((m) => m.name)).toEqual(['alpha', 'zeta']);
   });
 
+  it('sorts the combined All-source list by downloads', async () => {
+    mockBrowseModels.mockImplementation(async (src: string) => {
+      if (src === 'ollama') {
+        return { models: [{ name: 'zeta', downloads: 10 }], next_cursor: null };
+      }
+      if (src === 'huggingface') {
+        return { models: [{ name: 'alpha', downloads: 100 }], next_cursor: null };
+      }
+      return { models: [], next_cursor: null };
+    });
+
+    const { result } = renderHook(() => useBrowse());
+
+    await act(async () => {
+      await result.current.search('', 'all', 'downloads_desc');
+    });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.models.map((m) => m.name)).toEqual(['alpha', 'zeta']);
+  });
+
   it('re-sorts accumulated All-source pages when loading more', async () => {
     mockBrowseModels.mockImplementation(async (src: string, _q: string, cursor: string | null) => {
       if (!cursor) {

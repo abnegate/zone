@@ -26,6 +26,24 @@ describe('sortBrowseModels', () => {
     ]);
   });
 
+  it('sorts by downloads and matches backend null ordering', () => {
+    const models = [
+      model('unknown'),
+      model('popular', { downloads: 10_000 }),
+      model('niche', { downloads: 10 }),
+    ];
+    expect(sortBrowseModels(models, 'downloads_asc').map((m) => m.name)).toEqual([
+      'niche',
+      'popular',
+      'unknown',
+    ]);
+    expect(sortBrowseModels(models, 'downloads_desc').map((m) => m.name)).toEqual([
+      'unknown',
+      'popular',
+      'niche',
+    ]);
+  });
+
   it('sorts by size and matches backend null ordering', () => {
     const models = [model('unknown'), model('large', { size: 40 }), model('small', { size: 10 })];
     expect(sortBrowseModels(models, 'size_asc').map((m) => m.name)).toEqual([

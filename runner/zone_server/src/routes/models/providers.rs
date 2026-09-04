@@ -1270,7 +1270,9 @@ fn huggingface_sort_params(sort: ModelSort) -> (&'static str, i8) {
     match sort {
         ModelSort::UpdatedAsc => ("lastModified", 1),
         ModelSort::UpdatedDesc => ("lastModified", -1),
+        ModelSort::DownloadsAsc => ("downloads", 1),
         ModelSort::Relevance
+        | ModelSort::DownloadsDesc
         | ModelSort::NameAsc
         | ModelSort::NameDesc
         | ModelSort::SizeAsc
@@ -1419,6 +1421,8 @@ fn sort_models(models: &mut [ModelResponse], sort: ModelSort) {
         ModelSort::NameDesc => {
             models.sort_by_key(|model| std::cmp::Reverse(model.name.to_lowercase()))
         }
+        ModelSort::DownloadsAsc => models.sort_by(|a, b| cmp_optional(a.downloads, b.downloads)),
+        ModelSort::DownloadsDesc => models.sort_by(|a, b| cmp_optional(b.downloads, a.downloads)),
         ModelSort::SizeAsc => models.sort_by(|a, b| cmp_optional(a.size, b.size)),
         ModelSort::SizeDesc => models.sort_by(|a, b| cmp_optional(b.size, a.size)),
         ModelSort::ParamsAsc => {
@@ -1901,6 +1905,34 @@ mod tests {
     }
 
     #[test]
+    fn test_refine_models_sorts_by_downloads() {
+        let mut popular = test_model("popular", None, None, None, None);
+        popular.downloads = Some(10_000);
+        let mut niche = test_model("niche", None, None, None, None);
+        niche.downloads = Some(10);
+        let unknown = test_model("unknown", None, None, None, None);
+        let models = vec![unknown, niche, popular];
+
+        let desc = refine_models(
+            models.clone(),
+            &browse_opts(ModelSort::DownloadsDesc, None, ModelSizeFilter::All),
+        );
+        assert_eq!(
+            desc.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["unknown", "popular", "niche"]
+        );
+
+        let asc = refine_models(
+            models,
+            &browse_opts(ModelSort::DownloadsAsc, None, ModelSizeFilter::All),
+        );
+        assert_eq!(
+            asc.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["niche", "popular", "unknown"]
+        );
+    }
+
+    #[test]
     fn test_paginate_models() {
         let models: Vec<_> = (0..5)
             .map(|i| test_model(&format!("m{}", i), None, None, None, None))
@@ -1925,6 +1957,14 @@ mod tests {
         assert_eq!(
             huggingface_sort_params(ModelSort::UpdatedAsc),
             ("lastModified", 1)
+        );
+        assert_eq!(
+            huggingface_sort_params(ModelSort::DownloadsDesc),
+            ("downloads", -1)
+        );
+        assert_eq!(
+            huggingface_sort_params(ModelSort::DownloadsAsc),
+            ("downloads", 1)
         );
     }
 
@@ -1957,6 +1997,8 @@ mod tests {
         )));
         assert!(huggingface_uses_local_sort(ModelSort::ParamsDesc));
         assert!(!huggingface_uses_local_sort(ModelSort::UpdatedDesc));
+        assert!(!huggingface_uses_local_sort(ModelSort::DownloadsDesc));
+        assert!(!huggingface_uses_local_sort(ModelSort::DownloadsAsc));
         assert_eq!(huggingface_window_pages(true), HF_WINDOW_PAGES);
         assert_eq!(huggingface_window_pages(false), HF_FILTER_MAX_PAGES);
     }

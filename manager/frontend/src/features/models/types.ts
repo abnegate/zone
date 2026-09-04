@@ -49,6 +49,8 @@ export type BrowseSource = ModelSource | 'all';
 
 export type ModelSort =
   | 'relevance'
+  | 'downloads_desc'
+  | 'downloads_asc'
   | 'name_asc'
   | 'name_desc'
   | 'size_asc'
@@ -70,6 +72,8 @@ export const ALL_SOURCES: ModelSource[] = ['ollama', 'huggingface', 'gpt4all', '
 
 export const MODEL_SORT_OPTIONS: Array<{ value: ModelSort; label: string }> = [
   { value: 'relevance', label: 'Relevance' },
+  { value: 'downloads_desc', label: 'Most downloads' },
+  { value: 'downloads_asc', label: 'Fewest downloads' },
   { value: 'name_asc', label: 'Name A–Z' },
   { value: 'name_desc', label: 'Name Z–A' },
   { value: 'size_asc', label: 'Smallest size' },

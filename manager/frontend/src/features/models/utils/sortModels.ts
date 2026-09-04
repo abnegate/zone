@@ -61,6 +61,10 @@ export function sortBrowseModels(models: BrowseModel[], sort: ModelSort): Browse
         return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
       case 'name_desc':
         return b.name.localeCompare(a.name, undefined, { sensitivity: 'base' });
+      case 'downloads_asc':
+        return compareOptional(a.downloads ?? null, b.downloads ?? null);
+      case 'downloads_desc':
+        return compareOptional(b.downloads ?? null, a.downloads ?? null);
       case 'size_asc':
         return compareOptional(a.size ?? null, b.size ?? null);
       case 'size_desc':
