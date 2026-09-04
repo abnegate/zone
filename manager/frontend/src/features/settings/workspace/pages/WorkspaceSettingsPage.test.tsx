@@ -278,12 +278,15 @@ describe('WorkspaceSettingsPage', () => {
     );
   });
 
-  it('persists explicit default-looking values after changing a native theme', async () => {
+  it('directly selects explicit system font and medium radius from app defaults', async () => {
     savedTheme = { ...mockTheme, font_family: null, border_radius: null };
     render(<WorkspaceSettingsPage />);
-    fireEvent.change(await screen.findByLabelText('Font Family'), { target: { value: 'roboto' } });
+    expect(await screen.findByLabelText('Font Family')).toHaveValue('');
+    expect(screen.getByRole('option', { name: 'App Default' })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'App Default' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'App Default' })).toBeDisabled();
+    expect(screen.getByLabelText('Medium')).not.toBeChecked();
     fireEvent.change(screen.getByLabelText('Font Family'), { target: { value: 'system' } });
-    fireEvent.click(screen.getByLabelText('Large'));
     fireEvent.click(screen.getByLabelText('Medium'));
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
     await waitFor(() =>
@@ -301,7 +304,7 @@ describe('WorkspaceSettingsPage', () => {
     savedTheme = null;
     mockPreviewWorkspaceTheme.mockClear();
     rerender(<WorkspaceSettingsPage />);
-    expect(screen.getByLabelText('Font Family')).toHaveValue('system');
+    expect(screen.getByLabelText('Font Family')).toHaveValue('');
     expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
       0
     );
@@ -321,7 +324,7 @@ describe('WorkspaceSettingsPage', () => {
     savedTheme = null;
     mockPreviewWorkspaceTheme.mockClear();
     rerender(<WorkspaceSettingsPage />);
-    expect(screen.getByLabelText('Font Family')).toHaveValue('system');
+    expect(screen.getByLabelText('Font Family')).toHaveValue('');
     expect(mockPreviewWorkspaceTheme.mock.calls.filter(([value]) => value !== null)).toHaveLength(
       0
     );

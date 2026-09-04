@@ -100,9 +100,9 @@ export default function WorkspaceSettingsPage() {
   const [secondaryColorLight, setSecondaryColorLight] = useState('#6366f1');
   const [primaryColorDark, setPrimaryColorDark] = useState('#3b82f6');
   const [secondaryColorDark, setSecondaryColorDark] = useState('#6366f1');
-  const [fontFamily, setFontFamily] = useState<FontFamily>('system');
+  const [fontFamily, setFontFamily] = useState<FontFamily | null>(null);
   const [fontSize, setFontSize] = useState('16');
-  const [borderRadius, setBorderRadius] = useState<BorderRadius>('medium');
+  const [borderRadius, setBorderRadius] = useState<BorderRadius | null>(null);
 
   // Form state - AI Settings
   const [overrideAiSettings, setOverrideAiSettings] = useState(false);
@@ -171,9 +171,9 @@ export default function WorkspaceSettingsPage() {
     setSecondaryColorLight(theme?.secondary_color_light ?? '#6366f1');
     setPrimaryColorDark(theme?.primary_color_dark ?? '#3b82f6');
     setSecondaryColorDark(theme?.secondary_color_dark ?? '#6366f1');
-    setFontFamily(theme?.font_family ?? 'system');
+    setFontFamily(theme?.font_family ?? null);
     setFontSize((theme?.font_size_base ?? '16px').replace('px', ''));
-    setBorderRadius(theme?.border_radius ?? 'medium');
+    setBorderRadius(theme?.border_radius ?? null);
   }, []);
 
   useEffect(() => {
@@ -226,7 +226,7 @@ export default function WorkspaceSettingsPage() {
     const saved = workspaceTheme?.workspace_id === workspaceId ? workspaceTheme : null;
     const preserve = <T extends string>(
       field: keyof UpdateWorkspaceThemeRequest,
-      value: T,
+      value: T | null,
       previous: T | null | undefined
     ): T | null => (touched.current.has(field) ? value : (previous ?? null));
     return {
@@ -567,13 +567,16 @@ export default function WorkspaceSettingsPage() {
                       <label htmlFor="font-family">Font Family</label>
                       <select
                         id="font-family"
-                        value={fontFamily}
+                        value={fontFamily ?? ''}
                         onChange={(e) => {
                           touched.current.add('font_family');
                           setFontFamily(e.target.value as FontFamily);
                         }}
                         className="form-select"
                       >
+                        <option value="" disabled>
+                          App Default
+                        </option>
                         {fontOptions.map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.label}
@@ -608,6 +611,12 @@ export default function WorkspaceSettingsPage() {
                   <div className="form-group">
                     <span className="form-label">Corner Radius</span>
                     <div className="radio-group">
+                      {borderRadius === null && (
+                        <label className="radio-option">
+                          <input type="radio" name="border-radius" value="" checked disabled />
+                          <span className="radio-label">App Default</span>
+                        </label>
+                      )}
                       {radiusOptions.map((opt) => (
                         <label key={opt.value} className="radio-option">
                           <input

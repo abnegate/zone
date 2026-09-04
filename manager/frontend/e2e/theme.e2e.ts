@@ -186,7 +186,7 @@ test('nullable persisted fields resolve to usable defaults', async ({
   await prepare(page, nullableTheme);
   await openSettings(page);
   await expect(page.locator('.alert-error')).not.toBeVisible();
-  await expect(page.locator('#font-family')).toHaveValue('system');
+  await expect(page.locator('#font-family')).toHaveValue('');
   await expect(page.locator('html')).toHaveCSS('font-size', '16px');
   await page.locator('#primary-light').fill('#b03040');
   await expect(
