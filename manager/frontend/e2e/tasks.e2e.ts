@@ -533,6 +533,14 @@ test.describe('Tasks Page', () => {
   });
 
   test.describe('Task Execution', () => {
+    test.beforeEach(async ({ page }) => {
+      await routeApi(page, tasksRoutePattern, (route) =>
+        route.fulfill({ json: { tasks: mockTasks } })
+      );
+      await routeApi(page, '**/api/tasks/*/runs', (route) => route.fulfill({ json: { runs: [] } }));
+      await page.reload();
+    });
+
     const run = {
       id: 'run-123',
       task_id: 'task-1',
@@ -541,12 +549,6 @@ test.describe('Tasks Page', () => {
       progress_percent: null,
       error_message: null,
     };
-    test.beforeEach(async ({ page }) => {
-      await routeApi(page, '**/api/tasks/task-1/runs', (route) =>
-        route.fulfill({ json: { runs: [] } })
-      );
-    });
-
     test('opens an accessible idle dialog and closes with Escape', async ({ page }) => {
       await page.getByRole('button', { name: 'Execute', exact: true }).first().click();
       const dialog = page.getByRole('dialog', { name: 'Implement login page' });
@@ -559,15 +561,17 @@ test.describe('Tasks Page', () => {
 
     test('starts a real run and restores it on reopen', async ({ page }, testInfo) => {
       let started = false;
-      await routeApi(page, '**/api/tasks/task-1/runs', (route) =>
-        route.fulfill({ json: { runs: started ? [run] : [] } })
-      );
-      await routeApi(page, '**/api/tasks/task-1/run', (route) => {
+      await routeApi(page, '**/api/tasks/task-1/runs', (route) => {
+        if (route.request().method() === 'GET') {
+          return route.fulfill({ json: { runs: started ? [run] : [] } });
+        }
         started = true;
         return route.fulfill({ json: { run: { ...run, status: 'pending' } } });
       });
-      await routeApi(page, '**/api/task-runs/run-123', (route) => route.fulfill({ json: { run } }));
-      await routeApi(page, '**/api/task-runs/run-123/logs', (route) =>
+      await routeApi(page, '**/api/tasks/runs/run-123', (route) =>
+        route.fulfill({ json: { run } })
+      );
+      await routeApi(page, '**/api/tasks/runs/run-123/logs', (route) =>
         route.fulfill({
           json: {
             logs: [
@@ -600,15 +604,20 @@ test.describe('Tasks Page', () => {
           document.documentElement.setAttribute('data-theme', value);
           document.documentElement.classList.toggle('dark', value === 'dark');
         }, theme);
-        await routeApi(page, '**/api/tasks/task-1/run', (route) =>
-          route.fulfill({
-            status: 503,
-            json: { error: 'Worker unavailable. Try again when a worker is connected.' },
-          })
+        await routeApi(page, '**/api/tasks/task-1/runs', (route) =>
+          route.request().method() === 'GET'
+            ? route.fulfill({ json: { runs: [] } })
+            : route.fulfill({
+                status: 503,
+                json: { error: 'Worker unavailable. Try again when a worker is connected.' },
+              })
         );
         await page.getByRole('button', { name: 'Execute', exact: true }).first().click();
         await page.getByRole('button', { name: 'Start Execution' }).click();
         await expect(page.getByText('Could not start task')).toBeVisible();
+        await expect(
+          page.getByText('Worker unavailable. Try again when a worker is connected.')
+        ).toBeVisible();
         await expect(page.locator('.execution-logs')).toHaveCount(0);
         await expect(page.locator('.task-progress-bar-container')).toHaveCount(0);
         await page.screenshot({
@@ -617,6 +626,14 @@ test.describe('Tasks Page', () => {
         });
         await page.setViewportSize({ width: 390, height: 844 });
         await expect(page.getByRole('button', { name: 'Try Again' })).toBeInViewport();
+        await expect
+          .poll(() =>
+            page.getByRole('dialog').evaluate((dialog) => {
+              const bounds = dialog.getBoundingClientRect();
+              return dialog.contains(document.elementFromPoint(bounds.left + 20, bounds.top + 40));
+            })
+          )
+          .toBe(true);
         await page.screenshot({
           path: testInfo.outputPath(`task-error-${theme}-mobile.png`),
           fullPage: true,

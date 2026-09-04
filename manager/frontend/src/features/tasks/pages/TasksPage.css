@@ -222,7 +222,11 @@
 }
 
 /* Execution monitor */
+.ui-dialog-overlay:has(+ .task-execution-modal) {
+  z-index: 1000;
+}
 .task-execution-modal.ui-dialog-content {
+  z-index: 1000;
   width: min(40rem, calc(100vw - 2rem));
   max-width: 40rem;
   max-height: calc(100dvh - 2rem);
