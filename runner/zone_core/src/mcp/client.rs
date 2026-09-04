@@ -4,14 +4,20 @@ use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
 use rmcp::service::RunningService;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use super::config::{McpConfig, McpServerSpec};
-use super::tool::{McpTool, qualified_tool_name};
+use super::tool::{McpTool, unique_qualified_tool_name};
 use crate::tools::Tool as ZoneTool;
+
+/// Bound for `initialize` and `tools/list` so one silent child cannot stall
+/// agent startup. `kill_on_drop` then tears the process down.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An MCP client or config failure. Connecting is best-effort: one bad server
 /// does not take the others down.
@@ -48,9 +54,13 @@ impl McpHub {
 
     /// Connect the given servers. Failures are logged and skipped.
     pub async fn connect(config: &McpConfig) -> Self {
+        Self::connect_with_timeout(config, CONNECT_TIMEOUT).await
+    }
+
+    async fn connect_with_timeout(config: &McpConfig, limit: Duration) -> Self {
         let mut hub = Self::new();
         for spec in &config.servers {
-            match McpSession::connect(spec).await {
+            match McpSession::connect_with_timeout(spec, limit).await {
                 Ok(session) => {
                     tracing::info!(
                         server = %spec.name,
@@ -88,9 +98,15 @@ impl McpHub {
 
     /// Zone tools for every advertised remote tool.
     pub fn tools(&self) -> Vec<Arc<dyn ZoneTool>> {
+        let mut used = HashSet::new();
+        self.tools_avoiding(&mut used)
+    }
+
+    /// Same as [`Self::tools`], skipping names already in `used` (built-ins).
+    pub fn tools_avoiding(&self, used: &mut HashSet<String>) -> Vec<Arc<dyn ZoneTool>> {
         self.sessions
             .iter()
-            .flat_map(|session| session.zone_tools())
+            .flat_map(|session| session.zone_tools(used))
             .collect()
     }
 }
@@ -109,7 +125,7 @@ pub(crate) struct McpSession {
 }
 
 impl McpSession {
-    async fn connect(spec: &McpServerSpec) -> Result<Self, McpError> {
+    async fn connect_with_timeout(spec: &McpServerSpec, limit: Duration) -> Result<Self, McpError> {
         let mut command = Command::new(&spec.command);
         command.kill_on_drop(true);
         let transport = TokioChildProcess::new(command.configure(|cmd| {
@@ -126,17 +142,23 @@ impl McpSession {
             source,
         })?;
 
-        let client =
-            ().serve(transport)
-                .await
-                .map_err(|error| McpError::Handshake {
-                    server: spec.name.clone(),
-                    message: error.to_string(),
-                })?;
-
-        let remote_tools = client
-            .list_all_tools()
+        let client = tokio::time::timeout(limit, ().serve(transport))
             .await
+            .map_err(|_| McpError::Handshake {
+                server: spec.name.clone(),
+                message: "handshake timed out".to_string(),
+            })?
+            .map_err(|error| McpError::Handshake {
+                server: spec.name.clone(),
+                message: error.to_string(),
+            })?;
+
+        let remote_tools = tokio::time::timeout(limit, client.list_all_tools())
+            .await
+            .map_err(|_| McpError::Handshake {
+                server: spec.name.clone(),
+                message: "tool listing timed out".to_string(),
+            })?
             .map_err(|error| McpError::Handshake {
                 server: spec.name.clone(),
                 message: error.to_string(),
@@ -160,11 +182,11 @@ impl McpSession {
             .map_err(|error| McpError::Call(error.to_string()))
     }
 
-    fn zone_tools(self: &Arc<Self>) -> Vec<Arc<dyn ZoneTool>> {
+    fn zone_tools(self: &Arc<Self>, used: &mut HashSet<String>) -> Vec<Arc<dyn ZoneTool>> {
         self.remote_tools
             .iter()
             .map(|tool| {
-                let qualified = qualified_tool_name(&self.name, tool.name.as_ref());
+                let qualified = unique_qualified_tool_name(used, &self.name, tool.name.as_ref());
                 let description = tool
                     .description
                     .as_deref()
@@ -305,5 +327,28 @@ mod tests {
         let mut registry = ToolRegistry::new();
         assert_eq!(registry.register_mcp(&hub), 0);
         let _ = ToolContext::default();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_times_out_unresponsive_server() {
+        let config = McpConfig {
+            servers: vec![McpServerSpec {
+                name: "sleepy".to_string(),
+                command: "/bin/sleep".to_string(),
+                args: vec!["60".to_string()],
+                env: HashMap::new(),
+                cwd: None,
+                disabled: false,
+            }],
+        };
+        let started = std::time::Instant::now();
+        let hub = McpHub::connect_with_timeout(&config, Duration::from_millis(400)).await;
+        assert!(hub.is_empty());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "handshake timeout should fail fast, took {:?}",
+            started.elapsed()
+        );
     }
 }

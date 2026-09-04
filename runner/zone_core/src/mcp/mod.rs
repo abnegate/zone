@@ -18,7 +18,7 @@ mod tool;
 
 pub use client::{McpError, McpHub};
 pub use config::{McpConfig, McpServerSpec};
-pub use tool::{format_call_result, qualified_tool_name};
+pub use tool::{format_call_result, qualified_tool_name, unique_qualified_tool_name};
 
 /// Extra system-prompt text when MCP tools (especially magents) are attached.
 pub fn guidance_for_tools(names: &[&str]) -> Option<String> {

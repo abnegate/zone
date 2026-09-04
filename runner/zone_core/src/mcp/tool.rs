@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -98,6 +99,21 @@ pub fn qualified_tool_name(server: &str, tool: &str) -> String {
     }
 }
 
+/// Same as [`qualified_tool_name`], then `_2`, `_3`, … if that name is taken.
+///
+/// Sanitizing `list.files` and `list_files`, or prefix-skipping `srv_ping`
+/// next to `ping`, would otherwise overwrite an earlier registry entry.
+pub fn unique_qualified_tool_name(used: &mut HashSet<String>, server: &str, tool: &str) -> String {
+    let base = qualified_tool_name(server, tool);
+    let mut candidate = base.clone();
+    let mut n = 2u32;
+    while !used.insert(candidate.clone()) {
+        candidate = format!("{base}_{n}");
+        n += 1;
+    }
+    candidate
+}
+
 fn sanitize_ident(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -181,6 +197,27 @@ mod tests {
         assert_eq!(
             qualified_tool_name("my.server", "list/files"),
             "my_server_list_files"
+        );
+    }
+
+    #[test]
+    fn disambiguates_colliding_qualified_names() {
+        let mut used = HashSet::new();
+        assert_eq!(
+            unique_qualified_tool_name(&mut used, "srv", "ping"),
+            "srv_ping"
+        );
+        assert_eq!(
+            unique_qualified_tool_name(&mut used, "srv", "srv_ping"),
+            "srv_ping_2"
+        );
+        assert_eq!(
+            unique_qualified_tool_name(&mut used, "my.server", "list/files"),
+            "my_server_list_files"
+        );
+        assert_eq!(
+            unique_qualified_tool_name(&mut used, "my.server", "list_files"),
+            "my_server_list_files_2"
         );
     }
 

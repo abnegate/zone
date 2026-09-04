@@ -11,7 +11,7 @@ pub use file::*;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -219,8 +219,9 @@ impl ToolRegistry {
 
     /// Attach every tool from a connected MCP hub.
     ///
-    /// Names are prefixed with the server name (`magents_spawn_session`) so two
-    /// servers cannot collide. The hub can be dropped afterwards: each tool
+    /// Names are prefixed with the server name (`magents_spawn_session`).
+    /// Collisions after sanitizing are given a numeric suffix so one tool
+    /// cannot hide another. The hub can be dropped afterwards: each tool
     /// holds its own session handle.
     pub fn register_mcp(&mut self, hub: &crate::mcp::McpHub) -> usize {
         let mut added = 0;
@@ -229,7 +230,8 @@ impl ToolRegistry {
                 self.mcp_servers.push(name);
             }
         }
-        for tool in hub.tools() {
+        let mut used: HashSet<String> = self.tools.keys().cloned().collect();
+        for tool in hub.tools_avoiding(&mut used) {
             self.register(tool);
             added += 1;
         }

@@ -209,11 +209,17 @@ impl McpConfig {
 
 fn env_flag(name: &str, default: bool) -> bool {
     match std::env::var(name) {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
+        Ok(value) => parse_flag(&value, default),
         Err(_) => default,
+    }
+}
+
+fn parse_flag(value: &str, default: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => default,
     }
 }
 
@@ -335,5 +341,20 @@ mod tests {
         assert_eq!(spec.name, "magents");
         assert_eq!(spec.command, "magents");
         assert_eq!(spec.args, ["mcp"]);
+    }
+
+    #[test]
+    fn parse_flag_keeps_default_for_empty_and_unknown() {
+        assert!(parse_flag("", true));
+        assert!(!parse_flag("", false));
+        assert!(parse_flag("maybe", true));
+        assert!(!parse_flag("maybe", false));
+        assert!(parse_flag(" true ", true));
+        assert!(!parse_flag("0", true));
+        assert!(!parse_flag("off", true));
+        assert!(!parse_flag("false", true));
+        assert!(parse_flag("1", false));
+        assert!(parse_flag("yes", false));
+        assert!(parse_flag("on", false));
     }
 }
