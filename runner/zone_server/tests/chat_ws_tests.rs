@@ -265,6 +265,75 @@ async fn next_frame(
 }
 
 #[tokio::test]
+async fn test_custom_models_stream_in_chat_and_agent_modes() {
+    for model in ["qwen3.8:27b", "my-provider/custom-model:latest"] {
+        for enabled in [false, true] {
+            let provider = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .and(wiremock::matchers::body_partial_json(json!({"model": model})))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(
+                            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+                        ),
+                )
+                .expect(1)
+                .mount(&provider)
+                .await;
+            let mut config = test_config();
+            config.litellm_host = provider.uri();
+            config.comfyui.enabled = false;
+            let client = TestClient::with_db().await;
+            let (token, chat_id) = seed_chat_with_model(&client, model).await;
+            client
+                .put_json_auth(
+                    &format!("/api/chats/{chat_id}"),
+                    &json!({"agent_enabled": enabled}),
+                    &token,
+                )
+                .await
+                .assert_status(axum::http::StatusCode::OK);
+            let address = spawn_server_with_config(config).await;
+            let (mut socket, _) = connect_async(format!("ws://{address}/ws/chats/{chat_id}"))
+                .await
+                .unwrap();
+            socket
+                .send(WsMessage::Text(
+                    json!({"type": "auth", "token": token}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(WsMessage::Text(
+                    json!({"type": "send", "content": "Hello"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                let frame = next_frame(&mut socket, Duration::from_secs(10))
+                    .await
+                    .expect("custom model must complete a reply");
+                match frame["type"].as_str() {
+                    Some("message_end") => {
+                        assert_eq!(frame["content"], "hello");
+                        break;
+                    }
+                    Some("error" | "cancelled") => {
+                        panic!("custom model {model}, agent {enabled}: {frame}")
+                    }
+                    _ => {}
+                }
+            }
+            provider.verify().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_chat_ws_rejects_unauthenticated_send() {
     let client = TestClient::with_db().await;
     let (_token, chat_id) = seed_chat(&client).await;
@@ -557,8 +626,7 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
         .await;
 
     let client = TestClient::with_db().await;
-    // This model deliberately fails normal-chat validation. Image routing must
-    // still succeed because the selected chat model is not changed or invoked.
+    // Image routing must succeed without invoking the selected chat model.
     let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
     let artifact_root =
         std::env::temp_dir().join(format!("zone-ws-artifacts-{}", uuid::Uuid::new_v4()));

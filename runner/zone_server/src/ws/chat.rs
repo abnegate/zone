@@ -87,23 +87,6 @@ const LLM_STREAM_TIMEOUT_SECS: u64 = 300;
 /// Status constants
 const STATUS_CONNECTED: &str = "connected";
 
-/// Allowed model prefixes for validation
-const ALLOWED_MODEL_PREFIXES: &[&str] = &[
-    "gpt-",
-    "claude-",
-    "o1-",
-    "gemini-",
-    "llama",
-    "mistral",
-    "mixtral",
-    "codellama",
-    // Vision-capable local models, for messages carrying images.
-    "llava",
-    "bakllava",
-    "moondream",
-    "minicpm-v",
-];
-
 /// Global connection limiter per chat
 static CHAT_CONNECTIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
 
@@ -741,14 +724,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     }
 }
 
-/// Validate that a model name is allowed
-fn is_valid_model(model_name: &str) -> bool {
-    let model_lower = model_name.to_lowercase();
-    ALLOWED_MODEL_PREFIXES
-        .iter()
-        .any(|prefix| model_lower.starts_with(prefix))
-}
-
 async fn handle_image_generation(
     state: &AppState,
     sender: &SharedSender,
@@ -1123,8 +1098,6 @@ async fn prepare_message(
             return Ok(None);
         }
     };
-    let model_name = chat.model_name.as_str();
-
     let mut image_config = state.config().comfyui.clone();
     if let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
         && let Ok(settings) = ai_settings::get_effective_ai_settings(
@@ -1142,17 +1115,6 @@ async fn prepare_message(
         state.config().litellm_key.clone(),
     );
     let image_request = classifier.is_image_request(content, metadata).await;
-
-    // Image requests never route through the selected model. Validate it only
-    // when it will actually receive the request.
-    if !image_request && !is_valid_model(model_name) {
-        tracing::warn!("Invalid model name rejected: {}", model_name);
-        let error_msg = ServerMessage::Error {
-            message: "Invalid model configuration".to_string(),
-        };
-        let _ = send_server(sender, error_msg).await;
-        return Ok(None); // Not a fatal error, just reject this message
-    }
 
     Ok(Some(if image_request {
         Routing::Image(image_config)
@@ -1978,29 +1940,6 @@ mod tests {
         assert_eq!(MAX_GENERATED_IMAGES, 8);
         assert_eq!(LLM_STREAM_TIMEOUT_SECS, 300);
         assert_eq!(STATUS_CONNECTED, "connected");
-    }
-
-    #[test]
-    fn test_model_validation() {
-        // Valid models
-        assert!(is_valid_model("gpt-4"));
-        assert!(is_valid_model("gpt-4o"));
-        assert!(is_valid_model("gpt-4o-mini"));
-        assert!(is_valid_model("GPT-4")); // Case insensitive
-        assert!(is_valid_model("claude-3-5-sonnet"));
-        assert!(is_valid_model("claude-3-opus"));
-        assert!(is_valid_model("o1-preview"));
-        assert!(is_valid_model("gemini-pro"));
-        assert!(is_valid_model("llama3.1"));
-        assert!(is_valid_model("mistral-7b"));
-        assert!(is_valid_model("mixtral-8x7b"));
-        assert!(is_valid_model("codellama-34b"));
-
-        // Invalid models
-        assert!(!is_valid_model(""));
-        assert!(!is_valid_model("invalid-model"));
-        assert!(!is_valid_model("some-custom-model"));
-        assert!(!is_valid_model("random"));
     }
 
     #[test]
