@@ -6,6 +6,8 @@ import type {
   MessageMetadata,
   MessageRole,
   SendMessageRequest,
+  ToolCallRecord,
+  UpdateChatRequest,
 } from '../types';
 
 // The server saves the user message and streams the assistant reply over
@@ -22,6 +24,22 @@ type ServerMessage =
     }
   | { type: 'message_start'; message_id: string; role: MessageRole }
   | { type: 'chunk'; content: string; index: number }
+  | {
+      type: 'tool_call';
+      message_id: string;
+      tool_call_id: string;
+      name: string;
+      arguments: string;
+    }
+  | {
+      type: 'tool_result';
+      message_id: string;
+      tool_call_id: string;
+      name: string;
+      success: boolean;
+      detail: string;
+      duration_ms: number;
+    }
   | {
       type: 'image';
       message_id: string;
@@ -97,7 +115,10 @@ export function useChat(chatId: string | null) {
                 ? {
                     ...m,
                     content,
-                    metadata: metadata !== undefined ? (metadata ?? undefined) : m.metadata,
+                    // Merged, not replaced: a streaming turn has several
+                    // writers for one message, and an arriving image must not
+                    // drop the tool trace that patchToolCall put there.
+                    metadata: metadata !== undefined ? { ...m.metadata, ...metadata } : m.metadata,
                   }
                 : m
             ),
@@ -112,6 +133,40 @@ export function useChat(chatId: string | null) {
           metadata: metadata ?? undefined,
         };
         return { ...prev, messages: [...prev.messages, message] };
+      });
+    },
+    []
+  );
+
+  // Tool calls arrive in two frames: one when the agent starts a tool and one
+  // when it finishes, so this merges a partial update into the message's trace
+  // rather than replacing the record.
+  const patchToolCall = useCallback(
+    (messageId: string, toolCallId: string, patch: Partial<ToolCallRecord>) => {
+      setChat((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          messages: prev.messages.map((message) => {
+            if (message.id !== messageId) return message;
+            const existing = message.metadata?.tool_calls ?? [];
+            const toolCalls = existing.some((call) => call.id === toolCallId)
+              ? existing.map((call) => (call.id === toolCallId ? { ...call, ...patch } : call))
+              : [
+                  ...existing,
+                  {
+                    id: toolCallId,
+                    name: '',
+                    arguments: '',
+                    success: false,
+                    detail: '',
+                    duration_ms: 0,
+                    ...patch,
+                  },
+                ];
+            return { ...message, metadata: { ...message.metadata, tool_calls: toolCalls } };
+          }),
+        };
       });
     },
     []
@@ -194,10 +249,28 @@ export function useChat(chatId: string | null) {
             upsertMessage(assistantId, 'assistant', assistantContent);
           }
           break;
+        case 'tool_call':
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            name: payload.name,
+            arguments: payload.arguments,
+            detail: 'Running…',
+            pending: true,
+          });
+          break;
+        case 'tool_result':
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            name: payload.name,
+            success: payload.success,
+            detail: payload.detail,
+            duration_ms: payload.duration_ms,
+            pending: false,
+          });
+          break;
         case 'image':
           if (assistantId === payload.message_id) {
             const attachments = assistantMetadata?.attachments ?? [];
             assistantMetadata = {
+              ...assistantMetadata,
               attachments: [
                 ...attachments.filter((attachment) => attachment.url !== payload.attachment.url),
                 payload.attachment,
@@ -248,7 +321,7 @@ export function useChat(chatId: string | null) {
       socket.close();
       socketRef.current = null;
     };
-  }, [chatId, upsertMessage, applySavedUserMessage]);
+  }, [chatId, upsertMessage, applySavedUserMessage, patchToolCall]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     if (socket.readyState === WebSocket.OPEN) {
@@ -311,6 +384,30 @@ export function useChat(chatId: string | null) {
     }
   };
 
+  // Persisted on the chat rather than sent per message, so the next reply uses
+  // the new mode whichever window or device it comes from.
+  const updateAgentSettings = async (settings: UpdateChatRequest): Promise<void> => {
+    if (!chatId) {
+      throw new Error('No chat selected');
+    }
+    const updated = await chatsApi.updateChat(chatId, settings);
+    setChat((prev) =>
+      prev && prev.id === updated.id
+        ? {
+            ...prev,
+            agent_enabled: updated.agent_enabled,
+            agent_sandboxed: updated.agent_sandboxed,
+          }
+        : prev
+    );
+  };
+
+  const setAgentEnabled = (enabled: boolean): Promise<void> =>
+    updateAgentSettings({ agent_enabled: enabled });
+
+  const setAgentSandboxed = (sandboxed: boolean): Promise<void> =>
+    updateAgentSettings({ agent_sandboxed: sandboxed });
+
   const deleteMessage = async (messageId: string): Promise<void> => {
     if (!chatId) {
       throw new Error('No chat selected');
@@ -333,6 +430,8 @@ export function useChat(chatId: string | null) {
     status,
     sendMessage,
     cancelGeneration,
+    setAgentEnabled,
+    setAgentSandboxed,
     deleteMessage,
     refresh,
   };

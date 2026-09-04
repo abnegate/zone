@@ -33,6 +33,11 @@ impl Tool for RunCommandTool {
         "Execute a shell command. Returns stdout/stderr output. Use for running tests, builds, git commands, etc."
     }
 
+    fn timeout(&self, context: &ToolContext) -> Duration {
+        // Loose enough never to pre-empt the per-call limit applied below.
+        Duration::from_secs(context.command_timeout + 30)
+    }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -184,6 +189,156 @@ impl Tool for RunCommandTool {
     }
 }
 
+/// Run a command through a real shell, with no allow-list.
+///
+/// [`RunCommandTool`] spawns a binary from a fixed list and rejects shell
+/// metacharacters, which rules out pipes, redirection and chaining. That is
+/// the right trade for a task runner working in a checkout. This is the tool
+/// for callers who have deliberately asked for an unrestricted agent: it runs
+/// whatever it is given, as whoever runs the process. Register it only
+/// alongside a [`ToolContext`] with `unrestricted` set.
+pub struct RunShellTool;
+
+#[derive(Debug, Deserialize)]
+struct RunShellParams {
+    command: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+/// Longest a single shell command may run, whatever it asks for.
+const MAX_SHELL_TIMEOUT_SECS: u64 = 900;
+
+/// Cap on returned output, so one noisy command cannot fill the context
+/// window. The middle is dropped rather than the tail, because the error a
+/// build is being run for is usually at the end.
+const MAX_SHELL_OUTPUT_CHARS: usize = 16_000;
+
+fn trim_middle(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= MAX_SHELL_OUTPUT_CHARS {
+        return text.to_string();
+    }
+    let half = MAX_SHELL_OUTPUT_CHARS / 2;
+    let head: String = chars[..half].iter().collect();
+    let tail: String = chars[chars.len() - half..].iter().collect();
+    format!(
+        "{head}\n\n[… {} characters trimmed …]\n\n{tail}",
+        chars.len() - MAX_SHELL_OUTPUT_CHARS
+    )
+}
+
+#[async_trait]
+impl Tool for RunShellTool {
+    fn name(&self) -> &str {
+        "run_shell"
+    }
+
+    fn description(&self) -> &str {
+        "Run a shell command and return its stdout, stderr and exit code. Runs through `sh -c`, \
+         so pipes, redirection and chaining work. Use for builds, tests, git and package managers."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to run, e.g. 'cargo test 2>&1 | tail -40'"
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Directory to run in. Absolute, or relative to the working directory."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Wall-clock limit in seconds. Default 120, maximum 900."
+                }
+            },
+            "required": ["command"]
+        })
+    }
+
+    fn timeout(&self, _context: &ToolContext) -> Duration {
+        // Loose enough never to pre-empt the per-call limit enforced below.
+        Duration::from_secs(MAX_SHELL_TIMEOUT_SECS + 30)
+    }
+
+    async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let params: RunShellParams =
+            serde_json::from_value(params).map_err(|e| ToolError::InvalidParams(e.to_string()))?;
+
+        if params.command.trim().is_empty() {
+            return Err(ToolError::InvalidParams("Command is empty".to_string()));
+        }
+
+        let cwd = match &params.cwd {
+            Some(dir) => context.cwd.join(dir),
+            None => context.cwd.clone(),
+        };
+
+        let limit = Duration::from_secs(
+            params
+                .timeout_secs
+                .unwrap_or(120)
+                .clamp(1, MAX_SHELL_TIMEOUT_SECS),
+        );
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(&params.command)
+            .current_dir(&cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // Without this, a command that outlives its timeout keeps running
+            // after we have stopped waiting for it.
+            .kill_on_drop(true);
+
+        cmd.env_clear();
+        for (key, value) in &context.env {
+            cmd.env(key, value);
+        }
+
+        let output = match timeout(limit, cmd.output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(ToolError::Execution(format!("Failed to execute: {}", e))),
+            Err(_) => {
+                return Err(ToolError::Execution(format!(
+                    "Command timed out after {} seconds and was killed",
+                    limit.as_secs()
+                )));
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        let mut report = String::new();
+        match output.status.code() {
+            Some(0) => {}
+            Some(code) => report.push_str(&format!("Exit code: {}\n", code)),
+            None => report.push_str("Killed by signal\n"),
+        }
+        if !stdout.trim().is_empty() {
+            report.push_str(&format!("stdout:\n{}\n", stdout));
+        }
+        if !stderr.trim().is_empty() {
+            report.push_str(&format!("stderr:\n{}\n", stderr));
+        }
+        if report.is_empty() {
+            report.push_str("(no output)");
+        }
+
+        // A non-zero exit is an observation, not a tool failure: the model
+        // should read the compiler error rather than conclude the tool broke.
+        Ok(ToolResult::success(trim_middle(report.trim_end())))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +351,7 @@ mod tests {
             env: HashMap::new(),
             max_file_size: 1024 * 1024,
             command_timeout: 30,
+            unrestricted: false,
         }
     }
 

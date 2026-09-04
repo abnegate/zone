@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import type { Limits, Plan, Subscription, Usage } from '../types';
 import { client } from './client';
 
@@ -23,7 +23,17 @@ class MockWebSocket {
   close = mock();
 }
 
-(global as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket;
+// Every test file shares one process, so a global left swapped out here reaches
+// suites that expect a real WebSocket.
+const realWebSocket = global.WebSocket;
+
+beforeAll(() => {
+  (global as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket;
+});
+
+afterAll(() => {
+  global.WebSocket = realWebSocket;
+});
 
 describe('Client', () => {
   beforeEach(() => {
@@ -243,6 +253,8 @@ describe('Client', () => {
       created_at: '2024-01-01T00:00:00Z',
       updated_at: '2024-01-01T00:00:00Z',
       archived: false,
+      agent_enabled: false,
+      agent_sandboxed: true,
     };
 
     const mockMessage = {
@@ -310,22 +322,41 @@ describe('Client', () => {
       );
     });
 
-    it('updateChatTitle updates chat', async () => {
+    it('updateChat updates chat', async () => {
       const updatedChat = { ...mockChat, title: 'Updated', messages: [] };
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ chat: updatedChat }),
       });
 
-      await client.updateChatTitle('1', 'Updated');
+      await client.updateChat('1', { title: 'Updated' });
 
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/chats/1',
         expect.objectContaining({
-          method: 'PATCH',
+          method: 'PUT',
           body: JSON.stringify({ title: 'Updated' }),
         })
       );
+    });
+
+    it('updateChat toggles agent mode', async () => {
+      const updatedChat = { ...mockChat, agent_enabled: true, messages: [] };
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ chat: updatedChat }),
+      });
+
+      const chat = await client.updateChat('1', { agent_enabled: true });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/chats/1',
+        expect.objectContaining({
+          method: 'PUT',
+          body: JSON.stringify({ agent_enabled: true }),
+        })
+      );
+      expect(chat.agent_enabled).toBe(true);
     });
 
     it('deleteChat deletes chat', async () => {
@@ -1161,10 +1192,10 @@ describe('Client', () => {
       );
     });
 
-    it('updateChatTitle throws on failed request', async () => {
+    it('updateChat throws on failed request', async () => {
       mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
 
-      await expect(client.updateChatTitle('1', 'New Title')).rejects.toThrow(
+      await expect(client.updateChat('1', { title: 'New Title' })).rejects.toThrow(
         'Failed to update chat: 500'
       );
     });

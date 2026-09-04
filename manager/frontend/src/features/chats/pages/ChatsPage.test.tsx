@@ -12,6 +12,7 @@ const mockArchiveChat = mock();
 const mockUnarchiveChat = mock();
 const mockDeleteChat = mock();
 const mockSearchChatMessages = mock();
+const mockUpdateChat = mock();
 const mockWsSend = mock();
 const mockWsClose = mock();
 
@@ -31,7 +32,7 @@ mock.module('../../../api/chats', () => ({
     searchChatMessages: mockSearchChatMessages,
     setGetAccessToken: mock(),
     getMessages: mock(),
-    updateChatTitle: mock(),
+    updateChat: mockUpdateChat,
     deleteMessage: mock(),
     chatAccessToken: () => 'test-token',
     createChatWebSocket: () => ({
@@ -129,6 +130,7 @@ const mockClient = {
   unarchiveChat: mockUnarchiveChat,
   deleteChat: mockDeleteChat,
   searchChatMessages: mockSearchChatMessages,
+  updateChat: mockUpdateChat,
 };
 
 let ChatsPage: typeof import('./ChatsPage').default;
@@ -148,6 +150,8 @@ const mockChats: Chat[] = [
     model_name: 'llama2',
     updated_at: getDateString(0),
     archived: false,
+    agent_enabled: false,
+    agent_sandboxed: true,
     created_at: '2024-01-01T00:00:00Z',
   },
   {
@@ -156,6 +160,8 @@ const mockChats: Chat[] = [
     model_name: 'mistral',
     updated_at: getDateString(1),
     archived: false,
+    agent_enabled: false,
+    agent_sandboxed: true,
     created_at: '2024-01-02T00:00:00Z',
   },
   {
@@ -164,6 +170,8 @@ const mockChats: Chat[] = [
     model_name: 'llama2',
     updated_at: getDateString(3),
     archived: false,
+    agent_enabled: false,
+    agent_sandboxed: true,
     created_at: '2024-01-03T00:00:00Z',
   },
   {
@@ -172,6 +180,8 @@ const mockChats: Chat[] = [
     model_name: 'mistral',
     updated_at: getDateString(10),
     archived: false,
+    agent_enabled: false,
+    agent_sandboxed: true,
     created_at: '2024-01-04T00:00:00Z',
   },
 ];
@@ -182,6 +192,8 @@ const mockChatWithMessages: ChatWithMessages = {
   model_name: 'llama2',
   updated_at: '2024-01-01T00:00:00Z',
   archived: false,
+  agent_enabled: false,
+  agent_sandboxed: true,
   created_at: '2024-01-01T00:00:00Z',
   messages: [
     {
@@ -207,6 +219,8 @@ const mockChatEmpty: ChatWithMessages = {
   model_name: 'mistral',
   updated_at: '2024-01-02T00:00:00Z',
   archived: false,
+  agent_enabled: false,
+  agent_sandboxed: true,
   created_at: '2024-01-02T00:00:00Z',
   messages: [],
 };
@@ -217,6 +231,8 @@ const mockChatWithSystemMessage: ChatWithMessages = {
   model_name: 'llama2',
   updated_at: '2024-01-03T00:00:00Z',
   archived: false,
+  agent_enabled: false,
+  agent_sandboxed: true,
   created_at: '2024-01-03T00:00:00Z',
   messages: [
     {
@@ -255,6 +271,7 @@ describe('ChatsPage', () => {
     mockUnarchiveChat.mockReset();
     mockDeleteChat.mockReset();
     mockSearchChatMessages.mockReset();
+    mockUpdateChat.mockReset();
     mockWsSend.mockReset();
     mockWsClose.mockReset();
     mockClient.getChats.mockResolvedValue(mockChats);
@@ -540,6 +557,8 @@ describe('ChatsPage', () => {
         model_name: 'llama2',
         updated_at: '2024-01-05T00:00:00Z',
         archived: false,
+        agent_enabled: false,
+        agent_sandboxed: true,
         created_at: '2024-01-05T00:00:00Z',
       };
       mockClient.createChat.mockResolvedValueOnce(newChat);
@@ -582,6 +601,8 @@ describe('ChatsPage', () => {
           workspace_id: 'ws-1',
           title: 'Chat with llama2',
           model_name: 'llama2',
+          agent_enabled: false,
+          agent_sandboxed: true,
         });
       });
     });
@@ -794,6 +815,8 @@ describe('ChatsPage', () => {
         model_name: 'llama2',
         updated_at: '2024-01-01T00:00:00Z',
         archived: true,
+        agent_enabled: false,
+        agent_sandboxed: true,
         created_at: '2024-01-01T00:00:00Z',
       };
       mockClient.archiveChat.mockResolvedValueOnce(archivedChat);
@@ -838,6 +861,8 @@ describe('ChatsPage', () => {
           model_name: 'llama2',
           updated_at: '2024-01-01T00:00:00Z',
           archived: true,
+          agent_enabled: false,
+          agent_sandboxed: true,
           created_at: '2024-01-01T00:00:00Z',
         },
       ];
@@ -848,6 +873,8 @@ describe('ChatsPage', () => {
         model_name: 'llama2',
         updated_at: '2024-01-01T00:00:00Z',
         archived: false,
+        agent_enabled: false,
+        agent_sandboxed: true,
         created_at: '2024-01-01T00:00:00Z',
       };
       mockClient.unarchiveChat.mockResolvedValueOnce(unarchivedChat);
@@ -883,6 +910,8 @@ describe('ChatsPage', () => {
           model_name: 'llama2',
           updated_at: '2024-01-01T00:00:00Z',
           archived: true,
+          agent_enabled: false,
+          agent_sandboxed: true,
           created_at: '2024-01-01T00:00:00Z',
         },
       ];
@@ -937,6 +966,8 @@ describe('ChatsPage', () => {
         model_name: 'llama2',
         updated_at: '2024-01-01T00:00:00Z',
         archived: true,
+        agent_enabled: false,
+        agent_sandboxed: true,
         created_at: '2024-01-01T00:00:00Z',
       };
       mockClient.archiveChat.mockResolvedValueOnce(archivedChat);
@@ -1255,6 +1286,75 @@ describe('ChatsPage', () => {
 
       await waitFor(() => {
         expect(screen.getByText('llama2')).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('sandbox toggle', () => {
+    const openAgentChat = async (agentSandboxed: boolean) => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: agentSandboxed,
+      });
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('sandbox-toggle')).toBeInTheDocument();
+      });
+    };
+
+    it('is hidden until agent mode is on', async () => {
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByTestId('agent-toggle')).toBeInTheDocument();
+      });
+      // There is nothing to sandbox while replies come straight from the model.
+      expect(screen.queryByTestId('sandbox-toggle')).not.toBeInTheDocument();
+    });
+
+    it('says which mode the chat is in', async () => {
+      await openAgentChat(true);
+      expect(screen.getByTestId('sandbox-toggle')).toHaveTextContent('Sandboxed');
+    });
+
+    it('calls out host access rather than reading as just another setting', async () => {
+      await openAgentChat(false);
+
+      const toggle = screen.getByTestId('sandbox-toggle');
+      expect(toggle).toHaveTextContent('Host access');
+      expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      expect(toggle.className).toContain('agent-toggle-unsandboxed');
+      expect(toggle.getAttribute('title')).toContain('run shell commands and write files');
+    });
+
+    it('leaves the sandbox when clicked', async () => {
+      await openAgentChat(true);
+
+      mockClient.updateChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        agent_enabled: true,
+        agent_sandboxed: false,
+      });
+
+      fireEvent.click(screen.getByTestId('sandbox-toggle'));
+
+      await waitFor(() => {
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', {
+          agent_sandboxed: false,
+        });
       });
     });
   });
