@@ -1,4 +1,14 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from 'bun:test';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BrowserRouter } from 'react-router-dom';
 import type { Chat, ChatSearchResult, ChatWithMessages, Message } from '../types';
@@ -814,6 +824,34 @@ describe('ChatsPage', () => {
   });
 
   describe('generation feedback', () => {
+    let restoreClock: (() => void) | undefined;
+
+    afterEach(() => {
+      restoreClock?.();
+      restoreClock = undefined;
+    });
+
+    function controlClock(): (elapsed: number) => void {
+      let tick: (() => void) | undefined;
+      const now = spyOn(performance, 'now').mockReturnValue(0);
+      const interval = spyOn(window, 'setInterval').mockImplementation((callback: TimerHandler) => {
+        tick = () => {
+          if (typeof callback === 'function') callback();
+        };
+        return 1;
+      });
+      const clear = spyOn(window, 'clearInterval').mockImplementation(() => {});
+      restoreClock = () => {
+        now.mockRestore();
+        interval.mockRestore();
+        clear.mockRestore();
+      };
+      return (elapsed: number): void => {
+        now.mockReturnValue(elapsed);
+        act(() => tick?.());
+      };
+    }
+
     async function sendPrompt(): Promise<HTMLTextAreaElement> {
       renderChatsPage();
       fireEvent.click(await screen.findByText('Chat 1'));
@@ -827,12 +865,12 @@ describe('ChatsPage', () => {
     }
 
     it('keeps elapsed time through status changes and resets it for the next request', async () => {
+      const advance = controlClock();
       const input = await sendPrompt();
       expect(screen.getByRole('timer')).toHaveTextContent('0:00');
       expect(screen.getByRole('status').contains(screen.getByRole('timer'))).toBe(false);
-      await waitFor(() => expect(screen.getByRole('timer')).toHaveTextContent('0:01'), {
-        timeout: 2500,
-      });
+      advance(1000);
+      expect(screen.getByRole('timer')).toHaveTextContent('0:01');
       act(() => socket.emit({ type: 'status', message: 'Generating image…' }));
       expect(screen.getByRole('timer')).toHaveTextContent('0:01');
       act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
@@ -847,10 +885,10 @@ describe('ChatsPage', () => {
     });
 
     it('removes elapsed feedback when switching chats and starts fresh on return', async () => {
+      const advance = controlClock();
       await sendPrompt();
-      await waitFor(() => expect(screen.getByRole('timer')).toHaveTextContent('0:01'), {
-        timeout: 2500,
-      });
+      advance(1000);
+      expect(screen.getByRole('timer')).toHaveTextContent('0:01');
       fireEvent.click(screen.getByText('Chat 2'));
       expect(screen.queryByRole('timer')).not.toBeInTheDocument();
       fireEvent.click(screen.getByText('Chat 1'));
