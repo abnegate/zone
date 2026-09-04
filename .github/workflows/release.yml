@@ -1,0 +1,383 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-release:
+    name: Prepare release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+      - name: Set package.version from the release tag
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          chmod +x .github/scripts/set-release-version.sh
+          .github/scripts/set-release-version.sh "$version"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-version
+          path: |
+            runner/Cargo.toml
+            runner/Cargo.lock
+            runner/zone_desktop/tauri.conf.json
+
+  commit-release-version:
+    name: Commit release version
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          token: ${{ secrets.GH_TOKEN }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-version
+      - name: Commit version on the default branch when this release is its tip
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: .github/scripts/commit-release-version.sh
+
+  frontend:
+    name: Frontends
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install and build
+        run: |
+          bun install --frozen-lockfile
+          bun run build:ui
+          bun run --filter ./manager/frontend build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontends
+          path: |
+            manager/frontend/build
+
+  binary:
+    name: Binary (${{ matrix.target }})
+    needs: [prepare-release, frontend]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            kind: linux
+            app_arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            kind: linux
+            app_arch: arm64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            kind: macos
+            app_arch: arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            kind: macos
+            app_arch: x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-version
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: frontends
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: runner
+          key: ${{ matrix.target }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: matrix.kind == 'macos'
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Build CLI
+        working-directory: runner
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} \
+            --package zone_cli --package zone_installer
+      - name: Build desktop (Linux)
+        if: matrix.kind == 'linux'
+        working-directory: runner
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} \
+            --package zone_desktop
+      - name: Build desktop (macOS)
+        if: matrix.kind == 'macos'
+        working-directory: runner/zone_desktop
+        env:
+          CI: true
+        run: |
+          bunx --bun @tauri-apps/cli@2 build \
+            --target ${{ matrix.target }} \
+            --bundles app \
+            --ci \
+            -- --locked
+      - name: Package
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          chmod +x .github/scripts/package-tauri.sh .github/scripts/package-deb.sh
+          rust_dir="runner/target/${{ matrix.target }}/release"
+          strip "$rust_dir/zone" "$rust_dir/zone-installer" || true
+          mkdir -p dist
+          if [[ "${{ matrix.kind }}" == "macos" ]]; then
+            .github/scripts/package-tauri.sh \
+              "$VERSION" \
+              "${{ matrix.app_arch }}" \
+              "$rust_dir/bundle/macos/Zone.app" \
+              "$rust_dir/zone" \
+              manager/frontend/build \
+              dist
+          else
+            strip "$rust_dir/zone-desktop" || true
+            name="zone-${{ matrix.target }}"
+            mkdir -p "dist/$name/bin" "dist/$name/share/manager"
+            cp "$rust_dir/zone" "$rust_dir/zone-desktop" "dist/$name/bin/"
+            chmod +x "dist/$name/bin/"*
+            cp -R manager/frontend/build/. "dist/$name/share/manager/"
+            tar -C dist -czf "dist/${name}.tar.gz" "$name"
+            cp "$rust_dir/zone" "dist/zone-${{ matrix.target }}"
+            cp "$rust_dir/zone-installer" "dist/zone-installer-${{ matrix.target }}"
+            cp "$rust_dir/zone-desktop" "dist/zone-desktop-${{ matrix.target }}"
+            rm -rf "dist/$name"
+          fi
+      - name: Smoke
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          if [[ "${{ matrix.kind }}" == "macos" ]]; then
+            unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Zone.app/Contents/MacOS/zone-desktop'
+            unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Zone.app/Contents/MacOS/zone'
+            unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Contents/Resources/manager/index.html'
+          else
+            ./dist/zone-${{ matrix.target }} --help
+            test -x "./dist/zone-installer-${{ matrix.target }}"
+            test -x "./dist/zone-desktop-${{ matrix.target }}"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zone-${{ matrix.target }}
+          path: dist/*
+
+  github-release:
+    name: GitHub Release
+    needs: [prepare-release, binary]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: zone-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: frontends
+      - name: Package Debian
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          chmod +x .github/scripts/package-deb.sh
+          .github/scripts/package-deb.sh \
+            "$VERSION" amd64 \
+            dist/zone-x86_64-unknown-linux-gnu \
+            dist/zone-desktop-x86_64-unknown-linux-gnu \
+            manager/frontend/build \
+            dist
+          .github/scripts/package-deb.sh \
+            "$VERSION" arm64 \
+            dist/zone-aarch64-unknown-linux-gnu \
+            dist/zone-desktop-aarch64-unknown-linux-gnu \
+            manager/frontend/build \
+            dist
+      - name: Checksums
+        run: |
+          cd dist
+          find . -type f \( -name 'Zone-*.zip' -o -name 'zone-*.tar.gz' -o -name '*.deb' -o -name 'zone-*' -o -name 'zone-installer-*' \) \
+            ! -name 'SHA256SUMS' \
+            -exec sha256sum {} + | tee SHA256SUMS
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/*
+
+  publish-homebrew:
+    name: Homebrew Cask
+    if: ${{ !contains(github.event.release.tag_name, '-') }}
+    needs: [prepare-release, github-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download macOS apps
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          mkdir -p assets
+          gh release download "${RELEASE_TAG}" \
+            --repo "${REPO}" \
+            --pattern "Zone-${VERSION}-darwin-*.zip" \
+            --dir assets
+      - name: Checksums
+        id: checksums
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          echo "sha256_arm=$(sha256sum "assets/Zone-${VERSION}-darwin-arm64.zip" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "sha256_intel=$(sha256sum "assets/Zone-${VERSION}-darwin-x86_64.zip" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Generate cask
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          TAG: ${{ github.event.release.tag_name }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          SHA256_ARM: ${{ steps.checksums.outputs.sha256_arm }}
+          SHA256_INTEL: ${{ steps.checksums.outputs.sha256_intel }}
+        run: |
+          sed -e "s/{{VERSION}}/${VERSION}/g" \
+              -e "s/{{TAG}}/${TAG}/g" \
+              -e "s/{{REPO_OWNER}}/${REPO_OWNER}/g" \
+              -e "s/{{SHA256_ARM}}/${SHA256_ARM}/g" \
+              -e "s/{{SHA256_INTEL}}/${SHA256_INTEL}/g" \
+              .github/cask/zone.rb.template > zone.rb
+      - name: Push to Homebrew tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GH_TOKEN }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          : "${HOMEBREW_TAP_TOKEN:?set HOMEBREW_TAP_TOKEN or GH_TOKEN}"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${REPO_OWNER}/homebrew-tap.git"
+          mkdir -p homebrew-tap/Casks
+          cp zone.rb homebrew-tap/Casks/
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/zone.rb
+          if git diff --cached --quiet; then
+            echo "Casks/zone.rb already at ${VERSION}"
+            exit 0
+          fi
+          git commit -m "Update zone cask to ${VERSION}"
+          git push
+
+  publish-apt:
+    name: APT
+    if: ${{ !contains(github.event.release.tag_name, '-') }}
+    needs: [github-release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install APT repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils gnupg
+      - name: Download deb packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p debs
+          gh release download "${RELEASE_TAG}" \
+            --repo "${REPO}" \
+            --pattern "*.deb" \
+            --dir debs
+      - name: Import GPG key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+      - name: Clone APT repository
+        env:
+          APT_REPO_TOKEN: ${{ secrets.APT_REPO_TOKEN || secrets.GH_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          : "${APT_REPO_TOKEN:?set APT_REPO_TOKEN or GH_TOKEN}"
+          git clone "https://x-access-token:${APT_REPO_TOKEN}@github.com/${REPO_OWNER}/apt-repo.git"
+      - name: Update APT repository
+        env:
+          GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p apt-repo/pool/main
+          cp debs/*.deb apt-repo/pool/main/
+          cd apt-repo
+          mkdir -p dists/stable/main/binary-amd64
+          mkdir -p dists/stable/main/binary-arm64
+          dpkg-scanpackages --multiversion --arch amd64 pool/ > dists/stable/main/binary-amd64/Packages
+          dpkg-scanpackages --multiversion --arch arm64 pool/ > dists/stable/main/binary-arm64/Packages
+          gzip -k -f dists/stable/main/binary-amd64/Packages
+          gzip -k -f dists/stable/main/binary-arm64/Packages
+          cd dists/stable
+          printf '%s\n' \
+            'Origin: abnegate' \
+            'Label: abnegate' \
+            'Suite: stable' \
+            'Codename: stable' \
+            'Architectures: amd64 arm64' \
+            'Components: main' \
+            'Description: APT repository for abnegate packages' \
+            > Release
+          apt-ftparchive release . >> Release
+          gpg --batch --yes --default-key "$GPG_KEY_ID" -abs -o Release.gpg Release
+          gpg --batch --yes --default-key "$GPG_KEY_ID" --clearsign -o InRelease Release
+          cd ../..
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "APT repo already has ${RELEASE_TAG}"
+            exit 0
+          fi
+          git commit -m "Add zone ${RELEASE_TAG}"
+          git push

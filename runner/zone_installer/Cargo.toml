@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "zone_installer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "zone-installer"
 path = "src/main.rs"
@@ -23,3 +27,9 @@ rand = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 tokio-stream = { workspace = true }
+dirs = { workspace = true }
+reqwest = { workspace = true }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+
+[dev-dependencies]
+tempfile = "3"

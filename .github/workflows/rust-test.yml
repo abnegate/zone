@@ -96,17 +96,17 @@ jobs:
           PGPASSWORD: postgres
 
       - name: Build
-        run: cargo build --all-targets --no-default-features --features zone_context/test-utils
+        run: cargo build --workspace --exclude zone_desktop --all-targets --no-default-features --features zone_context/test-utils
 
       - name: Run unit tests
-        run: cargo test --lib --no-default-features --features zone_context/test-utils
+        run: cargo test --workspace --exclude zone_desktop --lib --no-default-features --features zone_context/test-utils
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
           REDIS_URL: redis://localhost:6379
 
       - name: Run integration tests
-        run: cargo test --test '*' --no-default-features --features zone_context/test-utils
+        run: cargo test --workspace --exclude zone_desktop --test '*' --no-default-features --features zone_context/test-utils
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
@@ -114,7 +114,7 @@ jobs:
           RUST_BACKTRACE: 1
 
       - name: Run doc tests
-        run: cargo test --doc --no-default-features --features zone_context/test-utils
+        run: cargo test --workspace --exclude zone_desktop --doc --no-default-features --features zone_context/test-utils
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
@@ -151,19 +151,19 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build
-        run: cargo build --all-targets --no-default-features --features zone_context/test-utils
+        run: cargo build --workspace --exclude zone_desktop --all-targets --no-default-features --features zone_context/test-utils
 
       - name: Run unit tests
-        run: cargo test --lib --no-default-features --features zone_context/test-utils
+        run: cargo test --workspace --exclude zone_desktop --lib --no-default-features --features zone_context/test-utils
 
       - name: Run integration tests
         # zone_server integration tests require Postgres/Valkey service containers.
-        run: cargo test --test '*' --no-default-features --features zone_context/test-utils --workspace --exclude zone_server
+        run: cargo test --test '*' --no-default-features --features zone_context/test-utils --workspace --exclude zone_server --exclude zone_desktop
         env:
           RUST_BACKTRACE: 1
 
       - name: Run doc tests
-        run: cargo test --doc --no-default-features --features zone_context/test-utils
+        run: cargo test --workspace --exclude zone_desktop --doc --no-default-features --features zone_context/test-utils
 
   # Ensure minimum supported Rust version compiles
   msrv:
@@ -193,4 +193,4 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Check MSRV
-        run: cargo check --all-targets
+        run: cargo check --workspace --exclude zone_desktop --all-targets --no-default-features --features zone_context/test-utils
