@@ -184,10 +184,19 @@ pub async fn hybrid_search_filtered(
 ) -> sqlx::Result<Vec<HybridSearchResult>> {
     let fetch_limit = (limit * 3).max(24);
     let rewritten = crate::embeddings::rewrite_query(query);
+    let extra = crate::embeddings::serving::has_extra_filters(
+        filters.and_then(|f| f.source_ids.as_ref()).is_some(),
+        filters.and_then(|f| f.categories.as_ref()).is_some(),
+        filters.and_then(|f| f.min_quality).is_some(),
+        filters.and_then(|f| f.since).is_some(),
+    );
+    let keyword_fetch = crate::embeddings::serving::keyword_candidate_limit(fetch_limit, extra);
+    let ann_fetch = crate::embeddings::serving::ann_candidate_limit(fetch_limit, extra);
 
     let keyword_results = keyword_search(
         pool,
         &rewritten.keyword,
+        keyword_fetch,
         fetch_limit,
         filters,
         config.min_keyword_score,
@@ -200,6 +209,7 @@ pub async fn hybrid_search_filtered(
     let semantic_results = semantic_search(
         pool,
         &query_embedding,
+        ann_fetch,
         fetch_limit,
         filters,
         config.min_semantic_score,
@@ -219,6 +229,7 @@ pub async fn hybrid_search_filtered(
 async fn keyword_search(
     pool: &PgPool,
     query: &str,
+    candidate_limit: usize,
     limit: usize,
     filters: Option<&SearchFilters>,
     min_score: f32,
@@ -236,37 +247,52 @@ async fn keyword_search(
 
     sqlx::query_as(
         r#"
+        WITH q AS (
+            SELECT websearch_to_tsquery('english', $1) AS tsq
+        ),
+        hits AS (
+            SELECT
+                cc.id AS chunk_id,
+                cc.content_item_id,
+                cc.text AS chunk_text,
+                ts_rank_cd(cc.search_vector, q.tsq) AS score
+            FROM content_chunks cc
+            JOIN content_items ci ON ci.id = cc.content_item_id
+            CROSS JOIN q
+            WHERE cc.search_vector @@ q.tsq
+                AND ($3::uuid IS NULL OR ci.workspace_id = $3)
+                AND ($4::uuid[] IS NULL OR ci.source_id = ANY($4))
+            ORDER BY score DESC
+            LIMIT $5
+        )
         SELECT
-            cc.id as chunk_id,
-            cc.content_item_id,
+            hits.chunk_id,
+            hits.content_item_id,
             ci.source_id,
-            cc.text as chunk_text,
-            ci.uri as item_uri,
-            ci.title as item_title,
-            ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) as score
-        FROM content_chunks cc
-        JOIN content_items ci ON ci.id = cc.content_item_id
-        JOIN sources s ON s.id = ci.source_id
+            hits.chunk_text,
+            ci.uri AS item_uri,
+            ci.title AS item_title,
+            hits.score
+        FROM hits
+        JOIN content_items ci ON ci.id = hits.content_item_id
         LEFT JOIN heuristic_analysis ha ON ha.content_item_id = ci.id
-        WHERE cc.search_vector @@ websearch_to_tsquery('english', $1)
-            AND ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) >= $2
-            AND ($3::uuid IS NULL OR s.workspace_id = $3)
-            AND ($4::uuid[] IS NULL OR ci.source_id = ANY($4))
+        WHERE hits.score >= $2
             AND ($6::text[] IS NULL OR ci.category = ANY($6))
             AND ($7::float IS NULL OR ha.quality->>'score' IS NULL OR (ha.quality->>'score')::float >= $7)
             AND ($8::timestamp IS NULL OR ci.fetched_at >= $8)
-        ORDER BY score DESC
-        LIMIT $5
+        ORDER BY hits.score DESC
+        LIMIT $9
         "#,
     )
     .bind(&sanitized_query)
     .bind(min_score)
     .bind(workspace_id)
     .bind(source_ids)
-    .bind(limit as i64)
+    .bind(candidate_limit as i64)
     .bind(categories.as_deref())
     .bind(min_quality.map(|q| q as f64))
     .bind(since)
+    .bind(limit as i64)
     .fetch_all(pool)
     .await
 }
@@ -275,6 +301,7 @@ async fn keyword_search(
 async fn semantic_search(
     pool: &PgPool,
     query_embedding: &[f32],
+    candidate_limit: usize,
     limit: usize,
     filters: Option<&SearchFilters>,
     min_similarity: f32,
@@ -293,37 +320,43 @@ async fn semantic_search(
 
     sqlx::query_as(
         r#"
+        WITH ann AS (
+            SELECT e.chunk_id, e.content_item_id, e.source_id, e.vector
+            FROM embeddings e
+            WHERE ($3::uuid IS NULL OR e.workspace_id = $3)
+                AND ($4::uuid[] IS NULL OR e.source_id = ANY($4))
+            ORDER BY e.vector_bit <~> binary_quantize($1::vector)::bit(1024)
+            LIMIT $5
+        )
         SELECT
-            e.chunk_id,
-            e.content_item_id,
-            e.source_id,
+            ann.chunk_id,
+            ann.content_item_id,
+            ann.source_id,
             cc.text as chunk_text,
             ci.uri as item_uri,
             ci.title as item_title,
-            (1 - (e.vector <=> $1::vector))::REAL as similarity
-        FROM embeddings e
-        JOIN content_chunks cc ON cc.id = e.chunk_id
-        JOIN content_items ci ON ci.id = e.content_item_id
-        JOIN sources s ON s.id = e.source_id
+            (1 - (ann.vector <=> $1::vector))::REAL as similarity
+        FROM ann
+        JOIN content_chunks cc ON cc.id = ann.chunk_id
+        JOIN content_items ci ON ci.id = ann.content_item_id
         LEFT JOIN heuristic_analysis ha ON ha.content_item_id = ci.id
-        WHERE (1 - (e.vector <=> $1::vector)) >= $2
-            AND ($3::uuid IS NULL OR s.workspace_id = $3)
-            AND ($4::uuid[] IS NULL OR e.source_id = ANY($4))
+        WHERE (1 - (ann.vector <=> $1::vector)) >= $2
             AND ($6::text[] IS NULL OR ci.category = ANY($6))
             AND ($7::float IS NULL OR ha.quality->>'score' IS NULL OR (ha.quality->>'score')::float >= $7)
             AND ($8::timestamp IS NULL OR ci.fetched_at >= $8)
-        ORDER BY e.vector <=> $1::vector
-        LIMIT $5
+        ORDER BY ann.vector <=> $1::vector
+        LIMIT $9
         "#,
     )
     .bind(&vector_str)
     .bind(min_similarity)
     .bind(workspace_id)
     .bind(source_ids)
-    .bind(limit as i64)
+    .bind(candidate_limit as i64)
     .bind(categories.as_deref())
     .bind(min_quality.map(|q| q as f64))
     .bind(since)
+    .bind(limit as i64)
     .fetch_all(pool)
     .await
 }
@@ -524,10 +557,23 @@ pub async fn keyword_only_search(
     min_score: f32,
 ) -> sqlx::Result<Vec<HybridSearchResult>> {
     let rewritten = crate::embeddings::rewrite_query(query);
+    let extra = crate::embeddings::serving::has_extra_filters(
+        filters
+            .as_ref()
+            .and_then(|f| f.source_ids.as_ref())
+            .is_some(),
+        filters
+            .as_ref()
+            .and_then(|f| f.categories.as_ref())
+            .is_some(),
+        filters.as_ref().and_then(|f| f.min_quality).is_some(),
+        filters.as_ref().and_then(|f| f.since).is_some(),
+    );
     let results = keyword_search(
         pool,
         &rewritten.keyword,
-        limit.max(12),
+        crate::embeddings::serving::keyword_candidate_limit(limit, extra),
+        limit,
         filters.as_ref(),
         min_score,
     )
@@ -564,9 +610,22 @@ pub async fn semantic_only_search(
     let query_embedding = crate::embeddings::align_vector(query_embedding)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
+    let extra = crate::embeddings::serving::has_extra_filters(
+        filters
+            .as_ref()
+            .and_then(|f| f.source_ids.as_ref())
+            .is_some(),
+        filters
+            .as_ref()
+            .and_then(|f| f.categories.as_ref())
+            .is_some(),
+        filters.as_ref().and_then(|f| f.min_quality).is_some(),
+        filters.as_ref().and_then(|f| f.since).is_some(),
+    );
     let results = semantic_search(
         pool,
         &query_embedding,
+        crate::embeddings::serving::ann_candidate_limit(limit, extra),
         limit,
         filters.as_ref(),
         min_similarity,

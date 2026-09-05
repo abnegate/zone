@@ -39,12 +39,12 @@ async fn main() {
     // Load config
     let config = Config::from_env().expect("Failed to load configuration");
 
-    // Connect to database
-    let db = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&config.database_url)
+    // Connect to database with ANN session knobs on every checkout.
+    let db = zone_server::db::DbPool::connect(&config.database_url)
         .await
-        .expect("Failed to connect to database");
+        .expect("Failed to connect to database")
+        .inner()
+        .clone();
 
     tracing::info!("Connected to database");
 

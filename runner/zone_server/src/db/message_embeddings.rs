@@ -49,11 +49,12 @@ pub async fn store_message_embedding(
 
     sqlx::query(
         r#"
-        INSERT INTO message_embeddings (message_id, chat_id, vector, model)
-        VALUES ($1, $2, $3::vector, $4)
+        INSERT INTO message_embeddings (message_id, chat_id, workspace_id, vector, model)
+        VALUES ($1, $2, (SELECT workspace_id FROM chats WHERE id = $2), $3::vector, $4)
         ON CONFLICT (message_id) DO UPDATE SET
             vector = EXCLUDED.vector,
-            model = EXCLUDED.model
+            model = EXCLUDED.model,
+            workspace_id = COALESCE(EXCLUDED.workspace_id, message_embeddings.workspace_id)
         "#,
     )
     .bind(message_id)
@@ -94,64 +95,39 @@ pub async fn search_messages(
 ) -> Result<Vec<MessageSearchResult>, sqlx::Error> {
     let vector_str = aligned_vector_literal(query_embedding)?;
 
-    let results = match chat_id {
-        Some(cid) => {
-            // Search within a specific chat in a workspace
-            sqlx::query_as::<_, MessageSearchResult>(
-                r#"
-                SELECT
-                    m.id as message_id,
-                    m.chat_id,
-                    (1 - (me.vector <=> $1::vector))::REAL as similarity,
-                    m.role,
-                    m.content,
-                    m.created_at
-                FROM message_embeddings me
-                JOIN messages m ON m.id = me.message_id
-                JOIN chats c ON c.id = m.chat_id
-                WHERE me.chat_id = $2
-                  AND c.workspace_id = $3
-                  AND (1 - (me.vector <=> $1::vector)) >= $5
-                ORDER BY me.vector <=> $1::vector
-                LIMIT $4
-                "#,
-            )
-            .bind(&vector_str)
-            .bind(cid)
-            .bind(workspace_id)
-            .bind(limit as i64)
-            .bind(threshold)
-            .fetch_all(pool)
-            .await?
-        }
-        None => {
-            // Search across all chats in a workspace
-            sqlx::query_as::<_, MessageSearchResult>(
-                r#"
-                SELECT
-                    m.id as message_id,
-                    m.chat_id,
-                    (1 - (me.vector <=> $1::vector))::REAL as similarity,
-                    m.role,
-                    m.content,
-                    m.created_at
-                FROM message_embeddings me
-                JOIN messages m ON m.id = me.message_id
-                JOIN chats c ON c.id = m.chat_id
-                WHERE c.workspace_id = $2
-                  AND (1 - (me.vector <=> $1::vector)) >= $4
-                ORDER BY me.vector <=> $1::vector
-                LIMIT $3
-                "#,
-            )
-            .bind(&vector_str)
-            .bind(workspace_id)
-            .bind(limit as i64)
-            .bind(threshold)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let candidate_limit = zone_context::ann_candidate_limit(limit, chat_id.is_none());
+    let results = sqlx::query_as::<_, MessageSearchResult>(
+        r#"
+        WITH ann AS (
+            SELECT me.message_id, me.chat_id, me.vector
+            FROM message_embeddings me
+            WHERE me.workspace_id = $2
+              AND ($3::uuid IS NULL OR me.chat_id = $3)
+            ORDER BY me.vector_bit <~> binary_quantize($1::vector)::bit(1024)
+            LIMIT $5
+        )
+        SELECT
+            m.id as message_id,
+            m.chat_id,
+            (1 - (ann.vector <=> $1::vector))::REAL as similarity,
+            m.role,
+            m.content,
+            m.created_at
+        FROM ann
+        JOIN messages m ON m.id = ann.message_id
+        WHERE (1 - (ann.vector <=> $1::vector)) >= $6
+        ORDER BY ann.vector <=> $1::vector
+        LIMIT $4
+        "#,
+    )
+    .bind(&vector_str)
+    .bind(workspace_id)
+    .bind(chat_id)
+    .bind(limit as i64)
+    .bind(candidate_limit as i64)
+    .bind(threshold)
+    .fetch_all(pool)
+    .await?;
 
     Ok(results)
 }

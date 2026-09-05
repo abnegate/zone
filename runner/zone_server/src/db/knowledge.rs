@@ -296,8 +296,8 @@ pub async fn search_knowledge_keyword(
         r#"
         SELECT
             ke.id as entry_id,
-            ts_rank(
-                to_tsvector('english', ke.title || ' ' || COALESCE(ke.content, '')),
+            ts_rank_cd(
+                ke.search_vector,
                 websearch_to_tsquery('english', $1)
             )::FLOAT8 as similarity,
             ke.title,
@@ -307,8 +307,7 @@ pub async fn search_knowledge_keyword(
         FROM knowledge_entries ke
         WHERE ke.workspace_id = $2
           AND ke.is_active = TRUE
-          AND to_tsvector('english', ke.title || ' ' || COALESCE(ke.content, ''))
-              @@ websearch_to_tsquery('english', $1)
+          AND ke.search_vector @@ websearch_to_tsquery('english', $1)
         ORDER BY similarity DESC
         LIMIT $3
         "#,

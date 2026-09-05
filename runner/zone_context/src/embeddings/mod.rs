@@ -10,6 +10,7 @@ pub mod providers;
 pub mod query;
 pub mod ranker;
 pub mod rerank;
+pub mod serving;
 #[cfg(feature = "local-embeddings")]
 pub mod local_rerank;
 
@@ -18,6 +19,7 @@ pub use hybrid::{
     hybrid_search, hybrid_search_filtered, keyword_only_search, semantic_only_search, sort_by_score,
 };
 pub use ranker::{LinearRanker, default_ranker, score_hit};
+pub use serving::{ann_candidate_limit, configure_ann_connection, keyword_candidate_limit};
 pub use rerank::{
     CrossEncoder, OllamaCrossEncoder, blend_rank, lexical_cross_score, probe_cross_encoder,
 };

@@ -61,6 +61,7 @@ pub use embeddings::{
     OllamaCrossEncoder, RewrittenQuery, VectorStore, default_ranker, embed_query_text,
     hybrid_search, hybrid_search_filtered, identifier_match_boost, keyword_only_search,
     probe_cross_encoder, rewrite_query, score_hit, semantic_only_search,
+    configure_ann_connection, ann_candidate_limit,
 };
 
 // Heuristics types
