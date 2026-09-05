@@ -528,6 +528,8 @@ describe('ChatsPage', () => {
         expect(screen.getByText('Hello')).toBeInTheDocument();
         expect(screen.getByText('Hi there!')).toBeInTheDocument();
       });
+      expect(screen.queryByText('You')).not.toBeInTheDocument();
+      expect(screen.queryByText('Assistant')).not.toBeInTheDocument();
     });
 
     it('shows error when chat loading fails', async () => {

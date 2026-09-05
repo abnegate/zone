@@ -405,11 +405,13 @@ test.describe('Chats Page', () => {
       await expect(page.locator('.message-assistant')).toContainText('I am doing well, thank you!');
     });
 
-    test('shows role labels on messages', async ({ page }) => {
+    test('omits speaker labels on user and assistant messages', async ({ page }) => {
       await page.click('.chat-item');
 
-      await expect(page.locator('.message-user .message-role')).toContainText('You');
-      await expect(page.locator('.message-assistant .message-role')).toContainText('Assistant');
+      await expect(page.locator('.message-user .message-role')).toHaveCount(0);
+      await expect(page.locator('.message-assistant .message-role')).toHaveCount(0);
+      await expect(page.locator('.message-user .message-time')).toBeVisible();
+      await expect(page.locator('.message-assistant .message-time')).toBeVisible();
     });
 
     test('shows message input form', async ({ page }) => {

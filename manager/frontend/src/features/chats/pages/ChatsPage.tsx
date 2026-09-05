@@ -675,13 +675,7 @@ export default function ChatsPage() {
                       className={`message message-${message.role}${linked ? ' message--linked' : ''}`}
                     >
                       <div className="message-header">
-                        <span className="message-role">
-                          {message.role === 'user'
-                            ? 'You'
-                            : message.role === 'assistant'
-                              ? 'Assistant'
-                              : 'System'}
-                        </span>
+                        {message.role === 'system' && <span className="message-role">System</span>}
                         <span className="message-time">{formatDate(message.created_at)}</span>
                       </div>
                       {images.length > 0 && (
