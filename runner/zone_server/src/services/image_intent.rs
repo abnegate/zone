@@ -1,4 +1,10 @@
 //! Hybrid image-generation intent classification.
+//!
+//! High-confidence rules route immediately. Anything leftover — including
+//! informal edits of an attached photo that the word lists miss — is decided
+//! by a short LiteLLM call (`COMFYUI_CLASSIFIER_MODEL` / workspace `model_fast`,
+//! default `llama3.2:3b`) with a small token budget. Timeouts and empty hosts
+//! fall back to chat.
 
 use serde_json::Value;
 use std::time::Duration;
@@ -89,6 +95,9 @@ impl ImageIntentClassifier {
     }
 
     async fn classify_ambiguous(&self, content: &str, has_source_image: bool) -> bool {
+        if self.litellm_host.trim().is_empty() {
+            return false;
+        }
         let client = LlmClient::new(LlmConfig {
             base_url: self.litellm_host.clone(),
             api_key: self.litellm_key.clone(),
@@ -100,15 +109,16 @@ impl ImageIntentClassifier {
             format!(
                 "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
                  or wants the attached image edited now: add, remove, replace, restyle, transform, \
-                 change the background or environment, or place the subject in a different setting. \
-                 Discussion, analysis, prompt-writing, coding, and questions about the attached \
-                 image are CHAT.\nUser: {content}"
+                 change the background or environment, place the subject in a different setting, \
+                 or any other change to the photo, including short or informal wording. \
+                 Greetings, thanks, opinions, discussion, analysis, prompt-writing, coding, and \
+                 questions about the attached image are CHAT.\nUser: {content}"
             )
         } else {
             format!(
                 "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
                  or wants something added to, removed from, or changed on an existing image now, \
-                 including a new background or environment. \
+                 including a new background or environment, even if the wording is informal. \
                  Discussion, analysis, prompt-writing, coding, and how-to questions are CHAT.\nUser: {content}"
             )
         };
@@ -291,7 +301,10 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         .any(|token| ACTIONS.contains(&token.as_str()) || VISUAL_NOUNS.contains(&token.as_str()))
         || has("visualize")
         || has("visualise")
+        || has_source_image
     {
+        // Attached photos: let the fast classifier catch informal edits the
+        // word lists miss ("same subject at night", "without the chair").
         RuleDecision::Ambiguous
     } else {
         RuleDecision::Chat
@@ -682,6 +695,22 @@ mod tests {
             deterministic_decision("Could you design a logo for Acme?", false),
             RuleDecision::Ambiguous
         );
+        assert_eq!(
+            deterministic_decision("the same subject at night", false),
+            RuleDecision::Chat
+        );
+        assert_eq!(
+            deterministic_decision("the same subject at night", true),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(
+            deterministic_decision("without the chair", true),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(
+            deterministic_decision("thanks", true),
+            RuleDecision::Ambiguous
+        );
     }
 
     #[tokio::test]
@@ -905,5 +934,100 @@ mod tests {
             .await;
         assert!(prompt.contains("requested object gone"));
         assert!(prompt.contains("Remove this object from an image"));
+    }
+
+    fn attached_png() -> serde_json::Value {
+        serde_json::json!({
+            "attachments": [{
+                "name": "photo.png",
+                "mime": "image/png",
+                "url": "data:image/png;base64,aaa"
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn attached_informal_edit_uses_fast_classifier() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "classification",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fast",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "IMAGE"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: "fast".to_string(),
+                ..Default::default()
+            },
+            server.uri(),
+            "key".to_string(),
+        );
+        assert!(
+            classifier
+                .is_image_request("the same subject at night", Some(&attached_png()))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_thanks_stays_chat_when_classifier_says_chat() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "classification",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fast",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "CHAT"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: "fast".to_string(),
+                ..Default::default()
+            },
+            server.uri(),
+            "key".to_string(),
+        );
+        assert!(
+            !classifier
+                .is_image_request("thanks", Some(&attached_png()))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_informal_edit_stays_chat_without_classifier_host() {
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            String::new(),
+            String::new(),
+        );
+        assert!(
+            !classifier
+                .is_image_request("the same subject at night", Some(&attached_png()))
+                .await
+        );
     }
 }

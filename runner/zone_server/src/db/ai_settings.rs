@@ -81,7 +81,8 @@ pub struct EffectiveAiSettings {
 impl EffectiveAiSettings {
     /// Overlay workspace/org image settings onto the process ComfyUI defaults.
     ///
-    /// `model_fast` classifies ambiguous image intent. `model_image` is the
+    /// `model_fast` classifies image intent when rules are unsure, including
+    /// informal edits of an attached photo. `model_image` is the
     /// ComfyUI checkpoint used for generation; an empty value keeps
     /// `COMFYUI_CHECKPOINT`. `model_video` is the Wan UNET filename and keeps
     /// `COMFYUI_VIDEO_UNET` when empty.

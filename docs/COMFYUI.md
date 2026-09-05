@@ -225,6 +225,14 @@ packaged `0.75`. The original instruction is kept in that prompt so edits
 such as removing an object or placing the subject in a new environment stay
 grounded in what the user asked.
 
+Routing is hybrid. High-confidence phrases (`generate an image`, `remove this
+object`, `put this in a forest`) skip the model. If an image is attached and
+the word lists do not match, a fast LiteLLM classifier (`IMAGE` / `CHAT`, max
+3 tokens) decides. Default model is `llama3.2:3b` via
+`COMFYUI_CLASSIFIER_MODEL`, overridable with workspace/org `model_fast`.
+Timeouts and an empty LiteLLM host fall back to chat. How-to, analysis, and
+coding questions never call the classifier.
+
 The packaged defaults are Schnell-appropriate: four Euler/simple steps and CFG
 1. Node `4` defaults to the manifest filename and is never changed from
 untrusted request data. Zone copies successful temporary output into its

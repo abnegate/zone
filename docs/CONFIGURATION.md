@@ -154,6 +154,14 @@ details, and native macOS / bundled NVIDIA instructions.
   do not set `model_image`. Path separators and traversal are rejected.
   Chat image generation uses the effective `model_image` setting when present.
 
+### `COMFYUI_CLASSIFIER_MODEL`
+- **Default**: `llama3.2:3b`
+- **Description**: Fast LiteLLM model used when image-intent rules are unsure,
+  including informal edits of an attached photo (`IMAGE` vs `CHAT`, 3-token
+  reply). Org/workspace `model_fast` overrides this when set.
+- **Timeout**: `COMFYUI_CLASSIFIER_TIMEOUT_SECS` (default `3`, range 1–30).
+  Timeouts fall back to normal chat.
+
 ### `COMFYUI_VIDEO_WORKFLOW_PATH`
 - **Default**: `/app/comfyui/workflows/wan2.2-ti2v-5b-api.json`
 - **Description**: In-container path to the versioned Wan 2.2 TI2V
