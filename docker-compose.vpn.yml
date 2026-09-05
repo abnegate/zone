@@ -2,7 +2,10 @@
 # Internet-facing app containers share Gluetun's network namespace so every
 # packet uses the tunnel and Gluetun's kill switch. Traefik, Postgres, Valkey,
 # Prometheus, and the console stay on Docker networks for inbound UI and
-# local service discovery. Requires Compose v2.24+ (`!reset` / `!override`).
+# local service discovery. Gluetun DNS is DoT-only, and Docker forbids
+# extra_hosts on network_mode=service, so VPN-attached apps use the pinned
+# internal addresses. Requires Compose v2.24+
+# (`!reset` / `!override`).
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
@@ -11,8 +14,13 @@ services:
   gluetun:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "postgres:172.30.0.20"
+      - "valkey:172.30.0.21"
+      - "prometheus:172.30.0.22"
     environment:
       FIREWALL_INPUT_PORTS: 8080,8001,8000,4000,3000,8188,11434,8888
+      # Default control API is :8000, which collides with manager in this namespace.
+      HTTP_CONTROL_SERVER_ADDRESS: 127.0.0.1:8007
     ports:
       - "127.0.0.1:8000:8000"
     networks:
@@ -92,6 +100,13 @@ services:
       LITELLM_HOST: http://127.0.0.1:4000
       SEARCH_SEARXNG_QUERY_URL: http://127.0.0.1:8080/search?q=<query>&format=json
       MONITORING_GRAFANA_URL: http://127.0.0.1:3000
+      # Docker forbids extra_hosts with network_mode=service. Gluetun DoT also
+      # cannot resolve Docker names, so use the pinned internal addresses.
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENCODED}@172.30.0.20:5432/${MANAGER_POSTGRES_DB:-manager}
+      REDIS_URL: redis://172.30.0.21:6379
+      POSTGRES_HOST: "172.30.0.20"
+      VALKEY_HOST: "172.30.0.21"
+      MONITORING_PROMETHEUS_URL: http://172.30.0.22:9090
 
   litellm:
     network_mode: "service:gluetun"
@@ -103,12 +118,16 @@ services:
     depends_on:
       gluetun:
         condition: service_healthy
+    environment:
+      POSTGRES_HOST: "172.30.0.20"
 
   grafana:
     network_mode: "service:gluetun"
     networks: !reset
     extra_hosts: !reset
     ports: !reset
+    environment:
+      PROMETHEUS_URL: http://172.30.0.22:9090
     labels: !override
       - traefik.enable=false
     depends_on:

@@ -84,7 +84,10 @@ services:
       - postgres_data:/var/lib/postgresql
       - ./postgres/init-manager-db.sh:/docker-entrypoint-initdb.d/init-manager-db.sh:ro
     networks:
-      - internal
+      internal:
+        # Pinned so VPN-attached containers can reach this host via extra_hosts.
+        # Gluetun's DoT resolver does not answer Docker service names.
+        ipv4_address: 172.30.0.20
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
@@ -100,8 +103,9 @@ services:
       - valkey_data:/data
     command: valkey-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     networks:
-      - internal
-      - edge
+      internal:
+        ipv4_address: 172.30.0.21
+      edge:
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
@@ -498,8 +502,9 @@ services:
       - --storage.tsdb.retention.time=${MONITORING_RETENTION_TIME:-15d}
       - --web.enable-lifecycle
     networks:
-      - internal
-      - edge
+      internal:
+        ipv4_address: 172.30.0.22
+      edge:
     labels:
       - traefik.enable=true
       - traefik.docker.network=zone_edge
@@ -538,6 +543,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${MONITORING_GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=http://grafana.${DOMAIN_HOST_WEBUI}
+      - PROMETHEUS_URL=http://prometheus:9090
       # SMTP Configuration for alerting
       - GF_SMTP_ENABLED=${ALERT_ENABLED:-false}
       - GF_SMTP_HOST=${ALERT_SMTP_HOST}:${ALERT_SMTP_PORT:-587}
@@ -682,6 +688,7 @@ networks:
       com.docker.network.bridge.name: zone_internal
     ipam:
       config:
+        # .20 postgres, .21 valkey, .22 prometheus — see extra_hosts in docker-compose.vpn.yml
         - subnet: 172.30.0.0/24
 
 volumes:

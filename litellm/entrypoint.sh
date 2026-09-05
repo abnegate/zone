@@ -40,18 +40,19 @@ url_encode() {
 if [ -n "${POSTGRES_PASSWORD}" ]; then
     POSTGRES_USER_VAL="${POSTGRES_USER:-litellm}"
     POSTGRES_DB_VAL="${POSTGRES_DB:-litellm}"
+    POSTGRES_HOST_VAL="${POSTGRES_HOST:-postgres}"
 
     # Check if password contains special URL characters that need encoding
     case "${POSTGRES_PASSWORD}" in
         *@* | *:* | */* | *%* | *?* | *#* | *\&* | *=* | *+*)
             echo "[litellm-entrypoint] Encoding DATABASE_URL password for special characters..."
             ENCODED_PASSWORD=$(url_encode "${POSTGRES_PASSWORD}")
-            export DATABASE_URL="postgresql://${POSTGRES_USER_VAL}:${ENCODED_PASSWORD}@postgres:5432/${POSTGRES_DB_VAL}"
+            export DATABASE_URL="postgresql://${POSTGRES_USER_VAL}:${ENCODED_PASSWORD}@${POSTGRES_HOST_VAL}:5432/${POSTGRES_DB_VAL}"
             echo "[litellm-entrypoint] ✓ DATABASE_URL password encoded"
             ;;
         *)
             # No special characters, use password as-is
-            export DATABASE_URL="postgresql://${POSTGRES_USER_VAL}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB_VAL}"
+            export DATABASE_URL="postgresql://${POSTGRES_USER_VAL}:${POSTGRES_PASSWORD}@${POSTGRES_HOST_VAL}:5432/${POSTGRES_DB_VAL}"
             ;;
     esac
 fi
