@@ -69,7 +69,10 @@ pub fn create_router(state: AppState) -> Router {
     // Note: WebSocket routes use in-message auth, not middleware
     let public_routes = Router::new()
         .route("/health", get(health::health_check))
-        .route("/metrics", get(crate::metrics::scrape))
+        .route(
+            "/metrics",
+            get(crate::metrics::scrape).head(crate::metrics::scrape),
+        )
         .route("/api/auth/register", post(auth::register))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/refresh", post(auth::refresh))
