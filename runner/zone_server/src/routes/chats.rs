@@ -772,70 +772,85 @@ pub async fn search_messages(
         }
     }
 
-    // Get embedding service
-    let embedding_service = match state.embedding_service() {
-        Some(svc) => svc,
+    let mut semantic = Vec::new();
+    match state.embedding_service() {
+        Some(embedding_service) => {
+            match embedding_service
+                .embed(&zone_context::embed_query_text(
+                    embedding_service.model(),
+                    &params.query,
+                ))
+                .await
+            {
+                Ok(query_embedding) => {
+                    match message_embeddings::search_messages(
+                        state.db(),
+                        &query_embedding,
+                        params.workspace_id,
+                        params.chat_id,
+                        limit,
+                        params.threshold,
+                    )
+                    .await
+                    {
+                        Ok(results) => semantic = results,
+                        Err(e) => {
+                            tracing::error!("Database error during message search: {}", e);
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(ErrorResponse::new("Internal server error")),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to generate query embedding, falling back to keyword: {}",
+                        e
+                    );
+                }
+            }
+        }
         None => {
-            tracing::warn!("Embedding service not available for search");
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ErrorResponse::new("Embedding service not available")),
-            )
-                .into_response();
+            tracing::warn!("Embedding service not available; using keyword message search");
         }
-    };
+    }
 
-    // Generate query embedding
-    let query_embedding = match embedding_service
-        .embed(&zone_context::embed_query_text(
-            embedding_service.model(),
-            &params.query,
-        ))
-        .await
-    {
-        Ok(emb) => emb,
-        Err(e) => {
-            tracing::error!("Failed to generate query embedding: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Failed to generate query embedding")),
-            )
-                .into_response();
-        }
-    };
-
-    // Search messages within workspace
-    match message_embeddings::search_messages(
+    let keyword = match message_embeddings::search_messages_keyword(
         state.db(),
-        &query_embedding,
+        &params.query,
         params.workspace_id,
         params.chat_id,
         limit,
-        params.threshold,
     )
     .await
     {
-        Ok(results) => {
-            // Convert to response format
-            let response: Vec<MessageSearchResponse> = results
-                .into_iter()
-                .map(MessageSearchResponse::from)
-                .collect();
-            let total = response.len();
-
-            Json(MessageSearchListResponse {
-                results: response,
-                total,
-            })
-            .into_response()
-        }
+        Ok(results) => results,
         Err(e) => {
-            tracing::error!("Database error during message search: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+            tracing::error!("Database error during keyword message search: {}", e);
+            if semantic.is_empty() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response();
+            }
+            Vec::new()
         }
-    }
+    };
+
+    let results =
+        message_embeddings::fuse_message_hits(semantic, keyword, &params.query, limit);
+    let response: Vec<MessageSearchResponse> = results
+        .into_iter()
+        .map(MessageSearchResponse::from)
+        .collect();
+    let total = response.len();
+
+    Json(MessageSearchListResponse {
+        results: response,
+        total,
+    })
+    .into_response()
 }

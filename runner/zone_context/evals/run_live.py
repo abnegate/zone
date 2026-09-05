@@ -19,6 +19,13 @@ from pathlib import Path
 EVAL_PATH = Path(__file__).with_name("retrieval.json")
 
 
+def first_hit_rank(uris: list[str], expected: list[str]) -> int | None:
+    for index, uri in enumerate(uris, start=1):
+        if any(needle in uri for needle in expected):
+            return index
+    return None
+
+
 def main() -> int:
     base = os.environ.get("ZONE_EVAL_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
     token = os.environ.get("ZONE_EVAL_TOKEN")
@@ -29,6 +36,8 @@ def main() -> int:
 
     cases = json.loads(EVAL_PATH.read_text())["cases"]
     failed = 0
+    reciprocal_ranks: list[float] = []
+    hit_ranks: list[int] = []
     for case in cases:
         params = urllib.parse.urlencode(
             {
@@ -48,18 +57,27 @@ def main() -> int:
         except Exception as exc:
             print(f"FAIL {case['id']}: request error {exc}")
             failed += 1
+            reciprocal_ranks.append(0.0)
             continue
 
         uris = [item.get("uri") or "" for item in body.get("results", [])]
         expected = case.get("expect_uri_contains") or []
-        hit = any(any(needle in uri for uri in uris) for needle in expected)
-        if hit:
-            print(f"PASS {case['id']}")
-        else:
+        rank = first_hit_rank(uris, expected)
+        if rank is None:
             print(f"FAIL {case['id']}: wanted {expected} in {uris[:5]}")
             failed += 1
+            reciprocal_ranks.append(0.0)
+            continue
 
-    print(f"{len(cases) - failed}/{len(cases)} passed")
+        print(f"PASS {case['id']} rank={rank}")
+        reciprocal_ranks.append(1.0 / rank)
+        hit_ranks.append(rank)
+
+    total = len(cases)
+    passed = total - failed
+    mrr = sum(reciprocal_ranks) / total if total else 0.0
+    mean_rank = sum(hit_ranks) / len(hit_ranks) if hit_ranks else 0.0
+    print(f"{passed}/{total} hit@10  MRR={mrr:.3f}  mean_first_rank={mean_rank:.2f}")
     return 1 if failed else 0
 
 

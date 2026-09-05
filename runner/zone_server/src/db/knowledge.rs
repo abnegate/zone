@@ -279,6 +279,85 @@ pub async fn search_knowledge_entries(
     .await
 }
 
+/// Keyword search over workspace knowledge entries using the document GIN index.
+pub async fn search_knowledge_keyword(
+    pool: &PgPool,
+    query: &str,
+    workspace_id: Uuid,
+    limit: i64,
+) -> DbResult<Vec<KnowledgeSearchHit>> {
+    let keyword = zone_context::rewrite_query(query).keyword;
+    let sanitized = zone_context::embeddings::sanitize_search_query(&keyword);
+    if sanitized.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, KnowledgeSearchHit>(
+        r#"
+        SELECT
+            ke.id as entry_id,
+            ts_rank(
+                to_tsvector('english', ke.title || ' ' || COALESCE(ke.content, '')),
+                websearch_to_tsquery('english', $1)
+            )::FLOAT8 as similarity,
+            ke.title,
+            ke.content,
+            ke.category,
+            ke.tags
+        FROM knowledge_entries ke
+        WHERE ke.workspace_id = $2
+          AND ke.is_active = TRUE
+          AND to_tsvector('english', ke.title || ' ' || COALESCE(ke.content, ''))
+              @@ websearch_to_tsquery('english', $1)
+        ORDER BY similarity DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(&sanitized)
+    .bind(workspace_id)
+    .bind(limit as i32)
+    .fetch_all(pool)
+    .await
+}
+
+/// Fuse semantic and keyword knowledge lists with RRF plus identifier boost.
+pub fn fuse_knowledge_hits(
+    semantic: Vec<KnowledgeSearchHit>,
+    keyword: Vec<KnowledgeSearchHit>,
+    query: &str,
+    limit: usize,
+) -> Vec<KnowledgeSearchHit> {
+    let identifiers = zone_context::rewrite_query(query).identifiers;
+    let mut scores: std::collections::HashMap<Uuid, (KnowledgeSearchHit, f32)> =
+        std::collections::HashMap::new();
+    for (rank, hit) in semantic.into_iter().enumerate() {
+        let boost = zone_context::identifier_match_boost(
+            "",
+            &hit.title,
+            &hit.content,
+            &identifiers,
+        );
+        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
+        scores.insert(hit.entry_id, (hit, rrf + boost));
+    }
+    for (rank, hit) in keyword.into_iter().enumerate() {
+        let boost = zone_context::identifier_match_boost(
+            "",
+            &hit.title,
+            &hit.content,
+            &identifiers,
+        );
+        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
+        scores
+            .entry(hit.entry_id)
+            .and_modify(|(_, score)| *score += rrf)
+            .or_insert((hit, rrf + boost));
+    }
+    let mut fused: Vec<_> = scores.into_values().collect();
+    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    fused.into_iter().take(limit).map(|(hit, _)| hit).collect()
+}
+
 /// Entry due for refresh
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct KnowledgeRefreshDue {
@@ -417,6 +496,33 @@ mod tests {
     #[allow(unused_imports)]
     use crate::db::workspace_members;
     use crate::db::workspaces;
+
+    #[test]
+    fn fuse_knowledge_prefers_identifier_keyword_hits() {
+        let symbol = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let neighbor = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let fused = fuse_knowledge_hits(
+            vec![KnowledgeSearchHit {
+                entry_id: neighbor,
+                similarity: 0.81,
+                title: "Auth notes".into(),
+                content: "generic login form".into(),
+                category: None,
+                tags: Vec::new(),
+            }],
+            vec![KnowledgeSearchHit {
+                entry_id: symbol,
+                similarity: 0.04,
+                title: "Blob skip".into(),
+                content: "should_skip_blob returns true for unchanged SHAs".into(),
+                category: None,
+                tags: Vec::new(),
+            }],
+            "What does should_skip_blob do?",
+            5,
+        );
+        assert_eq!(fused[0].entry_id, symbol);
+    }
 
     async fn create_test_pool() -> PgPool {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {

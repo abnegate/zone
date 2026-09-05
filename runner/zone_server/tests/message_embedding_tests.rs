@@ -546,13 +546,11 @@ async fn test_search_handles_embedding_service_unavailable() {
         )
         .await;
 
-    // Then: Should return 400 (empty query) or 503 Service Unavailable
-    // Without embedding service, the endpoint returns BAD_REQUEST
-    assert!(
-        response.status == StatusCode::BAD_REQUEST
-            || response.status == StatusCode::SERVICE_UNAVAILABLE
-            || response.status == StatusCode::INTERNAL_SERVER_ERROR,
-        "Should indicate service unavailable or bad request, got: {}",
+    // Keyword fallback still answers when embeddings are missing.
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "Keyword fallback should succeed without embeddings, got: {}",
         response.status
     );
 }

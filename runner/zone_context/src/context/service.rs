@@ -16,8 +16,7 @@ use crate::content::{
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
 use crate::embeddings::{
     Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult, PgVectorStore,
-    SearchFilters, VectorStore, embed_query_text, hybrid_search, keyword_only_search,
-    semantic_only_search,
+    SearchFilters, VectorStore, embed_query_text, keyword_only_search, semantic_only_search,
 };
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
@@ -461,38 +460,66 @@ impl ContextService {
         filters: Option<SearchFilters>,
         config: Option<HybridSearchConfig>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
-        // Generate query embedding for semantic search
-        let query_embedding = self
+        let query_embedding = match self
             .embedding_service
             .embed(&embed_query_text(self.embedding_service.model(), query))
-            .await?;
-
-        // Use default config if not provided
-        let hybrid_config = config.unwrap_or_default();
-
-        // Extract filter parameters
-        let workspace_id = filters.as_ref().and_then(|f| f.workspace_id);
-        let source_ids = filters.as_ref().and_then(|f| f.source_ids.as_deref());
-
-        // Perform hybrid search
-        let results = hybrid_search(
-            &self.pool,
+            .await
+        {
+            Ok(embedding) => Some(embedding),
+            Err(error) => {
+                tracing::warn!(%error, "hybrid semantic embed failed; falling back to keyword");
+                None
+            }
+        };
+        self.search_hybrid_with_embedding(
             query,
-            &query_embedding,
+            query_embedding.as_deref(),
             limit,
-            workspace_id,
-            source_ids,
-            &hybrid_config,
+            filters,
+            config,
         )
-        .await?;
+        .await
+    }
 
-        // Convert to SearchResultWithAnalysis
-        let enriched_results = results
+    /// Hybrid search using an embedding the caller already computed.
+    pub async fn search_hybrid_with_embedding(
+        &self,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        limit: usize,
+        filters: Option<SearchFilters>,
+        config: Option<HybridSearchConfig>,
+    ) -> Result<Vec<SearchResultWithAnalysis>> {
+        let hybrid_config = config.unwrap_or_else(|| HybridSearchConfig::for_query(query));
+        let results = match query_embedding {
+            Some(embedding) => {
+                crate::embeddings::hybrid_search_filtered(
+                    &self.pool,
+                    query,
+                    embedding,
+                    limit,
+                    filters.as_ref(),
+                    &hybrid_config,
+                )
+                .await?
+            }
+            None => {
+                keyword_only_search(
+                    &self.pool,
+                    query,
+                    limit,
+                    filters,
+                    hybrid_config.min_keyword_score,
+                )
+                .await?
+            }
+        };
+
+        let rrf = query_embedding.is_some();
+        Ok(results
             .into_iter()
-            .map(|r| SearchResultWithAnalysis::from_hybrid(r, true))
-            .collect();
-
-        Ok(enriched_results)
+            .map(|r| SearchResultWithAnalysis::from_hybrid(r, rrf))
+            .collect())
     }
 
     /// Keyword-only search (no semantic component)
@@ -565,7 +592,7 @@ impl ContextService {
         };
 
         let results = self
-            .search(query, config.max_items * 2, Some(filters))
+            .search_hybrid(query, config.max_items * 2, Some(filters), None)
             .await?;
 
         // Convert to SearchResult format for ContextBuilder
