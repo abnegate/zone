@@ -12,8 +12,11 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
+use zone_core::llm::ToolDefinition;
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::citations::{self, Citation};
@@ -101,6 +104,11 @@ pub struct ChatTools {
     scope: Option<WorkspaceScope>,
     workspace: Vec<String>,
     profile: ToolProfile,
+    names: Vec<String>,
+    name_set: HashSet<String>,
+    definitions: Vec<ToolDefinition>,
+    membership: OnceCell<bool>,
+    actor_name: OnceCell<String>,
 }
 
 impl ChatTools {
@@ -119,6 +127,7 @@ impl ChatTools {
         if added > 0 {
             tracing::info!(tools = added, "Attached MCP tools to task");
         }
+        assembled.cache_catalog();
         assembled
     }
 
@@ -178,13 +187,33 @@ impl ChatTools {
             ToolProfile::Task => task_context(task_cwd.unwrap_or_else(host_root)),
         };
 
-        Self {
+        let mut assembled = Self {
             registry,
             context,
             scope,
             workspace,
             profile,
-        }
+            names: Vec::new(),
+            name_set: HashSet::new(),
+            definitions: Vec::new(),
+            membership: OnceCell::new(),
+            actor_name: OnceCell::new(),
+        };
+        assembled.cache_catalog();
+        assembled
+    }
+
+    fn cache_catalog(&mut self) {
+        let mut names: Vec<String> = self
+            .registry
+            .names()
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        names.sort();
+        self.name_set = names.iter().cloned().collect();
+        self.names = names;
+        self.definitions = self.registry.definitions();
     }
 
     pub fn profile(&self) -> ToolProfile {
@@ -192,23 +221,20 @@ impl ChatTools {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.registry.names().is_empty()
+        self.names.is_empty()
     }
 
-    pub fn definitions(&self) -> Vec<zone_core::llm::ToolDefinition> {
-        self.registry.definitions()
+    pub fn definitions(&self) -> &[ToolDefinition] {
+        &self.definitions
     }
 
     /// Tool names, sorted so the system prompt is stable between turns.
-    pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .registry
-            .names()
-            .iter()
-            .map(|n| n.to_string())
-            .collect();
-        names.sort();
-        names
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    pub fn has(&self, name: &str) -> bool {
+        self.name_set.contains(name)
     }
 
     pub fn mcp_guidance(&self) -> Option<String> {
@@ -225,12 +251,10 @@ impl ChatTools {
     /// here aborts the turn.
     pub async fn execute(&self, name: &str, arguments: &str) -> ToolResult {
         let Some(tool) = self.registry.get(name) else {
-            let mut available = self.names();
-            available.sort();
             return ToolResult::error(format!(
                 "Unknown tool '{}'. Available tools: {}.",
                 name,
-                available.join(", ")
+                self.names.join(", ")
             ));
         };
 
@@ -248,21 +272,10 @@ impl ChatTools {
             }
         };
 
-        if self.workspace.iter().any(|registered| registered == name) {
-            let Some(scope) = self.scope.as_ref() else {
-                return ToolResult::error("Workspace access denied.");
-            };
-            match sqlx::query_scalar::<_, bool>(
-                "SELECT check_workspace_membership($1, $2) AND EXISTS(SELECT 1 FROM chats WHERE id = $3 AND workspace_id = $2)"
-            ).bind(scope.user_id).bind(scope.workspace_id).bind(scope.chat_id).fetch_one(scope.state.db()).await
-            {
-                Ok(true) => {}
-                Ok(false) => return ToolResult::error("Workspace access denied."),
-                Err(error) => {
-                    tracing::warn!(%error, "Workspace authorization failed");
-                    return ToolResult::error("Could not verify workspace access.");
-                }
-            }
+        if self.workspace.iter().any(|registered| registered == name)
+            && let Err(denied) = self.authorize_workspace().await
+        {
+            return denied;
         }
         let limit = tool.timeout(&self.context);
         match tokio::time::timeout(limit, tool.execute(params, &self.context)).await {
@@ -289,22 +302,64 @@ impl ChatTools {
             return None;
         }
         let scope = self.scope.as_ref()?;
-        let actor_name = match users::get_user_by_id(scope.state.db(), scope.user_id).await {
-            Ok(Some(user)) => user
-                .display_name
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(user.email),
-            _ => scope.user_id.to_string(),
-        };
+        let actor_name = self.actor_name().await;
         receipts::from_write(
             id,
             name,
             arguments,
             result,
             scope.user_id,
-            &actor_name,
+            actor_name,
             chrono::Utc::now(),
         )
+    }
+
+    async fn authorize_workspace(&self) -> Result<(), ToolResult> {
+        let Some(scope) = self.scope.as_ref() else {
+            return Err(ToolResult::error("Workspace access denied."));
+        };
+        match self
+            .membership
+            .get_or_try_init(|| async {
+                match sqlx::query_scalar::<_, bool>(
+                    "SELECT check_workspace_membership($1, $2) AND EXISTS(SELECT 1 FROM chats WHERE id = $3 AND workspace_id = $2)",
+                )
+                .bind(scope.user_id)
+                .bind(scope.workspace_id)
+                .bind(scope.chat_id)
+                .fetch_one(scope.state.db())
+                .await
+                {
+                    Ok(ok) => Ok(ok),
+                    Err(error) => {
+                        tracing::warn!(%error, "Workspace authorization failed");
+                        Err(ToolResult::error("Could not verify workspace access."))
+                    }
+                }
+            })
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(ToolResult::error("Workspace access denied.")),
+            Err(error) => Err(error.clone()),
+        }
+    }
+
+    async fn actor_name(&self) -> &str {
+        let Some(scope) = self.scope.as_ref() else {
+            return "";
+        };
+        self.actor_name
+            .get_or_init(|| async {
+                match users::get_user_by_id(scope.state.db(), scope.user_id).await {
+                    Ok(Some(user)) => user
+                        .display_name
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or(user.email),
+                    _ => scope.user_id.to_string(),
+                }
+            })
+            .await
     }
 }
 
@@ -481,70 +536,127 @@ impl SearchKnowledgeTool {
         let limit = limit_arg(&params);
         let observed_at = chrono::Utc::now().to_rfc3339();
 
-        let mut degraded = false;
-        let query_embedding = match ctx.state.embedding_service() {
-            Some(embedding_service) => {
-                match embedding_service
-                    .embed(&zone_context::embed_query_text(
-                        embedding_service.model(),
-                        query,
-                    ))
-                    .await
-                {
-                    Ok(embedding) => Some(embedding),
-                    Err(error) => {
-                        tracing::warn!(%error, "search_knowledge embed failed; keyword only");
-                        degraded = true;
-                        None
+        let embed_fut = async {
+            match ctx.state.embedding_service() {
+                Some(embedding_service) => {
+                    match embedding_service
+                        .embed(&zone_context::embed_query_text(
+                            embedding_service.model(),
+                            query,
+                        ))
+                        .await
+                    {
+                        Ok(embedding) => (Some(embedding), false),
+                        Err(error) => {
+                            tracing::warn!(%error, "search_knowledge embed failed; keyword only");
+                            (None, true)
+                        }
                     }
                 }
-            }
-            None => {
-                degraded = true;
-                None
+                None => (None, true),
             }
         };
-
-        let mut knowledge_hits = Vec::new();
-        if let Some(embedding) = query_embedding.as_deref() {
-            match knowledge::search_knowledge_entries(
+        let keyword_fut = async {
+            match knowledge::search_knowledge_keyword(
                 ctx.state.db(),
-                embedding,
+                query,
                 ctx.workspace_id,
                 limit as i64,
-                0.5,
             )
             .await
             {
-                Ok(hits) => knowledge_hits = hits,
+                Ok(hits) => hits,
                 Err(error) => {
                     tracing::warn!(
                         %error,
                         workspace_id = %ctx.workspace_id,
-                        "knowledge semantic search failed"
+                        "knowledge keyword search failed"
                     );
+                    Vec::new()
                 }
             }
-        }
+        };
+        let ((query_embedding, mut degraded), keyword_hits) = tokio::join!(embed_fut, keyword_fut);
 
-        let keyword_hits = match knowledge::search_knowledge_keyword(
-            ctx.state.db(),
-            query,
-            ctx.workspace_id,
-            limit as i64,
-        )
-        .await
-        {
-            Ok(hits) => hits,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    workspace_id = %ctx.workspace_id,
-                    "knowledge keyword search failed"
-                );
+        let semantic_fut = async {
+            if let Some(embedding) = query_embedding.as_deref() {
+                match knowledge::search_knowledge_entries(
+                    ctx.state.db(),
+                    embedding,
+                    ctx.workspace_id,
+                    limit as i64,
+                    0.5,
+                )
+                .await
+                {
+                    Ok(hits) => hits,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            workspace_id = %ctx.workspace_id,
+                            "knowledge semantic search failed"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
                 Vec::new()
             }
         };
+        let source_fut = async {
+            if let Some(context_service) = ctx.state.context_service() {
+                let filters = zone_context::embeddings::SearchFilters {
+                    workspace_id: Some(ctx.workspace_id),
+                    source_ids: None,
+                    categories: None,
+                    min_quality: None,
+                    since: None,
+                };
+                match context_service
+                    .search_hybrid_with_embedding(
+                        query,
+                        query_embedding.as_deref(),
+                        limit,
+                        Some(filters),
+                        None,
+                    )
+                    .await
+                {
+                    Ok(results) => (
+                        results
+                            .into_iter()
+                            .map(|result| RankedPassage {
+                                key: format!("source:{}", result.content_item_id),
+                                title: result.item_title,
+                                uri: result.item_uri,
+                                snippet: truncate(&one_line(&result.chunk_text), SNIPPET_CHARS),
+                                label: match_label(
+                                    result.semantic_score,
+                                    result.keyword_score,
+                                    result.rrf_score,
+                                    result.similarity,
+                                ),
+                                score: result.similarity,
+                            })
+                            .collect::<Vec<_>>(),
+                        false,
+                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            workspace_id = %ctx.workspace_id,
+                            "search_knowledge source hybrid failed"
+                        );
+                        (Vec::new(), true)
+                    }
+                }
+            } else {
+                (Vec::new(), true)
+            }
+        };
+        let (knowledge_hits, (source_passages, source_degraded)) =
+            tokio::join!(semantic_fut, source_fut);
+        degraded |= source_degraded;
 
         let knowledge_hits =
             knowledge::fuse_knowledge_hits(knowledge_hits, keyword_hits, query, limit);
@@ -559,56 +671,6 @@ impl SearchKnowledgeTool {
                 score: hit.similarity as f32,
             })
             .collect();
-
-        let mut source_passages = Vec::new();
-        if let Some(context_service) = ctx.state.context_service() {
-            let filters = zone_context::embeddings::SearchFilters {
-                workspace_id: Some(ctx.workspace_id),
-                source_ids: None,
-                categories: None,
-                min_quality: None,
-                since: None,
-            };
-            match context_service
-                .search_hybrid_with_embedding(
-                    query,
-                    query_embedding.as_deref(),
-                    limit,
-                    Some(filters),
-                    None,
-                )
-                .await
-            {
-                Ok(results) => {
-                    source_passages = results
-                        .into_iter()
-                        .map(|result| RankedPassage {
-                            key: format!("source:{}", result.content_item_id),
-                            title: result.item_title,
-                            uri: result.item_uri,
-                            snippet: truncate(&one_line(&result.chunk_text), SNIPPET_CHARS),
-                            label: match_label(
-                                result.semantic_score,
-                                result.keyword_score,
-                                result.rrf_score,
-                                result.similarity,
-                            ),
-                            score: result.similarity,
-                        })
-                        .collect();
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        workspace_id = %ctx.workspace_id,
-                        "search_knowledge source hybrid failed"
-                    );
-                    degraded = true;
-                }
-            }
-        } else {
-            degraded = true;
-        }
 
         let passages = interleave_passages(knowledge_passages, source_passages, limit);
         if passages.is_empty() {
@@ -710,61 +772,70 @@ impl SearchChatHistoryTool {
             .unwrap_or(false);
         let scope = this_chat_only.then_some(ctx.chat_id);
 
-        let mut degraded = false;
-        let mut semantic = Vec::new();
-        match ctx.state.embedding_service() {
-            Some(embedding_service) => {
-                match embedding_service
-                    .embed(&zone_context::embed_query_text(
-                        embedding_service.model(),
-                        query,
-                    ))
-                    .await
-                {
-                    Ok(embedding) => {
-                        match message_embeddings::search_messages(
-                            ctx.state.db(),
-                            &embedding,
-                            ctx.workspace_id,
-                            scope,
-                            limit,
-                            CHAT_HISTORY_THRESHOLD,
-                        )
+        let semantic_fut = async {
+            match ctx.state.embedding_service() {
+                Some(embedding_service) => {
+                    match embedding_service
+                        .embed(&zone_context::embed_query_text(
+                            embedding_service.model(),
+                            query,
+                        ))
                         .await
-                        {
-                            Ok(results) => semantic = results,
-                            Err(error) => {
-                                tracing::warn!(%error, "search_chat_history semantic query failed");
-                                degraded = true;
+                    {
+                        Ok(embedding) => {
+                            match message_embeddings::search_messages(
+                                ctx.state.db(),
+                                &embedding,
+                                ctx.workspace_id,
+                                scope,
+                                limit,
+                                CHAT_HISTORY_THRESHOLD,
+                            )
+                            .await
+                            {
+                                Ok(results) => (results, false),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "search_chat_history semantic query failed"
+                                    );
+                                    (Vec::new(), true)
+                                }
                             }
                         }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "search_chat_history embed failed; keyword only");
-                        degraded = true;
+                        Err(error) => {
+                            tracing::warn!(%error, "search_chat_history embed failed; keyword only");
+                            (Vec::new(), true)
+                        }
                     }
                 }
+                None => (Vec::new(), true),
             }
-            None => degraded = true,
-        }
-
-        let keyword = match message_embeddings::search_messages_keyword(
-            ctx.state.db(),
-            query,
-            ctx.workspace_id,
-            scope,
-            limit,
-        )
-        .await
-        {
+        };
+        let keyword_fut = async {
+            match message_embeddings::search_messages_keyword(
+                ctx.state.db(),
+                query,
+                ctx.workspace_id,
+                scope,
+                limit,
+            )
+            .await
+            {
+                Ok(results) => Ok(results),
+                Err(error) => {
+                    tracing::warn!(%error, "search_chat_history keyword query failed");
+                    Err(())
+                }
+            }
+        };
+        let ((semantic, degraded), keyword) = tokio::join!(semantic_fut, keyword_fut);
+        let keyword = match keyword {
             Ok(results) => results,
-            Err(error) => {
-                tracing::warn!(%error, "search_chat_history keyword query failed");
-                if semantic.is_empty() {
-                    return ToolResult::error("The message search failed.");
-                }
-                Vec::new()
+            Err(()) if semantic.is_empty() => {
+                return ToolResult::error("The message search failed.");
             }
+            Err(()) => Vec::new(),
         };
 
         let results = message_embeddings::fuse_message_hits(semantic, keyword, query, limit);

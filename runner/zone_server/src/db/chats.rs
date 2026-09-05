@@ -378,6 +378,20 @@ pub async fn list_messages(pool: &PgPool, chat_id: Uuid) -> DbResult<Vec<Message
         .collect())
 }
 
+/// Newest `limit` messages in chronological order, for a model turn.
+pub async fn list_recent_messages(
+    pool: &PgPool,
+    chat_id: Uuid,
+    limit: i64,
+) -> DbResult<Vec<MessageRow>> {
+    let mut messages = list_messages(pool, chat_id).await?;
+    let keep = usize::try_from(limit).unwrap_or(0);
+    if messages.len() > keep {
+        messages.drain(..messages.len() - keep);
+    }
+    Ok(messages)
+}
+
 /// Create a new message
 ///
 /// # Background Embedding Generation

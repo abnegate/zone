@@ -1,9 +1,24 @@
 //! LLM client for OpenAI-compatible APIs
 
 use reqwest::Client;
+use std::sync::LazyLock;
+use std::time::Duration;
 use thiserror::Error;
 
 use super::types::{ChatRequest, ChatResponse, ChatStreamChunk, Message, ToolDefinition};
+
+/// One connection pool for every completion in this process. Building a
+/// `reqwest::Client` per turn throws away TLS sessions and keep-alives to
+/// LiteLLM, which is the whole time-to-first-token budget on a local model.
+static HTTP: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .pool_max_idle_per_host(16)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_nodelay(true)
+        .build()
+        .unwrap_or_else(|_| Client::new())
+});
 
 /// LLM client error
 #[derive(Debug, Error)]
@@ -78,7 +93,7 @@ impl LlmClient {
     /// Create a new LLM client
     pub fn new(config: LlmConfig) -> Self {
         Self {
-            client: Client::new(),
+            client: HTTP.clone(),
             config,
         }
     }
@@ -86,8 +101,8 @@ impl LlmClient {
     /// Make a chat completion request
     pub async fn chat(
         &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolDefinition>>,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
     ) -> Result<ChatResponse, LlmError> {
         self.chat_with_model(&self.config.default_model, messages, tools)
             .await
@@ -97,11 +112,11 @@ impl LlmClient {
     pub async fn chat_with_model(
         &self,
         model: &str,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolDefinition>>,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
     ) -> Result<ChatResponse, LlmError> {
         let request = ChatRequest {
-            model: model.to_string(),
+            model,
             messages,
             tools,
             tool_choice: None,
@@ -137,9 +152,10 @@ impl LlmClient {
     /// Make a streaming chat completion request
     pub async fn chat_stream(
         &self,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolDefinition>>,
-    ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>>, LlmError> {
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>> + use<>, LlmError>
+    {
         self.chat_stream_with_model(&self.config.default_model, messages, tools)
             .await
     }
@@ -148,11 +164,12 @@ impl LlmClient {
     pub async fn chat_stream_with_model(
         &self,
         model: &str,
-        messages: Vec<Message>,
-        tools: Option<Vec<ToolDefinition>>,
-    ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>>, LlmError> {
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>> + use<>, LlmError>
+    {
         let request = ChatRequest {
-            model: model.to_string(),
+            model,
             messages,
             tools,
             tool_choice: None,
@@ -181,10 +198,10 @@ impl LlmClient {
             });
         }
 
-        // Parse SSE stream
+        // Parse SSE without reallocating the leftover buffer on every line.
         let stream = async_stream::stream! {
             let mut bytes = response.bytes_stream();
-            let mut buffer = String::new();
+            let mut buffer = Vec::<u8>::new();
 
             use futures::StreamExt;
             while let Some(chunk) = bytes.next().await {
@@ -196,28 +213,35 @@ impl LlmClient {
                     }
                 };
 
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                // Process complete lines
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim().to_string();
-                    buffer = buffer[pos + 1..].to_string();
-
+                buffer.extend_from_slice(&chunk);
+                let mut consumed = 0usize;
+                let mut done = false;
+                while let Some(rel) = buffer[consumed..].iter().position(|&b| b == b'\n') {
+                    let end = consumed + rel;
+                    let mut line = &buffer[consumed..end];
+                    if let Some(without_cr) = line.strip_suffix(b"\r") {
+                        line = without_cr;
+                    }
+                    consumed = end + 1;
                     if line.is_empty() {
                         continue;
                     }
-
-                    // SSE format: "data: {...}"
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
+                    if let Some(data) = line.strip_prefix(b"data: ") {
+                        if data == b"[DONE]" {
+                            done = true;
                             break;
                         }
-
-                        match serde_json::from_str::<ChatStreamChunk>(data) {
+                        match serde_json::from_slice::<ChatStreamChunk>(data) {
                             Ok(chunk) => yield Ok(chunk),
                             Err(e) => yield Err(LlmError::Json(e)),
                         }
                     }
+                }
+                if consumed > 0 {
+                    buffer.drain(..consumed);
+                }
+                if done {
+                    break;
                 }
             }
         };

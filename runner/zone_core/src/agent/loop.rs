@@ -133,7 +133,7 @@ impl Agent {
 
             let response = self
                 .llm
-                .chat(state.messages.clone(), Some(tool_definitions.clone()))
+                .chat(&state.messages, Some(&tool_definitions))
                 .await?;
 
             // Update token usage
@@ -159,51 +159,66 @@ impl Agent {
                 // Add assistant message with tool calls
                 state.add_message(Message::assistant_with_tools(tool_calls.clone()));
 
-                let mut tool_results = Vec::new();
-                let parallel = tool_calls
-                    .iter()
-                    .all(|call| !self.tools.mutating(&call.function.name));
-
-                if parallel && tool_calls.len() > 1 {
-                    for tool_call in tool_calls {
+                let mut tool_results = Vec::with_capacity(tool_calls.len());
+                let mut rest = tool_calls.as_slice();
+                while !rest.is_empty() {
+                    let serial_at = rest
+                        .iter()
+                        .position(|call| self.tools.mutating(&call.function.name));
+                    let parallel_end = serial_at.unwrap_or(rest.len());
+                    if parallel_end > 0 {
+                        let (parallel, tail) = rest.split_at(parallel_end);
+                        for tool_call in parallel {
+                            callback.on_tool_call(
+                                &tool_call.function.name,
+                                &tool_call.function.arguments,
+                            );
+                        }
+                        if parallel.len() == 1 {
+                            let start = Instant::now();
+                            let result = self.execute_tool(&parallel[0]).await;
+                            self.record_tool(
+                                state,
+                                callback,
+                                &mut tool_results,
+                                &parallel[0],
+                                result,
+                                start.elapsed().as_millis() as u64,
+                            );
+                        } else {
+                            let executed = join_all(parallel.iter().map(|tool_call| async move {
+                                let start = Instant::now();
+                                let result = self.execute_tool(tool_call).await;
+                                (tool_call, result, start.elapsed().as_millis() as u64)
+                            }))
+                            .await;
+                            for (tool_call, result, duration_ms) in executed {
+                                self.record_tool(
+                                    state,
+                                    callback,
+                                    &mut tool_results,
+                                    tool_call,
+                                    result,
+                                    duration_ms,
+                                );
+                            }
+                        }
+                        rest = tail;
+                    }
+                    if let Some(tool_call) = rest.first() {
                         callback
                             .on_tool_call(&tool_call.function.name, &tool_call.function.arguments);
-                    }
-                    let executed = join_all(tool_calls.iter().map(|tool_call| async move {
                         let start = Instant::now();
                         let result = self.execute_tool(tool_call).await;
-                        (tool_call, result, start.elapsed().as_millis() as u64)
-                    }))
-                    .await;
-                    for (tool_call, result, duration_ms) in executed {
-                        callback.on_tool_result(&tool_call.function.name, &result);
-                        tool_results.push(ToolCallResult {
-                            call: tool_call.clone(),
-                            result: result.to_message(),
-                            success: result.success,
-                            duration_ms,
-                        });
-                        state.add_message(Message::tool_result(&tool_call.id, result.to_message()));
-                    }
-                } else {
-                    for tool_call in tool_calls {
-                        callback
-                            .on_tool_call(&tool_call.function.name, &tool_call.function.arguments);
-
-                        let start = Instant::now();
-                        let result = self.execute_tool(tool_call).await;
-                        let duration_ms = start.elapsed().as_millis() as u64;
-
-                        callback.on_tool_result(&tool_call.function.name, &result);
-
-                        tool_results.push(ToolCallResult {
-                            call: tool_call.clone(),
-                            result: result.to_message(),
-                            success: result.success,
-                            duration_ms,
-                        });
-
-                        state.add_message(Message::tool_result(&tool_call.id, result.to_message()));
+                        self.record_tool(
+                            state,
+                            callback,
+                            &mut tool_results,
+                            tool_call,
+                            result,
+                            start.elapsed().as_millis() as u64,
+                        );
+                        rest = &rest[1..];
                     }
                 }
 
@@ -243,6 +258,26 @@ impl Agent {
                 return Err(AgentError::Tool("Empty response from LLM".to_string()));
             }
         }
+    }
+
+    fn record_tool(
+        &self,
+        state: &mut AgentState,
+        callback: &dyn AgentCallback,
+        tool_results: &mut Vec<ToolCallResult>,
+        tool_call: &ToolCall,
+        result: ToolResult,
+        duration_ms: u64,
+    ) {
+        callback.on_tool_result(&tool_call.function.name, &result);
+        let output = result.to_message();
+        tool_results.push(ToolCallResult {
+            call: tool_call.clone(),
+            result: output.clone(),
+            success: result.success,
+            duration_ms,
+        });
+        state.add_message(Message::tool_result(&tool_call.id, output));
     }
 
     /// Execute a single tool call

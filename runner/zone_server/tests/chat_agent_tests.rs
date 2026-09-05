@@ -261,6 +261,23 @@ async fn invalid_array_member_prevents_partial_execution() {
 }
 
 #[tokio::test]
+async fn ordinary_prose_is_streamed_as_it_arrives() {
+    let (events, _) = exercise(vec![vec![
+        json!({"content": "Hel"}),
+        json!({"content": "lo!"}),
+    ]])
+    .await;
+    let chunks: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Chunk(content) => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chunks, ["Hel", "lo!"]);
+}
+
+#[tokio::test]
 async fn ordinary_prose_and_json_remain_answers() {
     for content in [
         "Hello!",

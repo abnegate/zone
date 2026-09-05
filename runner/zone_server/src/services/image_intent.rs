@@ -133,13 +133,10 @@ impl ImageIntentClassifier {
                  Discussion, analysis, prompt-writing, coding, and how-to questions are CHAT.\nUser: {content}"
             )
         };
+        let messages = [Message::user(prompt)];
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.classifier_timeout_secs),
-            client.chat_with_model(
-                &self.config.classifier_model,
-                vec![Message::user(prompt)],
-                None,
-            ),
+            client.chat_with_model(&self.config.classifier_model, &messages, None),
         )
         .await;
 
@@ -179,13 +176,10 @@ impl ImageIntentClassifier {
              environment or background, describe the same subject in that new setting. \
              No quotes, labels, or preamble. One or two sentences.\nUser: {content}"
         );
+        let messages = [Message::user(prompt)];
         let result = tokio::time::timeout(
             Duration::from_secs(self.config.classifier_timeout_secs),
-            client.chat_with_model(
-                &self.config.classifier_model,
-                vec![Message::user(prompt)],
-                None,
-            ),
+            client.chat_with_model(&self.config.classifier_model, &messages, None),
         )
         .await;
         let Ok(Ok(response)) = result else {

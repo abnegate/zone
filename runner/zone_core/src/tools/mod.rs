@@ -209,7 +209,12 @@ impl ToolRegistry {
 
     /// Get all tool definitions
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|t| t.to_definition()).collect()
+        let mut definitions: Vec<ToolDefinition> =
+            self.tools.values().map(|t| t.to_definition()).collect();
+        // Stable order keeps the tools prefix identical across turns so a
+        // local server can reuse its prompt cache.
+        definitions.sort_by(|left, right| left.function.name.cmp(&right.function.name));
+        definitions
     }
 
     /// Execute a tool by name

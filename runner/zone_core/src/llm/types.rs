@@ -219,11 +219,11 @@ pub struct FunctionDefinition {
 
 /// Chat completion request
 #[derive(Debug, Clone, Serialize)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
+pub struct ChatRequest<'a> {
+    pub model: &'a str,
+    pub messages: &'a [Message],
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<ToolDefinition>>,
+    pub tools: Option<&'a [ToolDefinition]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -453,9 +453,10 @@ mod tests {
 
     #[test]
     fn test_chat_request_serialization() {
+        let messages = [Message::user("Hello")];
         let request = ChatRequest {
-            model: "gpt-4".to_string(),
-            messages: vec![Message::user("Hello")],
+            model: "gpt-4",
+            messages: &messages,
             tools: None,
             tool_choice: None,
             temperature: Some(0.7),
@@ -704,9 +705,10 @@ mod tests {
 
     #[test]
     fn test_chat_request_minimal() {
+        let messages = [Message::user("Hello")];
         let request = ChatRequest {
-            model: "gpt-4".to_string(),
-            messages: vec![Message::user("Hello")],
+            model: "gpt-4",
+            messages: &messages,
             tools: None,
             tool_choice: None,
             temperature: None,
@@ -731,10 +733,12 @@ mod tests {
             serde_json::json!({"type": "object"}),
         );
 
+        let messages = [Message::user("Use the tool")];
+        let tools = [tool];
         let request = ChatRequest {
-            model: "gpt-4".to_string(),
-            messages: vec![Message::user("Use the tool")],
-            tools: Some(vec![tool]),
+            model: "gpt-4",
+            messages: &messages,
+            tools: Some(&tools),
             tool_choice: Some(ToolChoice::auto()),
             temperature: Some(0.5),
             max_tokens: Some(2048),
@@ -749,14 +753,15 @@ mod tests {
 
     #[test]
     fn test_chat_request_multiple_messages() {
+        let messages = [
+            Message::system("You are helpful"),
+            Message::user("Hello"),
+            Message::assistant("Hi there!"),
+            Message::user("How are you?"),
+        ];
         let request = ChatRequest {
-            model: "gpt-4".to_string(),
-            messages: vec![
-                Message::system("You are helpful"),
-                Message::user("Hello"),
-                Message::assistant("Hi there!"),
-                Message::user("How are you?"),
-            ],
+            model: "gpt-4",
+            messages: &messages,
             tools: None,
             tool_choice: None,
             temperature: None,

@@ -66,7 +66,7 @@ pub fn system_prompt(tools: &ChatTools, auto_approve: bool) -> String {
         tools.names().join(", ")
     );
 
-    if tools.names().iter().any(|name| name == "list_documents") {
+    if tools.has("list_documents") {
         prompt.push_str(
             "\n\nWorkspace actions:\n\
              - Use list_documents with a query to find stored notes and documents even when semantic search is unavailable. Read a document by its ID for complete text; cite its source and freshness.\n\
@@ -80,7 +80,7 @@ pub fn system_prompt(tools: &ChatTools, auto_approve: bool) -> String {
         );
     }
 
-    if tools.names().iter().any(|name| name == "read_file") {
+    if tools.has("read_file") {
         if tools.profile() == ToolProfile::Chat {
             prompt.push_str(
                 "\n\nrun_shell, run_command, read_file, write_file, apply_patch, list_files and search_code act in \
@@ -111,7 +111,7 @@ pub fn system_prompt(tools: &ChatTools, auto_approve: bool) -> String {
         }
     }
 
-    if tools.names().iter().any(|name| name == "generate_image") {
+    if tools.has("generate_image") {
         prompt.push_str(
             "\n\nImages:\n\
              - generate_image and edit_image stay in this loop. After an image is generated you can inspect it and edit it in the same turn.\n\
@@ -119,7 +119,7 @@ pub fn system_prompt(tools: &ChatTools, auto_approve: bool) -> String {
         );
     }
 
-    if tools.names().iter().any(|name| name == "query_prometheus") {
+    if tools.has("query_prometheus") {
         prompt.push_str(
             "\n\nCluster:\n\
              - query_prometheus and list_grafana_dashboards read Zone's live monitoring stack. Use them for on-call questions instead of guessing from chat history.\n\
@@ -127,7 +127,7 @@ pub fn system_prompt(tools: &ChatTools, auto_approve: bool) -> String {
         );
     }
 
-    if tools.names().iter().any(|name| name == "web_search") {
+    if tools.has("web_search") {
         prompt.push_str(
             "\n\nWeb tools:\n\
              - A server-side search may already be in <web_search_context>. Use that evidence before searching again.\n\

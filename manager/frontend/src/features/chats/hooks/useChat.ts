@@ -166,6 +166,23 @@ export function useChat(
         if (supersededPendingIdsRef.current.has(id)) {
           return prev;
         }
+        const last = prev.messages[prev.messages.length - 1];
+        if (last?.id === id) {
+          return {
+            ...prev,
+            messages: [
+              ...prev.messages.slice(0, -1),
+              {
+                ...last,
+                content,
+                // Merged, not replaced: a streaming turn has several
+                // writers for one message, and an arriving image must not
+                // drop the tool trace that patchToolCall put there.
+                metadata: metadata !== undefined ? { ...last.metadata, ...metadata } : last.metadata,
+              },
+            ],
+          };
+        }
         const existing = prev.messages.find((m) => m.id === id);
         if (existing) {
           return {
@@ -175,9 +192,6 @@ export function useChat(
                 ? {
                     ...m,
                     content,
-                    // Merged, not replaced: a streaming turn has several
-                    // writers for one message, and an arriving image must not
-                    // drop the tool trace that patchToolCall put there.
                     metadata: metadata !== undefined ? { ...m.metadata, ...metadata } : m.metadata,
                   }
                 : m
@@ -322,6 +336,34 @@ export function useChat(
     let assistantId: string | null = null;
     let assistantContent = '';
     let assistantMetadata: MessageMetadata | undefined;
+    let chunkFrame = 0;
+    const flushChunks = () => {
+      chunkFrame = 0;
+      if (assistantId) {
+        upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+      }
+    };
+    const cancelChunkFrame = () => {
+      if (!chunkFrame) return;
+      if (typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(chunkFrame);
+      } else {
+        clearTimeout(chunkFrame);
+      }
+      chunkFrame = 0;
+    };
+    const flushChunksNow = () => {
+      if (!chunkFrame) return;
+      cancelChunkFrame();
+      flushChunks();
+    };
+    const scheduleChunks = () => {
+      if (chunkFrame) return;
+      chunkFrame =
+        typeof requestAnimationFrame === 'function'
+          ? requestAnimationFrame(flushChunks)
+          : window.setTimeout(flushChunks, 16);
+    };
 
     socket.onopen = () => {
       const token = chatsApi.chatAccessToken();
@@ -337,6 +379,10 @@ export function useChat(
         payload = JSON.parse(event.data);
       } catch {
         return;
+      }
+
+      if (payload.type !== 'chunk') {
+        flushChunksNow();
       }
 
       switch (payload.type) {
@@ -366,7 +412,7 @@ export function useChat(
         case 'chunk':
           if (assistantId) {
             assistantContent += payload.content;
-            upsertMessage(assistantId, 'assistant', assistantContent);
+            scheduleChunks();
           }
           break;
         case 'tool_call':
@@ -471,6 +517,7 @@ export function useChat(
     };
 
     return () => {
+      cancelChunkFrame();
       socket.onopen = null;
       socket.onmessage = null;
       socket.onerror = null;

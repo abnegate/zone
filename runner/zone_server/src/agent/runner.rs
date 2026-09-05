@@ -122,7 +122,7 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 ));
             }
             let stream = match llm
-                .chat_stream_with_model(&model, messages.clone(), (!finalizing).then(|| definitions.clone()))
+                .chat_stream_with_model(&model, &messages, (!finalizing).then_some(definitions))
                 .await
             {
                 Ok(stream) => stream,
@@ -143,9 +143,10 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                     return;
                 }
             };
-            let mut stream = Box::pin(stream);
+            futures::pin_mut!(stream);
 
             let mut text = String::new();
+            let mut streamed = 0usize;
             let mut pending = ToolCallAccumulator::default();
             let mut has_image = false;
 
@@ -168,10 +169,17 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 if let Some(content) = &choice.delta.content
                     && !content.is_empty()
                 {
-                    // Held until the stream ends: LiteLLM+Ollama often writes a
-                    // tool call as JSON in `content` instead of `delta.tool_calls`,
-                    // and that JSON must not become the visible reply.
+                    // LiteLLM+Ollama often writes a tool call as JSON in
+                    // `content`. Hold anything that still looks like a call;
+                    // stream ordinary prose as soon as it cannot be one.
                     text.push_str(content);
+                    if pending.is_empty()
+                        && !might_be_tool_text(&text)
+                        && streamed < text.len()
+                    {
+                        yield AgentEvent::Chunk(text[streamed..].to_string());
+                        streamed = text.len();
+                    }
                 }
 
                 for image in &choice.delta.generated_images {
@@ -189,15 +197,21 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
             }
 
             let mut requested = pending.finish();
-            let parsed = parse_text_tool_calls(&text, &names);
+            let parsed = if text.is_empty() {
+                TextToolCalls::Prose
+            } else {
+                parse_text_tool_calls(&text, names)
+            };
             if finalizing {
                 if !requested.is_empty() || !matches!(parsed, TextToolCalls::Prose) {
                     yield AgentEvent::Failed(
                         "The model could not finish without requesting more tools. Try a model with reliable tool support.".to_string()
                     );
                 } else if !text.trim().is_empty() {
-                    yield AgentEvent::Chunk(text);
-                } else if !has_image {
+                    if streamed < text.len() {
+                        yield AgentEvent::Chunk(text[streamed..].to_string());
+                    }
+                } else if streamed == 0 && !has_image {
                     yield AgentEvent::Failed("The model returned an empty response. Try again or choose another model.".to_string());
                 }
                 return;
@@ -222,8 +236,10 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
             };
             if requested.is_empty() {
                 if !text.trim().is_empty() {
-                    yield AgentEvent::Chunk(text);
-                } else if !has_image {
+                    if streamed < text.len() {
+                        yield AgentEvent::Chunk(text[streamed..].to_string());
+                    }
+                } else if streamed == 0 && !has_image {
                     yield AgentEvent::Failed("The model returned an empty response. Try again or choose another model.".to_string());
                 }
                 return;
@@ -267,56 +283,14 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                 executable.push(call);
             }
 
-            let parallel = !executable.is_empty()
-                && executable
-                    .iter()
-                    .all(|call| !tools.mutating(&call.function.name))
-                && executable
-                    .iter()
-                    .all(|call| approval.is_auto() || !requires_approval(&call.function.name));
-            if parallel {
-                let results = join_all(executable.iter().map(|call| {
-                    let tools = &tools;
-                    async move {
-                        let started = Instant::now();
-                        let result = tools
-                            .execute(&call.function.name, &call.function.arguments)
-                            .await;
-                        (result, started.elapsed().as_millis() as u64)
-                    }
-                }))
-                .await;
-                for (call, (result, duration_ms)) in executable.into_iter().zip(results) {
-                    tool_calls_used += 1;
-                    let receipt = tools
-                        .write_receipt(
-                            &call.id,
-                            &call.function.name,
-                            &call.function.arguments,
-                            &result,
-                        )
-                        .await;
-                    let output = result.to_message();
-                    for url in &result.images {
-                        yield AgentEvent::Image(url.clone());
-                    }
-                    yield AgentEvent::ToolCallCompleted {
-                        id: call.id.clone(),
-                        name: call.function.name.clone(),
-                        success: result.success,
-                        detail: summarize(&result, &output),
-                        duration_ms,
-                        citations: if result.success {
-                            citations::from_tool(&call.function.name, &output)
-                        } else {
-                            Vec::new()
-                        },
-                        receipt,
-                    };
-                    messages.push(LlmMessage::tool_result(&call.id, output));
-                }
-            } else {
-                for call in executable {
+            let mut rest = executable;
+            while !rest.is_empty() {
+                let serial_at = rest.iter().position(|call| {
+                    tools.mutating(&call.function.name)
+                        || (!approval.is_auto() && requires_approval(&call.function.name))
+                });
+                if serial_at == Some(0) {
+                    let call = rest.remove(0);
                     tool_calls_used += 1;
                     let denied = if !approval.is_auto() && requires_approval(&call.function.name) {
                         yield AgentEvent::ToolApprovalRequired {
@@ -341,38 +315,120 @@ pub fn run(run: AgentRun) -> impl Stream<Item = AgentEvent> {
                             .execute(&call.function.name, &call.function.arguments)
                             .await
                     };
-                    let duration_ms = started.elapsed().as_millis() as u64;
-                    let receipt = tools
-                        .write_receipt(
-                            &call.id,
-                            &call.function.name,
-                            &call.function.arguments,
-                            &result,
-                        )
-                        .await;
-                    let output = result.to_message();
-                    for url in &result.images {
+                    let finished = finish_tool(&tools, call, result, started.elapsed().as_millis() as u64).await;
+                    for url in &finished.images {
                         yield AgentEvent::Image(url.clone());
                     }
                     yield AgentEvent::ToolCallCompleted {
-                        id: call.id.clone(),
-                        name: call.function.name.clone(),
-                        success: result.success,
-                        detail: summarize(&result, &output),
-                        duration_ms,
-                        citations: if result.success {
-                            citations::from_tool(&call.function.name, &output)
-                        } else {
-                            Vec::new()
-                        },
-                        receipt,
+                        id: finished.id.clone(),
+                        name: finished.name,
+                        success: finished.success,
+                        detail: finished.detail,
+                        duration_ms: finished.duration_ms,
+                        citations: finished.citations,
+                        receipt: finished.receipt,
                     };
-                    messages.push(LlmMessage::tool_result(&call.id, output));
+                    messages.push(LlmMessage::tool_result(&finished.id, finished.output));
+                    continue;
+                }
+                let parallel_end = serial_at.unwrap_or(rest.len());
+                let parallel: Vec<_> = rest.drain(..parallel_end).collect();
+                let results = if parallel.len() == 1 {
+                    let call = &parallel[0];
+                    let started = Instant::now();
+                    let result = tools
+                        .execute(&call.function.name, &call.function.arguments)
+                        .await;
+                    vec![(result, started.elapsed().as_millis() as u64)]
+                } else {
+                    join_all(parallel.iter().map(|call| {
+                        let tools = &tools;
+                        async move {
+                            let started = Instant::now();
+                            let result = tools
+                                .execute(&call.function.name, &call.function.arguments)
+                                .await;
+                            (result, started.elapsed().as_millis() as u64)
+                        }
+                    }))
+                    .await
+                };
+                for (call, (result, duration_ms)) in parallel.into_iter().zip(results) {
+                    tool_calls_used += 1;
+                    let finished = finish_tool(&tools, call, result, duration_ms).await;
+                    for url in &finished.images {
+                        yield AgentEvent::Image(url.clone());
+                    }
+                    yield AgentEvent::ToolCallCompleted {
+                        id: finished.id.clone(),
+                        name: finished.name,
+                        success: finished.success,
+                        detail: finished.detail,
+                        duration_ms: finished.duration_ms,
+                        citations: finished.citations,
+                        receipt: finished.receipt,
+                    };
+                    messages.push(LlmMessage::tool_result(&finished.id, finished.output));
                 }
             }
             finalizing |= tool_calls_used >= budget.max_tool_calls;
         }
     }
+}
+
+struct FinishedTool {
+    id: String,
+    name: String,
+    success: bool,
+    detail: String,
+    duration_ms: u64,
+    citations: Vec<Citation>,
+    receipt: Option<ActionReceipt>,
+    images: Vec<String>,
+    output: String,
+}
+
+async fn finish_tool(
+    tools: &ChatTools,
+    call: LlmToolCall,
+    result: zone_core::tools::ToolResult,
+    duration_ms: u64,
+) -> FinishedTool {
+    let receipt = tools
+        .write_receipt(
+            &call.id,
+            &call.function.name,
+            &call.function.arguments,
+            &result,
+        )
+        .await;
+    let output = result.to_message();
+    let citations = if result.success {
+        citations::from_tool(&call.function.name, &output)
+    } else {
+        Vec::new()
+    };
+    FinishedTool {
+        id: call.id,
+        name: call.function.name,
+        success: result.success,
+        detail: summarize(&result, &output),
+        duration_ms,
+        citations,
+        receipt,
+        images: result.images,
+        output,
+    }
+}
+
+/// True while the buffered assistant text could still become a tool envelope
+/// rather than the visible answer. Conservative: once it cannot, stream it.
+fn might_be_tool_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.is_empty()
+        || trimmed.starts_with('{')
+        || trimmed.starts_with('[')
+        || trimmed.starts_with('`')
 }
 
 /// Match semantic arguments even when a provider changes JSON key ordering.
@@ -477,7 +533,7 @@ fn resembles_tool_value(value: &serde_json::Value, names: &[String]) -> bool {
         .get("name")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|name| {
-            names.iter().any(|registered| registered == name)
+            registered(names, name)
                 || (value.get("type").and_then(serde_json::Value::as_str) == Some("function")
                     && function.get("arguments").is_some())
         })
@@ -537,9 +593,7 @@ fn resembles_tool_call(text: &str, names: &[String]) -> bool {
         }
         if key == "name" {
             named = value.as_str().is_some();
-            recognized = value
-                .as_str()
-                .is_some_and(|name| names.iter().any(|registered| registered == name));
+            recognized = value.as_str().is_some_and(|name| registered(names, name));
         }
         remaining = remaining[values.byte_offset()..].trim_start();
         let Some(next) = remaining.strip_prefix(',') else {
@@ -557,7 +611,7 @@ fn text_tool_call(
     let object = value.as_object()?;
     let function = value.get("function").unwrap_or(value);
     let name = function.get("name")?.as_str()?;
-    if !names.iter().any(|registered| registered == name)
+    if !registered(names, name)
         || value
             .get("type")
             .is_some_and(|kind| kind.as_str() != Some("function"))
@@ -599,6 +653,10 @@ fn text_tool_call(
     })
 }
 
+fn registered(names: &[String], name: &str) -> bool {
+    names.iter().any(|n| n == name)
+}
+
 fn unique_identifiers(calls: &mut [LlmToolCall], identifiers: &mut BTreeSet<String>) {
     // Reserve incoming ids before allocating replacements, including ids that
     // collide with the generated namespace later in this same response.
@@ -638,6 +696,10 @@ struct PartialToolCall {
 }
 
 impl ToolCallAccumulator {
+    fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+
     fn merge(&mut self, deltas: &[StreamToolCall]) {
         for delta in deltas {
             let entry = self.calls.entry(delta.index).or_default();
@@ -956,6 +1018,19 @@ mod tests {
         let result = ToolResult::success("This workspace has no tasks.");
         let output = result.to_message();
         assert_eq!(summarize(&result, &output), "This workspace has no tasks.");
+    }
+
+    #[test]
+    fn tool_shaped_prefixes_are_held_until_classified() {
+        assert!(might_be_tool_text(""));
+        assert!(might_be_tool_text("   "));
+        assert!(might_be_tool_text("{\"name\""));
+        assert!(might_be_tool_text(" [{\"name\""));
+        assert!(might_be_tool_text("```json"));
+        assert!(!might_be_tool_text("Hello"));
+        assert!(!might_be_tool_text(
+            "Here is an example: {\"name\":\"read_file\"}"
+        ));
     }
 
     #[test]

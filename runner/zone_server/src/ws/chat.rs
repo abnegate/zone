@@ -1646,6 +1646,61 @@ async fn prepare_message(
     }))
 }
 
+async fn load_chat_history(state: &AppState, chat_id: Uuid) -> Vec<LlmMessage> {
+    match chats::list_recent_messages(state.db(), chat_id, MAX_CONTEXT_MESSAGES).await {
+        Ok(messages) => messages
+            .into_iter()
+            .map(|msg| LlmMessage {
+                role: match msg.role.as_str() {
+                    "user" => LlmRole::User,
+                    "assistant" => LlmRole::Assistant,
+                    "system" => LlmRole::System,
+                    _ => LlmRole::User,
+                },
+                content: Some(msg.content),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                images: image_urls_from_metadata(msg.metadata.as_ref()),
+                generated_images: Vec::new(),
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!("Failed to fetch message history: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+async fn load_web_search(
+    state: &AppState,
+    content: &str,
+    web_search_requested: bool,
+) -> SearchContext {
+    let search = SearchContext::new(&state.config().web_search);
+    if !web_search_requested {
+        return search;
+    }
+    let query = sanitize_query(content);
+    if query.is_empty() {
+        return search;
+    }
+    match SearxngClient::new(state.config().web_search.clone()) {
+        Ok(client) => match client.search(&query).await {
+            Ok(hits) if !hits.is_empty() => SearchContext::Results(hits),
+            Ok(_) => SearchContext::Empty,
+            Err(e) => {
+                tracing::warn!("Web search failed: {}", e);
+                SearchContext::Failed
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Failed to create web search client: {}", e);
+            SearchContext::Failed
+        }
+    }
+}
+
 async fn prepare_chat(
     state: &AppState,
     sender: &SharedSender,
@@ -1657,53 +1712,26 @@ async fn prepare_chat(
     web_search_requested: bool,
 ) -> ChatPreparation {
     let model_name = chat.model_name.as_str();
-    // Build context for AI
-    let mut context_messages = Vec::new();
-
-    // Add recent conversation history
-    match chats::list_messages(state.db(), chat_id).await {
-        Ok(messages) => {
-            // Take last N messages for context
-            let recent_messages: Vec<_> = messages
-                .iter()
-                .rev()
-                .take(MAX_CONTEXT_MESSAGES as usize)
-                .rev()
-                .collect();
-
-            for msg in recent_messages {
-                context_messages.push(LlmMessage {
-                    role: match msg.role.as_str() {
-                        "user" => LlmRole::User,
-                        "assistant" => LlmRole::Assistant,
-                        "system" => LlmRole::System,
-                        _ => LlmRole::User,
-                    },
-                    content: Some(msg.content.clone()),
-                    name: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    images: image_urls_from_metadata(msg.metadata.as_ref()),
-                    generated_images: Vec::new(),
-                });
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to fetch message history: {}", e);
-            // Continue without history
-        }
+    if web_search_requested && !sanitize_query(content).is_empty() {
+        let _ = send_server(
+            sender,
+            ServerMessage::Status {
+                message: "Searching the web...".to_string(),
+            },
+        )
+        .await;
     }
 
-    // Agent mode replaces blind context injection with a `search_knowledge`
-    // tool. Doing both would spend the context window on passages the model
-    // never asked for and then offer to fetch them again.
-    let tools = agent::ChatTools::build(agent::WorkspaceScope {
-        state: state.clone(),
-        workspace_id,
-        chat_id,
-        user_id,
-    })
-    .await;
+    let (context_messages, tools, search) = tokio::join!(
+        load_chat_history(state, chat_id),
+        agent::ChatTools::build(agent::WorkspaceScope {
+            state: state.clone(),
+            workspace_id,
+            chat_id,
+            user_id,
+        }),
+        load_web_search(state, content, web_search_requested),
+    );
     let agentic = chat.agent_enabled && !tools.is_empty();
 
     let mut prompt = if agentic {
@@ -1820,57 +1848,22 @@ async fn prepare_chat(
             prompt.push_str(&retrieved_context_block(&context_lines));
         }
     }
-
-    // Inject live web search via SearXNG (reached through Gluetun in Docker).
-    let mut search = SearchContext::new(&state.config().web_search);
-    if web_search_requested {
-        let query = sanitize_query(content);
-        if !query.is_empty() {
-            let status_msg = ServerMessage::Status {
-                message: "Searching the web...".to_string(),
-            };
-            let _ = send_server(sender, status_msg).await;
-
-            match SearxngClient::new(state.config().web_search.clone()) {
-                Ok(client) => match client.search(&query).await {
-                    Ok(hits) if !hits.is_empty() => {
-                        tracing::debug!(
-                            "Injected {} web search results for chat {}",
-                            hits.len(),
-                            chat_id
-                        );
-                        search = SearchContext::Results(hits);
-                    }
-                    Ok(_) => {
-                        tracing::debug!("Web search returned no results for chat {}", chat_id);
-                        search = SearchContext::Empty;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Web search failed for chat {}: {}", chat_id, e);
-                        search = SearchContext::Failed;
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!("Failed to create web search client: {}", e);
-                    search = SearchContext::Failed;
-                }
-            }
-        }
-    }
     prompt.push_str("\n\n");
     prompt.push_str(&search.capability());
-    context_messages.insert(0, LlmMessage::system(prompt));
+    let mut messages = Vec::with_capacity(context_messages.len() + 2);
+    messages.push(LlmMessage::system(prompt));
+    messages.extend(context_messages);
     // Ollama's Qwen3.8 renderer hoists system messages ahead of history. A
     // supplemental user-role context message keeps current evidence nearby.
     // This message is sent only to the model, never stored as a user message.
-    context_messages.push(LlmMessage::user(search.prompt()));
+    messages.push(LlmMessage::user(search.prompt()));
 
     ChatPreparation {
         model: model_name.to_string(),
         agentic,
         auto_approve: chat.auto_approve,
         tools,
-        messages: context_messages,
+        messages,
     }
 }
 
@@ -1934,7 +1927,7 @@ async fn handle_chat_generation(
                 generation.cancelled(sender).await;
                 return Ok(());
             }
-            stream = llm_client.chat_stream_with_model(model_name, context_messages, None) => stream,
+            stream = llm_client.chat_stream_with_model(model_name, &context_messages, None) => stream,
         };
         match stream {
             Ok(stream) => Box::pin(plain_events(stream)),
