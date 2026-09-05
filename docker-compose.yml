@@ -544,6 +544,8 @@ services:
       - GF_ALERTING_ENABLED=false
       # Alert recipient email (used in provisioned contact points)
       - ALERT_EMAIL_RECIPIENTS=${ALERT_EMAIL_RECIPIENTS:-admin@example.com}
+      # Discord channel webhook. Independent of SMTP / ALERT_ENABLED.
+      - ALERT_DISCORD_WEBHOOK_URL=${ALERT_DISCORD_WEBHOOK_URL:-}
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/entrypoint.sh:/grafana-entrypoint.sh:ro

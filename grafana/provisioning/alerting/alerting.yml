@@ -1,9 +1,13 @@
 # Grafana Alerting Provisioning
-# This file configures contact points and notification policies for alerts
+# Contact points and notification policies.
+#
+# grafana/entrypoint.sh rewrites this at start:
+#   - email when ALERT_ENABLED=true (needs SMTP)
+#   - Discord when ALERT_DISCORD_WEBHOOK_URL is set (no SMTP)
+# Discord mobile notifications are the push path.
 
 apiVersion: 1
 
-# Contact points define where alerts are sent
 contactPoints:
   - orgId: 1
     name: email-notifications
@@ -15,7 +19,6 @@ contactPoints:
           singleEmail: false
         disableResolveMessage: false
 
-# Notification policies define routing rules for alerts
 policies:
   - orgId: 1
     receiver: email-notifications
