@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "default_image": "flux-schnell",
+  "recipes": [
+    {
+      "id": "flux-schnell",
+      "kind": "image",
+      "label": "FLUX.1 Schnell",
+      "bare": "flux1-schnell-fp8-api.json",
+      "with_source": "flux1-schnell-fp8-img2img-api.json",
+      "output_node": "9",
+      "output": "preview_image",
+      "slots": {
+        "prompt": "/6/inputs/text",
+        "seed": "/3/inputs/seed",
+        "source": "/10/inputs/image",
+        "weights": {
+          "checkpoint": "/4/inputs/ckpt_name"
+        }
+      },
+      "files": ["flux1-schnell-fp8.safetensors"],
+      "base_models": ["Flux.1 S", "Flux.1 Schnell"],
+      "filename_hints": ["schnell", "flux"]
+    },
+    {
+      "id": "sd15",
+      "kind": "image",
+      "label": "Stable Diffusion 1.5",
+      "bare": "sd15-api.json",
+      "with_source": "sd15-img2img-api.json",
+      "output_node": "9",
+      "output": "preview_image",
+      "slots": {
+        "prompt": "/6/inputs/text",
+        "seed": "/3/inputs/seed",
+        "source": "/10/inputs/image",
+        "weights": {
+          "checkpoint": "/4/inputs/ckpt_name"
+        }
+      },
+      "files": [],
+      "base_models": ["SD 1.5", "SD 1.5 Hyper", "SD 1.5 LCM"],
+      "filename_hints": ["sd15", "sd-15", "sd1.5", "sd1_5", "v1-5", "v1_5"]
+    },
+    {
+      "id": "sdxl",
+      "kind": "image",
+      "label": "Stable Diffusion XL",
+      "bare": "sdxl-api.json",
+      "with_source": "sdxl-img2img-api.json",
+      "output_node": "9",
+      "output": "preview_image",
+      "slots": {
+        "prompt": "/6/inputs/text",
+        "seed": "/3/inputs/seed",
+        "source": "/10/inputs/image",
+        "weights": {
+          "checkpoint": "/4/inputs/ckpt_name"
+        }
+      },
+      "files": [],
+      "base_models": ["SDXL 1.0", "SDXL Turbo", "Pony", "Illustrious"],
+      "filename_hints": ["sdxl", "sd_xl", "sd-xl", "pony", "illustrious", "juggernautxl"]
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 //! Business logic and external service integrations
 
 pub mod artifacts;
+pub mod comfy_recipe;
 pub mod comfyui;
 pub mod email;
 pub mod embedding;

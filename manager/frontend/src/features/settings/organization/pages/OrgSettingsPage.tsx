@@ -537,8 +537,9 @@ export default function OrgSettingsPage() {
                       ))}
                     </select>
                     <p className="form-hint">
-                      ComfyUI checkpoint used when a message asks for an image. Leave empty to use
-                      COMFYUI_CHECKPOINT.
+                      ComfyUI checkpoint used when a message asks for an image. Attach a photo
+                      to edit it instead of generating. The matching recipe is selected
+                      automatically. Leave empty to use COMFYUI_CHECKPOINT.
                     </p>
                   </div>
                 </div>
