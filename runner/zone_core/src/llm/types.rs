@@ -232,6 +232,8 @@ pub struct ChatRequest<'a> {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<&'a [String]>,
 }
 
 /// Tool choice specification
@@ -462,6 +464,7 @@ mod tests {
             temperature: Some(0.7),
             max_tokens: Some(1000),
             stream: Some(false),
+            stop: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -714,6 +717,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: None,
+            stop: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -743,6 +747,7 @@ mod tests {
             temperature: Some(0.5),
             max_tokens: Some(2048),
             stream: Some(false),
+            stop: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -767,6 +772,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: None,
+            stop: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();

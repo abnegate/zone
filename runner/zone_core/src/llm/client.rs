@@ -87,6 +87,7 @@ impl Default for LlmConfig {
 pub struct LlmClient {
     client: Client,
     config: LlmConfig,
+    stop: Vec<String>,
 }
 
 impl LlmClient {
@@ -95,7 +96,15 @@ impl LlmClient {
         Self {
             client: HTTP.clone(),
             config,
+            stop: Vec::new(),
         }
+    }
+
+    /// Ask the provider to halt on these strings. Custom GGUFs often ignore
+    /// their own end tokens unless the request repeats them.
+    pub fn with_stop(mut self, stop: Vec<String>) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// Make a chat completion request
@@ -123,6 +132,7 @@ impl LlmClient {
             temperature: Some(self.config.temperature),
             max_tokens: Some(self.config.max_tokens),
             stream: Some(false),
+            stop: (!self.stop.is_empty()).then_some(self.stop.as_slice()),
         };
 
         let url = format!("{}/chat/completions", self.config.base_url);
@@ -176,6 +186,7 @@ impl LlmClient {
             temperature: Some(self.config.temperature),
             max_tokens: Some(self.config.max_tokens),
             stream: Some(true),
+            stop: (!self.stop.is_empty()).then_some(self.stop.as_slice()),
         };
 
         let url = format!("{}/chat/completions", self.config.base_url);

@@ -74,6 +74,7 @@ mock.module('../../models', () => ({
     models: [
       { name: 'llama2', size: 1, modified_at: '' },
       { name: 'mistral', size: 1, modified_at: '', completion: true },
+      { name: 'llama3.1', size: 1, modified_at: '', completion: true, tools: true },
       { name: 'vectors', size: 1, modified_at: '', completion: false },
     ],
     loading: false,
@@ -352,7 +353,9 @@ describe('ChatsPage', () => {
         socket.emit({ type: 'chunk', content: ' continues', index: 1 });
       });
       expect(screen.getAllByText('Summary title')).toHaveLength(2);
-      expect(screen.getByText('First chunk continues')).toBeInTheDocument();
+      await waitFor(() => {
+        expect(screen.getByText('First chunk continues')).toBeInTheDocument();
+      });
       act(() => socket.emit({ type: 'title_updated', chat_id: 'chat-2', title: 'Wrong chat' }));
       expect(screen.queryByText('Wrong chat')).not.toBeInTheDocument();
     });
@@ -774,6 +777,36 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
 
       expect(screen.getByRole('button', { name: 'Create Chat' })).toBeDisabled();
+    });
+
+    it('shows Agent mode only for a model that can call tools', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByRole('button', { name: 'New chat' }));
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
+      });
+      expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
+
+      const selectTrigger = screen.getByRole('combobox');
+      fireEvent.mouseDown(selectTrigger);
+      fireEvent.mouseUp(selectTrigger);
+      fireEvent.click(selectTrigger);
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'llama2' })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole('option', { name: 'llama2' }));
+      expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
+
+      fireEvent.mouseDown(selectTrigger);
+      fireEvent.mouseUp(selectTrigger);
+      fireEvent.click(selectTrigger);
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'llama3.1' })).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole('option', { name: 'llama3.1' }));
+      await waitFor(() => {
+        expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
+      });
     });
 
     it('shows error when create chat fails', async () => {
@@ -1738,12 +1771,80 @@ describe('ChatsPage', () => {
     });
   });
 
+  it('saves a pasted character card onto the open chat', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      needs_character: true,
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      needs_character: true,
+      character: { name: 'Ada', system_prompt: 'Stay in character as Ada.' },
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('character-toggle')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('character-toggle'));
+    fireEvent.change(screen.getByLabelText('Card JSON or system prompt'), {
+      target: { value: 'Stay in character as Ada.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save character' }));
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith(
+        'chat-1',
+        expect.objectContaining({
+          character: expect.objectContaining({
+            name: 'Character',
+            system_prompt: 'Stay in character as Ada.',
+          }),
+        })
+      );
+    });
+  });
+
   it('hides auto-approve when the chat is not agentic', async () => {
+    mockClient.getChat.mockResolvedValueOnce({ ...mockChatWithMessages, tools: true });
     renderChatsPage();
     await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
     fireEvent.click(screen.getByText('Chat 1'));
     await waitFor(() => expect(screen.getByTestId('agent-toggle')).toBeInTheDocument());
     expect(screen.queryByTestId('auto-approve-toggle')).not.toBeInTheDocument();
+  });
+
+  it('hides Agent and Character until the model needs them', async () => {
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByText('Hi there!')).toBeInTheDocument());
+    expect(screen.queryByTestId('agent-toggle')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('character-toggle')).not.toBeInTheDocument();
+  });
+
+  it('shows Agent for a tool-capable model and Character when a card is needed', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      tools: true,
+      needs_character: true,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-toggle')).toBeInTheDocument());
+    expect(screen.getByTestId('character-toggle')).toBeInTheDocument();
+  });
+
+  it('keeps Agent and Character visible so an active setting can be turned off', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      agent_enabled: true,
+      character: { name: 'Ada' },
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('agent-toggle')).toBeInTheDocument());
+    expect(screen.getByTestId('character-toggle')).toHaveTextContent('Ada');
   });
 
   describe('chat search', () => {

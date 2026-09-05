@@ -29,6 +29,12 @@ pub struct ModelResponse {
     /// Known completion support; absent when engine metadata is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion: Option<bool>,
+    /// Whether the engine advertised tool calling for this installed model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<bool>,
+    /// Whether chats with this model should offer a character card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_character: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -163,9 +163,12 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
                             .collect();
 
                         futures::future::join_all(models.iter_mut().map(|model| async {
-                            model.completion =
-                                crate::services::model::Model::completion(ollama_host, &model.name)
+                            let profile =
+                                crate::services::model::Model::profile(ollama_host, &model.name)
                                     .await;
+                            model.completion = profile.completion;
+                            model.tools = profile.tools;
+                            model.needs_character = Some(profile.needs_character);
                         }))
                         .await;
                         Json(models).into_response()

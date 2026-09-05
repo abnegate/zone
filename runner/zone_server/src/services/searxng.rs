@@ -52,6 +52,11 @@ impl SearchContext {
         }
     }
 
+    /// A lookup ran this turn and produced a current outcome to place after history.
+    pub fn has_lookup_outcome(&self) -> bool {
+        matches!(self, Self::Results(_) | Self::Empty | Self::Failed)
+    }
+
     /// Stable capability instructions belong before the conversation history.
     pub fn capability(&self) -> String {
         let capability = if matches!(self, Self::Disabled) {
@@ -484,6 +489,15 @@ mod tests {
         assert_eq!(SearchContext::new(&config), SearchContext::NotRequested);
         config.query_url = "   ".to_string();
         assert_eq!(SearchContext::new(&config), SearchContext::Disabled);
+    }
+
+    #[test]
+    fn lookup_outcomes_are_the_turns_that_fetched_the_web() {
+        assert!(!SearchContext::Disabled.has_lookup_outcome());
+        assert!(!SearchContext::NotRequested.has_lookup_outcome());
+        assert!(SearchContext::Empty.has_lookup_outcome());
+        assert!(SearchContext::Failed.has_lookup_outcome());
+        assert!(SearchContext::Results(Vec::new()).has_lookup_outcome());
     }
 
     #[test]

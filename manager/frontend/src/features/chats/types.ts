@@ -78,6 +78,19 @@ export interface Message {
   metadata?: MessageMetadata | null;
 }
 
+export interface ChatCharacter {
+  name: string;
+  description?: string | null;
+  personality?: string | null;
+  scenario?: string | null;
+  first_mes?: string | null;
+  mes_example?: string | null;
+  system_prompt?: string | null;
+  post_history_instructions?: string | null;
+  stop_sequences?: string[];
+  source_name?: string | null;
+}
+
 export interface Chat {
   id: string;
   title: string;
@@ -85,6 +98,12 @@ export interface Chat {
   created_at: string;
   updated_at: string;
   archived: boolean;
+  /** Persona for models that expect a character card. Absent on ordinary assistant chats. */
+  character?: ChatCharacter | null;
+  /** Whether the installed model advertised tool calling. */
+  tools?: boolean | null;
+  /** Whether this model should offer a character card. */
+  needs_character?: boolean | null;
   /**
    * Whether replies run the tool-calling agent loop, including workspace tools
    * and server filesystem and shell tools.
@@ -109,12 +128,15 @@ export interface CreateChatRequest {
   automatic_title?: boolean;
   agent_enabled?: boolean;
   auto_approve?: boolean;
+  character?: ChatCharacter;
 }
 
 export interface UpdateChatRequest {
   title?: string;
   agent_enabled?: boolean;
   auto_approve?: boolean;
+  character?: ChatCharacter | null;
+  clear_character?: boolean;
 }
 
 export interface SendMessageRequest {

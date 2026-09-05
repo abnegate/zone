@@ -65,13 +65,17 @@ async fn mock_ollama_tags() -> Json<serde_json::Value> {
 async fn mock_ollama_show(
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let name = payload["name"].as_str().unwrap_or("");
+    let name = payload["model"]
+        .as_str()
+        .or_else(|| payload["name"].as_str())
+        .unwrap_or("");
 
     match name {
         "llama2:latest" | "llama2" => Ok(Json(json!({
             "modelfile": "FROM llama2",
             "parameters": "temperature 0.7",
             "template": "{{ .Prompt }}",
+            "capabilities": ["completion"],
             "details": {
                 "format": "gguf",
                 "family": "llama",
@@ -83,6 +87,7 @@ async fn mock_ollama_show(
             "modelfile": "FROM mistral",
             "parameters": "temperature 0.8",
             "template": "{{ .Prompt }}",
+            "capabilities": ["completion"],
             "details": {
                 "format": "gguf",
                 "family": "mistral",
@@ -358,6 +363,9 @@ async fn test_list_models_ollama_success() {
     assert!(models[0]["size"].as_u64().is_some());
     assert!(models[0]["digest"].as_str().is_some());
     assert!(models[0]["details"]["family"].as_str().is_some());
+    assert_eq!(models[0]["completion"], true);
+    assert_eq!(models[0]["tools"], false);
+    assert_eq!(models[0]["needs_character"], false);
 }
 
 #[tokio::test]

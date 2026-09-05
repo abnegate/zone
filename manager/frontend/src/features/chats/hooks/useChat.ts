@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import type {
   ActionReceipt,
+  ChatCharacter,
   ChatWithMessages,
   Citation,
   Message,
@@ -178,7 +179,8 @@ export function useChat(
                 // Merged, not replaced: a streaming turn has several
                 // writers for one message, and an arriving image must not
                 // drop the tool trace that patchToolCall put there.
-                metadata: metadata !== undefined ? { ...last.metadata, ...metadata } : last.metadata,
+                metadata:
+                  metadata !== undefined ? { ...last.metadata, ...metadata } : last.metadata,
               },
             ],
           };
@@ -641,8 +643,11 @@ export function useChat(
       prev && prev.id === updated.id
         ? {
             ...prev,
-            agent_enabled: updated.agent_enabled,
-            auto_approve: updated.auto_approve,
+            ...updated,
+            messages:
+              'messages' in updated && Array.isArray(updated.messages)
+                ? updated.messages
+                : prev.messages,
           }
         : prev
     );
@@ -653,6 +658,11 @@ export function useChat(
 
   const setAutoApprove = (enabled: boolean): Promise<void> =>
     updateAgentSettings({ auto_approve: enabled });
+
+  const setCharacter = (character: ChatCharacter): Promise<void> =>
+    updateAgentSettings({ character });
+
+  const clearCharacter = (): Promise<void> => updateAgentSettings({ clear_character: true });
 
   const deleteMessage = async (messageId: string): Promise<void> => {
     if (!chatId) {
@@ -679,6 +689,8 @@ export function useChat(
     approveTool,
     setAgentEnabled,
     setAutoApprove,
+    setCharacter,
+    clearCharacter,
     deleteMessage,
     refresh,
     updateTitle,

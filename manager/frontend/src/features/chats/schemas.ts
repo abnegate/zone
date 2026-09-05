@@ -73,6 +73,21 @@ export const MessageSchema = z.object({
   metadata: MessageMetadataSchema.nullish(),
 });
 
+export const ChatCharacterSchema = z
+  .object({
+    name: z.string(),
+    description: z.string().nullish(),
+    personality: z.string().nullish(),
+    scenario: z.string().nullish(),
+    first_mes: z.string().nullish(),
+    mes_example: z.string().nullish(),
+    system_prompt: z.string().nullish(),
+    post_history_instructions: z.string().nullish(),
+    stop_sequences: z.array(z.string()).optional(),
+    source_name: z.string().nullish(),
+  })
+  .passthrough();
+
 export const ChatSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -83,6 +98,9 @@ export const ChatSchema = z.object({
   // Servers predating agentic chat omit this; treat those chats as plain.
   agent_enabled: z.boolean().default(false),
   auto_approve: z.boolean().default(false),
+  character: ChatCharacterSchema.nullish(),
+  tools: z.boolean().nullish(),
+  needs_character: z.boolean().nullish(),
 });
 
 export const ChatWithMessagesSchema = ChatSchema.extend({

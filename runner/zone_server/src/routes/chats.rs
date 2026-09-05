@@ -13,6 +13,7 @@ use crate::auth::AuthUser;
 use crate::db::{chats, message_embeddings};
 use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
+use crate::services::character::ChatCharacter;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 
@@ -115,6 +116,12 @@ pub struct ChatResponse {
     archived: bool,
     agent_enabled: bool,
     auto_approve: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    character: Option<ChatCharacter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    needs_character: Option<bool>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -129,8 +136,19 @@ impl From<chats::ChatRow> for ChatResponse {
             archived: row.archived.unwrap_or(false),
             agent_enabled: row.agent_enabled,
             auto_approve: row.auto_approve,
+            character: row.character,
+            tools: None,
+            needs_character: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
+    }
+}
+
+impl ChatResponse {
+    fn with_profile(mut self, profile: crate::services::model::ModelProfile) -> Self {
+        self.tools = profile.tools;
+        self.needs_character = Some(profile.needs_character);
+        self
     }
 }
 
@@ -176,6 +194,8 @@ struct SingleChatResponse {
 /// Load a chat's messages for a single-chat response. A chat whose messages
 /// cannot be read still returns the chat, with an empty list.
 async fn chat_with_messages(state: &AppState, chat: chats::ChatRow) -> ChatWithMessagesResponse {
+    let profile =
+        crate::services::model::Model::profile(&state.config().ollama_host, &chat.model_name).await;
     let messages = chats::list_messages(state.db(), chat.id)
         .await
         .unwrap_or_default()
@@ -184,9 +204,52 @@ async fn chat_with_messages(state: &AppState, chat: chats::ChatRow) -> ChatWithM
         .collect();
 
     ChatWithMessagesResponse {
-        chat: ChatResponse::from(chat),
+        chat: ChatResponse::from(chat).with_profile(profile),
         messages,
     }
+}
+
+async fn apply_character(
+    state: &AppState,
+    chat_id: Uuid,
+    character: Option<&ChatCharacter>,
+    clear: bool,
+) -> Result<Option<chats::ChatRow>, axum::response::Response> {
+    if !clear && character.is_none() {
+        return Ok(None);
+    }
+    if let Some(card) = character
+        && let Err(message) = card.validate()
+    {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response());
+    }
+    let stored = if clear { None } else { character };
+    let chat = chats::set_chat_character(state.db(), chat_id, stored)
+        .await
+        .map_err(|error| {
+            tracing::error!("Database error saving character: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response()
+        })?;
+    if let Some(card) = stored
+        && let Some(greeting) = card
+            .first_mes
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        let empty = chats::list_messages(state.db(), chat_id)
+            .await
+            .map(|messages| messages.is_empty())
+            .unwrap_or(true);
+        if empty {
+            let _ = chats::create_message(state.db(), chat_id, "assistant", greeting, None).await;
+        }
+    }
+    Ok(chat)
 }
 
 /// Chats list response
@@ -225,6 +288,8 @@ pub struct CreateChatRequest {
     agent_enabled: bool,
     #[serde(default)]
     auto_approve: bool,
+    #[serde(default)]
+    character: Option<ChatCharacter>,
 }
 
 /// Update chat request
@@ -233,6 +298,10 @@ pub struct UpdateChatRequest {
     title: Option<String>,
     agent_enabled: Option<bool>,
     auto_approve: Option<bool>,
+    #[serde(default)]
+    character: Option<ChatCharacter>,
+    #[serde(default)]
+    clear_character: bool,
 }
 
 /// Create message request
@@ -303,13 +372,20 @@ pub async fn create(
     )
     .await
     {
-        Ok(chat) => (
-            StatusCode::CREATED,
-            Json(SingleChatResponse {
-                chat: chat_with_messages(&state, chat).await,
-            }),
-        )
-            .into_response(),
+        Ok(chat) => {
+            let chat = match apply_character(&state, chat.id, req.character.as_ref(), false).await {
+                Ok(Some(chat)) => chat,
+                Ok(None) => chat,
+                Err(response) => return response,
+            };
+            (
+                StatusCode::CREATED,
+                Json(SingleChatResponse {
+                    chat: chat_with_messages(&state, chat).await,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -376,10 +452,25 @@ pub async fn update(
     )
     .await
     {
-        Ok(Some(chat)) => Json(SingleChatResponse {
-            chat: chat_with_messages(&state, chat).await,
-        })
-        .into_response(),
+        Ok(Some(chat)) => {
+            let chat = if req.clear_character {
+                match apply_character(&state, chat.id, None, true).await {
+                    Ok(Some(chat)) => chat,
+                    Ok(None) => chat,
+                    Err(response) => return response,
+                }
+            } else {
+                match apply_character(&state, chat.id, req.character.as_ref(), false).await {
+                    Ok(Some(chat)) => chat,
+                    Ok(None) => chat,
+                    Err(response) => return response,
+                }
+            };
+            Json(SingleChatResponse {
+                chat: chat_with_messages(&state, chat).await,
+            })
+            .into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Chat not found")),

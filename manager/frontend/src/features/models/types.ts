@@ -1,5 +1,7 @@
 export interface InstalledModel {
   completion?: boolean;
+  tools?: boolean;
+  needs_character?: boolean;
   name: string;
   size: number;
   modified_at: string;

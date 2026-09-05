@@ -34,6 +34,8 @@ use zone_core::llm::{
 use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, ToolCallRecord};
 use crate::auth::validate_token;
 use crate::db::{ai_settings, chats, knowledge, workspace_members, workspaces};
+use crate::services::character::ChatCharacter;
+use crate::services::completion_tokens::{FilterStep, TokenFilter, merge_stops};
 use crate::services::searxng::{SearchContext, SearxngClient, sanitize_query};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
@@ -116,6 +118,33 @@ fn snippet_line(text: &str, max_chars: usize) -> String {
 
 fn format_retrieved_line(kind: &str, title: &str, uri: &str, text: &str) -> String {
     format!("- [{kind}] {title} ({uri}): {}", snippet_line(text, 500))
+}
+
+async fn emit_chunk(
+    sender: &SharedSender,
+    full_content: &mut String,
+    chunk_index: &mut u32,
+    client_gone: &mut bool,
+    content: String,
+    response_truncated: &mut bool,
+) -> bool {
+    if content.is_empty() {
+        return true;
+    }
+    if full_content.len() + content.len() > MAX_RESPONSE_LENGTH {
+        *response_truncated = true;
+        return false;
+    }
+    full_content.push_str(&content);
+    let chunk_msg = ServerMessage::Chunk {
+        content,
+        index: *chunk_index,
+    };
+    if !*client_gone && !send_server(sender, chunk_msg).await {
+        *client_gone = true;
+    }
+    *chunk_index += 1;
+    true
 }
 
 fn interleave_context_lines(
@@ -226,6 +255,7 @@ struct ChatPreparation {
     auto_approve: bool,
     tools: agent::ChatTools,
     messages: Vec<LlmMessage>,
+    stop: Vec<String>,
 }
 
 enum Routing {
@@ -1739,13 +1769,10 @@ async fn prepare_chat(
         load_web_search(state, content, web_search_requested),
     );
     let agentic = chat.agent_enabled && !tools.is_empty();
+    let character = chat.character.as_ref();
 
-    let mut prompt = if agentic {
-        agent::system_prompt(&tools, chat.auto_approve)
-    } else {
-        "You are Zone's assistant, answering inside one of the user's workspaces.".to_string()
-    };
-    if !agentic {
+    let mut prompt = chat_system_prompt(character, agentic, &tools, chat.auto_approve);
+    if !agentic && character.is_none() {
         let query_embedding = match state.embedding_service() {
             Some(embedding_service) => {
                 match embedding_service
@@ -1859,10 +1886,13 @@ async fn prepare_chat(
     let mut messages = Vec::with_capacity(context_messages.len() + 2);
     messages.push(LlmMessage::system(prompt));
     messages.extend(context_messages);
-    // Ollama's Qwen3.8 renderer hoists system messages ahead of history. A
-    // supplemental user-role context message keeps current evidence nearby.
-    // This message is sent only to the model, never stored as a user message.
-    messages.push(LlmMessage::user(search.prompt()));
+    // Official instruct models need current search state after history so a
+    // hoisted system prompt cannot bury it. Character-card models treat that
+    // extra user turn as more story and complete it, so only send it when a
+    // lookup actually ran.
+    if character.is_none() || search.has_lookup_outcome() {
+        messages.push(LlmMessage::user(search.prompt()));
+    }
 
     ChatPreparation {
         model: model_name.to_string(),
@@ -1870,6 +1900,33 @@ async fn prepare_chat(
         auto_approve: chat.auto_approve,
         tools,
         messages,
+        stop: merge_stops(
+            character
+                .map(|card| card.stop_sequences.as_slice())
+                .unwrap_or(&[]),
+        ),
+    }
+}
+
+fn chat_system_prompt(
+    character: Option<&ChatCharacter>,
+    agentic: bool,
+    tools: &agent::ChatTools,
+    auto_approve: bool,
+) -> String {
+    match (character, agentic) {
+        (Some(card), true) => {
+            format!(
+                "{}\n\n{}",
+                card.system_prompt(),
+                agent::system_prompt(tools, auto_approve)
+            )
+        }
+        (Some(card), false) => card.system_prompt(),
+        (None, true) => agent::system_prompt(tools, auto_approve),
+        (None, false) => {
+            "You are Zone's assistant, answering inside one of the user's workspaces.".to_string()
+        }
     }
 }
 
@@ -1886,8 +1943,10 @@ async fn handle_chat_generation(
         auto_approve,
         tools,
         messages: context_messages,
+        stop,
     } = preparation;
     let model_name = model.as_str();
+    let mut token_filter = TokenFilter::new(stop.clone());
     // Create LLM client
     let llm_config = LlmConfig {
         base_url: state.config().litellm_host.clone(),
@@ -1896,7 +1955,7 @@ async fn handle_chat_generation(
         temperature: 0.7,
         max_tokens: 4096,
     };
-    let llm_client = LlmClient::new(llm_config);
+    let llm_client = LlmClient::new(llm_config).with_stop(stop);
 
     let assistant_message_id = generation.message_id;
     if generation.cancel.try_recv().is_ok() {
@@ -1984,29 +2043,38 @@ async fn handle_chat_generation(
             event = events.next() => {
                 match event {
                     Some(AgentEvent::Chunk(content)) => {
-                        // MAJOR-3: Check response length limit
-                        if full_content.len() + content.len() > MAX_RESPONSE_LENGTH {
-                            tracing::warn!(
-                                "LLM response exceeded maximum length for message {}",
-                                assistant_message_id
-                            );
-                            response_truncated = true;
+                        let filtered = match token_filter.push(&content) {
+                            FilterStep::Hold => continue,
+                            FilterStep::Emit(text) => text,
+                            FilterStep::Halt(text) => {
+                                if !text.is_empty()
+                                    && !emit_chunk(
+                                        sender,
+                                        &mut full_content,
+                                        &mut chunk_index,
+                                        &mut client_gone,
+                                        text,
+                                        &mut response_truncated,
+                                    )
+                                    .await
+                                {
+                                    break;
+                                }
+                                break;
+                            }
+                        };
+                        if !emit_chunk(
+                            sender,
+                            &mut full_content,
+                            &mut chunk_index,
+                            &mut client_gone,
+                            filtered,
+                            &mut response_truncated,
+                        )
+                        .await
+                        {
                             break;
                         }
-
-                        full_content.push_str(&content);
-
-                        let chunk_msg = ServerMessage::Chunk {
-                            content,
-                            index: chunk_index,
-                        };
-                        if !client_gone && !send_server(sender, chunk_msg).await {
-                            // The reader navigated away. Keep generating:
-                            // the reply still has to be saved, because the
-                            // console reloads history from the database.
-                            client_gone = true;
-                        }
-                        chunk_index += 1;
                     }
                     Some(AgentEvent::ToolApprovalRequired { id, name, arguments }) => {
                         if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
@@ -2124,6 +2192,19 @@ async fn handle_chat_generation(
     // Drop the producer before acknowledging cancellation so it cannot emit
     // more events after the terminal frame.
     drop(events);
+
+    let leftover = token_filter.finish();
+    if !leftover.is_empty() {
+        let _ = emit_chunk(
+            sender,
+            &mut full_content,
+            &mut chunk_index,
+            &mut client_gone,
+            leftover,
+            &mut response_truncated,
+        )
+        .await;
+    }
 
     // Nothing generated yet: there is no reply worth keeping. A turn that ran
     // tools or produced an image before it broke is worth keeping even with no

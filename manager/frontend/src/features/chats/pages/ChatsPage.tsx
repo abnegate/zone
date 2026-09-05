@@ -20,11 +20,16 @@ import {
   type Attachment,
   attachmentMetadata,
   buildMessageWithAttachments,
+  chatShowsAgent,
+  chatShowsCharacter,
+  findInstalledModel,
   formatBytes,
   formatDate,
   imageAttachments,
   isSendable,
   isStartingImage,
+  parseCharacterFile,
+  parseCharacterText,
   readAttachment,
   sourceAttachment,
   videoAttachments,
@@ -55,16 +60,12 @@ export default function ChatsPage() {
   const [messageInput, setMessageInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [showCharacterModal, setShowCharacterModal] = useState(false);
+  const [characterDraft, setCharacterDraft] = useState('');
+  const [characterError, setCharacterError] = useState<string | null>(null);
+  const [characterSaving, setCharacterSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const addFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const read = await Promise.all(Array.from(files).map(readAttachment));
-    setAttachments((prev) => {
-      const seen = new Set(prev.map((a) => a.id));
-      return [...prev, ...read.filter((a) => !seen.has(a.id))];
-    });
-  };
+  const characterFileRef = useRef<HTMLInputElement>(null);
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
@@ -101,6 +102,8 @@ export default function ChatsPage() {
     approveTool,
     setAgentEnabled: setAgentEnabledFn,
     setAutoApprove: setAutoApproveFn,
+    setCharacter: setCharacterFn,
+    clearCharacter: clearCharacterFn,
     updateTitle,
   } = useChat(selectedChatId, updateListTitle);
 
@@ -117,6 +120,13 @@ export default function ChatsPage() {
   // Only render a conversation that matches the current selection so a
   // previous chat never flashes in the main pane while the next one loads.
   const displayedChat = activeChat?.id === selectedChatId ? activeChat : null;
+  const installedForChat = displayedChat
+    ? findInstalledModel(models, displayedChat.model_name)
+    : undefined;
+  const showAgent = displayedChat ? chatShowsAgent(displayedChat, installedForChat) : false;
+  const showCharacter = displayedChat ? chatShowsCharacter(displayedChat, installedForChat) : false;
+  const selectedNewModel = findInstalledModel(models, newChatModel);
+  const showNewChatAgent = selectedNewModel?.tools === true;
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -205,6 +215,89 @@ export default function ChatsPage() {
       await setAutoApproveFn(!displayedChat.auto_approve);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to change auto-approve');
+    }
+  };
+
+  const handleIncomingFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const leftover: File[] = [];
+    for (const file of Array.from(files)) {
+      if (displayedChat && showCharacter) {
+        try {
+          const card = await parseCharacterFile(file);
+          if (card) {
+            setOperationError(null);
+            await setCharacterFn(card);
+            continue;
+          }
+        } catch (err) {
+          setOperationError(err instanceof Error ? err.message : 'Failed to attach character');
+          continue;
+        }
+      }
+      leftover.push(file);
+    }
+    if (leftover.length === 0) return;
+    const read = await Promise.all(leftover.map(readAttachment));
+    setAttachments((prev) => {
+      const seen = new Set(prev.map((a) => a.id));
+      return [...prev, ...read.filter((a) => !seen.has(a.id))];
+    });
+  };
+
+  const handleSaveCharacter = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!displayedChat) return;
+    const card = parseCharacterText(characterDraft);
+    if (!card) {
+      setCharacterError('Paste a character card JSON or a system prompt.');
+      return;
+    }
+    setCharacterSaving(true);
+    setCharacterError(null);
+    try {
+      await setCharacterFn(card);
+      setShowCharacterModal(false);
+      setCharacterDraft('');
+    } catch (err) {
+      setCharacterError(err instanceof Error ? err.message : 'Failed to save character');
+    } finally {
+      setCharacterSaving(false);
+    }
+  };
+
+  const handleCharacterUpload = async (files: FileList | null) => {
+    if (!files?.[0] || !displayedChat) return;
+    setCharacterSaving(true);
+    setCharacterError(null);
+    try {
+      const card = await parseCharacterFile(files[0]);
+      if (!card) {
+        setCharacterError('That file is not a character card, JSON card, or text prompt.');
+        return;
+      }
+      await setCharacterFn(card);
+      setShowCharacterModal(false);
+      setCharacterDraft('');
+    } catch (err) {
+      setCharacterError(err instanceof Error ? err.message : 'Failed to save character');
+    } finally {
+      setCharacterSaving(false);
+    }
+  };
+
+  const handleClearCharacter = async () => {
+    if (!displayedChat) return;
+    setCharacterSaving(true);
+    setCharacterError(null);
+    try {
+      await clearCharacterFn();
+      setShowCharacterModal(false);
+      setCharacterDraft('');
+    } catch (err) {
+      setCharacterError(err instanceof Error ? err.message : 'Failed to remove character');
+    } finally {
+      setCharacterSaving(false);
     }
   };
 
@@ -626,32 +719,54 @@ export default function ChatsPage() {
                     Auto-approve
                   </button>
                 )}
-                <button
-                  type="button"
-                  className="agent-toggle"
-                  onClick={handleToggleAgent}
-                  aria-pressed={displayedChat.agent_enabled}
-                  title={
-                    displayedChat.agent_enabled
-                      ? 'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
-                      : 'Agent mode off: replies come straight from the model'
-                  }
-                  data-testid="agent-toggle"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.75"
-                    width="14"
-                    height="14"
-                    aria-hidden="true"
+                {showCharacter && (
+                  <button
+                    type="button"
+                    className="agent-toggle"
+                    onClick={() => {
+                      setCharacterError(null);
+                      setCharacterDraft('');
+                      setShowCharacterModal(true);
+                    }}
+                    aria-pressed={Boolean(displayedChat.character)}
+                    title={
+                      displayedChat.character
+                        ? `Character: ${displayedChat.character.name}. Custom models use this persona instead of Zone's assistant prompt.`
+                        : 'Attach a character card or system prompt for models that expect a persona'
+                    }
+                    data-testid="character-toggle"
                   >
-                    <path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4L7 17M17 7l1.4-1.4" />
-                    <circle cx="12" cy="12" r="3.5" />
-                  </svg>
-                  Agent
-                </button>
+                    {displayedChat.character?.name ?? 'Character'}
+                  </button>
+                )}
+                {showAgent && (
+                  <button
+                    type="button"
+                    className="agent-toggle"
+                    onClick={handleToggleAgent}
+                    aria-pressed={displayedChat.agent_enabled}
+                    title={
+                      displayedChat.agent_enabled
+                        ? 'Agent mode on: replies can search this workspace, run server commands, and read or write server files'
+                        : 'Agent mode off: replies come straight from the model'
+                    }
+                    data-testid="agent-toggle"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.75"
+                      width="14"
+                      height="14"
+                      aria-hidden="true"
+                    >
+                      <path d="M12 3v2M12 19v2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M3 12h2M19 12h2M5.6 18.4L7 17M17 7l1.4-1.4" />
+                      <circle cx="12" cy="12" r="3.5" />
+                    </svg>
+                    Agent
+                  </button>
+                )}
               </div>
             </div>
 
@@ -763,7 +878,7 @@ export default function ChatsPage() {
               onDrop={(e) => {
                 e.preventDefault();
                 setIsDragging(false);
-                addFiles(e.dataTransfer.files);
+                void handleIncomingFiles(e.dataTransfer.files);
               }}
             >
               {attachments.length > 0 && (
@@ -822,7 +937,7 @@ export default function ChatsPage() {
                   multiple
                   hidden
                   onChange={(e) => {
-                    addFiles(e.target.files);
+                    void handleIncomingFiles(e.target.files);
                     e.target.value = '';
                   }}
                 />
@@ -859,7 +974,7 @@ export default function ChatsPage() {
                   onPaste={(e) => {
                     if (e.clipboardData.files.length > 0) {
                       e.preventDefault();
-                      addFiles(e.clipboardData.files);
+                      void handleIncomingFiles(e.clipboardData.files);
                     }
                   }}
                   disabled={sending}
@@ -930,23 +1045,32 @@ export default function ChatsPage() {
           <Select
             label="Select Model"
             value={newChatModel}
-            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setNewChatModel(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
+              const name = e.target.value;
+              setNewChatModel(name);
+              if (findInstalledModel(models, name)?.tools !== true) {
+                setNewChatAgent(false);
+                setNewChatAutoApprove(false);
+              }
+            }}
             placeholder="Choose a model..."
             helpText="Embedding models are not available for chat."
             options={models
               .filter((model) => model.completion !== false)
               .map((model) => ({ value: model.name, label: model.name }))}
           />
-          <Checkbox
-            label="Agent mode"
-            helpText="Let replies search workspace content, check connected GitHub data and manage workspace work, run shell commands and read and write server files when requested. Requires a model that supports tool calling."
-            checked={newChatAgent}
-            onCheckedChange={(checked) => {
-              setNewChatAgent(checked);
-              if (!checked) setNewChatAutoApprove(false);
-            }}
-          />
-          {newChatAgent && (
+          {showNewChatAgent && (
+            <Checkbox
+              label="Agent mode"
+              helpText="Let replies search workspace content, check connected GitHub data and manage workspace work, run shell commands and read and write server files when requested. Requires a model that supports tool calling."
+              checked={newChatAgent}
+              onCheckedChange={(checked) => {
+                setNewChatAgent(checked);
+                if (!checked) setNewChatAutoApprove(false);
+              }}
+            />
+          )}
+          {showNewChatAgent && newChatAgent && (
             <Checkbox
               label="Auto-approve writes and commands"
               helpText="Skip the confirmation prompt for write_file, apply_patch, run_command and run_shell. You can change this later on the chat."
@@ -994,6 +1118,77 @@ export default function ChatsPage() {
             </Button>
             <Button type="submit" variant="primary" disabled={renaming || !title.trim()}>
               {renaming ? 'Saving…' : 'Save name'}
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        isOpen={showCharacterModal}
+        onClose={() => {
+          if (!characterSaving) setShowCharacterModal(false);
+        }}
+        title={displayedChat?.character ? displayedChat.character.name : 'Character'}
+      >
+        <form className="ui-form" onSubmit={handleSaveCharacter}>
+          <p className="help-text">
+            Custom models can use this card as the persona instead of Zone&apos;s assistant
+            prompt. Drop a JSON or PNG card, or paste the system prompt. Turn Agent off unless you
+            also want tools.
+          </p>
+          {displayedChat?.character?.description ? (
+            <p className="help-text">{displayedChat.character.description}</p>
+          ) : null}
+          <input
+            ref={characterFileRef}
+            type="file"
+            accept=".json,.png,.txt,.md,application/json,image/png,text/plain"
+            hidden
+            onChange={(event) => {
+              void handleCharacterUpload(event.target.files);
+              event.target.value = '';
+            }}
+          />
+          <label htmlFor="character-draft">Card JSON or system prompt</label>
+          <textarea
+            id="character-draft"
+            className="form-input"
+            rows={6}
+            value={characterDraft}
+            onChange={(event) => setCharacterDraft(event.target.value)}
+            placeholder='{"spec":"chara_card_v2","data":{"name":"...", "first_mes":"..."}}'
+            disabled={characterSaving}
+          />
+          {characterError && (
+            <div className="chats-error" role="alert">
+              {characterError}
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={characterSaving}
+              onClick={() => characterFileRef.current?.click()}
+            >
+              Upload card
+            </Button>
+            {displayedChat?.character && (
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={characterSaving}
+                onClick={() => void handleClearCharacter()}
+              >
+                Remove
+              </Button>
+            )}
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={characterSaving || !characterDraft.trim()}
+            >
+              {characterSaving ? 'Saving…' : 'Save character'}
             </Button>
           </div>
         </form>

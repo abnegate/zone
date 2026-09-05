@@ -5,6 +5,8 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::services::character::ChatCharacter;
+
 use super::DbResult;
 
 /// Chat row from database
@@ -23,6 +25,8 @@ pub struct ChatRow {
     pub agent_sandboxed: bool,
     /// When true, mutating file and shell tools run without a confirmation.
     pub auto_approve: bool,
+    /// Persona for models that expect a character card. Absent on ordinary assistant chats.
+    pub character: Option<ChatCharacter>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
 }
@@ -51,6 +55,7 @@ macro_rules! map_chat_row {
             agent_enabled: $r.agent_enabled,
             agent_sandboxed: $r.agent_sandboxed,
             auto_approve: $r.auto_approve,
+            character: None,
             created_at: $r.created_at,
             updated_at: $r.updated_at,
         }
@@ -135,7 +140,10 @@ pub async fn get_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> {
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| ChatRow {
+    let Some(r) = row else {
+        return Ok(None);
+    };
+    let mut chat = ChatRow {
         id: r.id,
         workspace_id: r.workspace_id,
         title: r.title,
@@ -144,9 +152,46 @@ pub async fn get_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> {
         agent_enabled: r.agent_enabled,
         agent_sandboxed: r.agent_sandboxed,
         auto_approve: r.auto_approve,
+        character: None,
         created_at: r.created_at,
         updated_at: r.updated_at,
-    }))
+    };
+    chat.character = get_chat_character(pool, chat.id).await?;
+    Ok(Some(chat))
+}
+
+/// Load a chat's character card. Missing or unreadable JSON is treated as none.
+pub async fn get_chat_character(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatCharacter>> {
+    let value: Option<Option<serde_json::Value>> =
+        sqlx::query_scalar("SELECT character FROM chats WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(value
+        .flatten()
+        .and_then(|value| serde_json::from_value(value).ok()))
+}
+
+/// Replace or clear the character card on a chat, then return the fresh row.
+pub async fn set_chat_character(
+    pool: &PgPool,
+    id: Uuid,
+    character: Option<&ChatCharacter>,
+) -> DbResult<Option<ChatRow>> {
+    let value = character
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let updated = sqlx::query("UPDATE chats SET character = $2, updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .bind(value)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if updated == 0 {
+        return Ok(None);
+    }
+    get_chat(pool, id).await
 }
 
 /// Create a new chat
@@ -215,6 +260,7 @@ pub async fn create_chat_with_title(
         agent_enabled: row.agent_enabled,
         agent_sandboxed: row.agent_sandboxed,
         auto_approve: row.auto_approve,
+        character: None,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
@@ -258,18 +304,10 @@ pub async fn update_chat(
 
     transaction.commit().await?;
 
-    Ok(row.map(|r| ChatRow {
-        id: r.id,
-        workspace_id: r.workspace_id,
-        title: r.title,
-        model_name: r.model_name,
-        archived: r.archived,
-        agent_enabled: r.agent_enabled,
-        agent_sandboxed: r.agent_sandboxed,
-        auto_approve: r.auto_approve,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-    }))
+    match row {
+        Some(r) => get_chat(pool, r.id).await,
+        None => Ok(None),
+    }
 }
 
 /// Save a generated title only while its original claim still owns the title.
@@ -316,6 +354,7 @@ pub async fn archive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> 
         agent_enabled: r.agent_enabled,
         agent_sandboxed: r.agent_sandboxed,
         auto_approve: r.auto_approve,
+        character: None,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))
@@ -345,6 +384,7 @@ pub async fn unarchive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>
         agent_enabled: r.agent_enabled,
         agent_sandboxed: r.agent_sandboxed,
         auto_approve: r.auto_approve,
+        character: None,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }))

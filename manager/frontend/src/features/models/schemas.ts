@@ -14,6 +14,8 @@ export const ModelDetailsSchema = z.object({
 
 export const InstalledModelSchema = z.object({
   completion: z.boolean().optional(),
+  tools: z.boolean().optional(),
+  needs_character: z.boolean().optional(),
   name: z.string(),
   size: z.number(),
   modified_at: z.string(),
