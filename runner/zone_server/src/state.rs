@@ -10,6 +10,7 @@ use zone_core::mcp::McpHub;
 
 use crate::cache::Cache;
 use crate::config::Config;
+use crate::pull::PullRegistry;
 use crate::services::email::EmailService;
 use crate::sync::SyncRegistry;
 use crate::utils::rate_limit::{RateLimitConfig, RateLimiter};
@@ -36,6 +37,7 @@ struct AppStateInner {
     pub email_service: Option<Arc<EmailService>>,
     pub rate_limiter: Arc<RateLimiter>,
     pub sync_registry: SyncRegistry,
+    pub pull_registry: PullRegistry,
     /// Derived encryption key (32 bytes) for AES-256-GCM
     pub encryption_key: [u8; 32],
     /// Semaphore for limiting concurrent indexing operations
@@ -77,6 +79,7 @@ impl AppState {
                 email_service: None,
                 rate_limiter,
                 sync_registry: SyncRegistry::new(),
+                pull_registry: PullRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 mcp: OnceCell::new(),
@@ -123,6 +126,7 @@ impl AppState {
                 email_service: None,
                 rate_limiter,
                 sync_registry: SyncRegistry::new(),
+                pull_registry: PullRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 mcp: OnceCell::new(),
@@ -170,6 +174,7 @@ impl AppState {
                 email_service,
                 rate_limiter,
                 sync_registry: SyncRegistry::new(),
+                pull_registry: PullRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 mcp: OnceCell::new(),
@@ -230,6 +235,11 @@ impl AppState {
     /// Get the sync registry
     pub fn sync_registry(&self) -> &SyncRegistry {
         &self.inner.sync_registry
+    }
+
+    /// Get the background model pull registry
+    pub fn pull_registry(&self) -> &PullRegistry {
+        &self.inner.pull_registry
     }
 
     /// MCP servers for this process. Connected once on first chat or task use.

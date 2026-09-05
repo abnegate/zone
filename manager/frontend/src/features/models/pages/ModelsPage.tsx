@@ -166,7 +166,8 @@ export default function ModelsPage() {
               <h2>Add Model</h2>
               <p className="help-text">
                 Enter an Ollama model:tag (e.g., llama3.2:3b) or a HuggingFace GGUF reference
-                (hf.co/owner/Model-GGUF).
+                (hf.co/owner/Model-GGUF). Downloads continue in the background if you leave this
+                page.
               </p>
 
               <form className="model-form" onSubmit={handlePull}>
@@ -189,10 +190,15 @@ export default function ModelsPage() {
                 <div className="progress-section">
                   <div className="progress-header">
                     {pull.pulling
-                      ? 'Installing model...'
+                      ? `Installing ${pull.model || 'model'}...`
                       : pull.result?.success
                         ? 'Installation complete'
                         : 'Installation failed'}
+                    {pull.pulling && (
+                      <Button type="button" variant="ghost" size="sm" onClick={pull.cancel}>
+                        Cancel
+                      </Button>
+                    )}
                   </div>
 
                   {pull.progress !== null && (
@@ -200,6 +206,15 @@ export default function ModelsPage() {
                       <div className="progress-bar" style={{ width: `${pull.progress}%` }} />
                       <span className="progress-text">{Math.round(pull.progress)}%</span>
                     </div>
+                  )}
+
+                  {pull.chunk && (
+                    <p className="progress-chunk">
+                      {formatBytes(pull.chunk.completed)} / {formatBytes(pull.chunk.total)}
+                      {pull.chunk.digest
+                        ? ` · ${pull.chunk.digest.replace(/^sha256:/, '').slice(0, 12)}`
+                        : ''}
+                    </p>
                   )}
 
                   {pull.steps.length > 0 && (

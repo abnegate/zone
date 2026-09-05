@@ -1,9 +1,9 @@
 // Types
 
 // Components
-export { VirtualBrowseList } from './components';
+export { PullDownloadIndicator, VirtualBrowseList } from './components';
 // Hooks
-export { useBrowse, useModels, usePull } from './hooks';
+export { PullProvider, useBrowse, useModels, usePull } from './hooks';
 // Pages
 export { ModelsPage } from './pages';
 // Schemas
@@ -25,6 +25,7 @@ export type {
   ModelSort,
   ModelSource,
   ModelsResponse,
+  PullChunk,
   PullProgress,
   Step,
 } from './types';

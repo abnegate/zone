@@ -127,12 +127,18 @@ async fn send(socket: &mut Socket, value: Value) {
 }
 
 async fn receive(socket: &mut Socket) -> Value {
-    let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .expect("frame timeout")
-        .expect("connection closed")
-        .unwrap();
-    serde_json::from_str(message.to_text().unwrap()).unwrap()
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("frame timeout")
+            .expect("connection closed")
+            .unwrap();
+        match message {
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Text(text) => return serde_json::from_str(text.as_str()).unwrap(),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -274,7 +280,91 @@ impl Drop for Disconnected {
 }
 
 #[tokio::test]
-async fn client_disconnect_drops_the_upstream_download() {
+async fn repeated_layer_progress_emits_one_step() {
+    let fixture = Fixture::new(
+        MODEL,
+        StatusCode::OK,
+        vec![
+            "{\"status\":\"pulling manifest\"}\n",
+            "{\"status\":\"pulling 6ccbab317026\",\"total\":100,\"completed\":10}\n",
+            "{\"status\":\"pulling 6ccbab317026\",\"total\":100,\"completed\":65}\n",
+            "{\"status\":\"success\"}",
+        ],
+    )
+    .await;
+    let mut socket = fixture.pull().await;
+    assert_eq!(receive(&mut socket).await["status"], "pulling manifest");
+    assert_eq!(receive(&mut socket).await["status"], "pulling 6ccbab317026");
+    let progress = receive(&mut socket).await;
+    assert_eq!(progress["type"], "progress");
+    assert_eq!(progress["percent"], 10.0);
+    let progress = receive(&mut socket).await;
+    assert_eq!(progress["type"], "progress");
+    assert_eq!(progress["percent"], 65.0);
+    assert_eq!(receive(&mut socket).await["type"], "complete");
+}
+
+#[tokio::test]
+async fn client_text_during_download_does_not_cancel_the_pull() {
+    let provider = Router::new().route(
+        "/api/pull",
+        post(|| async {
+            let stream = async_stream::stream! {
+                yield Ok::<_, std::io::Error>("{\"status\":\"pulling manifest\"}\n");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                yield Ok("{\"status\":\"success\"}");
+            };
+            Body::from_stream(stream)
+        }),
+    );
+    let fixture = Fixture::start(MODEL, provider, Arc::new(AtomicUsize::new(0))).await;
+    let mut socket = fixture.pull().await;
+    assert_eq!(receive(&mut socket).await["status"], "pulling manifest");
+    send(&mut socket, json!({"type": "noise"})).await;
+    assert_eq!(receive(&mut socket).await["type"], "complete");
+}
+
+#[tokio::test]
+async fn client_disconnect_keeps_the_upstream_download() {
+    let stopped = Arc::new(tokio::sync::Notify::new());
+    let notification = stopped.clone();
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    let continue_download = proceed.clone();
+    let provider = Router::new().route(
+        "/api/pull",
+        post(move || {
+            let notification = notification.clone();
+            let continue_download = continue_download.clone();
+            async move {
+                let stream = async_stream::stream! {
+                    let _guard = Disconnected(notification);
+                    yield Ok::<_, std::io::Error>("{\"status\":\"pulling manifest\"}\n");
+                    continue_download.notified().await;
+                    yield Ok("{\"status\":\"success\"}");
+                };
+                Body::from_stream(stream)
+            }
+        }),
+    );
+    let fixture = Fixture::start(MODEL, provider, Arc::new(AtomicUsize::new(0))).await;
+    let mut socket = fixture.pull().await;
+    assert_eq!(receive(&mut socket).await["status"], "pulling manifest");
+    socket.close(None).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), stopped.notified())
+            .await
+            .is_err(),
+        "upstream body must keep running after the subscriber disconnects"
+    );
+
+    let mut socket = fixture.pull().await;
+    assert_eq!(receive(&mut socket).await["status"], "pulling manifest");
+    proceed.notify_waiters();
+    assert_eq!(receive(&mut socket).await["type"], "complete");
+}
+
+#[tokio::test]
+async fn cancel_message_stops_the_upstream_download() {
     let stopped = Arc::new(tokio::sync::Notify::new());
     let notification = stopped.clone();
     let provider = Router::new().route(
@@ -294,8 +384,55 @@ async fn client_disconnect_drops_the_upstream_download() {
     let fixture = Fixture::start(MODEL, provider, Arc::new(AtomicUsize::new(0))).await;
     let mut socket = fixture.pull().await;
     assert_eq!(receive(&mut socket).await["type"], "step");
-    socket.close(None).await.unwrap();
+    send(&mut socket, json!({"model": MODEL, "cancel": true})).await;
+    assert_eq!(
+        receive(&mut socket).await,
+        json!({"type": "error", "message": "Installation cancelled"})
+    );
     tokio::time::timeout(Duration::from_secs(5), stopped.notified())
         .await
-        .expect("upstream body must be dropped when client disconnects");
+        .expect("upstream body must be dropped when the pull is cancelled");
+}
+
+#[tokio::test]
+async fn interrupted_stream_resumes_from_the_same_layer() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let provider = Router::new().route(
+        "/api/pull",
+        post(move |Json(payload): Json<Value>| {
+            let counter = counter.clone();
+            async move {
+                assert_eq!(payload, json!({"model": MODEL, "stream": true}));
+                let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                let stream = async_stream::stream! {
+                    if attempt == 0 {
+                        yield Ok::<_, std::io::Error>(
+                            "{\"status\":\"pulling 6ccbab317026\",\"digest\":\"sha256:6ccbab317026\",\"total\":100,\"completed\":10}\n",
+                        );
+                        tokio::task::yield_now().await;
+                        yield Err(std::io::Error::other("connection reset"));
+                    } else {
+                        yield Ok(
+                            "{\"status\":\"pulling 6ccbab317026\",\"digest\":\"sha256:6ccbab317026\",\"total\":100,\"completed\":90}\n",
+                        );
+                        yield Ok("{\"status\":\"success\"}");
+                    }
+                };
+                Body::from_stream(stream)
+            }
+        }),
+    );
+    let fixture = Fixture::start(MODEL, provider, calls.clone()).await;
+    let mut socket = fixture.pull().await;
+    assert_eq!(receive(&mut socket).await["status"], "pulling 6ccbab317026");
+    let progress = receive(&mut socket).await;
+    assert_eq!(progress["type"], "progress");
+    assert_eq!(progress["percent"], 10.0);
+    assert_eq!(progress["completed"], 10);
+    assert_eq!(receive(&mut socket).await["status"], "resuming download");
+    let progress = receive(&mut socket).await;
+    assert_eq!(progress["percent"], 90.0);
+    assert_eq!(receive(&mut socket).await["type"], "complete");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }

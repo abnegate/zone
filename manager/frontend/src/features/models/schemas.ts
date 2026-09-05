@@ -62,6 +62,7 @@ export const PullProgressSchema = z.object({
   percent: z.number().optional(),
   completed: z.number().optional(),
   total: z.number().optional(),
+  digest: z.string().optional(),
   message: z.string().optional(),
   success: z.boolean().optional(),
 });

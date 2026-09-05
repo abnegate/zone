@@ -171,3 +171,52 @@ test.describe('catalog download references', () => {
     }
   }
 });
+
+test('keeps a chunked download running after leaving Models', async ({ context, page }) => {
+  await blockServiceWorker(context);
+  await mockCommonEndpoints(page);
+  await setupAuth(page);
+  await routeApi(page, '**/api/models', (route) =>
+    route.fulfill({
+      json: {
+        models: [{ name: 'llama3.2:3b', size: 2000000000, modified_at: '2026-09-04T00:00:00Z' }],
+      },
+    })
+  );
+  await routeApi(page, '**/api/chats*', (route) => route.fulfill({ json: { chats: [] } }));
+  await page.routeWebSocket('**/ws/pull?*', (connection) => {
+    connection.onMessage((message) => {
+      const frame = JSON.parse(message.toString());
+      if (frame.type === 'auth') {
+        connection.send(JSON.stringify({ type: 'authenticated' }));
+      } else if (frame.model && !frame.cancel) {
+        connection.send(JSON.stringify({ type: 'step', status: 'pulling 6ccbab317026' }));
+        connection.send(
+          JSON.stringify({
+            type: 'progress',
+            percent: 42,
+            completed: 42,
+            total: 100,
+            digest: 'sha256:6ccbab317026',
+          })
+        );
+      }
+    });
+  });
+
+  await page.goto('/models');
+  await page.locator('.model-form input').fill('qwen3.8:27b');
+  await page.locator('.model-form button[type="submit"]').click();
+  await expect(page.locator('.progress-text')).toHaveText('42%');
+  await expect(page.locator('.progress-chunk')).toContainText('42 B / 100 B');
+
+  await page.getByRole('link', { name: 'Chats', exact: true }).click();
+  const indicator = page.locator('.pull-download-indicator');
+  await expect(indicator).toContainText('Downloading qwen3.8:27b');
+  await expect(indicator).toContainText('42%');
+  await expect(page.locator('.models-install-panel')).toHaveCount(0);
+
+  await page.getByRole('link', { name: 'Models', exact: true }).click();
+  await expect(page.locator('.models-install-panel')).toContainText('42%');
+  await expect(page.locator('.pull-download-indicator')).toHaveCount(0);
+});

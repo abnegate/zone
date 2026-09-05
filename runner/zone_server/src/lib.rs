@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod metrics;
+pub mod pull;
 pub mod routes;
 pub mod services;
 pub mod state;

@@ -1,6 +1,7 @@
-//! Authenticated Ollama model downloads with streaming progress.
+//! Authenticated subscriptions to background Ollama model downloads.
 
 use axum::{
+    body::Bytes,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -10,12 +11,14 @@ use axum::{
 use futures::{SinkExt, StreamExt, stream::SplitSink};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use crate::auth::validate_token;
+use crate::pull::{Event, Pull, PullRegistry};
 use crate::state::AppState;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-const MISSING_MANIFEST: &str = "pull model manifest: file does not exist";
+const PING_INTERVAL: Duration = Duration::from_secs(15);
 
 type Sender = SplitSink<WebSocket, Message>;
 
@@ -25,40 +28,23 @@ enum Authentication {
     Auth { token: String },
 }
 
-#[derive(Deserialize, Serialize)]
-struct Pull {
-    model: String,
-}
-
-#[derive(Deserialize)]
-struct Progress {
-    status: Option<String>,
-    error: Option<String>,
-    total: Option<u64>,
-    completed: Option<u64>,
-}
-
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Event {
+enum Handshake {
     Authenticated,
-    Step {
-        status: String,
-    },
-    Progress {
-        percent: f64,
-    },
-    Complete {
-        success: bool,
-        message: &'static str,
-    },
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
-async fn send(sender: &mut Sender, event: Event) -> Result<(), String> {
+async fn emit_handshake(sender: &mut Sender, event: Handshake) -> Result<(), String> {
     let text = serde_json::to_string(&event).map_err(|error| error.to_string())?;
+    sender
+        .send(Message::Text(text.into()))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn emit_event(sender: &mut Sender, event: &Event) -> Result<(), String> {
+    let text = serde_json::to_string(event).map_err(|error| error.to_string())?;
     sender
         .send(Message::Text(text.into()))
         .await
@@ -89,9 +75,9 @@ async fn handle(socket: WebSocket, state: AppState) {
         _ => false,
     };
     if !authenticated {
-        let _ = send(
+        let _ = emit_handshake(
             &mut sender,
-            Event::Error {
+            Handshake::Error {
                 message: "Authentication failed".to_string(),
             },
         )
@@ -99,7 +85,10 @@ async fn handle(socket: WebSocket, state: AppState) {
         let _ = sender.close().await;
         return;
     }
-    if send(&mut sender, Event::Authenticated).await.is_err() {
+    if emit_handshake(&mut sender, Handshake::Authenticated)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -108,9 +97,9 @@ async fn handle(socket: WebSocket, state: AppState) {
         _ => None,
     };
     let Some(request) = request.filter(|request| !request.model.trim().is_empty()) else {
-        let _ = send(
+        let _ = emit_handshake(
             &mut sender,
-            Event::Error {
+            Handshake::Error {
                 message: "A model name is required".to_string(),
             },
         )
@@ -119,119 +108,90 @@ async fn handle(socket: WebSocket, state: AppState) {
         return;
     };
 
-    let result = {
-        let download = download(&mut sender, &state.config().ollama_host, &request);
-        tokio::pin!(download);
-        loop {
-            tokio::select! {
-                result = &mut download => break result,
-                message = receiver.next() => {
-                    match message {
-                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => {},
-                        // Dropping the download future cancels the upstream request too.
-                        _ => return,
-                    }
-                }
-            }
-        }
-    };
-    if let Err(message) = result {
-        let message = if message == MISSING_MANIFEST {
-            format!(
-                "{message}. Ollama could not find \"{}\". Use an Ollama model:tag or hf.co/owner/GGUF-repository reference.",
-                request.model
-            )
-        } else {
-            message
-        };
-        let _ = send(&mut sender, Event::Error { message }).await;
-    }
-    let _ = sender.close().await;
-}
-
-async fn download(sender: &mut Sender, host: &str, request: &Pull) -> Result<(), String> {
-    // Large models can take hours; only connection establishment has a timeout.
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|error| format!("Could not connect to Ollama: {error}"))?;
-    let response = client
-        .post(format!("{}/api/pull", host.trim_end_matches('/')))
-        .json(&serde_json::json!({ "model": request.model, "stream": true }))
-        .send()
-        .await
-        .map_err(|error| format!("Could not connect to Ollama: {error}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .map_err(|error| format!("Could not read Ollama error: {error}"))?;
-        let message = serde_json::from_str::<Progress>(&body)
-            .ok()
-            .and_then(|progress| progress.error)
-            .filter(|error| !error.trim().is_empty())
-            .unwrap_or_else(|| {
-                if body.trim().is_empty() {
-                    format!("Ollama returned HTTP {status}")
-                } else {
-                    body
-                }
-            });
-        return Err(message);
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut pending = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("Model download interrupted: {error}"))?;
-        pending.extend_from_slice(&chunk);
-        while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<u8> = pending.drain(..=end).collect();
-            if process(sender, &line).await? {
-                return Ok(());
-            }
-        }
-    }
-    if !pending.is_empty() && process(sender, &pending).await? {
-        return Ok(());
-    }
-    Err("Model download ended before installation completed".to_string())
-}
-
-async fn process(sender: &mut Sender, line: &[u8]) -> Result<bool, String> {
-    if line.iter().all(u8::is_ascii_whitespace) {
-        return Ok(false);
-    }
-    let progress: Progress = serde_json::from_slice(line)
-        .map_err(|_| "Ollama returned invalid download progress".to_string())?;
-    if let Some(error) = progress.error {
-        return Err(error);
-    }
-    if let Some(status) = progress.status {
-        if status == "success" {
-            send(
-                sender,
-                Event::Complete {
-                    success: true,
-                    message: "Model installed successfully",
-                },
-            )
-            .await?;
-            return Ok(true);
-        }
-        send(sender, Event::Step { status }).await?;
-    }
-    if let (Some(total), Some(completed)) = (progress.total, progress.completed)
-        && total > 0
-    {
-        send(
-            sender,
-            Event::Progress {
-                percent: (completed as f64 / total as f64 * 100.0).clamp(0.0, 100.0),
+    let registry = state.pull_registry();
+    if request.cancel {
+        registry.cancel(&request.model);
+        let _ = emit_event(
+            &mut sender,
+            &Event::Error {
+                message: "Installation cancelled".to_string(),
             },
         )
-        .await?;
+        .await;
+        let _ = sender.close().await;
+        return;
     }
-    Ok(false)
+
+    subscribe(
+        &mut sender,
+        &mut receiver,
+        registry,
+        state.config().ollama_host.clone(),
+        request.model,
+    )
+    .await;
+}
+
+async fn subscribe(
+    sender: &mut Sender,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    registry: &PullRegistry,
+    host: String,
+    model: String,
+) {
+    let mut subscription = registry.start_or_attach(host, model.clone());
+    for event in subscription.replay() {
+        if emit_event(sender, &event).await.is_err() {
+            return;
+        }
+        if event.is_terminal() {
+            let _ = sender.close().await;
+            return;
+        }
+    }
+
+    let mut ping = interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+    ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            event = subscription.next() => {
+                let Some(event) = event else {
+                    let _ = sender.close().await;
+                    return;
+                };
+                let terminal = event.is_terminal();
+                if emit_event(sender, &event).await.is_err() {
+                    return;
+                }
+                if terminal {
+                    let _ = sender.close().await;
+                    return;
+                }
+            }
+            _ = ping.tick() => {
+                if sender.send(Message::Ping(Bytes::new())).await.is_err() {
+                    return;
+                }
+            }
+            message = receiver.next() => {
+                match message {
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(pull) = serde_json::from_str::<Pull>(&text)
+                            && pull.cancel
+                        {
+                            registry.cancel(&pull.model);
+                        }
+                    }
+                    Some(Ok(Message::Pong(_) | Message::Binary(_))) => {}
+                    // Detaching leaves the background job running.
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                }
+            }
+        }
+    }
 }

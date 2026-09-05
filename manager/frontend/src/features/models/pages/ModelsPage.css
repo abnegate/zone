@@ -196,10 +196,21 @@
 }
 
 .models-page .progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-space-3);
   text-transform: none;
   letter-spacing: 0;
   font-weight: 500;
   color: var(--ui-text-secondary);
+}
+
+.models-page .progress-chunk {
+  margin: 0 0 var(--ui-space-3);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 .models-page .progress-bar-container {

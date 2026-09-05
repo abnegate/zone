@@ -118,12 +118,19 @@ export const MODEL_SIZE_FILTERS: Array<{ value: ModelSizeFilter; label: string }
   { value: 'xl', label: '70B+' },
 ];
 
+export interface PullChunk {
+  completed: number;
+  total: number;
+  digest?: string;
+}
+
 export interface PullProgress {
   type: 'progress' | 'step' | 'complete' | 'error' | 'authenticated';
   status?: string;
   percent?: number;
   completed?: number;
   total?: number;
+  digest?: string;
   message?: string;
   success?: boolean;
 }

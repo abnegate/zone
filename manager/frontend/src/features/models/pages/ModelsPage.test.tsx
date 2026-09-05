@@ -140,8 +140,10 @@ const defaultBrowseHook = {
 const defaultPullHook = {
   pulling: false,
   progress: null,
+  chunk: null,
   steps: [],
   result: null,
+  model: null,
   pull: mock(),
   reset: mock(),
   cancel: mock(),
