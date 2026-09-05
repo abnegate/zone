@@ -306,7 +306,8 @@ services:
       - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
       - "SEARCH_SEARXNG_QUERY_URL=${SEARCH_SEARXNG_QUERY_URL:-http://gluetun:8080/search?q=<query>&format=json}"
       - SEARCH_RESULT_COUNT=${SEARCH_RESULT_COUNT:-5}
-      # Set by VPN launch targets for model catalogs and tool subprocesses.
+      # Belt-and-suspenders HTTP proxy. `make up-vpn` also attaches this
+      # container to Gluetun's network so non-HTTP traffic uses the tunnel.
       - MODEL_SEARCH_PROXY_URL=${MODEL_SEARCH_PROXY_URL:-}
       - TOOL_RUNNER_PROXY_URL=${TOOL_RUNNER_PROXY_URL:-}
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
@@ -404,7 +405,8 @@ services:
       retries: 3
       start_period: 10s
 
-  # VPN and search use the optional vpn profile.
+  # VPN profile. `docker-compose.vpn.yml` attaches internet-facing app
+  # services to this network namespace so all of their traffic uses the tunnel.
   gluetun:
     image: ghcr.io/thecfu/gluetun-exporter:${DOCKER_VERSION_GLUETUN_BUNDLED:-0.1.1-bundled}@${DOCKER_DIGEST_GLUETUN_BUNDLED:-sha256:bc0d59e2307c8aa1e16d6d0e5173ebd7fb568caceacff8ed29ea87931b61515e}
     container_name: gluetun
@@ -415,6 +417,8 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
       - VPN_TYPE=${VPN_TYPE}
@@ -430,8 +434,10 @@ services:
       - TZ=${ADVANCED_TZ}
       # Do not include 10.0.0.0/8 — overlaps Surfshark WG (10.14.0.2/16)
       - FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12,192.168.0.0/16
-      - FIREWALL_INPUT_PORTS=8080,8001
-      # Expose Gluetun's HTTP proxy for remote model catalogs and tool requests.
+      # 8080 SearXNG, 8001 metrics, 8888 HTTP proxy, plus app ports when the
+      # VPN overlay shares this namespace with manager/LiteLLM/Grafana/engines.
+      - FIREWALL_INPUT_PORTS=8080,8001,8000,4000,3000,8188,11434,8888
+      # HTTP proxy remains available for Traefik ACME and proxy-aware tools.
       - HTTPPROXY=on
       - UPDATER_PERIOD=24h
     networks:

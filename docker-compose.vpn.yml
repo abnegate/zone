@@ -1,0 +1,156 @@
+# Full-tunnel overlay used when VPN is on (`make up-vpn`, ZONE_VPN=1).
+# Internet-facing app containers share Gluetun's network namespace so every
+# packet uses the tunnel and Gluetun's kill switch. Traefik, Postgres, Valkey,
+# Prometheus, and the console stay on Docker networks for inbound UI and
+# local service discovery. Requires Compose v2.24+ (`!reset` / `!override`).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
+
+services:
+  gluetun:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      FIREWALL_INPUT_PORTS: 8080,8001,8000,4000,3000,8188,11434,8888
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      internal:
+        aliases:
+          - manager
+          - litellm
+          - grafana
+          - ollama
+          - comfyui
+          - searxng
+      edge:
+        aliases:
+          - manager
+          - litellm
+          - grafana
+          - ollama
+          - comfyui
+          - searxng
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=zone_edge
+      - traefik.http.services.manager.loadbalancer.server.port=8000
+      - traefik.http.routers.manager.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      - traefik.http.routers.manager.entrypoints=web
+      - traefik.http.routers.manager.service=manager
+      - traefik.http.routers.manager.middlewares=security-headers
+      - traefik.http.routers.manager-secure.rule=(Host(`manager.localhost`) || Host(`manager.${DOMAIN_HOST_WEBUI}`)) && (PathPrefix(`/api`) || PathPrefix(`/ws`))
+      - traefik.http.routers.manager-secure.entrypoints=websecure
+      - traefik.http.routers.manager-secure.service=manager
+      - traefik.http.routers.manager-secure.middlewares=security-headers
+      - traefik.http.routers.manager-secure.tls=true
+      - traefik.http.routers.manager-secure.tls.certresolver=letsencrypt
+      - traefik.http.services.litellm.loadbalancer.server.port=4000
+      - traefik.http.routers.litellm.rule=Host(`litellm.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.litellm.entrypoints=web
+      - traefik.http.routers.litellm.service=litellm
+      - traefik.http.routers.litellm.middlewares=auth,security-headers
+      - traefik.http.routers.litellm-secure.rule=Host(`litellm.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.litellm-secure.entrypoints=websecure
+      - traefik.http.routers.litellm-secure.service=litellm
+      - traefik.http.routers.litellm-secure.middlewares=auth,security-headers
+      - traefik.http.routers.litellm-secure.tls=true
+      - traefik.http.routers.litellm-secure.tls.certresolver=letsencrypt
+      - traefik.http.services.grafana.loadbalancer.server.port=3000
+      - traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.grafana.entrypoints=web
+      - traefik.http.routers.grafana.service=grafana
+      - traefik.http.routers.grafana.middlewares=security-headers
+      - traefik.http.routers.grafana-secure.rule=Host(`grafana.${DOMAIN_HOST_WEBUI}`)
+      - traefik.http.routers.grafana-secure.entrypoints=websecure
+      - traefik.http.routers.grafana-secure.service=grafana
+      - traefik.http.routers.grafana-secure.middlewares=security-headers
+      - traefik.http.routers.grafana-secure.tls=true
+      - traefik.http.routers.grafana-secure.tls.certresolver=letsencrypt
+
+  traefik:
+    environment:
+      HTTP_PROXY: http://gluetun:8888
+      HTTPS_PROXY: http://gluetun:8888
+      NO_PROXY: localhost,127.0.0.1,traefik,console,gluetun,prometheus,grafana,manager,litellm,postgres,valkey,blackbox,cadvisor,ollama,comfyui,searxng,ollama-metrics,postgres-exporter,valkey-exporter,172.16.0.0/12,172.30.0.0/24,172.31.0.0/24
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  manager:
+    network_mode: "service:gluetun"
+    networks: !reset
+    extra_hosts: !reset
+    ports: !reset
+    labels: !override
+      - traefik.enable=false
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      LITELLM_HOST: http://127.0.0.1:4000
+      SEARCH_SEARXNG_QUERY_URL: http://127.0.0.1:8080/search?q=<query>&format=json
+      MONITORING_GRAFANA_URL: http://127.0.0.1:3000
+
+  litellm:
+    network_mode: "service:gluetun"
+    networks: !reset
+    extra_hosts: !reset
+    ports: !reset
+    labels: !override
+      - traefik.enable=false
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  grafana:
+    network_mode: "service:gluetun"
+    networks: !reset
+    extra_hosts: !reset
+    ports: !reset
+    labels: !override
+      - traefik.enable=false
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  ollama:
+    network_mode: "service:gluetun"
+    networks: !reset
+    extra_hosts: !reset
+    ports: !reset
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  ollama-init:
+    network_mode: "service:gluetun"
+    networks: !reset
+    extra_hosts: !reset
+    ports: !reset
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  comfyui:
+    network_mode: "service:gluetun"
+    networks: !reset
+    extra_hosts: !reset
+    ports: !reset
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  comfyui-model-setup:
+    network_mode: "service:gluetun"
+    networks: !reset
+    extra_hosts: !reset
+    ports: !reset
+    depends_on:
+      gluetun:
+        condition: service_healthy
+
+  console:
+    environment:
+      VITE_PROXY_TARGET: http://gluetun:8000

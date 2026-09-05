@@ -8,7 +8,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 - **Local LLM Inference**: Run powerful language models locally with Ollama
 - **Intelligent Routing**: Automatic model selection based on query complexity (LiteLLM)
 - **Zone Chat**: Built-in conversations, history, web search, and agent tools
-- **Private Web Search** (optional): VPN-protected metasearch engine (SearXNG + Gluetun)
+- **Private Web Search** (optional): VPN-protected metasearch engine; when the VPN is on, all stack internet traffic uses the same tunnel
 
 ### Platform Management
 - **Multi-Tenant Architecture**: Organizations and workspaces for team collaboration
@@ -35,9 +35,10 @@ flowchart TD
     Manager --> PostgreSQL
     Manager --> Valkey
     Manager --> SearXNG
-    Manager --> Proxy[Gluetun HTTP proxy]
-    SearXNG --> VPN[Gluetun VPN tunnel]
-    Proxy --> VPN
+    Manager --> VPN[Gluetun VPN tunnel]
+    LiteLLM --> VPN
+    SearXNG --> VPN
+    Grafana --> VPN
     Traefik --> Grafana
 ```
 
@@ -65,7 +66,7 @@ Access the services:
 - **8GB+ RAM** (16GB+ recommended for larger models)
 - **50GB+ free disk space** (models can be large)
 - **NVIDIA GPU** (optional, only for `--profile bundled-ollama`)
-- **VPN subscription** (optional, only needed for private web search)
+- **VPN subscription** (optional; when enabled, all stack internet traffic uses the tunnel)
 
 ### Installation
 
@@ -138,7 +139,7 @@ docker compose --profile bundled-ollama up -d
 
 | Profile | Services | Description |
 |---------|----------|-------------|
-| `vpn` | Gluetun, SearXNG | VPN-protected web search |
+| `vpn` | Gluetun, SearXNG | Full-tunnel VPN for stack internet traffic |
 | `monitoring` | Prometheus, Grafana | Metrics and dashboards |
 
 ## Configuration
@@ -157,12 +158,12 @@ Browse more models at [Ollama Library](https://ollama.com/library).
 
 ### VPN Configuration (Optional)
 
-VPN is optional. Zone chat works without it; private web search requires the VPN profile. VPN launches also route remote model catalogs and proxy-aware tool subprocess HTTP requests through Gluetun.
+VPN is optional. Zone chat works without it; private web search requires the VPN profile. When the VPN is on, internet-facing services share Gluetun's network so all of their traffic uses the tunnel (search, model catalogs, LiteLLM providers, Grafana alerts, bundled engine pulls, and tool HTTP). Host Ollama or ComfyUI daemons still use the host network.
 
-To enable VPN-protected search:
+To enable the VPN:
 ```bash
 # Add VPN credentials to .env
-# Save model and tool proxy settings in .env and start the VPN profile
+# Saves ZONE_VPN=1, attaches services to Gluetun, and starts the VPN profile
 make up-vpn
 ```
 
@@ -216,7 +217,7 @@ make logs-follow       # Follow logs
 make ps                # Show service status
 
 # With Profiles
-make up-vpn            # Start with VPN
+make up-vpn            # Start with full-tunnel VPN
 make up-monitoring     # Start with monitoring
 
 # Health & Monitoring
@@ -426,7 +427,7 @@ zone/
 3. **Rotate secrets regularly** - JWT secrets, API keys
 4. **Keep images updated** - Run `make update` monthly
 5. **Review logs** - Monitor for suspicious activity
-6. **Use VPN for search** - Privacy-respecting web search
+6. **Use VPN when you want a full tunnel** - All stack internet traffic through Gluetun
 7. **Enable fail2ban** - On the host system (optional)
 
 ### Authentication

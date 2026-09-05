@@ -8,10 +8,12 @@ script=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/configure-model-proxy.sh
 printf '%s\n' '# Keep comment' 'OTHER=value' 'MODEL_SEARCH_PROXY_URL=' \
     'export MODEL_SEARCH_PROXY_URL=http://old:8888' \
     ' TOOL_RUNNER_PROXY_URL=http://old:8888' \
-    'export TOOL_RUNNER_PROXY_URL=http://duplicate:8888' > "$directory/environment"
+    'export TOOL_RUNNER_PROXY_URL=http://duplicate:8888' \
+    'ZONE_VPN=' 'export ZONE_VPN=0' > "$directory/environment"
 printf '%s\n' '# Keep comment' 'OTHER=value' \
     'MODEL_SEARCH_PROXY_URL=http://gluetun:8888' \
-    'TOOL_RUNNER_PROXY_URL=http://gluetun:8888' > "$directory/expected"
+    'TOOL_RUNNER_PROXY_URL=http://gluetun:8888' \
+    'ZONE_VPN=1' > "$directory/expected"
 
 sh "$script" "$directory/environment"
 cmp "$directory/environment" "$directory/expected"
@@ -23,7 +25,7 @@ sh "$script" "$directory/environment"
 cmp "$directory/environment" "$directory/expected"
 
 printf '%s\n' '# Keep comment' 'OTHER=value' \
-    'MODEL_SEARCH_PROXY_URL=' 'TOOL_RUNNER_PROXY_URL=' > "$directory/direct"
+    'MODEL_SEARCH_PROXY_URL=' 'TOOL_RUNNER_PROXY_URL=' 'ZONE_VPN=' > "$directory/direct"
 sh "$script" "$directory/environment" direct
 cmp "$directory/environment" "$directory/direct"
 sh "$script" "$directory/environment" direct

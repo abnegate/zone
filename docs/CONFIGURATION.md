@@ -229,18 +229,24 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Optional HTTP proxy for proxy-aware command tools and MCP subprocesses
 - **VPN value**: `http://gluetun:8888`
 
-`make up-vpn` and `make up-all` save both proxy URLs in `.env` so rebuilds retain
-routing; `make up` clears both for a direct launch. A configured proxy does not
-silently fall back to a direct connection when unavailable. The runner applies
-its proxy settings after command and MCP environment overlays. Loopback and
-internal service names bypass the proxy. Clients must honor proxy environment
-variables; this is not a network sandbox for raw sockets or other clients that
-ignore them. Tool HTTP requests go directly to Gluetun's proxy, while chat search
-queries go to SearXNG.
+### `ZONE_VPN`
+- **Default**: empty
+- **Description**: Set to `1` by `make up-vpn`. Makefile targets then include
+  `docker-compose.vpn.yml`, which attaches internet-facing services to Gluetun's
+  network namespace so all of their traffic uses the tunnel.
+- **VPN value**: `1`
+
+`make up-vpn` and `make up-all` save `ZONE_VPN=1` and both proxy URLs in `.env`
+so rebuilds retain full-tunnel routing; `make up` clears them for a direct
+launch. The overlay is the network sandbox. Proxy URLs remain as
+belt-and-suspenders for HTTP clients and Traefik ACME. A configured proxy does
+not silently fall back to a direct connection when unavailable. The runner
+applies its proxy settings after command and MCP environment overlays. Loopback
+and internal service names bypass the proxy.
 
 ### Manager / zone-server chat
 
-Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). When `SEARCH_ENABLE_WEB_SEARCH` is true, Manager chat automatically queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. Remote model catalog searches use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search`.
+Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases). When `SEARCH_ENABLE_WEB_SEARCH` is true, Manager chat automatically queries SearXNG when a message looks like it needs current web information (news, weather, prices, recency, URLs, etc.) and skips search for code review, casual replies, and stable knowledge questions. SearXNG shares Gluetun's network stack, so lookups leave through the VPN. When `ZONE_VPN=1`, Manager, LiteLLM, Grafana, and bundled engines share that stack too. Remote model catalog searches also use Gluetun's HTTP proxy when `MODEL_SEARCH_PROXY_URL` is configured. A message can force search on or off with `metadata.web_search`.
 
 ---
 
@@ -288,7 +294,7 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 ## 🔒 VPN Configuration - Optional
 
-**VPN is completely optional!** Only needed if you want private web search.
+**VPN is completely optional!** Enable it to send all stack internet traffic through Gluetun, including private web search.
 
 ### `VPN_SERVICE_PROVIDER`
 - **Default**: `surfshark`

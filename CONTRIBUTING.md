@@ -80,7 +80,7 @@ Be respectful, professional, and constructive in all interactions. We aim to mai
 ### Development Tips
 
 - **Expose services locally**: Uncomment port mappings in `docker-compose.override.yml`
-- **Disable VPN**: Comment out Gluetun service for faster local testing
+- **Disable VPN**: Use `make up` (not `make up-vpn`) for faster local testing
 - **Use smaller models**: Set `OLLAMA_MODEL_FAST=llama3.2:3b` for faster startup
 - **Enable debug logging**: Add `--debug` flag to LiteLLM command
 
