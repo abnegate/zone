@@ -14,11 +14,10 @@ use crate::content::{
     embed_char_budget, smart_chunk, split_for_embedding,
 };
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
-use crate::embeddings::rerank::min_max_norm;
 use crate::embeddings::{
     CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
-    PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_query_text, keyword_only_search,
-    prefer_definition_chunks, semantic_only_search, sort_by_score,
+    PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_cached, keyword_only_search,
+    prefer_definition_chunks, semantic_only_search,
 };
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
@@ -117,6 +116,7 @@ pub struct ContextService {
     adapter_registry: Arc<AdapterRegistry>,
     embedding_service: Arc<dyn EmbeddingService>,
     vector_store: PgVectorStore,
+    #[allow(dead_code)] // CE is loaded at boot but too slow to run on the search path
     reranker: Option<Arc<dyn CrossEncoder>>,
 }
 
@@ -431,11 +431,7 @@ impl ContextService {
         limit: usize,
         filters: Option<SearchFilters>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
-        // Generate query embedding
-        let query_embedding = self
-            .embedding_service
-            .embed(&embed_query_text(self.embedding_service.model(), query))
-            .await?;
+        let query_embedding = embed_cached(self.embedding_service.as_ref(), query).await?;
 
         // Search vector store
         let results = self
@@ -468,19 +464,42 @@ impl ContextService {
         filters: Option<SearchFilters>,
         config: Option<HybridSearchConfig>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
-        let query_embedding = match self
-            .embedding_service
-            .embed(&embed_query_text(self.embedding_service.model(), query))
-            .await
-        {
+        let hybrid_config = config.unwrap_or_else(|| HybridSearchConfig::for_query(query));
+        let rewritten = crate::embeddings::rewrite_query(query);
+        if !rewritten.identifiers.is_empty() {
+            let keyword = keyword_only_search(
+                &self.pool,
+                query,
+                (limit * 4).max(32),
+                filters.clone(),
+                hybrid_config.min_keyword_score,
+            )
+            .await?;
+            if crate::embeddings::ranker::first_stage_answered(
+                query,
+                keyword
+                    .iter()
+                    .map(|result| (result.item_uri.as_str(), result.chunk_text.as_str())),
+            ) {
+                tracing::debug!("hybrid search served from keyword definition");
+                return Ok(assemble_hybrid_results(query, keyword, false, limit));
+            }
+        }
+        let query_embedding = match embed_cached(self.embedding_service.as_ref(), query).await {
             Ok(embedding) => Some(embedding),
             Err(error) => {
                 tracing::warn!(%error, "hybrid semantic embed failed; falling back to keyword");
                 None
             }
         };
-        self.search_hybrid_with_embedding(query, query_embedding.as_deref(), limit, filters, config)
-            .await
+        self.search_hybrid_with_embedding(
+            query,
+            query_embedding.as_deref(),
+            limit,
+            filters,
+            Some(hybrid_config),
+        )
+        .await
     }
 
     /// Hybrid search using an embedding the caller already computed.
@@ -494,7 +513,7 @@ impl ContextService {
     ) -> Result<Vec<SearchResultWithAnalysis>> {
         let hybrid_config = config.unwrap_or_else(|| HybridSearchConfig::for_query(query));
         let candidate_limit = (limit * 4).max(32);
-        let mut results = match query_embedding {
+        let results = match query_embedding {
             Some(embedding) => {
                 crate::embeddings::hybrid_search_filtered(
                     &self.pool,
@@ -517,17 +536,15 @@ impl ContextService {
                 .await?
             }
         };
-        if let Some(reranker) = &self.reranker {
-            results = neural_rerank(reranker.as_ref(), query, results).await;
-        }
-        prefer_definition_chunks(query, &mut results);
-        let results = cap_per_file(results, 2, limit);
-
-        let rrf = query_embedding.is_some();
-        Ok(results
-            .into_iter()
-            .map(|r| SearchResultWithAnalysis::from_hybrid(r, rrf))
-            .collect())
+        // Skip the in-process CE: it holds a process-wide mutex and takes ~1s
+        // per query. Under concurrency that becomes a 10s p50. LTR already
+        // packed the answer; a 0.10 neural blend is not worth the lock.
+        Ok(assemble_hybrid_results(
+            query,
+            results,
+            query_embedding.is_some(),
+            limit,
+        ))
     }
 
     /// Keyword-only search (no semantic component)
@@ -564,11 +581,7 @@ impl ContextService {
         filters: Option<SearchFilters>,
         min_similarity: f32,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
-        // Generate query embedding
-        let query_embedding = self
-            .embedding_service
-            .embed(&embed_query_text(self.embedding_service.model(), query))
-            .await?;
+        let query_embedding = embed_cached(self.embedding_service.as_ref(), query).await?;
 
         let results =
             semantic_only_search(&self.pool, &query_embedding, limit, filters, min_similarity)
@@ -821,53 +834,17 @@ impl<'a> ProgressCallback for SourceProgressAdapter<'a> {
     }
 }
 
-async fn neural_rerank(
-    reranker: &dyn CrossEncoder,
+fn assemble_hybrid_results(
     query: &str,
     mut results: Vec<HybridSearchResult>,
-) -> Vec<HybridSearchResult> {
-    if results.is_empty() {
-        return results;
-    }
-    let take = results.len().min(16);
-    let documents: Vec<&str> = results
-        .iter()
-        .take(take)
-        .map(|result| result.chunk_text.as_str())
-        .collect();
-    match reranker.score_documents(query, &documents).await {
-        Ok(scores) => {
-            let norm = min_max_norm(&scores);
-            let identifiers = crate::embeddings::rewrite_query(query).identifiers;
-            let has_definition = results.iter().take(take).any(|result| {
-                crate::embeddings::ranker::identifier_role(
-                    &result.chunk_text,
-                    &result.item_uri,
-                    &identifiers,
-                )
-                .is_definition()
-            });
-            for (result, neural) in results.iter_mut().zip(norm) {
-                let defined = crate::embeddings::ranker::identifier_role(
-                    &result.chunk_text,
-                    &result.item_uri,
-                    &identifiers,
-                )
-                .is_definition();
-                let mut delta = 0.10 * (neural - 0.5);
-                if has_definition && !defined && delta > 0.0 {
-                    delta *= 0.25;
-                }
-                result.score += delta;
-            }
-            sort_by_score(&mut results);
-            prefer_definition_chunks(query, &mut results);
-        }
-        Err(error) => {
-            tracing::debug!(%error, "neural cross-encoder skipped");
-        }
-    }
-    results
+    used_embedding: bool,
+    limit: usize,
+) -> Vec<SearchResultWithAnalysis> {
+    prefer_definition_chunks(query, &mut results);
+    cap_per_file(results, 2, limit)
+        .into_iter()
+        .map(|result| SearchResultWithAnalysis::from_hybrid(result, used_embedding))
+        .collect()
 }
 
 #[cfg(test)]

@@ -28,6 +28,8 @@ pub struct OllamaProvider {
 struct EmbeddingRequest {
     model: String,
     prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<String>,
 }
 
 /// Response from Ollama embeddings API
@@ -157,9 +159,15 @@ impl OllamaProvider {
         let request_body = EmbeddingRequest {
             model: self.model.clone(),
             prompt: prompt.to_string(),
+            keep_alive: Some("30m".into()),
+        };
+        let timeout = if prompt.chars().count() < 2000 {
+            Duration::from_secs(8)
+        } else {
+            Duration::from_secs(30)
         };
 
-        let mut request = self.client.post(&url).json(&request_body);
+        let mut request = self.client.post(&url).timeout(timeout).json(&request_body);
 
         if let Some(ref key) = self.api_key {
             request = request.header("Authorization", format!("Bearer {}", key));
@@ -216,7 +224,8 @@ impl EmbeddingService for OllamaProvider {
         let budget = embed_char_budget(self.max_tokens());
         let mut prompt = truncate_chars(text, budget);
         let mut last_err = None;
-        for attempt in 0..3 {
+        let attempts = if text.chars().count() < 2000 { 2 } else { 3 };
+        for attempt in 0..attempts {
             match self.embed_prompt(&prompt).await {
                 Ok(vector) => return Ok(vector),
                 Err(err) if err.is_context_length() => {

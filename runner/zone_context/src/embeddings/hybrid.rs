@@ -185,7 +185,10 @@ pub async fn hybrid_search_filtered(
     let keyword_fetch = crate::embeddings::serving::keyword_candidate_limit(fetch_limit, extra);
     let ann_fetch = crate::embeddings::serving::ann_candidate_limit(fetch_limit, extra);
 
-    let keyword_results = keep_answer_chunks(
+    let query_embedding = crate::embeddings::align_vector(query_embedding)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+    let (keyword_raw, semantic_raw) = tokio::join!(
         keyword_search(
             pool,
             &rewritten.keyword,
@@ -193,17 +196,7 @@ pub async fn hybrid_search_filtered(
             fetch_limit * 2,
             filters,
             config.min_keyword_score,
-        )
-        .await?,
-        fetch_limit,
-        &rewritten.identifiers,
-        |row| (row.chunk_text.as_str(), row.item_uri.as_str()),
-    );
-
-    let query_embedding = crate::embeddings::align_vector(query_embedding)
-        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-
-    let semantic_results = keep_answer_chunks(
+        ),
         semantic_search(
             pool,
             &query_embedding,
@@ -211,12 +204,17 @@ pub async fn hybrid_search_filtered(
             fetch_limit * 2,
             filters,
             config.min_semantic_score,
-        )
-        .await?,
-        fetch_limit,
-        &rewritten.identifiers,
-        |row| (row.chunk_text.as_str(), row.item_uri.as_str()),
+        ),
     );
+
+    let keyword_results =
+        keep_answer_chunks(keyword_raw?, fetch_limit, &rewritten.identifiers, |row| {
+            (row.chunk_text.as_str(), row.item_uri.as_str())
+        });
+    let semantic_results =
+        keep_answer_chunks(semantic_raw?, fetch_limit, &rewritten.identifiers, |row| {
+            (row.chunk_text.as_str(), row.item_uri.as_str())
+        });
 
     let combined = reciprocal_rank_fusion(keyword_results, semantic_results, config);
     Ok(finalize_ranking(combined, query, limit))

@@ -312,6 +312,22 @@ fn code_definition(text: &str, uri: &str, identifiers: &[String]) -> bool {
     identifier_role(text, uri, &code_ids).is_definition()
 }
 
+/// Keyword already found a real definition — skip embed / neural on the hot path.
+pub fn first_stage_answered<'a>(
+    query: &str,
+    hits: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    let identifiers = rewrite_query(query).identifiers;
+    if identifiers.is_empty() {
+        return false;
+    }
+    hits.into_iter().next().is_some_and(|(uri, text)| {
+        !is_test_chunk(uri, text)
+            && !is_outline_chunk(text)
+            && code_definition(text, uri, &identifiers)
+    })
+}
+
 pub fn role_strength(text: &str, uri: &str, identifiers: &[String]) -> u8 {
     match identifier_role(text, uri, identifiers) {
         IdentifierRole::Exported => 3,
@@ -796,5 +812,38 @@ mod tests {
         );
         let ranker = fit_pairwise(&[(pos.clone(), neg.clone())], 80, 0.4);
         assert!(ranker.score(&pos) > ranker.score(&neg));
+    }
+
+    #[test]
+    fn first_stage_answered_needs_a_real_definition() {
+        let query = "What does should_skip_blob do when a GitHub file SHA is unchanged?";
+        let def = (
+            "github://zone/content/mod.rs@main",
+            "impl FetchConfig { pub fn should_skip_blob(&self, uri: &str, blob_sha: &str) -> bool { true } }",
+        );
+        let mention = (
+            "github://zone/embeddings/query.rs@main",
+            "assert!(rewritten.identifiers.iter().any(|i| i == \"should_skip_blob\"));",
+        );
+        let test = (
+            "github://zone/embeddings/ranker.rs@main",
+            "#[cfg(test)]\nfn quoted_tool() { let _ = \"pub fn should_skip_blob\"; }",
+        );
+        assert!(first_stage_answered(query, [def]));
+        assert!(first_stage_answered(query, [def, mention]));
+        assert!(!first_stage_answered(query, [mention, def]));
+        assert!(!first_stage_answered(query, [mention]));
+        assert!(!first_stage_answered(query, [test, mention]));
+        assert!(!first_stage_answered(
+            "How does the server verify a webhook signature?",
+            [def],
+        ));
+        assert!(!first_stage_answered(
+            "Where is search_messages implemented?",
+            [(
+                "github://zone/routes/chats.rs@main",
+                "GET /api/chats/search | search_messages",
+            )],
+        ));
     }
 }

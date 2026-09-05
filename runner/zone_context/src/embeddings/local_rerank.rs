@@ -123,11 +123,14 @@ impl CrossEncoder for LocalCrossEncoder {
             .iter()
             .map(|doc| clip_doc(doc, DEFAULT_MAX_DOC_CHARS))
             .collect();
+        if self.model.try_lock().is_err() {
+            return Err(ContextError::Embedding("reranker busy".into()));
+        }
         let handle = Arc::clone(&self.model);
         tokio::task::spawn_blocking(move || {
             let mut model = handle
-                .lock()
-                .map_err(|_| ContextError::Embedding("reranker mutex poisoned".into()))?;
+                .try_lock()
+                .map_err(|_| ContextError::Embedding("reranker busy".into()))?;
             let docs_ref: Vec<&str> = docs.iter().map(String::as_str).collect();
             let ranked = model
                 .rerank(query.as_str(), docs_ref.as_slice(), false, Some(8))
