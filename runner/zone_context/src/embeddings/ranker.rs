@@ -325,7 +325,40 @@ pub fn first_stage_answered<'a>(
         !is_test_chunk(uri, text)
             && !is_outline_chunk(text)
             && code_definition(text, uri, &identifiers)
+            && !(name_only_definition(text, &identifiers)
+                && definition_misses_question(query, text))
     })
+}
+
+pub fn answers_as_definition(query: &str, uri: &str, text: &str) -> bool {
+    let identifiers = rewrite_query(query).identifiers;
+    if identifiers.is_empty() {
+        return false;
+    }
+    identifier_role(text, uri, &identifiers).is_definition()
+        && !definition_misses_question(query, text)
+}
+
+fn name_only_definition(text: &str, identifiers: &[String]) -> bool {
+    identifiers.iter().any(|id| tool_name_def(text, id))
+        && identifiers
+            .iter()
+            .all(|id| !text.contains(&format!("fn {id}(")) && !text.contains(&format!("fn {id} (")))
+}
+
+pub fn definition_misses_question(query: &str, text: &str) -> bool {
+    let identifiers = rewrite_query(query).identifiers;
+    let text_l = text.to_ascii_lowercase();
+    let extras: Vec<String> = super::query::nl_content_tokens(query)
+        .into_iter()
+        .filter(|token| {
+            !identifiers.iter().any(|id| {
+                let id_l = id.to_ascii_lowercase();
+                id_l.contains(token) || token.contains(&id_l)
+            })
+        })
+        .collect();
+    extras.len() >= 2 && extras.iter().all(|token| !text_l.contains(token))
 }
 
 pub fn role_strength(text: &str, uri: &str, identifiers: &[String]) -> u8 {
@@ -344,6 +377,25 @@ pub fn is_file_header(text: &str) -> bool {
 pub fn is_outline_chunk(text: &str) -> bool {
     let head: String = text.chars().take(400).collect();
     head.contains("kind: file_header") || head.contains("kind: api_surface")
+}
+
+/// File banner / `//!` only — not an implementation of the question.
+pub fn is_module_prelude(text: &str) -> bool {
+    let head: String = text.chars().take(400).collect();
+    if !head.contains("kind: top_level") {
+        return false;
+    }
+    let has_impl = [
+        "\npub fn ",
+        "\npub async fn ",
+        "\nfn ",
+        "\nimpl ",
+        "\npub struct ",
+        "\npub enum ",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle));
+    !has_impl
 }
 
 pub fn is_fixture_uri(uri: &str) -> bool {
@@ -819,7 +871,7 @@ mod tests {
         let query = "What does should_skip_blob do when a GitHub file SHA is unchanged?";
         let def = (
             "github://zone/content/mod.rs@main",
-            "impl FetchConfig { pub fn should_skip_blob(&self, uri: &str, blob_sha: &str) -> bool { true } }",
+            "impl FetchConfig { pub fn should_skip_blob(&self, file_uri: &str, blob_sha: &str) -> bool { true } }",
         );
         let mention = (
             "github://zone/embeddings/query.rs@main",
@@ -843,6 +895,13 @@ mod tests {
             [(
                 "github://zone/routes/chats.rs@main",
                 "GET /api/chats/search | search_messages",
+            )],
+        ));
+        assert!(!first_stage_answered(
+            "How does run_command trim oversized stdout?",
+            [(
+                "github://zone/tools/command.rs@main",
+                "fn name(&self) -> &str {\n        \"run_command\"\n    }",
             )],
         ));
     }

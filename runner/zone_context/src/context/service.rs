@@ -17,7 +17,7 @@ use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
 use crate::embeddings::{
     CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
     PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_cached, keyword_only_search,
-    prefer_definition_chunks, semantic_only_search,
+    semantic_only_search,
 };
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
@@ -836,11 +836,10 @@ impl<'a> ProgressCallback for SourceProgressAdapter<'a> {
 
 fn assemble_hybrid_results(
     query: &str,
-    mut results: Vec<HybridSearchResult>,
+    results: Vec<HybridSearchResult>,
     used_embedding: bool,
     limit: usize,
 ) -> Vec<SearchResultWithAnalysis> {
-    prefer_definition_chunks(query, &mut results);
     cap_per_file(results, 2, limit, query)
         .into_iter()
         .map(|result| SearchResultWithAnalysis::from_hybrid(result, used_embedding))

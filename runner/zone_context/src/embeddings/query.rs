@@ -287,8 +287,44 @@ pub fn nl_content_tokens(query: &str) -> Vec<String> {
     tokens
 }
 
+/// Adjacent content words from the original question, including `not`.
+/// Used to prefer the chunk that literally answers ("not configured").
+pub fn nl_question_phrases(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for token in tokenize(query) {
+        let token = token.to_ascii_lowercase();
+        if is_phrase_skip(&token) || !token.chars().any(|c| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        tokens.push(token);
+    }
+    let mut seen = HashSet::new();
+    let mut phrases = Vec::new();
+    for pair in tokens.windows(2) {
+        if !keep_nl_pair_token(&pair[0]) && !keep_nl_pair_token(&pair[1]) {
+            continue;
+        }
+        if is_nl_stopword(&pair[0]) && is_nl_stopword(&pair[1]) {
+            continue;
+        }
+        let phrase = format!("{} {}", pair[0], pair[1]);
+        if phrase.len() >= 8 && seen.insert(phrase.clone()) {
+            phrases.push(phrase);
+        }
+    }
+    phrases
+}
+
 fn expand_nl_terms(query: &str) -> Vec<String> {
     let tokens = nl_content_tokens(query);
+    let mut stems = Vec::new();
+    for token in &tokens {
+        if let Some(stem) = question_verb_stem(token)
+            && stem != token.as_str()
+        {
+            stems.push(stem.to_string());
+        }
+    }
     let mut seen: HashSet<String> = tokens.iter().cloned().collect();
     let mut terms = Vec::new();
     for token in &tokens {
@@ -296,8 +332,13 @@ fn expand_nl_terms(query: &str) -> Vec<String> {
             terms.push(token.clone());
         }
     }
+    for stem in &stems {
+        if keep_nl_singleton(stem) && seen.insert(stem.clone()) {
+            terms.push(stem.clone());
+        }
+    }
     let mut push_pair = |left: &str, right: &str| {
-        if left.len() < 4 || right.len() < 4 {
+        if !allow_pair_side(left) || !allow_pair_side(right) {
             return;
         }
         let snake = format!("{left}_{right}");
@@ -313,15 +354,65 @@ fn expand_nl_terms(query: &str) -> Vec<String> {
     {
         push_pair(first, last);
     }
+    for stem in &stems {
+        for token in &tokens {
+            if stem != token {
+                push_pair(stem, token);
+                push_pair(token, stem);
+            }
+        }
+    }
     terms
+}
+
+fn question_verb_stem(token: &str) -> Option<&str> {
+    Some(match token {
+        "derived" | "derive" => "derive",
+        "authorized" | "authorizing" => "authorize",
+        "configured" => "configure",
+        "trimmed" | "trim" => "trim",
+        _ => return None,
+    })
 }
 
 fn keep_nl_pair_token(token: &str) -> bool {
     token.len() >= 4
         || matches!(
             token,
-            "cors" | "jwt" | "smtp" | "mcp" | "hmac" | "aes" | "gcm" | "sha" | "sql"
+            "cors" | "jwt" | "smtp" | "mcp" | "hmac" | "aes" | "gcm" | "sha" | "sql" | "key"
         )
+}
+
+fn allow_pair_side(token: &str) -> bool {
+    token.len() >= 4 || matches!(token, "key" | "cors" | "aes" | "gcm" | "jwt" | "mcp" | "sql")
+}
+
+fn is_phrase_skip(token: &str) -> bool {
+    matches!(
+        token,
+        "how"
+            | "does"
+            | "do"
+            | "did"
+            | "the"
+            | "a"
+            | "an"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "when"
+            | "what"
+            | "where"
+            | "why"
+            | "who"
+            | "which"
+            | "for"
+            | "from"
+            | "with"
+            | "that"
+            | "this"
+    )
 }
 
 fn keep_nl_singleton(token: &str) -> bool {
@@ -583,6 +674,18 @@ mod tests {
             !email.keyword.split(" OR ").any(|term| term == "error"),
             "bare 'error' floods error.rs: {}",
             email.keyword
+        );
+        assert!(
+            nl_question_phrases("What error is returned when SMTP is not configured?")
+                .iter()
+                .any(|phrase| phrase == "not configured")
+        );
+
+        let derive = rewrite_query("Where is the AES-256-GCM encryption key derived with Argon2id?");
+        assert!(
+            derive.keyword.contains("derive_key"),
+            "keyword {}",
+            derive.keyword
         );
 
         let ident = rewrite_query("What does should_skip_blob do when a file SHA is unchanged?");

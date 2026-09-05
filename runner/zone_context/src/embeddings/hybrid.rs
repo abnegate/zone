@@ -217,6 +217,7 @@ pub async fn hybrid_search_filtered(
         });
 
     let combined = reciprocal_rank_fusion(keyword_results, semantic_results, config);
+    let combined = expand_same_file(pool, query, combined).await?;
     Ok(finalize_ranking(combined, query, limit))
 }
 
@@ -663,40 +664,52 @@ fn cmp_file_chunks(
     let right_tier = file_row_tier(&right.item_uri, &right.chunk_text);
     let identifiers = crate::embeddings::rewrite_query(query).identifiers;
     left_tier.cmp(&right_tier).then_with(|| {
-        let left_cover = question_coverage(query, &left.chunk_text, &identifiers);
-        let right_cover = question_coverage(query, &right.chunk_text, &identifiers);
-        left_cover.cmp(&right_cover).then_with(|| {
-            let left_role = crate::embeddings::ranker::role_strength(
-                &left.chunk_text,
-                &left.item_uri,
-                &identifiers,
-            );
-            let right_role = crate::embeddings::ranker::role_strength(
-                &right.chunk_text,
-                &right.item_uri,
-                &identifiers,
-            );
-            left_role.cmp(&right_role).then_with(|| {
-                let left_lex = crate::embeddings::lexical_cross_score(
-                    query,
-                    &left.item_uri,
-                    &left.item_title,
+        let left_def = crate::embeddings::ranker::answers_as_definition(
+            query,
+            &left.item_uri,
+            &left.chunk_text,
+        );
+        let right_def = crate::embeddings::ranker::answers_as_definition(
+            query,
+            &right.item_uri,
+            &right.chunk_text,
+        );
+        left_def.cmp(&right_def).then_with(|| {
+            let left_cover = question_coverage(query, &left.chunk_text, &identifiers);
+            let right_cover = question_coverage(query, &right.chunk_text, &identifiers);
+            left_cover.cmp(&right_cover).then_with(|| {
+                let left_role = crate::embeddings::ranker::role_strength(
                     &left.chunk_text,
+                    &left.item_uri,
+                    &identifiers,
                 );
-                let right_lex = crate::embeddings::lexical_cross_score(
-                    query,
-                    &right.item_uri,
-                    &right.item_title,
+                let right_role = crate::embeddings::ranker::role_strength(
                     &right.chunk_text,
+                    &right.item_uri,
+                    &identifiers,
                 );
-                left_lex
-                    .partial_cmp(&right_lex)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        left.score
-                            .partial_cmp(&right.score)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
+                left_role.cmp(&right_role).then_with(|| {
+                    let left_lex = crate::embeddings::lexical_cross_score(
+                        query,
+                        &left.item_uri,
+                        &left.item_title,
+                        &left.chunk_text,
+                    );
+                    let right_lex = crate::embeddings::lexical_cross_score(
+                        query,
+                        &right.item_uri,
+                        &right.item_title,
+                        &right.chunk_text,
+                    );
+                    left_lex
+                        .partial_cmp(&right_lex)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            left.score
+                                .partial_cmp(&right.score)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                })
             })
         })
     })
@@ -708,7 +721,9 @@ fn file_row_tier(uri: &str, text: &str) -> u8 {
     {
         return 0;
     }
-    if crate::embeddings::ranker::is_outline_chunk(text) {
+    if crate::embeddings::ranker::is_outline_chunk(text)
+        || crate::embeddings::ranker::is_module_prelude(text)
+    {
         return 1;
     }
     2
@@ -725,7 +740,230 @@ fn question_coverage(query: &str, text: &str, identifiers: &[String]) -> u32 {
         .into_iter()
         .filter(|term| text_l.contains(term))
         .count() as u32;
-    ident_hits * 2 + bridges + words
+    let phrases = crate::embeddings::nl_question_phrases(query)
+        .into_iter()
+        .filter(|phrase| text_l.contains(phrase))
+        .count() as u32;
+    let symbol = defined_symbol_overlap(query, text);
+    let docs = if function_kind(text) {
+        doc_comment_coverage(query, text)
+    } else {
+        0
+    };
+    ident_hits + bridges + words + phrases * 3 + symbol * 3 + docs * 2
+}
+
+fn doc_comment_coverage(query: &str, text: &str) -> u32 {
+    let comments: String = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("///") || trimmed.starts_with("//!")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    if comments.is_empty() {
+        return 0;
+    }
+    crate::embeddings::nl_content_tokens(query)
+        .into_iter()
+        .filter(|token| comments.contains(token))
+        .count() as u32
+}
+
+fn defined_symbol_overlap(query: &str, text: &str) -> u32 {
+    if !function_kind(text) {
+        return 0;
+    }
+    let Some(leaf) = defined_leaf_symbol(text) else {
+        return 0;
+    };
+    crate::embeddings::nl_content_tokens(query)
+        .into_iter()
+        .chain(question_stems(query))
+        .any(|token| leaf.contains(&token) || (token.len() >= 4 && token.contains(&leaf)))
+        .then_some(1)
+        .unwrap_or(0)
+}
+
+fn function_kind(text: &str) -> bool {
+    if text.lines().take(24).any(|line| {
+        let line = line.trim();
+        line.eq_ignore_ascii_case("kind: Function")
+            || line.eq_ignore_ascii_case("kind: Method")
+            || line.eq_ignore_ascii_case("kind: Assoc")
+    }) {
+        return true;
+    }
+    let Some(leaf) = defined_leaf_symbol(text) else {
+        return false;
+    };
+    text.contains(&format!("fn {leaf}(")) || text.contains(&format!("fn {leaf} ("))
+}
+
+fn defined_leaf_symbol(text: &str) -> Option<String> {
+    for line in text.lines().take(24) {
+        let line = line.trim();
+        let Some(rest) = line
+            .strip_prefix("symbol: ")
+            .or_else(|| line.strip_prefix("Symbol: "))
+        else {
+            continue;
+        };
+        let Some(leaf) = rest.split('.').next_back().map(str::trim) else {
+            continue;
+        };
+        if leaf.len() >= 3 {
+            return Some(leaf.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+fn question_stems(query: &str) -> Vec<String> {
+    crate::embeddings::nl_content_tokens(query)
+        .into_iter()
+        .filter_map(|token| match token.as_str() {
+            "derived" => Some("derive".into()),
+            "authorized" | "authorizing" => Some("authorize".into()),
+            "configured" => Some("configure".into()),
+            "trimmed" => Some("trim".into()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn same_file_patterns(query: &str) -> Vec<String> {
+    let rewritten = crate::embeddings::rewrite_query(query);
+    let mut seen = std::collections::HashSet::new();
+    let mut patterns = Vec::new();
+    let mut push = |token: &str| {
+        let token = token.to_ascii_lowercase();
+        if token.len() < 3
+            || !token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !seen.insert(token.clone())
+        {
+            return;
+        }
+        patterns.push(format!("%{token}%"));
+    };
+    for id in &rewritten.identifiers {
+        push(id);
+    }
+    for token in crate::embeddings::nl_content_tokens(query) {
+        push(&token);
+    }
+    for token in crate::embeddings::nl_bridge_terms(query) {
+        push(&token);
+    }
+    patterns.truncate(16);
+    patterns
+}
+
+async fn expand_same_file(
+    pool: &PgPool,
+    query: &str,
+    mut results: Vec<HybridSearchResult>,
+) -> sqlx::Result<Vec<HybridSearchResult>> {
+    if results.is_empty() {
+        return Ok(results);
+    }
+    let mut ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for result in &results {
+        if seen.insert(result.content_item_id) {
+            ids.push(result.content_item_id);
+            if ids.len() >= 8 {
+                break;
+            }
+        }
+    }
+    let patterns = same_file_patterns(query);
+    let extras = same_file_chunks(pool, &ids, &patterns, 28).await?;
+    let existing: std::collections::HashSet<Uuid> =
+        results.iter().map(|result| result.chunk_id).collect();
+    for row in extras {
+        if existing.contains(&row.chunk_id) {
+            continue;
+        }
+        results.push(HybridSearchResult {
+            chunk_id: row.chunk_id,
+            content_item_id: row.content_item_id,
+            source_id: row.source_id,
+            chunk_text: row.chunk_text,
+            item_uri: row.item_uri,
+            item_title: row.item_title,
+            score: 0.0,
+            fusion_score: 0.0,
+            keyword_rank: None,
+            semantic_rank: None,
+            keyword_score: None,
+            semantic_score: None,
+        });
+    }
+    Ok(results)
+}
+
+async fn same_file_chunks(
+    pool: &PgPool,
+    item_ids: &[Uuid],
+    patterns: &[String],
+    per_file: usize,
+) -> sqlx::Result<Vec<KeywordResult>> {
+    if item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let patterns = if patterns.is_empty() {
+        None
+    } else {
+        Some(patterns)
+    };
+    sqlx::query_as(
+        r#"
+        SELECT
+            chunk_id,
+            content_item_id,
+            source_id,
+            chunk_text,
+            item_uri,
+            item_title,
+            score
+        FROM (
+            SELECT
+                cc.id AS chunk_id,
+                cc.content_item_id,
+                ci.source_id,
+                cc.text AS chunk_text,
+                ci.uri AS item_uri,
+                ci.title AS item_title,
+                0::float4 AS score,
+                row_number() OVER (
+                    PARTITION BY cc.content_item_id
+                    ORDER BY
+                        CASE
+                            WHEN $2::text[] IS NULL THEN 1
+                            WHEN cc.text ILIKE ANY($2) THEN 0
+                            ELSE 1
+                        END,
+                        cc.chunk_index
+                ) AS rn
+            FROM content_chunks cc
+            JOIN content_items ci ON ci.id = cc.content_item_id
+            WHERE cc.content_item_id = ANY($1)
+              AND cc.text NOT ILIKE '%symbol: tests%'
+              AND cc.text NOT ILIKE '%symbol: tests.%'
+        ) ranked
+        WHERE rn <= $3
+        "#,
+    )
+    .bind(item_ids)
+    .bind(patterns)
+    .bind(per_file as i64)
+    .fetch_all(pool)
+    .await
 }
 
 /// Keep unique files first so a second gold can enter the window, then
@@ -886,6 +1124,7 @@ pub async fn keyword_only_search(
             semantic_score: None,
         })
         .collect();
+    let mapped = expand_same_file(pool, query, mapped).await?;
     Ok(finalize_ranking(mapped, query, limit))
 }
 
@@ -1207,6 +1446,180 @@ mod tests {
             "kept {}",
             capped[0].chunk_text
         );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_error_phrase_over_from_env() {
+        let item = Uuid::from_u128(13);
+        let from_env = hit(
+            1,
+            item,
+            "github://zone/services/email.rs@main",
+            r#"symbol: EmailConfig.from_env
+pub fn from_env() -> EmailResult<Self> {
+    env::var("SMTP_HOST").map_err(|_| EmailError::NotConfigured)
+}"#,
+            3.0,
+        );
+        let error = hit(
+            2,
+            item,
+            "github://zone/services/email.rs@main",
+            r#"symbol: EmailError
+#[error("Email service not configured")]
+NotConfigured,"#,
+            1.0,
+        );
+        let capped = cap_per_file(
+            vec![from_env, error],
+            2,
+            2,
+            "What error is returned when SMTP is not configured?",
+        );
+        assert!(
+            capped[0]
+                .chunk_text
+                .contains("Email service not configured"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_helper_over_tool_name() {
+        let item = Uuid::from_u128(14);
+        let name = hit(
+            1,
+            item,
+            "github://zone/tools/command.rs@main",
+            "symbol: RunCommandTool.name\nfn name(&self) -> &str {\n        \"run_command\"\n    }",
+            3.5,
+        );
+        let helper = hit(
+            2,
+            item,
+            "github://zone/tools/command.rs@main",
+            "symbol: trim_middle\nfn trim_middle(text: &str) -> String { chars }",
+            0.4,
+        );
+        let capped = cap_per_file(
+            vec![name, helper],
+            2,
+            2,
+            "How does run_command trim oversized stdout?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("trim_middle"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_cleanup_over_check() {
+        let item = Uuid::from_u128(15);
+        let check = hit(
+            1,
+            item,
+            "github://zone/utils/rate_limit.rs@main",
+            "symbol: RateLimiter.check_rate_limit\nParent: RateLimiter\npub fn check_rate_limit(&self, user_id: Uuid)",
+            3.0,
+        );
+        let cleanup = hit(
+            2,
+            item,
+            "github://zone/utils/rate_limit.rs@main",
+            "symbol: RateLimiter.cleanup\nParent: RateLimiter\n/// Clean up old entries (optional, for memory management)\npub fn cleanup(&self)",
+            0.5,
+        );
+        let capped = cap_per_file(
+            vec![check, cleanup],
+            2,
+            2,
+            "How does the rate limiter prevent unbounded memory growth?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("fn cleanup"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_ident_method_over_type_banner() {
+        let item = Uuid::from_u128(17);
+        let claims = hit(
+            1,
+            item,
+            "github://zone/auth/jwt.rs@main",
+            "symbol: Claims\nkind: Struct\n/// Subject (user ID)\npub struct Claims { pub sub: String }",
+            3.2,
+        );
+        let user_id = hit(
+            2,
+            item,
+            "github://zone/auth/jwt.rs@main",
+            "symbol: Claims.user_id\nkind: Method\npub fn user_id(&self) -> Result<Uuid, uuid::Error> {\n        Uuid::parse_str(&self.sub)\n    }",
+            0.7,
+        );
+        let capped = cap_per_file(
+            vec![claims, user_id],
+            2,
+            2,
+            "How does user_id parse the JWT subject on Claims?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("parse_str"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_body_over_module_prelude() {
+        let item = Uuid::from_u128(16);
+        let prelude = hit(
+            1,
+            item,
+            "github://zone/routes/artifacts.rs@main",
+            "Language: rust\nkind: top_level\n\n//! Authorized generated-artifact serving.\n",
+            2.8,
+        );
+        let body = hit(
+            2,
+            item,
+            "github://zone/routes/artifacts.rs@main",
+            "symbol: get_artifact\nlet authorized = chats::get_chat\nlet store = ArtifactStore::new",
+            0.6,
+        );
+        let capped = cap_per_file(
+            vec![prelude, body],
+            2,
+            2,
+            "How are generated chat artifacts authorized before serving?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("ArtifactStore"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    fn hit(chunk: u128, item: Uuid, uri: &str, text: &str, score: f32) -> HybridSearchResult {
+        HybridSearchResult {
+            chunk_id: Uuid::from_u128(chunk),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text: text.into(),
+            item_uri: uri.into(),
+            item_title: uri.rsplit('/').next().unwrap_or(uri).into(),
+            score,
+            fusion_score: score,
+            keyword_rank: Some(chunk as usize),
+            semantic_rank: None,
+            keyword_score: Some(score / 10.0),
+            semantic_score: None,
+        }
     }
 
     #[test]

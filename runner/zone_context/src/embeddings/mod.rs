@@ -24,7 +24,7 @@ pub use hybrid::{
 pub use pgvector::{PgVectorStore, VECTOR_DIMENSION, align_vector};
 pub use query::{
     RewrittenQuery, embed_query_text, identifier_match_boost, nl_bridge_terms, nl_content_tokens,
-    rewrite_query, sanitize_search_query,
+    nl_question_phrases, rewrite_query, sanitize_search_query,
 };
 pub use ranker::{IdentifierRole, LinearRanker, default_ranker, identifier_role, score_hit};
 pub use rerank::{
