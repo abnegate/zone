@@ -174,7 +174,7 @@ pub async fn hybrid_search_filtered(
     filters: Option<&SearchFilters>,
     config: &HybridSearchConfig,
 ) -> sqlx::Result<Vec<HybridSearchResult>> {
-    let fetch_limit = (limit * 3).max(24);
+    let fetch_limit = (limit * 4).max(32);
     let rewritten = crate::embeddings::rewrite_query(query);
     let extra = crate::embeddings::serving::has_extra_filters(
         filters.and_then(|f| f.source_ids.as_ref()).is_some(),
@@ -477,24 +477,87 @@ pub fn apply_local_rerank(
         );
     }
     sort_by_score(&mut results);
+    prefer_definition_chunks(query, &mut results);
     results
 }
 
+/// If a file has both a definition chunk and a mention/bag chunk, show the
+/// definition first so unique-file eval and the 1-per-file pass keep the impl.
+pub fn prefer_definition_chunks(query: &str, results: &mut [HybridSearchResult]) {
+    let identifiers = crate::embeddings::rewrite_query(query).identifiers;
+    if identifiers.is_empty() {
+        return;
+    }
+    results.sort_by(|a, b| {
+        let a_header = crate::embeddings::ranker::is_file_header(&a.chunk_text);
+        let b_header = crate::embeddings::ranker::is_file_header(&b.chunk_text);
+        let a_def = !a_header
+            && crate::embeddings::ranker::identifier_role(
+                &a.chunk_text,
+                &a.item_uri,
+                &identifiers,
+            )
+            .is_definition();
+        let b_def = !b_header
+            && crate::embeddings::ranker::identifier_role(
+                &b.chunk_text,
+                &b.item_uri,
+                &identifiers,
+            )
+            .is_definition();
+        match (a_def, b_def, a_header, b_header) {
+            (true, false, _, _) => std::cmp::Ordering::Less,
+            (false, true, _, _) => std::cmp::Ordering::Greater,
+            (false, false, false, true) => std::cmp::Ordering::Less,
+            (false, false, true, false) => std::cmp::Ordering::Greater,
+            _ => b
+                .score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        }
+    });
+}
+
+/// Keep unique files first so a second gold can enter the window, then
+/// fill leftover slots with extra chunks (up to `max_per_file`).
 pub fn cap_per_file(
     results: Vec<HybridSearchResult>,
     max_per_file: usize,
     limit: usize,
 ) -> Vec<HybridSearchResult> {
+    if limit == 0 || max_per_file == 0 {
+        return Vec::new();
+    }
+    let mut chosen = Vec::new();
     let mut per_item = HashMap::<Uuid, usize>::new();
-    results
-        .into_iter()
-        .filter(|result| {
+    let mut taken = std::collections::HashSet::<Uuid>::new();
+    for result in &results {
+        if chosen.len() >= limit {
+            break;
+        }
+        let seen = per_item.entry(result.content_item_id).or_insert(0);
+        if *seen == 0 {
+            *seen = 1;
+            taken.insert(result.chunk_id);
+            chosen.push(result.clone());
+        }
+    }
+    if max_per_file > 1 && chosen.len() < limit {
+        for result in results {
+            if chosen.len() >= limit {
+                break;
+            }
+            if taken.contains(&result.chunk_id) {
+                continue;
+            }
             let seen = per_item.entry(result.content_item_id).or_insert(0);
-            *seen += 1;
-            *seen <= max_per_file
-        })
-        .take(limit)
-        .collect()
+            if *seen > 0 && *seen < max_per_file {
+                *seen += 1;
+                chosen.push(result);
+            }
+        }
+    }
+    chosen
 }
 
 pub fn sort_by_score(results: &mut [HybridSearchResult]) {
@@ -783,6 +846,86 @@ mod tests {
             .collect();
         let ranked = finalize_ranking(results, "should_skip_blob", 10);
         assert_eq!(ranked.len(), 2);
+    }
+
+    #[test]
+    fn cap_per_file_prefers_unique_files() {
+        let files = [
+            Uuid::parse_str("00000000-0000-0000-0000-0000000000a1").unwrap(),
+            Uuid::parse_str("00000000-0000-0000-0000-0000000000a2").unwrap(),
+            Uuid::parse_str("00000000-0000-0000-0000-0000000000a3").unwrap(),
+        ];
+        let results = files
+            .iter()
+            .enumerate()
+            .flat_map(|(file_idx, item)| {
+                (0..2).map(move |chunk_idx| HybridSearchResult {
+                    chunk_id: Uuid::from_u128((file_idx * 2 + chunk_idx + 1) as u128),
+                    content_item_id: *item,
+                    source_id: Uuid::nil(),
+                    chunk_text: format!("chunk {file_idx}-{chunk_idx}"),
+                    item_uri: format!("file{file_idx}.rs"),
+                    item_title: format!("file{file_idx}.rs"),
+                    score: 1.0 - file_idx as f32 * 0.1 - chunk_idx as f32 * 0.01,
+                    fusion_score: 1.0,
+                    keyword_rank: None,
+                    semantic_rank: None,
+                    keyword_score: None,
+                    semantic_score: None,
+                })
+            })
+            .collect();
+        let capped = cap_per_file(results, 2, 4);
+        let unique: std::collections::HashSet<_> =
+            capped.iter().map(|r| r.content_item_id).collect();
+        assert_eq!(unique.len(), 3);
+        assert_eq!(capped.len(), 4);
+    }
+
+    #[test]
+    fn prefers_definition_chunk_over_same_file_mention() {
+        let item = Uuid::parse_str("00000000-0000-0000-0000-0000000000bb").unwrap();
+        let mention = HybridSearchResult {
+            chunk_id: Uuid::from_u128(1),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text: "identifiers: should_skip_blob, other".into(),
+            item_uri: "github://zone/content/mod.rs".into(),
+            item_title: "mod.rs".into(),
+            score: 2.0,
+            fusion_score: 2.0,
+            keyword_rank: Some(1),
+            semantic_rank: None,
+            keyword_score: Some(0.4),
+            semantic_score: None,
+        };
+        let definition = HybridSearchResult {
+            chunk_id: Uuid::from_u128(2),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text: "pub fn should_skip_blob(&self, uri: &str, blob_sha: &str) -> bool { true }"
+                .into(),
+            item_uri: "github://zone/content/mod.rs".into(),
+            item_title: "mod.rs".into(),
+            score: 1.2,
+            fusion_score: 1.2,
+            keyword_rank: Some(2),
+            semantic_rank: None,
+            keyword_score: Some(0.3),
+            semantic_score: None,
+        };
+        let ranked = finalize_ranking(
+            vec![mention, definition],
+            "What does should_skip_blob do?",
+            2,
+        );
+        assert!(
+            ranked[0]
+                .chunk_text
+                .contains("pub fn should_skip_blob"),
+            "kept {}",
+            ranked[0].chunk_text
+        );
     }
 
     #[test]

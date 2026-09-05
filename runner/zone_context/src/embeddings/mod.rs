@@ -16,14 +16,14 @@ pub mod serving;
 
 pub use hybrid::{
     HybridSearchConfig, HybridSearchResult, apply_local_rerank, cap_per_file, finalize_ranking,
-    hybrid_search, hybrid_search_filtered, keyword_only_search, semantic_only_search,
-    sort_by_score,
+    hybrid_search, hybrid_search_filtered, keyword_only_search, prefer_definition_chunks,
+    semantic_only_search, sort_by_score,
 };
 pub use pgvector::{PgVectorStore, VECTOR_DIMENSION, align_vector};
 pub use query::{
     RewrittenQuery, embed_query_text, identifier_match_boost, rewrite_query, sanitize_search_query,
 };
-pub use ranker::{LinearRanker, default_ranker, score_hit};
+pub use ranker::{IdentifierRole, LinearRanker, default_ranker, identifier_role, score_hit};
 pub use rerank::{
     CrossEncoder, OllamaCrossEncoder, blend_rank, lexical_cross_score, probe_cross_encoder,
 };

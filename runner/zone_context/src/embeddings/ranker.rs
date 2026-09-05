@@ -60,50 +60,141 @@ pub fn score_hit(
     blend_rank(ltr, ce) + editorial_bonus(query, uri, text)
 }
 
+/// How a hit relates to identifiers extracted from the query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierRole {
+    Exported,
+    Defined,
+    Mention,
+    None,
+}
+
+impl IdentifierRole {
+    pub fn is_definition(self) -> bool {
+        matches!(self, Self::Exported | Self::Defined)
+    }
+}
+
+pub fn identifier_role(text: &str, uri: &str, identifiers: &[String]) -> IdentifierRole {
+    if identifiers.is_empty() {
+        return IdentifierRole::None;
+    }
+    let uri_l = uri.to_ascii_lowercase();
+    let mut best = IdentifierRole::None;
+    for id in identifiers {
+        best = max_role(best, role_for_identifier(text, &uri_l, id));
+    }
+    best
+}
+
+fn max_role(left: IdentifierRole, right: IdentifierRole) -> IdentifierRole {
+    use IdentifierRole::*;
+    match (left, right) {
+        (Exported, _) | (_, Exported) => Exported,
+        (Defined, _) | (_, Defined) => Defined,
+        (Mention, _) | (_, Mention) => Mention,
+        _ => None,
+    }
+}
+
+fn role_for_identifier(text: &str, uri_l: &str, id: &str) -> IdentifierRole {
+    if id.is_empty() {
+        return IdentifierRole::None;
+    }
+    if text.contains(&format!("pub fn {id}"))
+        || text.contains(&format!("pub async fn {id}"))
+        || text.contains(&format!("pub struct {id}"))
+        || text.contains(&format!("pub enum {id}"))
+        || text.contains(&format!("pub const {id}"))
+        || text.contains(&format!("pub static {id}"))
+        || text.contains(&format!("pub type {id}"))
+    {
+        return IdentifierRole::Exported;
+    }
+    if text.contains(&format!("pub(crate) fn {id}"))
+        || text.contains(&format!("fn {id}"))
+        || text.contains(&format!("async fn {id}"))
+        || text.contains(&format!("struct {id}"))
+        || text.contains(&format!("enum {id}"))
+        || text.contains(&format!("type {id}"))
+        || text.contains(&format!("const {id}"))
+        || text.contains(&format!("static {id}"))
+        || text.contains(&format!("CREATE TABLE {id}"))
+        || text.contains(&format!("CREATE TABLE IF NOT EXISTS {id}"))
+        || text.contains(&format!("CREATE OR REPLACE FUNCTION {id}"))
+        || text.contains(&format!("name: \"{id}\""))
+        || text.contains(&format!("\"{id}\" =>"))
+        || text.contains(&format!("'{id}' =>"))
+        || text.contains(&format!("env_u64(\"{id}\""))
+        || text.contains(&format!("env::var(\"{id}\""))
+        || (text.contains("fn name(") && text.contains(&format!("\"{id}\"")))
+    {
+        return IdentifierRole::Defined;
+    }
+    if id.contains('/')
+        && (text.contains(&format!("\"{id}\""))
+            || text.contains(&format!("'{id}'"))
+            || (text.contains(id)
+                && (text.contains("format!(")
+                    || text.contains(".post(")
+                    || text.contains("path(\""))))
+    {
+        return IdentifierRole::Defined;
+    }
+    let file = uri_l
+        .rsplit('/')
+        .next()
+        .unwrap_or(uri_l)
+        .split('@')
+        .next()
+        .unwrap_or(uri_l);
+    let stem = file.split('.').next().unwrap_or(file);
+    let id_l = id.to_ascii_lowercase();
+    if stem == id_l || (id_l.len() >= 8 && stem.contains(&id_l)) {
+        return IdentifierRole::Defined;
+    }
+    if text.contains(id) || uri_l.contains(&id_l) {
+        return IdentifierRole::Mention;
+    }
+    IdentifierRole::None
+}
+
 fn editorial_bonus(query: &str, uri: &str, text: &str) -> f32 {
     let identifiers = rewrite_query(query).identifiers;
-    let mut bonus = 0.0;
-    if is_exported_definition(text, &identifiers) {
-        bonus += 1.05;
-    } else if is_definition(text, &identifiers) {
-        bonus += 0.7;
+    let role = identifier_role(text, uri, &identifiers);
+    let mut bonus = match role {
+        IdentifierRole::Exported => 1.05,
+        IdentifierRole::Defined => 0.7,
+        IdentifierRole::Mention | IdentifierRole::None => 0.0,
+    };
+    if is_file_header(text) {
+        bonus -= 0.95;
     }
     if fixture_penalty(&uri.to_ascii_lowercase()) > 0.0 {
-        bonus -= 0.6;
+        bonus -= 1.1;
     }
-    if is_test_module(uri, text, &identifiers) {
+    if is_test_module(uri, text, role) {
         bonus -= 0.35;
     }
     bonus
 }
 
-fn is_exported_definition(text: &str, identifiers: &[String]) -> bool {
-    identifiers.iter().any(|id| {
-        text.contains(&format!("pub fn {id}"))
-            || text.contains(&format!("pub async fn {id}"))
-            || text.contains(&format!("pub struct {id}"))
-            || text.contains(&format!("pub enum {id}"))
-    })
+pub fn is_file_header(text: &str) -> bool {
+    let head: String = text.chars().take(400).collect();
+    head.contains("kind: file_header")
 }
 
-fn is_definition(text: &str, identifiers: &[String]) -> bool {
-    identifiers.iter().any(|id| {
-        text.contains(&format!("fn {id}"))
-            || text.contains(&format!("struct {id}"))
-            || text.contains(&format!("enum {id}"))
-            || text.contains(&format!("type {id}"))
-            || text.contains(&format!("const {id}"))
-    })
-}
-
-fn is_test_module(uri: &str, text: &str, identifiers: &[String]) -> bool {
+fn is_test_module(uri: &str, text: &str, role: IdentifierRole) -> bool {
+    if role.is_definition() {
+        return false;
+    }
     let uri_l = uri.to_ascii_lowercase();
     uri_l.contains("/tests/")
         || uri_l.contains(".test.")
         || uri_l.ends_with("_test.rs")
         || text.contains("#[cfg(test)]")
         || text.contains("#[test]")
-        || (text.contains("assert!(") && !is_definition(text, identifiers))
+        || text.contains("assert!(")
 }
 
 pub fn extract_features(
@@ -139,6 +230,7 @@ pub fn extract_features(
         }
     }
     let ident_n = rewritten.identifiers.len().max(1) as f32;
+    let role = identifier_role(text, uri, &rewritten.identifiers);
 
     let tokens: Vec<&str> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
@@ -183,12 +275,8 @@ pub fn extract_features(
             inv_rank(keyword_rank),
             inv_rank(semantic_rank),
             fixture_penalty(&uri_l),
-            if is_definition(text, &rewritten.identifiers) {
-                1.0
-            } else {
-                0.0
-            },
-            if is_test_module(uri, text, &rewritten.identifiers) {
+            if role.is_definition() { 1.0 } else { 0.0 },
+            if is_test_module(uri, text, role) {
                 1.0
             } else {
                 0.0
@@ -388,6 +476,66 @@ mod tests {
             0.015,
         );
         assert!(exact > mention, "exact={exact} mention={mention}");
+        let method = score_hit(
+            query,
+            "github://abnegate/zone/runner/zone_context/src/content/mod.rs@main",
+            "mod.rs",
+            "impl FetchConfig { pub fn should_skip_blob(&self, uri: &str, blob_sha: &str) -> bool { true } }",
+            Some(0.55),
+            Some(0.40),
+            Some(1),
+            Some(6),
+            0.009,
+        );
+        assert!(method > mention, "method={method} mention={mention}");
+        let header = score_hit(
+            query,
+            "github://abnegate/zone/runner/zone_context/src/content/mod.rs@main",
+            "mod.rs",
+            "path: github://zone/content/mod.rs@main kind: file_header\n\nidentifiers: should_skip_blob, FetchConfig",
+            Some(0.72),
+            Some(0.45),
+            Some(1),
+            Some(1),
+            0.018,
+        );
+        assert!(method > header, "method={method} header={header}");
+    }
+
+    #[test]
+    fn quoted_tool_and_sql_stem_count_as_definitions() {
+        assert_eq!(
+            identifier_role(
+                r#"fn name(&self) -> &str { "search_knowledge" }"#,
+                "agent/tools.rs",
+                &["search_knowledge".into()],
+            ),
+            IdentifierRole::Defined
+        );
+        assert_eq!(
+            identifier_role(
+                "CREATE TABLE IF NOT EXISTS embeddings (id UUID)",
+                "migrations/001_initial_schema.sql",
+                &["001_initial_schema".into()],
+            ),
+            IdentifierRole::Defined
+        );
+        assert_eq!(
+            identifier_role(
+                r#"let url = format!("{}/api/embeddings", self.base_url);"#,
+                "providers/ollama.rs",
+                &["/api/embeddings".into()],
+            ),
+            IdentifierRole::Defined
+        );
+        assert_eq!(
+            identifier_role(
+                r#"assert!(rewritten.identifiers.iter().any(|i| i == "should_skip_blob"));"#,
+                "embeddings/query.rs",
+                &["should_skip_blob".into()],
+            ),
+            IdentifierRole::Mention
+        );
     }
 
     #[test]

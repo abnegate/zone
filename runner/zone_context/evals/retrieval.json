@@ -245,7 +245,7 @@
       "expect_identifiers": ["SOURCE_RESYNC_POLL_SECS"],
       "expect_uri_contains": ["source_resync.rs", "config.rs"],
       "judgments": [
-        {"uri_contains": "source_resync.rs", "grade": 3, "must_contain": ["SOURCE_RESYNC_POLL_SECS"]},
+        {"uri_contains": "source_resync.rs", "grade": 3, "must_contain": ["poll_interval_secs"]},
         {"uri_contains": "config.rs", "grade": 3, "must_contain": ["SOURCE_RESYNC_POLL_SECS"]}
       ]
     }

@@ -25,21 +25,19 @@ pub fn lexical_cross_score(query: &str, uri: &str, title: &str, text: &str) -> f
     let title_l = title.to_ascii_lowercase();
     let text_l = text.to_ascii_lowercase();
 
-    let mut ident: f32 = 0.0;
+    let role = crate::embeddings::ranker::identifier_role(text, uri, &rewritten.identifiers);
+    let mut ident: f32 = match role {
+        crate::embeddings::ranker::IdentifierRole::Exported => 0.7,
+        crate::embeddings::ranker::IdentifierRole::Defined => 0.55,
+        crate::embeddings::ranker::IdentifierRole::Mention => 0.16,
+        crate::embeddings::ranker::IdentifierRole::None => 0.0,
+    };
     for id in &rewritten.identifiers {
-        if text.contains(&format!("pub fn {id}")) || text.contains(&format!("pub async fn {id}")) {
-            ident += 0.7;
-        } else if text.contains(&format!("fn {id}"))
-            || text.contains(&format!("struct {id}"))
-            || text.contains(&format!("enum {id}"))
-        {
-            ident += 0.55;
-        } else if text.contains(id) {
-            ident += 0.35;
-        } else if uri_l.contains(&id.to_ascii_lowercase()) {
-            ident += 0.2;
-        } else if title_l.contains(&id.to_ascii_lowercase()) {
+        let id_l = id.to_ascii_lowercase();
+        if uri_l.contains(&id_l) {
             ident += 0.12;
+        } else if title_l.contains(&id_l) {
+            ident += 0.08;
         }
     }
     ident = ident.min(0.75);
