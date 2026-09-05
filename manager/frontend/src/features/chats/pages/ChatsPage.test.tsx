@@ -825,15 +825,19 @@ describe('ChatsPage', () => {
     });
 
     function controlClock(): (elapsed: number) => void {
-      const ticks: Array<() => void> = [];
+      const ticks = new Map<number, () => void>();
+      let nextIntervalId = 1;
       const now = spyOn(performance, 'now').mockReturnValue(0);
       const interval = spyOn(window, 'setInterval').mockImplementation((callback: TimerHandler) => {
-        ticks.push(() => {
+        const id = nextIntervalId++;
+        ticks.set(id, () => {
           if (typeof callback === 'function') callback();
         });
-        return ticks.length;
+        return id;
       });
-      const clear = spyOn(window, 'clearInterval').mockImplementation(() => {});
+      const clear = spyOn(window, 'clearInterval').mockImplementation((id) => {
+        ticks.delete(Number(id));
+      });
       restoreClock = () => {
         now.mockRestore();
         interval.mockRestore();
@@ -842,7 +846,7 @@ describe('ChatsPage', () => {
       return (elapsed: number): void => {
         now.mockReturnValue(elapsed);
         act(() => {
-          for (const tick of ticks) tick();
+          for (const tick of ticks.values()) tick();
         });
       };
     }
