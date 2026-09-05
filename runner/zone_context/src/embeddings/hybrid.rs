@@ -750,7 +750,7 @@ fn question_coverage(query: &str, text: &str, identifiers: &[String]) -> u32 {
     } else {
         0
     };
-    ident_hits + bridges + words + phrases * 3 + symbol * 3 + docs * 2
+    ident_hits * 2 + bridges + words + phrases * 3 + symbol * 3 + docs * 2
 }
 
 fn doc_comment_coverage(query: &str, text: &str) -> u32 {
@@ -1008,6 +1008,10 @@ pub fn cap_per_file(
         taken.insert(results[best_idx].chunk_id);
         chosen.push(results[best_idx].clone());
     }
+    chosen.sort_by(|left, right| {
+        file_row_tier(&right.item_uri, &right.chunk_text)
+            .cmp(&file_row_tier(&left.item_uri, &left.chunk_text))
+    });
     if max_per_file > 1 && chosen.len() < limit {
         let mut extras: HashMap<String, usize> = HashMap::new();
         for result in &results {

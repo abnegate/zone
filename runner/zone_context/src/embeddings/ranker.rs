@@ -156,6 +156,7 @@ fn role_for_identifier(text: &str, uri_l: &str, id: &str) -> IdentifierRole {
         || ident_form(text, &format!("pub {id}:"))
         || ident_form(text, &format!("pub(crate) {id}:"))
         || reexport_def(text, id)
+        || enum_variant_def(text, id)
     {
         return IdentifierRole::Defined;
     }
@@ -299,8 +300,27 @@ pub fn chunk_rank_tier(query: &str, uri: &str, text: &str) -> u8 {
     2
 }
 
+fn enum_variant_def(text: &str, id: &str) -> bool {
+    if !text.contains("enum ") || id.len() < 4 {
+        return false;
+    }
+    text.contains(&format!("\n    {id},"))
+        || text.contains(&format!("\n    {id}\n"))
+        || text.contains(&format!("\n        {id},"))
+}
+
 /// A path hit like `/api/chats/search` is not a code definition of `search_messages`.
 fn code_definition(text: &str, uri: &str, identifiers: &[String]) -> bool {
+    if is_sql_migration(uri) {
+        let uri_l = uri.to_ascii_lowercase();
+        let names_file = identifiers.iter().any(|id| {
+            let id_l = id.to_ascii_lowercase();
+            id_l.len() >= 8 && uri_l.contains(&id_l)
+        });
+        if !names_file {
+            return false;
+        }
+    }
     let code_ids: Vec<String> = identifiers
         .iter()
         .filter(|id| !id.contains('/'))
@@ -385,6 +405,9 @@ pub fn is_module_prelude(text: &str) -> bool {
     if !head.contains("kind: top_level") {
         return false;
     }
+    if text.contains("CREATE TABLE") || text.contains("CREATE OR REPLACE") {
+        return false;
+    }
     let has_impl = [
         "\npub fn ",
         "\npub async fn ",
@@ -427,6 +450,7 @@ pub fn is_test_chunk(uri: &str, text: &str) -> bool {
         || head.contains("#[test]")
         || text.contains("assert_eq!(")
         || text.contains("assert_ne!(")
+        || text.contains("assert!(")
 }
 
 fn looks_like_unit_test_body(text: &str) -> bool {
@@ -793,6 +817,14 @@ mod tests {
                 &["search_knowledge".into()],
             ),
             IdentifierRole::Mention
+        );
+        assert_eq!(
+            identifier_role(
+                "pub enum ResyncReason {\n    RemoteChanged,\n    MissingEmbeddings,\n}",
+                "workers/source_resync.rs",
+                &["MissingEmbeddings".into()],
+            ),
+            IdentifierRole::Defined
         );
         assert_eq!(
             identifier_role(

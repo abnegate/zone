@@ -681,7 +681,7 @@ mod tests {
                 .any(|phrase| phrase == "not configured")
         );
 
-        let derive = rewrite_query("Where is the AES-256-GCM encryption key derived with Argon2id?");
+        let derive = rewrite_query("Where is the AES-256 encryption key derived?");
         assert!(
             derive.keyword.contains("derive_key"),
             "keyword {}",
