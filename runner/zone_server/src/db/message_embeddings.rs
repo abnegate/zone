@@ -156,6 +156,112 @@ pub async fn search_messages(
     Ok(results)
 }
 
+/// Keyword search over chat messages when embeddings are missing or fail.
+pub async fn search_messages_keyword(
+    pool: &PgPool,
+    query: &str,
+    workspace_id: Uuid,
+    chat_id: Option<Uuid>,
+    limit: usize,
+) -> Result<Vec<MessageSearchResult>, sqlx::Error> {
+    let keyword = zone_context::rewrite_query(query).keyword;
+    let sanitized = zone_context::embeddings::sanitize_search_query(&keyword);
+    if sanitized.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let results = match chat_id {
+        Some(cid) => {
+            sqlx::query_as::<_, MessageSearchResult>(
+                r#"
+                SELECT
+                    m.id as message_id,
+                    m.chat_id,
+                    ts_rank(
+                        to_tsvector('english', m.content),
+                        websearch_to_tsquery('english', $1)
+                    )::REAL as similarity,
+                    m.role,
+                    m.content,
+                    m.created_at
+                FROM messages m
+                JOIN chats c ON c.id = m.chat_id
+                WHERE m.chat_id = $2
+                  AND c.workspace_id = $3
+                  AND to_tsvector('english', m.content)
+                      @@ websearch_to_tsquery('english', $1)
+                ORDER BY similarity DESC
+                LIMIT $4
+                "#,
+            )
+            .bind(&sanitized)
+            .bind(cid)
+            .bind(workspace_id)
+            .bind(limit as i64)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, MessageSearchResult>(
+                r#"
+                SELECT
+                    m.id as message_id,
+                    m.chat_id,
+                    ts_rank(
+                        to_tsvector('english', m.content),
+                        websearch_to_tsquery('english', $1)
+                    )::REAL as similarity,
+                    m.role,
+                    m.content,
+                    m.created_at
+                FROM messages m
+                JOIN chats c ON c.id = m.chat_id
+                WHERE c.workspace_id = $2
+                  AND to_tsvector('english', m.content)
+                      @@ websearch_to_tsquery('english', $1)
+                ORDER BY similarity DESC
+                LIMIT $3
+                "#,
+            )
+            .bind(&sanitized)
+            .bind(workspace_id)
+            .bind(limit as i64)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    Ok(results)
+}
+
+/// Fuse semantic and keyword chat-history lists with RRF plus identifier boost.
+pub fn fuse_message_hits(
+    semantic: Vec<MessageSearchResult>,
+    keyword: Vec<MessageSearchResult>,
+    query: &str,
+    limit: usize,
+) -> Vec<MessageSearchResult> {
+    let identifiers = zone_context::rewrite_query(query).identifiers;
+    let mut scores: std::collections::HashMap<Uuid, (MessageSearchResult, f32)> =
+        std::collections::HashMap::new();
+    for (rank, hit) in semantic.into_iter().enumerate() {
+        let boost = zone_context::identifier_match_boost("", "", &hit.content, &identifiers);
+        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
+        scores.insert(hit.message_id, (hit, rrf + boost));
+    }
+    for (rank, hit) in keyword.into_iter().enumerate() {
+        let boost = zone_context::identifier_match_boost("", "", &hit.content, &identifiers);
+        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
+        scores
+            .entry(hit.message_id)
+            .and_modify(|(_, score)| *score += rrf)
+            .or_insert((hit, rrf + boost));
+    }
+    let mut fused: Vec<_> = scores.into_values().collect();
+    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    fused.into_iter().take(limit).map(|(hit, _)| hit).collect()
+}
+
 /// Delete embedding for a message
 ///
 /// Called when a message is deleted to clean up associated embeddings.
@@ -307,5 +413,33 @@ mod tests {
         // Test that negative infinity values are detected
         let invalid_embedding: Vec<f32> = vec![0.1, f32::NEG_INFINITY, 0.3];
         assert!(!invalid_embedding.iter().all(|&v| v.is_finite()));
+    }
+
+    #[test]
+    fn fuse_messages_prefers_identifier_hits() {
+        let symbol = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let neighbor = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let now = chrono::Utc::now().naive_utc();
+        let fused = fuse_message_hits(
+            vec![MessageSearchResult {
+                message_id: neighbor,
+                chat_id: Uuid::new_v4(),
+                similarity: 0.88,
+                role: "assistant".into(),
+                content: "generic auth helper".into(),
+                created_at: now,
+            }],
+            vec![MessageSearchResult {
+                message_id: symbol,
+                chat_id: Uuid::new_v4(),
+                similarity: 0.03,
+                role: "user".into(),
+                content: "should_skip_blob is the SHA short-circuit".into(),
+                created_at: now,
+            }],
+            "What does should_skip_blob do?",
+            5,
+        );
+        assert_eq!(fused[0].message_id, symbol);
     }
 }

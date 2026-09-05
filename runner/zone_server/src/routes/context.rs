@@ -494,13 +494,31 @@ pub async fn search(
             .into_response();
     }
 
-    // Reject categories filter as it's not implemented yet
-    if query.categories.is_some() {
+    const MAX_CATEGORIES: usize = 20;
+    let categories: Option<Vec<String>> = query.categories.as_ref().and_then(|s| {
+        let parts: Vec<String> = s
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect();
+        if parts.is_empty() || parts.len() > MAX_CATEGORIES {
+            None
+        } else {
+            Some(parts)
+        }
+    });
+    if query
+        .categories
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty())
+        && categories.is_none()
+    {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(
-                "Category filtering is not yet implemented",
-            )),
+            Json(ErrorResponse::new(format!(
+                "Invalid categories format or exceeds maximum of {MAX_CATEGORIES}"
+            ))),
         )
             .into_response();
     }
@@ -544,12 +562,12 @@ pub async fn search(
         }
     };
 
-    // Build search filters
+    // Build search filters. `threshold` is a similarity floor, not heuristic quality.
     let filters = zone_context::embeddings::SearchFilters {
         source_ids: source_ids.clone(),
         workspace_id: Some(query.workspace_id),
-        categories: None,
-        min_quality: threshold,
+        categories,
+        min_quality: None,
         since: None,
     };
 
@@ -560,12 +578,21 @@ pub async fn search(
     let results_vec = match search_mode.as_str() {
         "hybrid" => {
             // Build hybrid search config
-            let hybrid_config = zone_context::HybridSearchConfig {
-                semantic_weight: query.semantic_weight.unwrap_or(0.7).clamp(0.0, 1.0),
-                rrf_k: query.rrf_k.unwrap_or(60.0),
-                min_keyword_score: query.min_keyword_score.unwrap_or(0.0).clamp(0.0, 1.0),
-                min_semantic_score: query.min_semantic_score.unwrap_or(0.35).clamp(0.0, 1.0),
-            };
+            let mut hybrid_config = zone_context::HybridSearchConfig::for_query(trimmed_query);
+            if let Some(weight) = query.semantic_weight {
+                hybrid_config.semantic_weight = weight.clamp(0.0, 1.0);
+            }
+            if let Some(rrf_k) = query.rrf_k {
+                hybrid_config.rrf_k = rrf_k.max(1.0);
+            }
+            if let Some(min_keyword) = query.min_keyword_score {
+                hybrid_config.min_keyword_score = min_keyword.clamp(0.0, 1.0);
+            }
+            hybrid_config.min_semantic_score = query
+                .min_semantic_score
+                .or(threshold)
+                .unwrap_or(hybrid_config.min_semantic_score)
+                .clamp(0.0, 1.0);
 
             tracing::info!(
                 "Hybrid search: semantic_weight={}, rrf_k={}, min_keyword={}, min_semantic={}",
@@ -610,7 +637,11 @@ pub async fn search(
             }
         }
         "semantic" => {
-            let min_similarity = query.min_semantic_score.unwrap_or(0.35).clamp(0.0, 1.0);
+            let min_similarity = query
+                .min_semantic_score
+                .or(threshold)
+                .unwrap_or(0.35)
+                .clamp(0.0, 1.0);
             tracing::info!("Semantic-only search: min_similarity={}", min_similarity);
 
             match context_service

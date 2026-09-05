@@ -56,6 +56,20 @@ impl Default for HybridSearchConfig {
     }
 }
 
+impl HybridSearchConfig {
+    /// Balance keyword and semantic legs when the query names code symbols.
+    pub fn for_query(query: &str) -> Self {
+        let mut config = Self::default();
+        if !crate::embeddings::rewrite_query(query)
+            .identifiers
+            .is_empty()
+        {
+            config.semantic_weight = 0.45;
+        }
+        config
+    }
+}
+
 /// Result from hybrid search
 #[derive(Debug, Clone)]
 pub struct HybridSearchResult {
@@ -140,18 +154,32 @@ pub async fn hybrid_search(
     source_ids: Option<&[Uuid]>,
     config: &HybridSearchConfig,
 ) -> sqlx::Result<Vec<HybridSearchResult>> {
-    // Fetch more results than needed for better RRF combining
-    let fetch_limit = (limit * 2).max(20);
+    let filters = SearchFilters {
+        workspace_id,
+        source_ids: source_ids.map(|ids| ids.to_vec()),
+        ..Default::default()
+    };
 
+    hybrid_search_filtered(pool, query, query_embedding, limit, Some(&filters), config).await
+}
+
+/// Hybrid search that honors the same filters as semantic `VectorStore::search`.
+pub async fn hybrid_search_filtered(
+    pool: &PgPool,
+    query: &str,
+    query_embedding: &[f32],
+    limit: usize,
+    filters: Option<&SearchFilters>,
+    config: &HybridSearchConfig,
+) -> sqlx::Result<Vec<HybridSearchResult>> {
+    let fetch_limit = (limit * 3).max(24);
     let rewritten = crate::embeddings::rewrite_query(query);
 
-    // 1. Perform keyword search against identifiers when present
     let keyword_results = keyword_search(
         pool,
         &rewritten.keyword,
         fetch_limit,
-        workspace_id,
-        source_ids,
+        filters,
         config.min_keyword_score,
     )
     .await?;
@@ -159,22 +187,17 @@ pub async fn hybrid_search(
     let query_embedding = crate::embeddings::align_vector(query_embedding)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
-    // 2. Perform semantic search
     let semantic_results = semantic_search(
         pool,
         &query_embedding,
         fetch_limit,
-        workspace_id,
-        source_ids,
+        filters,
         config.min_semantic_score,
     )
     .await?;
 
-    // 3. Combine with RRF
     let combined = reciprocal_rank_fusion(keyword_results, semantic_results, config);
-
-    // 4. Return top N
-    Ok(combined.into_iter().take(limit).collect())
+    Ok(finalize_ranking(combined, &rewritten.identifiers, limit))
 }
 
 /// Keyword search using PostgreSQL full-text search
@@ -187,12 +210,19 @@ async fn keyword_search(
     pool: &PgPool,
     query: &str,
     limit: usize,
-    workspace_id: Option<Uuid>,
-    source_ids: Option<&[Uuid]>,
+    filters: Option<&SearchFilters>,
     min_score: f32,
 ) -> sqlx::Result<Vec<KeywordResult>> {
-    // Sanitize query to prevent injection and limit length
     let sanitized_query = crate::embeddings::sanitize_search_query(query);
+    let workspace_id = filters.and_then(|f| f.workspace_id);
+    let source_ids = filters.and_then(|f| f.source_ids.as_deref());
+    let categories = filters.and_then(|f| {
+        f.categories
+            .as_ref()
+            .map(|cats| cats.iter().map(|c| c.to_lowercase()).collect::<Vec<_>>())
+    });
+    let min_quality = filters.and_then(|f| f.min_quality);
+    let since = filters.and_then(|f| f.since.map(|dt| dt.naive_utc()));
 
     sqlx::query_as(
         r#"
@@ -207,10 +237,14 @@ async fn keyword_search(
         FROM content_chunks cc
         JOIN content_items ci ON ci.id = cc.content_item_id
         JOIN sources s ON s.id = ci.source_id
+        LEFT JOIN heuristic_analysis ha ON ha.content_item_id = ci.id
         WHERE cc.search_vector @@ websearch_to_tsquery('english', $1)
             AND ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) >= $2
             AND ($3::uuid IS NULL OR s.workspace_id = $3)
             AND ($4::uuid[] IS NULL OR ci.source_id = ANY($4))
+            AND ($6::text[] IS NULL OR ci.category = ANY($6))
+            AND ($7::float IS NULL OR ha.quality->>'score' IS NULL OR (ha.quality->>'score')::float >= $7)
+            AND ($8::timestamp IS NULL OR ci.fetched_at >= $8)
         ORDER BY score DESC
         LIMIT $5
         "#,
@@ -220,6 +254,9 @@ async fn keyword_search(
     .bind(workspace_id)
     .bind(source_ids)
     .bind(limit as i64)
+    .bind(categories.as_deref())
+    .bind(min_quality.map(|q| q as f64))
+    .bind(since)
     .fetch_all(pool)
     .await
 }
@@ -229,13 +266,20 @@ async fn semantic_search(
     pool: &PgPool,
     query_embedding: &[f32],
     limit: usize,
-    workspace_id: Option<Uuid>,
-    source_ids: Option<&[Uuid]>,
+    filters: Option<&SearchFilters>,
     min_similarity: f32,
 ) -> sqlx::Result<Vec<SemanticResult>> {
-    // Convert vector to PostgreSQL format
     let vector_str = vector_to_pg_string(query_embedding)
         .map_err(|e| sqlx::Error::Protocol(format!("Invalid embedding vector: {}", e)))?;
+    let workspace_id = filters.and_then(|f| f.workspace_id);
+    let source_ids = filters.and_then(|f| f.source_ids.as_deref());
+    let categories = filters.and_then(|f| {
+        f.categories
+            .as_ref()
+            .map(|cats| cats.iter().map(|c| c.to_lowercase()).collect::<Vec<_>>())
+    });
+    let min_quality = filters.and_then(|f| f.min_quality);
+    let since = filters.and_then(|f| f.since.map(|dt| dt.naive_utc()));
 
     sqlx::query_as(
         r#"
@@ -251,9 +295,13 @@ async fn semantic_search(
         JOIN content_chunks cc ON cc.id = e.chunk_id
         JOIN content_items ci ON ci.id = e.content_item_id
         JOIN sources s ON s.id = e.source_id
+        LEFT JOIN heuristic_analysis ha ON ha.content_item_id = ci.id
         WHERE (1 - (e.vector <=> $1::vector)) >= $2
             AND ($3::uuid IS NULL OR s.workspace_id = $3)
             AND ($4::uuid[] IS NULL OR e.source_id = ANY($4))
+            AND ($6::text[] IS NULL OR ci.category = ANY($6))
+            AND ($7::float IS NULL OR ha.quality->>'score' IS NULL OR (ha.quality->>'score')::float >= $7)
+            AND ($8::timestamp IS NULL OR ci.fetched_at >= $8)
         ORDER BY e.vector <=> $1::vector
         LIMIT $5
         "#,
@@ -263,6 +311,9 @@ async fn semantic_search(
     .bind(workspace_id)
     .bind(source_ids)
     .bind(limit as i64)
+    .bind(categories.as_deref())
+    .bind(min_quality.map(|q| q as f64))
+    .bind(since)
     .fetch_all(pool)
     .await
 }
@@ -360,6 +411,41 @@ fn reciprocal_rank_fusion(
     results
 }
 
+/// Boost exact identifier hits and keep at most two chunks per file.
+fn finalize_ranking(
+    mut results: Vec<HybridSearchResult>,
+    identifiers: &[String],
+    limit: usize,
+) -> Vec<HybridSearchResult> {
+    for result in &mut results {
+        result.score += crate::embeddings::identifier_match_boost(
+            &result.item_uri,
+            &result.item_title,
+            &result.chunk_text,
+            identifiers,
+        );
+    }
+    results.sort_by(|a, b| match (a.score.is_nan(), b.score.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => b
+            .score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal),
+    });
+    let mut per_item = HashMap::<Uuid, usize>::new();
+    results
+        .into_iter()
+        .filter(|result| {
+            let seen = per_item.entry(result.content_item_id).or_insert(0);
+            *seen += 1;
+            *seen <= 2
+        })
+        .take(limit)
+        .collect()
+}
+
 /// Convert a vector to PostgreSQL vector string format
 ///
 /// Returns an error if any vector values are non-finite (NaN or Infinity).
@@ -399,14 +485,16 @@ pub async fn keyword_only_search(
     filters: Option<SearchFilters>,
     min_score: f32,
 ) -> sqlx::Result<Vec<HybridSearchResult>> {
-    let workspace_id = filters.as_ref().and_then(|f| f.workspace_id);
-    let source_ids = filters.as_ref().and_then(|f| f.source_ids.as_deref());
-
-    let keyword = crate::embeddings::rewrite_query(query).keyword;
-    let results =
-        keyword_search(pool, &keyword, limit, workspace_id, source_ids, min_score).await?;
-
-    Ok(results
+    let rewritten = crate::embeddings::rewrite_query(query);
+    let results = keyword_search(
+        pool,
+        &rewritten.keyword,
+        limit.max(12),
+        filters.as_ref(),
+        min_score,
+    )
+    .await?;
+    let mapped = results
         .into_iter()
         .enumerate()
         .map(|(rank, r)| HybridSearchResult {
@@ -422,7 +510,8 @@ pub async fn keyword_only_search(
             keyword_score: Some(r.score),
             semantic_score: None,
         })
-        .collect())
+        .collect();
+    Ok(finalize_ranking(mapped, &rewritten.identifiers, limit))
 }
 
 /// Semantic-only search (no keyword component)
@@ -433,9 +522,6 @@ pub async fn semantic_only_search(
     filters: Option<SearchFilters>,
     min_similarity: f32,
 ) -> sqlx::Result<Vec<HybridSearchResult>> {
-    let workspace_id = filters.as_ref().and_then(|f| f.workspace_id);
-    let source_ids = filters.as_ref().and_then(|f| f.source_ids.as_deref());
-
     let query_embedding = crate::embeddings::align_vector(query_embedding)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
@@ -443,8 +529,7 @@ pub async fn semantic_only_search(
         pool,
         &query_embedding,
         limit,
-        workspace_id,
-        source_ids,
+        filters.as_ref(),
         min_similarity,
     )
     .await?;
@@ -554,6 +639,58 @@ mod tests {
             .unwrap();
         assert!(result_3.keyword_rank.is_none());
         assert!(result_3.semantic_rank.is_some());
+    }
+
+    #[test]
+    fn identifier_hits_outrank_semantic_neighbors() {
+        let config = HybridSearchConfig::for_query("What does should_skip_blob do?");
+        assert_eq!(config.semantic_weight, 0.45);
+
+        let keyword_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let semantic_id = Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap();
+        let keyword_results = vec![KeywordResult {
+            chunk_id: keyword_id,
+            content_item_id: Uuid::new_v4(),
+            source_id: Uuid::new_v4(),
+            chunk_text: "fn should_skip_blob(uri: &str, sha: &str) -> bool".to_string(),
+            item_uri: "github://zone/content/mod.rs".to_string(),
+            item_title: "mod.rs".to_string(),
+            score: 0.07,
+        }];
+        let semantic_results = vec![SemanticResult {
+            chunk_id: semantic_id,
+            content_item_id: Uuid::new_v4(),
+            source_id: Uuid::new_v4(),
+            chunk_text: "generic authentication helper".to_string(),
+            item_uri: "github://zone/auth.ts".to_string(),
+            item_title: "auth.ts".to_string(),
+            similarity: 0.51,
+        }];
+        let fused = reciprocal_rank_fusion(keyword_results, semantic_results, &config);
+        let ranked = finalize_ranking(fused, &["should_skip_blob".to_string()], 5);
+        assert_eq!(ranked[0].chunk_id, keyword_id);
+    }
+
+    #[test]
+    fn finalize_ranking_caps_chunks_per_file() {
+        let item = Uuid::parse_str("00000000-0000-0000-0000-0000000000aa").unwrap();
+        let results = (0..4)
+            .map(|i| HybridSearchResult {
+                chunk_id: Uuid::from_u128(i as u128 + 1),
+                content_item_id: item,
+                source_id: Uuid::new_v4(),
+                chunk_text: format!("fn should_skip_blob chunk {i}"),
+                item_uri: "github://zone/content/mod.rs".to_string(),
+                item_title: "mod.rs".to_string(),
+                score: 1.0 - i as f32 * 0.01,
+                keyword_rank: Some(i + 1),
+                semantic_rank: None,
+                keyword_score: Some(0.1),
+                semantic_score: None,
+            })
+            .collect();
+        let ranked = finalize_ranking(results, &["should_skip_blob".to_string()], 10);
+        assert_eq!(ranked.len(), 2);
     }
 
     #[test]

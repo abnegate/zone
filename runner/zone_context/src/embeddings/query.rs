@@ -164,6 +164,30 @@ fn model_family(model: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Additive RRF-scale boost when a hit literally contains an extracted identifier.
+/// Rank-1 RRF is ~0.01; a symbol in the chunk must beat a mediocre semantic neighbor.
+pub fn identifier_match_boost(uri: &str, title: &str, text: &str, identifiers: &[String]) -> f32 {
+    if identifiers.is_empty() {
+        return 0.0;
+    }
+    let uri_l = uri.to_ascii_lowercase();
+    let title_l = title.to_ascii_lowercase();
+    let mut boost: f32 = 0.0;
+    for id in identifiers {
+        if text.contains(id) {
+            boost += 0.01;
+            continue;
+        }
+        let id_l = id.to_ascii_lowercase();
+        if !id_l.is_empty() && uri_l.contains(&id_l) {
+            boost += 0.006;
+        } else if !id_l.is_empty() && title_l.contains(&id_l) {
+            boost += 0.004;
+        }
+    }
+    boost.min(0.02)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +258,20 @@ mod tests {
         assert!(text.contains("Instruct:"));
         assert!(text.contains("should_skip_blob"));
         assert_eq!(embed_query_text("nomic-embed-text", "hello"), "hello");
+    }
+
+    #[test]
+    fn identifier_boost_prefers_exact_symbol_hits() {
+        let ids = vec!["should_skip_blob".to_string()];
+        let in_chunk = identifier_match_boost(
+            "github://zone/other.rs",
+            "other",
+            "fn should_skip_blob() {}",
+            &ids,
+        );
+        let semantic_neighbor =
+            identifier_match_boost("github://zone/auth.ts", "auth", "login form", &ids);
+        assert!(in_chunk > semantic_neighbor);
+        assert!(in_chunk >= 0.01);
     }
 }

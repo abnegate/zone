@@ -236,6 +236,49 @@ fn file_citation(value: &Value, observed_at: &str) -> Citation {
     }
 }
 
+/// Citation for a retrieved knowledge entry or indexed source chunk.
+pub fn from_retrieved(title: &str, uri: &str, complete: bool, observed_at: &str) -> Citation {
+    let (kind, url, revision) = indexed_uri(uri);
+    Citation {
+        kind,
+        title: if title.trim().is_empty() {
+            url.clone()
+        } else {
+            title.to_string()
+        },
+        url,
+        revision,
+        observed_at: observed_at.to_string(),
+        complete,
+        outcome: if complete {
+            CitationOutcome::Observed
+        } else {
+            CitationOutcome::Incomplete
+        },
+        note: None,
+    }
+    .normalize()
+}
+
+fn indexed_uri(uri: &str) -> (CitationKind, String, Option<String>) {
+    if let Some(rest) = uri.strip_prefix("github://") {
+        if let Some((path, revision)) = rest.rsplit_once('@') {
+            let mut parts = path.splitn(3, '/');
+            if let (Some(owner), Some(repo), Some(file)) =
+                (parts.next(), parts.next(), parts.next())
+            {
+                return (
+                    CitationKind::GithubFile,
+                    format!("https://github.com/{owner}/{repo}/blob/{revision}/{file}"),
+                    Some(revision.to_string()),
+                );
+            }
+        }
+        return (CitationKind::GithubFile, uri.to_string(), None);
+    }
+    (CitationKind::WorkspaceDocument, uri.to_string(), None)
+}
+
 fn document_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
     if let Some(document) = value.get("document") {
         return vec![document_citation(document, value, observed_at)];
@@ -606,5 +649,59 @@ mod tests {
         let original = citations.clone();
         merge(&mut citations, original.clone());
         assert_eq!(citations, original);
+    }
+
+    #[test]
+    fn retrieved_github_uri_becomes_a_blob_url() {
+        let citation = from_retrieved(
+            "mod.rs",
+            "github://abnegate/zone/content/mod.rs@main",
+            true,
+            OBSERVED,
+        );
+        assert_eq!(citation.kind, CitationKind::GithubFile);
+        assert_eq!(
+            citation.url,
+            "https://github.com/abnegate/zone/blob/main/content/mod.rs"
+        );
+        assert_eq!(citation.revision.as_deref(), Some("main"));
+        assert!(citation.complete);
+        assert!(citation.usable());
+    }
+
+    #[test]
+    fn retrieved_knowledge_uri_stays_a_workspace_document() {
+        let citation = from_retrieved(
+            "Guide",
+            "knowledge://11111111-1111-1111-1111-111111111111",
+            true,
+            OBSERVED,
+        );
+        assert_eq!(citation.kind, CitationKind::WorkspaceDocument);
+        assert_eq!(
+            citation.url,
+            "knowledge://11111111-1111-1111-1111-111111111111"
+        );
+    }
+
+    #[test]
+    fn search_knowledge_json_citations_are_honored() {
+        let found = citations(
+            "search_knowledge",
+            json!({
+                "query": "should_skip_blob",
+                "citations": [{
+                    "kind": "github_file",
+                    "title": "mod.rs",
+                    "url": "https://github.com/abnegate/zone/blob/main/content/mod.rs",
+                    "revision": "main",
+                    "observed_at": OBSERVED,
+                    "complete": true,
+                    "outcome": "observed"
+                }]
+            }),
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, CitationKind::GithubFile);
     }
 }
