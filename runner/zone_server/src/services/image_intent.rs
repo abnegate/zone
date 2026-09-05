@@ -451,7 +451,7 @@ fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> 
         || has_phrase(&["into", "this"])
 }
 
-fn refers_to_existing_image(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+fn refers_to_existing_image(_tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
     has_phrase(&["this", "image"])
         || has_phrase(&["this", "picture"])
         || has_phrase(&["this", "photo"])
