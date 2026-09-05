@@ -1648,7 +1648,7 @@ describe('ChatsPage', () => {
       expect(screen.getByText('Starting image')).toBeInTheDocument();
       expect(
         screen.getByText(
-          'Ask to generate, edit, or animate and this image will be the starting point.'
+          'Ask to generate, edit, remove an object, change the setting, or animate and this image will be the starting point.'
         )
       ).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Added as starting image' })).toBeDisabled();

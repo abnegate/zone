@@ -329,7 +329,7 @@ test.describe('Chat images', () => {
     await expect(page.getByText('Starting image')).toBeVisible();
     await expect(
       page.getByText(
-        'Ask to generate, edit, or animate and this image will be the starting point.'
+        'Ask to generate, edit, remove an object, change the setting, or animate and this image will be the starting point.'
       )
     ).toBeVisible();
 

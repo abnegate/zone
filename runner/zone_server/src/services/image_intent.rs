@@ -99,14 +99,16 @@ impl ImageIntentClassifier {
         let prompt = if has_source_image {
             format!(
                 "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
-                 or wants the attached image edited now: add, remove, replace, restyle, or transform. \
+                 or wants the attached image edited now: add, remove, replace, restyle, transform, \
+                 change the background or environment, or place the subject in a different setting. \
                  Discussion, analysis, prompt-writing, coding, and questions about the attached \
                  image are CHAT.\nUser: {content}"
             )
         } else {
             format!(
                 "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
-                 or wants something added to, removed from, or changed on an existing image now. \
+                 or wants something added to, removed from, or changed on an existing image now, \
+                 including a new background or environment. \
                  Discussion, analysis, prompt-writing, coding, and how-to questions are CHAT.\nUser: {content}"
             )
         };
@@ -131,6 +133,51 @@ impl ImageIntentClassifier {
             return false;
         };
         answer.trim().eq_ignore_ascii_case("IMAGE")
+    }
+
+    /// Turn an attached-image edit request into a CLIP prompt for img2img.
+    /// Falls back to a heuristic if the classifier model is unavailable.
+    pub async fn edit_prompt(&self, content: &str) -> String {
+        let fallback = heuristic_edit_prompt(content);
+        if self.litellm_host.trim().is_empty() {
+            return fallback;
+        }
+        let client = LlmClient::new(LlmConfig {
+            base_url: self.litellm_host.clone(),
+            api_key: self.litellm_key.clone(),
+            default_model: self.config.classifier_model.clone(),
+            temperature: 0.2,
+            max_tokens: 160,
+        });
+        let prompt = format!(
+            "Rewrite the user's request as a positive prompt for an image model that starts from \
+             the attached photo. Describe the finished photograph, not the editing instruction. \
+             Keep the same main subject, identity, and pose unless the user asked to change them. \
+             If they asked to remove something, describe the scene without it and with that area \
+             filled in naturally; do not name the removed thing. If they asked to change the \
+             environment or background, describe the same subject in that new setting. \
+             No quotes, labels, or preamble. One or two sentences.\nUser: {content}"
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(self.config.classifier_timeout_secs),
+            client.chat_with_model(
+                &self.config.classifier_model,
+                vec![Message::user(prompt)],
+                None,
+            ),
+        )
+        .await;
+        let Ok(Ok(response)) = result else {
+            return fallback;
+        };
+        let Some(answer) = response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.as_deref())
+        else {
+            return fallback;
+        };
+        sanitize_rewritten_prompt(answer, content).unwrap_or(fallback)
     }
 }
 
@@ -185,7 +232,7 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         return RuleDecision::Video;
     }
 
-    if is_edit_request(&tokens, &has_phrase)
+    if is_edit_request(&tokens, &has_phrase, has_source_image)
         && (has_source_image || refers_to_existing_image(&tokens, &has_phrase))
     {
         return RuleDecision::Image;
@@ -323,7 +370,11 @@ fn is_animate_existing(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool)
             && refers_to_existing_image(tokens, has_phrase))
 }
 
-fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+fn is_edit_request(
+    tokens: &[String],
+    has_phrase: &impl Fn(&[&str]) -> bool,
+    has_source_image: bool,
+) -> bool {
     const STRONG_EDITS: &[&str] = &[
         "add",
         "remove",
@@ -346,18 +397,19 @@ fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> 
         "modify",
         "convert",
         "wipe",
+        "relocate",
     ];
     const WEAK_EDITS: &[&str] = &[
-        "put", "take", "fill", "hide", "fix", "clean", "clear", "brighten", "darken", "sharpen",
-        "blur", "vary", "swap", "move",
+        "put", "place", "take", "fill", "hide", "fix", "clean", "clear", "brighten", "darken",
+        "sharpen", "blur", "vary", "swap", "move",
     ];
+    let weak_edit = tokens
+        .iter()
+        .any(|token| WEAK_EDITS.contains(&token.as_str()));
     tokens
         .iter()
         .any(|token| STRONG_EDITS.contains(&token.as_str()))
-        || (tokens
-            .iter()
-            .any(|token| WEAK_EDITS.contains(&token.as_str()))
-            && refers_to_existing_image(tokens, has_phrase))
+        || (weak_edit && (has_source_image || refers_to_existing_image(tokens, has_phrase)))
         || has_phrase(&["get", "rid"])
         || has_phrase(&["take", "out"])
         || has_phrase(&["take", "off"])
@@ -368,6 +420,19 @@ fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> 
         || has_phrase(&["turn", "it"])
         || has_phrase(&["change", "this"])
         || has_phrase(&["change", "the"])
+        || has_phrase(&["put", "this"])
+        || has_phrase(&["place", "this"])
+        || has_phrase(&["put", "it"])
+        || has_phrase(&["place", "it"])
+        || has_phrase(&["move", "this"])
+        || has_phrase(&["different", "environment"])
+        || has_phrase(&["new", "environment"])
+        || has_phrase(&["another", "environment"])
+        || has_phrase(&["different", "background"])
+        || has_phrase(&["new", "background"])
+        || has_phrase(&["different", "setting"])
+        || has_phrase(&["new", "setting"])
+        || has_phrase(&["another", "scene"])
         || has_phrase(&["based", "on", "this"])
         || has_phrase(&["from", "this"])
         || has_phrase(&["using", "this"])
@@ -388,9 +453,89 @@ fn refers_to_existing_image(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> 
         || has_phrase(&["that", "picture"])
         || has_phrase(&["that", "photo"])
         || has_phrase(&["the", "attached"])
+        || has_phrase(&["this", "object"])
+        || has_phrase(&["the", "object"])
+        || has_phrase(&["this", "subject"])
+        || has_phrase(&["this", "one"])
+        || has_phrase(&["from", "an", "image"])
+        || has_phrase(&["from", "this"])
+        || has_phrase(&["put", "this"])
+        || has_phrase(&["place", "this"])
+        || has_phrase(&["put", "it"])
+        || has_phrase(&["place", "it"])
         || tokens
             .iter()
             .any(|token| token == "background" || token == "watermark")
+}
+
+fn is_removal_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    ["remove", "delete", "erase", "wipe"]
+        .iter()
+        .any(|word| tokens.iter().any(|token| token == *word))
+        || has_phrase(&["get", "rid"])
+        || has_phrase(&["take", "out"])
+        || has_phrase(&["take", "off"])
+        || has_phrase(&["cut", "out"])
+}
+
+fn is_environment_change(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "environment" | "background" | "setting" | "scene" | "backdrop"
+        )
+    }) || has_phrase(&["put", "this"])
+        || has_phrase(&["place", "this"])
+        || has_phrase(&["put", "it"])
+        || has_phrase(&["place", "it"])
+        || has_phrase(&["in", "a"])
+        || has_phrase(&["into", "a"])
+}
+
+/// CLIP text for img2img when the classifier model cannot rewrite the request.
+pub fn heuristic_edit_prompt(content: &str) -> String {
+    let tokens = tokenize(content);
+    let has_phrase = |phrase: &[&str]| phrase_in(&tokens, phrase);
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return "the same subject, edited as requested, photorealistic".to_string();
+    }
+    if is_removal_request(&tokens, &has_phrase) {
+        format!(
+            "the same photograph with the requested object gone, that area filled in naturally \
+             to match the surrounding scene, no leftover object or hole, photorealistic. {trimmed}"
+        )
+    } else if is_environment_change(&tokens, &has_phrase) {
+        format!(
+            "the same subject in the new environment described, keep the subject's identity, \
+             pose, and appearance, only change the setting, matching lighting, photorealistic. \
+             {trimmed}"
+        )
+    } else {
+        format!(
+            "the same subject with the requested edits applied, keep identity and composition \
+             unless asked to change them, photorealistic. {trimmed}"
+        )
+    }
+}
+
+fn sanitize_rewritten_prompt(answer: &str, original: &str) -> Option<String> {
+    let mut text = answer.trim().trim_matches('"').trim_matches('\'').trim();
+    if let Some(stripped) = text.strip_prefix("Prompt:") {
+        text = stripped.trim();
+    }
+    if text.is_empty()
+        || text.len() > 4_000
+        || text.eq_ignore_ascii_case("IMAGE")
+        || text.eq_ignore_ascii_case("CHAT")
+        || text.eq_ignore_ascii_case("VIDEO")
+    {
+        return None;
+    }
+    if text.eq_ignore_ascii_case(original.trim()) {
+        return Some(heuristic_edit_prompt(original));
+    }
+    Some(format!("{text} {}", original.trim()))
 }
 
 #[cfg(test)]
@@ -454,6 +599,10 @@ mod tests {
             "Take the logo off this image",
             "Get rid of the background",
             "Replace the sky in this picture",
+            "Put this object in a different environment",
+            "Remove this object from an image",
+            "Place this on a beach",
+            "Put this in a snowy forest",
         ] {
             assert_eq!(
                 deterministic_decision(edit, true),
@@ -478,6 +627,9 @@ mod tests {
             "Add a hat to this picture",
             "Edit this image to add a sunset",
             "Change the background to a forest",
+            "Put this object in a different environment",
+            "Remove this object from an image",
+            "Place this on a beach",
         ] {
             assert_eq!(
                 deterministic_decision(named_image, false),
@@ -488,6 +640,9 @@ mod tests {
         }
         assert!(!should_reuse_thread_image(
             "Generate an image of a blue fox"
+        ));
+        assert!(!should_reuse_thread_image(
+            "Generate an image of the environment"
         ));
         assert!(should_reuse_thread_image("Animate this image"));
         assert!(should_reuse_thread_image("Make this a video"));
@@ -658,5 +813,97 @@ mod tests {
                 .is_image_request("Design a logo for Acme", None)
                 .await
         );
+    }
+
+    #[test]
+    fn heuristic_edit_prompt_rewrites_environment_and_removal() {
+        let environment = heuristic_edit_prompt("Put this object in a different environment");
+        assert!(environment.contains("new environment"));
+        assert!(environment.contains("Put this object in a different environment"));
+
+        let beach = heuristic_edit_prompt("Place this on a beach");
+        assert!(beach.contains("new environment"));
+        assert!(beach.contains("Place this on a beach"));
+
+        let removal = heuristic_edit_prompt("Remove this object from an image");
+        assert!(removal.contains("requested object gone"));
+        assert!(removal.contains("Remove this object from an image"));
+
+        let style = heuristic_edit_prompt("Make this a watercolor");
+        assert!(style.contains("requested edits"));
+        assert!(style.contains("Make this a watercolor"));
+    }
+
+    #[test]
+    fn sanitize_rewritten_prompt_keeps_original_instruction() {
+        let rewritten = sanitize_rewritten_prompt(
+            "A wooden chair on a misty forest path, photorealistic.",
+            "Put this object in a different environment",
+        )
+        .unwrap();
+        assert!(rewritten.contains("wooden chair on a misty forest path"));
+        assert!(rewritten.contains("Put this object in a different environment"));
+
+        assert!(sanitize_rewritten_prompt("IMAGE", "remove the chair").is_none());
+        let echoed = sanitize_rewritten_prompt(
+            "Remove this object from an image",
+            "Remove this object from an image",
+        )
+        .unwrap();
+        assert!(echoed.contains("requested object gone"));
+    }
+
+    #[tokio::test]
+    async fn edit_prompt_uses_rewritten_scene_and_keeps_original() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "rewrite",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fast",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "A wooden chair on a misty forest path, photorealistic."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: "fast".to_string(),
+                ..Default::default()
+            },
+            server.uri(),
+            "key".to_string(),
+        );
+        let prompt = classifier
+            .edit_prompt("Put this object in a different environment")
+            .await;
+        assert!(prompt.contains("wooden chair on a misty forest path"));
+        assert!(prompt.contains("Put this object in a different environment"));
+    }
+
+    #[tokio::test]
+    async fn edit_prompt_falls_back_when_host_is_empty() {
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            String::new(),
+            String::new(),
+        );
+        let prompt = classifier
+            .edit_prompt("Remove this object from an image")
+            .await;
+        assert!(prompt.contains("requested object gone"));
+        assert!(prompt.contains("Remove this object from an image"));
     }
 }

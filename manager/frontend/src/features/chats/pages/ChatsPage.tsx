@@ -816,7 +816,8 @@ export default function ChatsPage() {
               )}
               {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
                 <p className="message-form-hint">
-                  Ask to generate, edit, or animate and this image will be the starting point.
+                  Ask to generate, edit, remove an object, change the setting, or animate and this
+                  image will be the starting point.
                 </p>
               ) : null}
 

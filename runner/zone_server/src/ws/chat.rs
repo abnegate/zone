@@ -937,6 +937,17 @@ async fn handle_image_generation(
         },
     )
     .await;
+    let generation_prompt = if source.is_some() {
+        crate::services::image_intent::ImageIntentClassifier::new(
+            image_config.clone(),
+            state.config().litellm_host.clone(),
+            state.config().litellm_key.clone(),
+        )
+        .edit_prompt(prompt)
+        .await
+    } else {
+        prompt.to_string()
+    };
     let _generation_permit = tokio::select! {
         biased;
         _ = generation.cancel.recv() => {
@@ -948,6 +959,7 @@ async fn handle_image_generation(
         }
         permit = IMAGE_GENERATIONS.acquire() => permit.expect("image semaphore is never closed"),
     };
+
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let progress_sender = sender.clone();
     let progress_task = tokio::spawn(async move {
@@ -959,7 +971,12 @@ async fn handle_image_generation(
     });
 
     let result = client
-        .generate(prompt, source.as_ref(), &mut generation.cancel, progress_tx)
+        .generate(
+            &generation_prompt,
+            source.as_ref(),
+            &mut generation.cancel,
+            progress_tx,
+        )
         .await;
     progress_task.abort();
     let _ = progress_task.await;

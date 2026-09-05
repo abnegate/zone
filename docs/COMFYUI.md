@@ -218,6 +218,13 @@ Node `11` scales the source to 1024×1024 with a centered crop. Node `12`
 VAE-encodes it. Packaged denoise is `0.75` so Schnell's four Euler/simple
 steps still transform the source instead of ignoring it.
 
+When chat has a source image (an attachment or a reused thread image), it
+rewrites the user instruction into a positive CLIP prompt — a description of
+the finished photograph — before filling node `6`. Denoise stays at the
+packaged `0.75`. The original instruction is kept in that prompt so edits
+such as removing an object or placing the subject in a new environment stay
+grounded in what the user asked.
+
 The packaged defaults are Schnell-appropriate: four Euler/simple steps and CFG
 1. Node `4` defaults to the manifest filename and is never changed from
 untrusted request data. Zone copies successful temporary output into its
