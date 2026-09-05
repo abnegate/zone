@@ -258,7 +258,7 @@ pub fn ident_part_coverage(text: &str, identifiers: &[String]) -> f32 {
     let text_l = text.to_ascii_lowercase();
     let mut parts = Vec::new();
     for id in identifiers {
-        for part in id.split(|c: char| c == '_' || c == '-' || c == '/') {
+        for part in id.split(['_', '-', '/']) {
             if part.len() >= 4 {
                 parts.push(part.to_ascii_lowercase());
             }
@@ -461,11 +461,7 @@ pub fn extract_features(
             inv_rank(semantic_rank),
             fixture_penalty(&uri_l),
             if role.is_definition() { 1.0 } else { 0.0 },
-            if is_test_chunk(uri, text) {
-                1.0
-            } else {
-                0.0
-            },
+            if is_test_chunk(uri, text) { 1.0 } else { 0.0 },
         ],
     }
 }
@@ -562,10 +558,10 @@ fn training_pairs() -> Vec<(RankFeatures, RankFeatures)> {
                 0.011,
             ),
         ));
-        for i in 0..graded.len() {
-            for j in 0..graded.len() {
-                if graded[i].0 > graded[j].0 {
-                    pairs.push((graded[i].1.clone(), graded[j].1.clone()));
+        for (rank_i, feat_i) in &graded {
+            for (rank_j, feat_j) in &graded {
+                if rank_i > rank_j {
+                    pairs.push((feat_i.clone(), feat_j.clone()));
                 }
             }
         }

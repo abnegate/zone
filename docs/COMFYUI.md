@@ -191,28 +191,52 @@ docker inspect --format '{{.State.Health.Status}}' comfyui
 docker compose --profile bundled-comfyui logs comfyui
 ```
 
+## Recipes
+
+Chat does not pick a workflow. The **Image model** setting is a checkpoint
+filename. Zone resolves that name to a recipe in `comfyui/recipes/catalog.json`
+and runs the matching graph:
+
+- no attached image → the recipe's `bare` graph
+- attached or reused thread image → the recipe's `with_source` graph
+
+Each recipe declares the only slots integration code may write: positive
+prompt, seed, checkpoint filename, and (for edits) the uploaded source
+filename. Sampler, steps, CFG, size, and negative prompt stay packaged.
+
+Shipped image recipes:
+
+- `flux-schnell` — FLUX.1 Schnell FP8 (default, including unknown filenames)
+- `sd15` — Stable Diffusion 1.5 (512, 20 Euler steps)
+- `sdxl` — SDXL / Pony / Illustrious (1024, 25 Euler steps)
+
+To add another family, drop two API-format graphs in `comfyui/workflows/`
+(generate + edit) and list them in `comfyui/recipes/catalog.json` with slot
+pointers. Do not add settings fields or sampler controls. Compose bind-mounts
+those directories, so a catalog on disk replaces the packaged catalog. To bake
+a new graph into the manager binary (no bind mounts), also add the filename to
+`packaged_workflow` in `runner/zone_server/src/services/comfy_recipe.rs`.
+
+Video (Wan) still uses the graphs in [Video workflow contract](#video-workflow-contract);
+it is not in the image catalog yet.
+
 ## Workflow contract
 
-`comfyui/workflows/flux1-schnell-fp8-api.json` is the text-to-image API-format
-workflow. It uses only built-in ComfyUI nodes. Integration code may replace
-only these inputs:
+`comfyui/workflows/flux1-schnell-fp8-api.json` is the default text-to-image
+graph (`flux-schnell`). It uses only built-in ComfyUI nodes. Integration code
+may replace only these inputs:
 
 - node `6`: positive prompt text
 - node `4`: checkpoint filename from trusted server configuration
-- node `5`: width, height, and batch size
-- node `3`: seed, steps, CFG, sampler, scheduler, and denoise
+- node `3`: seed
 - node `9`: temporary `PreviewImage` output (persistent `SaveImage` is rejected)
 
 `comfyui/workflows/flux1-schnell-fp8-img2img-api.json` is the image-to-image
 sibling. Chat uses it when the current message includes an image attachment
 (a data URL or a same-chat `/api/artifacts/...` URL). The manager uploads
-that image to ComfyUI's input folder, then may replace only:
+that image to ComfyUI's input folder, then may also replace:
 
-- node `6`: positive prompt text
-- node `4`: checkpoint filename from trusted server configuration
-- node `3`: seed (steps, CFG, sampler, scheduler, and denoise stay packaged)
 - node `10`: uploaded source filename
-- node `9`: temporary `PreviewImage` output (persistent `SaveImage` is rejected)
 
 Node `11` scales the source to 1024×1024 with a centered crop. Node `12`
 VAE-encodes it. Packaged denoise is `0.75` so Schnell's four Euler/simple

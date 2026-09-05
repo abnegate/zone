@@ -87,15 +87,18 @@ jobs:
             ${{ runner.os }}-${{ matrix.rust }}-cargo-
             ${{ runner.os }}-cargo-
 
+      - name: Install sqlx-cli
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
+        with:
+          tool: sqlx-cli@0.9.0
+
       - name: Run database migrations
         if: runner.os == 'Linux'
-        run: |
-          for f in migrations/*.sql; do
-            psql -h localhost -U postgres -d zone_test -v ON_ERROR_STOP=1 -f "$f"
-          done
         working-directory: runner/zone_server
+        run: sqlx migrate run
         env:
-          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
 
       - name: Build
         run: cargo build --workspace --exclude zone_desktop --all-targets --no-default-features --features zone_context/test-utils

@@ -308,7 +308,27 @@ async fn test_manual_reindex_endpoint() {
     let source_value = response.json_value();
     let source_id = source_value["source"]["id"].as_str().unwrap();
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    // Creating a source starts indexing. Wait until that run is no longer
+    // in-progress so manual reindex returns 202 instead of 409.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        let status_response = client
+            .get_auth(
+                &format!("/api/workspaces/{}/sources/{}", workspace_id, source_id),
+                &token,
+            )
+            .await;
+        status_response.assert_status(StatusCode::OK);
+        let status_body = status_response.json_value();
+        let index_status = status_body["source"]["index_status"].as_str().unwrap_or("");
+        if index_status != "indexing" {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("create-source indexing did not finish before reindex");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
 
     let initial_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")

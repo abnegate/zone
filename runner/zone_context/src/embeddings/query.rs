@@ -198,12 +198,11 @@ fn is_generic_ident_part(part: &str) -> bool {
 fn request_style_snake(token: &str) -> Option<String> {
     const SUFFIXES: &[&str] = &["Request", "Response", "Error", "Params", "Options", "Args"];
     for suffix in SUFFIXES {
-        if let Some(prefix) = token.strip_suffix(suffix) {
-            if let Some(snake) = camel_to_snake(prefix) {
-                if snake.contains('_') {
-                    return Some(snake);
-                }
-            }
+        if let Some(prefix) = token.strip_suffix(suffix)
+            && let Some(snake) = camel_to_snake(prefix)
+            && snake.contains('_')
+        {
+            return Some(snake);
         }
     }
     None

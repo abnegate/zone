@@ -1038,12 +1038,9 @@ mod tests {
             item_title: "mod.rs".into(),
             score: 0.4,
         };
-        let kept = keep_answer_chunks(
-            vec![header, body],
-            1,
-            &["should_skip_blob".into()],
-            |row| (row.chunk_text.as_str(), row.item_uri.as_str()),
-        );
+        let kept = keep_answer_chunks(vec![header, body], 1, &["should_skip_blob".into()], |row| {
+            (row.chunk_text.as_str(), row.item_uri.as_str())
+        });
         assert_eq!(kept.len(), 1);
         assert!(kept[0].chunk_text.contains("pub fn should_skip_blob"));
     }
@@ -1069,8 +1066,8 @@ mod tests {
             chunk_id: Uuid::from_u128(2),
             content_item_id: item,
             source_id: Uuid::nil(),
-            chunk_text: "pub fn should_skip_blob(&self, uri: &str, blob_sha: &str) -> bool { true }"
-                .into(),
+            chunk_text:
+                "pub fn should_skip_blob(&self, uri: &str, blob_sha: &str) -> bool { true }".into(),
             item_uri: "github://zone/content/mod.rs".into(),
             item_title: "mod.rs".into(),
             score: 1.2,
@@ -1086,9 +1083,7 @@ mod tests {
             2,
         );
         assert!(
-            ranked[0]
-                .chunk_text
-                .contains("pub fn should_skip_blob"),
+            ranked[0].chunk_text.contains("pub fn should_skip_blob"),
             "kept {}",
             ranked[0].chunk_text
         );

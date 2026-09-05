@@ -27,8 +27,9 @@ COPY runner/zone_desktop/Cargo.toml ./zone_desktop/
 COPY runner/zone_desktop/src ./zone_desktop/src/
 COPY runner/.sqlx ./.sqlx
 
-# Packaged workflow is compiled into zone_server via include_str! from repo root.
+# Packaged recipes and workflows are compiled into zone_server via include_str!
 COPY comfyui/workflows /build/comfyui/workflows
+COPY comfyui/recipes /build/comfyui/recipes
 
 ENV SQLX_OFFLINE=true
 # Source mtimes can precede cached artifacts after a checkout or file restore.
@@ -58,6 +59,7 @@ COPY --from=builder /build/bin/zone-server /app/zone-server
 COPY --from=builder /build/bin/zone-runner /app/zone-runner
 COPY --from=builder /build/runner/zone_server/migrations /app/migrations
 COPY --from=builder /build/comfyui/workflows /app/comfyui/workflows
+COPY --from=builder /build/comfyui/recipes /app/comfyui/recipes
 
 RUN chmod +x /app/zone-server /app/zone-runner
 

@@ -338,6 +338,7 @@ services:
       - manager_artifacts:/app/artifacts
       - manager_embed_cache:/app/embed-cache
       - ./comfyui/workflows:/app/comfyui/workflows:ro
+      - ./comfyui/recipes:/app/comfyui/recipes:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

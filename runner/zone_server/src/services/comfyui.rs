@@ -1,18 +1,19 @@
-//! Direct ComfyUI API client and versioned FLUX.1 Schnell workflow.
+//! Direct ComfyUI API client. Graphs come from packaged recipes; chat only
+//! supplies prompt, seed, checkpoint filename, and an optional source image.
 
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
+use super::comfy_recipe::{Fill, RecipeCatalog, sanitize_upload_name, sanitize_weight_filename};
 use crate::config::ComfyUiConfig;
 
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-const PACKAGED_IMG2IMG_WORKFLOW: &str =
-    include_str!("../../../../comfyui/workflows/flux1-schnell-fp8-img2img-api.json");
 const PACKAGED_VIDEO_WORKFLOW: &str =
     include_str!("../../../../comfyui/workflows/wan2.2-ti2v-5b-api.json");
 const PACKAGED_I2V_WORKFLOW: &str =
@@ -73,8 +74,7 @@ impl SourceImage {
 pub struct ComfyUiClient {
     config: ComfyUiConfig,
     client: Client,
-    workflow: Value,
-    img2img_workflow: Value,
+    catalog: RecipeCatalog,
 }
 
 #[derive(Deserialize)]
@@ -177,24 +177,20 @@ impl ComfyUiClient {
         if config.base_url.trim().is_empty() {
             return Err(ComfyUiError::Configuration("COMFYUI_BASE_URL is empty"));
         }
-        if !is_model_filename(&config.checkpoint) {
-            return Err(ComfyUiError::Configuration(
-                "COMFYUI_CHECKPOINT must be a checkpoint filename",
-            ));
-        }
+        sanitize_weight_filename(&config.checkpoint).map_err(|_| {
+            ComfyUiError::Configuration("COMFYUI_CHECKPOINT must be a checkpoint filename")
+        })?;
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(config.request_timeout_secs))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let workflow = load_workflow_file(&config.workflow_path)?;
-        validate_workflow(&workflow)?;
-        let img2img_workflow = load_img2img_workflow(&config.workflow_path)?;
-        validate_img2img_workflow(&img2img_workflow)?;
+        let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))?;
+        let _ = catalog.image_recipe_for(&config.checkpoint)?;
         Ok(Self {
             config,
             client,
-            workflow,
-            img2img_workflow,
+            catalog,
         })
     }
 
@@ -249,23 +245,23 @@ impl ComfyUiClient {
         } else {
             prompt
         };
+        let recipe = self.catalog.image_recipe_for(&self.config.checkpoint)?;
         let workflow = if let Some(source) = source {
             let _ = progress.send("Uploading source image...".to_string());
             let uploaded = self.upload_source(source, cancel, deadline).await?;
-            configure_flux_schnell_img2img_workflow(
-                self.img2img_workflow.clone(),
+            recipe.apply(Fill {
                 prompt,
-                &self.config.checkpoint,
-                rand::random::<u64>() & i64::MAX as u64,
-                &uploaded,
-            )?
+                seed: rand::random::<u64>() & i64::MAX as u64,
+                weights: HashMap::from([("checkpoint", self.config.checkpoint.as_str())]),
+                source: Some(uploaded.as_str()),
+            })?
         } else {
-            configure_flux_schnell_workflow(
-                self.workflow.clone(),
+            recipe.apply(Fill {
                 prompt,
-                &self.config.checkpoint,
-                rand::random::<u64>() & i64::MAX as u64,
-            )?
+                seed: rand::random::<u64>() & i64::MAX as u64,
+                weights: HashMap::from([("checkpoint", self.config.checkpoint.as_str())]),
+                source: None,
+            })?
         };
         self.submit_and_collect(
             workflow,
@@ -574,29 +570,37 @@ impl ComfyUiClient {
     }
 }
 
-/// Build the fixed workflow and mutate only prompt, checkpoint, and random seed.
+/// Build the default image recipe and mutate only prompt, checkpoint, and seed.
 pub fn build_flux_schnell_workflow(
     prompt: &str,
     checkpoint: &str,
     seed: u64,
 ) -> Result<Value, ComfyUiError> {
-    let workflow = serde_json::from_str(include_str!(
-        "../../../../comfyui/workflows/flux1-schnell-fp8-api.json"
-    ))
-    .map_err(|_| ComfyUiError::Configuration("packaged workflow is not valid JSON"))?;
-    configure_flux_schnell_workflow(workflow, prompt, checkpoint, seed)
+    RecipeCatalog::packaged()?
+        .image_recipe_for("flux1-schnell-fp8.safetensors")?
+        .apply(Fill {
+            prompt,
+            seed,
+            weights: HashMap::from([("checkpoint", checkpoint)]),
+            source: None,
+        })
 }
 
-/// Build the image-to-image workflow and mutate only approved inputs.
+/// Build the default image-to-image recipe and mutate only approved inputs.
 pub fn build_flux_schnell_img2img_workflow(
     prompt: &str,
     checkpoint: &str,
     seed: u64,
     image_name: &str,
 ) -> Result<Value, ComfyUiError> {
-    let workflow = serde_json::from_str(PACKAGED_IMG2IMG_WORKFLOW)
-        .map_err(|_| ComfyUiError::Configuration("packaged img2img workflow is not valid JSON"))?;
-    configure_flux_schnell_img2img_workflow(workflow, prompt, checkpoint, seed, image_name)
+    RecipeCatalog::packaged()?
+        .image_recipe_for("flux1-schnell-fp8.safetensors")?
+        .apply(Fill {
+            prompt,
+            seed,
+            weights: HashMap::from([("checkpoint", checkpoint)]),
+            source: Some(image_name),
+        })
 }
 
 fn load_workflow_file(path: &std::path::Path) -> Result<Value, ComfyUiError> {
@@ -604,18 +608,6 @@ fn load_workflow_file(path: &std::path::Path) -> Result<Value, ComfyUiError> {
         .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not readable"))?;
     serde_json::from_str(&contents)
         .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not valid JSON"))
-}
-
-fn load_img2img_workflow(text_to_image_path: &std::path::Path) -> Result<Value, ComfyUiError> {
-    let sibling = text_to_image_path
-        .parent()
-        .map(|directory| directory.join("flux1-schnell-fp8-img2img-api.json"));
-    if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return load_workflow_file(&path)
-            .map_err(|_| ComfyUiError::Configuration("img2img workflow path is not readable"));
-    }
-    serde_json::from_str(PACKAGED_IMG2IMG_WORKFLOW)
-        .map_err(|_| ComfyUiError::Configuration("packaged img2img workflow is not valid JSON"))
 }
 
 fn load_video_workflow(path: &std::path::Path) -> Result<Value, ComfyUiError> {
@@ -668,115 +660,6 @@ pub fn build_wan_i2v_workflow(
     })?;
     configure_wan_i2v_workflow(workflow, prompt, unet, clip, vae, seed, image_name)
 }
-
-fn validate_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
-    for pointer in [
-        "/3/inputs/seed",
-        "/4/inputs/ckpt_name",
-        "/5/inputs/width",
-        "/5/inputs/height",
-        "/6/inputs/text",
-        "/9/inputs/images",
-    ] {
-        if workflow.pointer(pointer).is_none() {
-            return Err(ComfyUiError::Configuration(
-                "workflow does not match the FLUX Schnell contract",
-            ));
-        }
-    }
-    if workflow.pointer("/9/class_type").and_then(Value::as_str) != Some("PreviewImage") {
-        return Err(ComfyUiError::Configuration(
-            "workflow output must use temporary PreviewImage storage",
-        ));
-    }
-    Ok(())
-}
-
-fn configure_flux_schnell_workflow(
-    mut workflow: Value,
-    prompt: &str,
-    checkpoint: &str,
-    seed: u64,
-) -> Result<Value, ComfyUiError> {
-    if prompt.trim().is_empty() || prompt.len() > 100_000 {
-        return Err(ComfyUiError::Configuration("prompt is empty or too long"));
-    }
-    if checkpoint.is_empty()
-        || checkpoint.contains('/')
-        || checkpoint.contains('\\')
-        || checkpoint.contains("..")
-    {
-        return Err(ComfyUiError::Configuration("invalid checkpoint filename"));
-    }
-    validate_workflow(&workflow)?;
-    workflow["3"]["inputs"]["seed"] = json!(seed);
-    workflow["4"]["inputs"]["ckpt_name"] = json!(checkpoint);
-    workflow["6"]["inputs"]["text"] = json!(prompt);
-    Ok(workflow)
-}
-
-fn validate_img2img_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
-    for pointer in [
-        "/3/inputs/seed",
-        "/3/inputs/denoise",
-        "/4/inputs/ckpt_name",
-        "/6/inputs/text",
-        "/9/inputs/images",
-        "/10/inputs/image",
-        "/11/inputs/width",
-        "/11/inputs/height",
-        "/12/inputs/pixels",
-    ] {
-        if workflow.pointer(pointer).is_none() {
-            return Err(ComfyUiError::Configuration(
-                "workflow does not match the FLUX Schnell img2img contract",
-            ));
-        }
-    }
-    if workflow.pointer("/9/class_type").and_then(Value::as_str) != Some("PreviewImage") {
-        return Err(ComfyUiError::Configuration(
-            "workflow output must use temporary PreviewImage storage",
-        ));
-    }
-    if workflow.pointer("/10/class_type").and_then(Value::as_str) != Some("LoadImage") {
-        return Err(ComfyUiError::Configuration(
-            "img2img workflow must load a source image",
-        ));
-    }
-    if workflow.pointer("/12/class_type").and_then(Value::as_str) != Some("VAEEncode") {
-        return Err(ComfyUiError::Configuration(
-            "img2img workflow must encode the source image",
-        ));
-    }
-    Ok(())
-}
-
-fn configure_flux_schnell_img2img_workflow(
-    mut workflow: Value,
-    prompt: &str,
-    checkpoint: &str,
-    seed: u64,
-    image_name: &str,
-) -> Result<Value, ComfyUiError> {
-    if prompt.trim().is_empty() || prompt.len() > 100_000 {
-        return Err(ComfyUiError::Configuration("prompt is empty or too long"));
-    }
-    if checkpoint.is_empty()
-        || checkpoint.contains('/')
-        || checkpoint.contains('\\')
-        || checkpoint.contains("..")
-    {
-        return Err(ComfyUiError::Configuration("invalid checkpoint filename"));
-    }
-    let image_name = sanitize_upload_name(image_name)?;
-    validate_img2img_workflow(&workflow)?;
-    workflow["3"]["inputs"]["seed"] = json!(seed);
-    workflow["4"]["inputs"]["ckpt_name"] = json!(checkpoint);
-    workflow["6"]["inputs"]["text"] = json!(prompt);
-    workflow["10"]["inputs"]["image"] = json!(image_name);
-    Ok(workflow)
-}
-
 fn validate_video_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
     for pointer in [
         "/1/inputs/unet_name",
@@ -916,21 +799,6 @@ fn mime_for_filename(name: &str) -> String {
     } else {
         "image/png".to_string()
     }
-}
-
-fn sanitize_upload_name(name: &str) -> Result<String, ComfyUiError> {
-    if name.is_empty()
-        || name.len() > 128
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains("..")
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
-    {
-        return Err(ComfyUiError::Configuration("invalid source image filename"));
-    }
-    Ok(name.to_string())
 }
 
 fn uploaded_image_name(uploaded: &UploadResponse, fallback: &str) -> Result<String, ComfyUiError> {
@@ -1083,21 +951,6 @@ mod tests {
     fn workflow_rejects_checkpoint_traversal() {
         assert!(build_flux_schnell_workflow("fox", "../secret", 1).is_err());
         assert!(build_flux_schnell_workflow("fox", "models/secret", 1).is_err());
-    }
-
-    #[test]
-    fn workflow_rejects_persistent_output_nodes() {
-        let mut workflow: Value = serde_json::from_str(include_str!(
-            "../../../../comfyui/workflows/flux1-schnell-fp8-api.json"
-        ))
-        .unwrap();
-        workflow["9"]["class_type"] = json!("SaveImage");
-        assert!(matches!(
-            validate_workflow(&workflow),
-            Err(ComfyUiError::Configuration(
-                "workflow output must use temporary PreviewImage storage"
-            ))
-        ));
     }
 
     #[test]

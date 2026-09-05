@@ -977,7 +977,9 @@ export default function WorkspaceSettingsPage() {
                           ))}
                         </select>
                         <p className="form-hint">
-                          ComfyUI checkpoint used when a message asks for an image.
+                          ComfyUI checkpoint used when a message asks for an image. Attach a photo
+                          to edit it instead of generating. The matching recipe is selected
+                          automatically.
                         </p>
                       </div>
                       <div className="form-group">

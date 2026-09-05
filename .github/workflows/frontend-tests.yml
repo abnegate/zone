@@ -15,6 +15,9 @@ on:
       - 'runner/zone_installer/src/setup.html'
       - '.github/workflows/frontend-tests.yml'
 
+permissions:
+  contents: read
+
 jobs:
   coverage:
     name: Unit Tests & Coverage
@@ -65,9 +68,9 @@ jobs:
         working-directory: manager/frontend
         run: |
           if [ "${{ matrix.browser }}" = "chromium" ]; then
-            bunx playwright install --with-deps chromium chromium-headless-shell
+            bunx playwright@1.62.1 install --with-deps chromium chromium-headless-shell
           else
-            bunx playwright install --with-deps ${{ matrix.browser }}
+            bunx playwright@1.62.1 install --with-deps ${{ matrix.browser }}
           fi
 
       - name: Run Playwright tests

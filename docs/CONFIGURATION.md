@@ -142,11 +142,13 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `COMFYUI_WORKFLOW_PATH`
 - **Default**: `/app/comfyui/workflows/flux1-schnell-fp8-api.json`
-- **Description**: In-container path to the versioned FLUX.1 Schnell
-  text-to-image API workflow. Image-to-image uses the sibling file
-  `flux1-schnell-fp8-img2img-api.json` in the same directory.
-- **Usage**: The Compose file mounts the repository workflow directory at this
-  path
+- **Description**: In-container path to a workflow file. Graphs in that
+  directory overlay packaged copies of the same filename. If
+  `../recipes/catalog.json` exists beside that directory, it replaces the
+  packaged recipe catalog. Chat still only writes prompt, seed, checkpoint,
+  and optional source image.
+- **Usage**: The Compose file mounts the repository `comfyui/workflows` and
+  `comfyui/recipes` directories here.
 
 ### `COMFYUI_CHECKPOINT`
 - **Default**: `flux1-schnell-fp8.safetensors`
