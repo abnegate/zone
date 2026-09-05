@@ -821,9 +821,7 @@ describe('WorkspaceSettingsPage', () => {
       render(<WorkspaceSettingsPage />);
       await openAiTab(user);
       await waitFor(() => {
-        expect(screen.getByLabelText('Video Model')).toHaveValue(
-          'wan2.2_ti2v_5B_fp16.safetensors'
-        );
+        expect(screen.getByLabelText('Video Model')).toHaveValue('wan2.2_ti2v_5B_fp16.safetensors');
       });
       await user.selectOptions(screen.getByLabelText('Video Model'), '');
       await user.click(screen.getByRole('button', { name: 'Save Changes' }));

@@ -356,9 +356,7 @@ describe('OrgSettingsPage', () => {
 
       render(<OrgSettingsPage />);
       await waitFor(() => {
-        expect(screen.getByLabelText('Video Model')).toHaveValue(
-          'wan2.2_ti2v_5B_fp16.safetensors'
-        );
+        expect(screen.getByLabelText('Video Model')).toHaveValue('wan2.2_ti2v_5B_fp16.safetensors');
       });
 
       fireEvent.change(screen.getByLabelText('Video Model'), { target: { value: '' } });
