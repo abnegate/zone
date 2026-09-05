@@ -14,9 +14,11 @@ use crate::content::{
     embed_char_budget, smart_chunk, split_for_embedding,
 };
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
+use crate::embeddings::rerank::min_max_norm;
 use crate::embeddings::{
-    Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult, PgVectorStore,
-    SearchFilters, VectorStore, embed_query_text, keyword_only_search, semantic_only_search,
+    CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
+    PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_query_text, keyword_only_search,
+    semantic_only_search, sort_by_score,
 };
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
@@ -92,7 +94,7 @@ impl SearchResultWithAnalysis {
             content_item_id: r.content_item_id,
             source_id: r.source_id,
             similarity: r.semantic_score.unwrap_or(r.score),
-            rrf_score: rrf.then_some(r.score),
+            rrf_score: rrf.then_some(r.fusion_score),
             semantic_score: r.semantic_score,
             keyword_score: r.keyword_score,
             chunk_text: r.chunk_text,
@@ -115,6 +117,7 @@ pub struct ContextService {
     adapter_registry: Arc<AdapterRegistry>,
     embedding_service: Arc<dyn EmbeddingService>,
     vector_store: PgVectorStore,
+    reranker: Option<Arc<dyn CrossEncoder>>,
 }
 
 impl ContextService {
@@ -130,7 +133,12 @@ impl ContextService {
             adapter_registry,
             embedding_service,
             vector_store,
+            reranker: None,
         }
+    }
+
+    pub fn set_reranker(&mut self, reranker: Arc<dyn CrossEncoder>) {
+        self.reranker = Some(reranker);
     }
 
     /// Gather content from sources, analyze, embed, and store
@@ -485,13 +493,14 @@ impl ContextService {
         config: Option<HybridSearchConfig>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
         let hybrid_config = config.unwrap_or_else(|| HybridSearchConfig::for_query(query));
-        let results = match query_embedding {
+        let candidate_limit = (limit * 2).max(16);
+        let mut results = match query_embedding {
             Some(embedding) => {
                 crate::embeddings::hybrid_search_filtered(
                     &self.pool,
                     query,
                     embedding,
-                    limit,
+                    candidate_limit,
                     filters.as_ref(),
                     &hybrid_config,
                 )
@@ -501,13 +510,17 @@ impl ContextService {
                 keyword_only_search(
                     &self.pool,
                     query,
-                    limit,
+                    candidate_limit,
                     filters,
                     hybrid_config.min_keyword_score,
                 )
                 .await?
             }
         };
+        if let Some(reranker) = &self.reranker {
+            results = neural_rerank(reranker.as_ref(), query, results).await;
+        }
+        let results = cap_per_file(results, 2, limit);
 
         let rrf = query_embedding.is_some();
         Ok(results
@@ -805,6 +818,35 @@ impl<'a> ProgressCallback for SourceProgressAdapter<'a> {
     fn on_message(&self, _message: &str) {
         // Could emit message events if needed
     }
+}
+
+async fn neural_rerank(
+    reranker: &dyn CrossEncoder,
+    query: &str,
+    mut results: Vec<HybridSearchResult>,
+) -> Vec<HybridSearchResult> {
+    if results.is_empty() {
+        return results;
+    }
+    let take = results.len().min(16);
+    let documents: Vec<&str> = results
+        .iter()
+        .take(take)
+        .map(|result| result.chunk_text.as_str())
+        .collect();
+    match reranker.score_documents(query, &documents).await {
+        Ok(scores) => {
+            let norm = min_max_norm(&scores);
+            for (result, neural) in results.iter_mut().zip(norm) {
+                result.score += 0.22 * (neural - 0.5);
+            }
+            sort_by_score(&mut results);
+        }
+        Err(error) => {
+            tracing::debug!(%error, "neural cross-encoder skipped");
+        }
+    }
+    results
 }
 
 #[cfg(test)]

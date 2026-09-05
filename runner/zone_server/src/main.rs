@@ -39,12 +39,12 @@ async fn main() {
     // Load config
     let config = Config::from_env().expect("Failed to load configuration");
 
-    // Connect to database
-    let db = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&config.database_url)
+    // Connect to database with ANN session knobs on every checkout.
+    let db = zone_server::db::DbPool::connect(&config.database_url)
         .await
-        .expect("Failed to connect to database");
+        .expect("Failed to connect to database")
+        .inner()
+        .clone();
 
     tracing::info!("Connected to database");
 
@@ -149,11 +149,18 @@ async fn main() {
     // Build app state
     let state = if let Some(embedding_service) = embedding_service {
         // Initialize context service
-        let context_service = Arc::new(ContextService::new(
+        let mut context_service = ContextService::new(
             db.clone(),
             adapter_registry.clone(),
             embedding_service.clone(),
-        ));
+        );
+        if let Some(reranker) = zone_context::probe_cross_encoder(&config.ollama_host).await {
+            tracing::info!("Initialized neural cross-encoder reranker");
+            context_service.set_reranker(reranker);
+        } else {
+            tracing::info!("No neural reranker; using learned ranker + lexical cross-encoder");
+        }
+        let context_service = Arc::new(context_service);
 
         tracing::info!("Initialized context service");
 

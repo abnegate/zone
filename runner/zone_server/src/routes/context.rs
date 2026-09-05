@@ -65,6 +65,7 @@ const MAX_QUERY_LENGTH: usize = 1000;
 const MIN_QUERY_LENGTH: usize = 1;
 const MAX_SOURCE_IDS: usize = 50;
 const SNIPPET_MAX_LENGTH: usize = 200;
+const PASSAGE_MAX_LENGTH: usize = 2000;
 
 // Knowledge validation constants
 const MAX_TITLE_LENGTH: usize = 256;
@@ -99,6 +100,8 @@ pub struct SearchResultItem {
     title: String,
     uri: String,
     snippet: String,
+    /// Retrieved chunk used for graded relevance (longer than `snippet`).
+    text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -684,6 +687,7 @@ pub async fn search(
             title: r.item_title,
             uri: r.item_uri,
             snippet: truncate_snippet(&r.chunk_text, SNIPPET_MAX_LENGTH),
+            text: truncate_snippet(&r.chunk_text, PASSAGE_MAX_LENGTH),
         })
         .collect();
 

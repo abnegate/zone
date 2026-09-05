@@ -42,8 +42,11 @@ impl DbPool {
     /// Create a new database connection pool
     pub async fn connect(database_url: &str) -> Result<Self, sqlx::Error> {
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(20)
             .acquire_timeout(Duration::from_secs(30))
+            .after_connect(|conn, _meta| {
+                Box::pin(async move { zone_context::configure_ann_connection(conn).await })
+            })
             .connect(database_url)
             .await?;
 

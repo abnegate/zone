@@ -49,11 +49,12 @@ pub async fn store_message_embedding(
 
     sqlx::query(
         r#"
-        INSERT INTO message_embeddings (message_id, chat_id, vector, model)
-        VALUES ($1, $2, $3::vector, $4)
+        INSERT INTO message_embeddings (message_id, chat_id, workspace_id, vector, model)
+        VALUES ($1, $2, (SELECT workspace_id FROM chats WHERE id = $2), $3::vector, $4)
         ON CONFLICT (message_id) DO UPDATE SET
             vector = EXCLUDED.vector,
-            model = EXCLUDED.model
+            model = EXCLUDED.model,
+            workspace_id = COALESCE(EXCLUDED.workspace_id, message_embeddings.workspace_id)
         "#,
     )
     .bind(message_id)
@@ -94,64 +95,39 @@ pub async fn search_messages(
 ) -> Result<Vec<MessageSearchResult>, sqlx::Error> {
     let vector_str = aligned_vector_literal(query_embedding)?;
 
-    let results = match chat_id {
-        Some(cid) => {
-            // Search within a specific chat in a workspace
-            sqlx::query_as::<_, MessageSearchResult>(
-                r#"
-                SELECT
-                    m.id as message_id,
-                    m.chat_id,
-                    (1 - (me.vector <=> $1::vector))::REAL as similarity,
-                    m.role,
-                    m.content,
-                    m.created_at
-                FROM message_embeddings me
-                JOIN messages m ON m.id = me.message_id
-                JOIN chats c ON c.id = m.chat_id
-                WHERE me.chat_id = $2
-                  AND c.workspace_id = $3
-                  AND (1 - (me.vector <=> $1::vector)) >= $5
-                ORDER BY me.vector <=> $1::vector
-                LIMIT $4
-                "#,
-            )
-            .bind(&vector_str)
-            .bind(cid)
-            .bind(workspace_id)
-            .bind(limit as i64)
-            .bind(threshold)
-            .fetch_all(pool)
-            .await?
-        }
-        None => {
-            // Search across all chats in a workspace
-            sqlx::query_as::<_, MessageSearchResult>(
-                r#"
-                SELECT
-                    m.id as message_id,
-                    m.chat_id,
-                    (1 - (me.vector <=> $1::vector))::REAL as similarity,
-                    m.role,
-                    m.content,
-                    m.created_at
-                FROM message_embeddings me
-                JOIN messages m ON m.id = me.message_id
-                JOIN chats c ON c.id = m.chat_id
-                WHERE c.workspace_id = $2
-                  AND (1 - (me.vector <=> $1::vector)) >= $4
-                ORDER BY me.vector <=> $1::vector
-                LIMIT $3
-                "#,
-            )
-            .bind(&vector_str)
-            .bind(workspace_id)
-            .bind(limit as i64)
-            .bind(threshold)
-            .fetch_all(pool)
-            .await?
-        }
-    };
+    let candidate_limit = zone_context::ann_candidate_limit(limit, chat_id.is_none());
+    let results = sqlx::query_as::<_, MessageSearchResult>(
+        r#"
+        WITH ann AS (
+            SELECT me.message_id, me.chat_id, me.vector
+            FROM message_embeddings me
+            WHERE me.workspace_id = $2
+              AND ($3::uuid IS NULL OR me.chat_id = $3)
+            ORDER BY me.vector_bit <~> binary_quantize($1::vector)::bit(1024)
+            LIMIT $5
+        )
+        SELECT
+            m.id as message_id,
+            m.chat_id,
+            (1 - (ann.vector <=> $1::vector))::REAL as similarity,
+            m.role,
+            m.content,
+            m.created_at
+        FROM ann
+        JOIN messages m ON m.id = ann.message_id
+        WHERE (1 - (ann.vector <=> $1::vector)) >= $6
+        ORDER BY ann.vector <=> $1::vector
+        LIMIT $4
+        "#,
+    )
+    .bind(&vector_str)
+    .bind(workspace_id)
+    .bind(chat_id)
+    .bind(limit as i64)
+    .bind(candidate_limit as i64)
+    .bind(threshold)
+    .fetch_all(pool)
+    .await?;
 
     Ok(results)
 }
@@ -178,7 +154,7 @@ pub async fn search_messages_keyword(
                     m.id as message_id,
                     m.chat_id,
                     ts_rank(
-                        to_tsvector('english', m.content),
+                        m.search_vector,
                         websearch_to_tsquery('english', $1)
                     )::REAL as similarity,
                     m.role,
@@ -188,8 +164,7 @@ pub async fn search_messages_keyword(
                 JOIN chats c ON c.id = m.chat_id
                 WHERE m.chat_id = $2
                   AND c.workspace_id = $3
-                  AND to_tsvector('english', m.content)
-                      @@ websearch_to_tsquery('english', $1)
+                  AND m.search_vector @@ websearch_to_tsquery('english', $1)
                 ORDER BY similarity DESC
                 LIMIT $4
                 "#,
@@ -208,7 +183,7 @@ pub async fn search_messages_keyword(
                     m.id as message_id,
                     m.chat_id,
                     ts_rank(
-                        to_tsvector('english', m.content),
+                        m.search_vector,
                         websearch_to_tsquery('english', $1)
                     )::REAL as similarity,
                     m.role,
@@ -217,8 +192,7 @@ pub async fn search_messages_keyword(
                 FROM messages m
                 JOIN chats c ON c.id = m.chat_id
                 WHERE c.workspace_id = $2
-                  AND to_tsvector('english', m.content)
-                      @@ websearch_to_tsquery('english', $1)
+                  AND m.search_vector @@ websearch_to_tsquery('english', $1)
                 ORDER BY similarity DESC
                 LIMIT $3
                 "#,
@@ -241,23 +215,41 @@ pub fn fuse_message_hits(
     query: &str,
     limit: usize,
 ) -> Vec<MessageSearchResult> {
-    let identifiers = zone_context::rewrite_query(query).identifiers;
-    let mut scores: std::collections::HashMap<Uuid, (MessageSearchResult, f32)> =
-        std::collections::HashMap::new();
+    let mut scores: std::collections::HashMap<
+        Uuid,
+        (MessageSearchResult, f32, Option<usize>, Option<usize>),
+    > = std::collections::HashMap::new();
     for (rank, hit) in semantic.into_iter().enumerate() {
-        let boost = zone_context::identifier_match_boost("", "", &hit.content, &identifiers);
-        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
-        scores.insert(hit.message_id, (hit, rrf + boost));
+        scores.insert(hit.message_id, (hit, 0.0, None, Some(rank + 1)));
     }
     for (rank, hit) in keyword.into_iter().enumerate() {
-        let boost = zone_context::identifier_match_boost("", "", &hit.content, &identifiers);
-        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
         scores
             .entry(hit.message_id)
-            .and_modify(|(_, score)| *score += rrf)
-            .or_insert((hit, rrf + boost));
+            .and_modify(|(existing, _, kw_rank, _)| {
+                *kw_rank = Some(rank + 1);
+                if existing.content.is_empty() {
+                    *existing = hit.clone();
+                }
+            })
+            .or_insert((hit, 0.0, Some(rank + 1), None));
     }
-    let mut fused: Vec<_> = scores.into_values().collect();
+    let mut fused: Vec<_> = scores
+        .into_values()
+        .map(|(hit, _, kw_rank, sem_rank)| {
+            let score = zone_context::score_hit(
+                query,
+                "",
+                "",
+                &hit.content,
+                sem_rank.map(|_| hit.similarity),
+                kw_rank.map(|_| hit.similarity),
+                kw_rank,
+                sem_rank,
+                0.0,
+            );
+            (hit, score)
+        })
+        .collect();
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     fused.into_iter().take(limit).map(|(hit, _)| hit).collect()
 }

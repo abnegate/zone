@@ -564,28 +564,41 @@ impl VectorStore for PgVectorStore {
             item_title: String,
         }
 
+        let extra = super::serving::has_extra_filters(
+            source_ids.is_some(),
+            categories.is_some(),
+            min_quality.is_some(),
+            since.is_some(),
+        );
+        let candidate_limit = super::serving::ann_candidate_limit(limit, extra);
+
         let records: Vec<SearchResultRow> = sqlx::query_as(
             r#"
+            WITH ann AS (
+                SELECT e.chunk_id, e.content_item_id, e.source_id, e.vector
+                FROM embeddings e
+                WHERE ($4::uuid IS NULL OR e.workspace_id = $4)
+                    AND ($3::uuid[] IS NULL OR e.source_id = ANY($3))
+                ORDER BY e.vector_bit <~> binary_quantize($1::vector)::bit(1024)
+                LIMIT $9
+            )
             SELECT
-                e.chunk_id,
-                e.content_item_id,
-                e.source_id,
-                (1 - (e.vector <=> $1::vector))::FLOAT as similarity,
+                ann.chunk_id,
+                ann.content_item_id,
+                ann.source_id,
+                (1 - (ann.vector <=> $1::vector))::FLOAT as similarity,
                 cc.text as chunk_text,
                 ci.uri as item_uri,
                 ci.title as item_title
-            FROM embeddings e
-            JOIN content_chunks cc ON cc.id = e.chunk_id
-            JOIN content_items ci ON ci.id = e.content_item_id
-            JOIN sources s ON s.id = e.source_id
+            FROM ann
+            JOIN content_chunks cc ON cc.id = ann.chunk_id
+            JOIN content_items ci ON ci.id = ann.content_item_id
             LEFT JOIN heuristic_analysis ha ON ha.content_item_id = ci.id
-            WHERE (1 - (e.vector <=> $1::vector)) >= $2
-                AND ($3::uuid[] IS NULL OR e.source_id = ANY($3))
-                AND ($4::uuid IS NULL OR s.workspace_id = $4)
+            WHERE (1 - (ann.vector <=> $1::vector)) >= $2
                 AND ($5::text[] IS NULL OR ci.category = ANY($5))
                 AND ($7::float IS NULL OR ha.quality->>'score' IS NULL OR (ha.quality->>'score')::float >= $7)
                 AND ($8::timestamp IS NULL OR ci.fetched_at >= $8)
-            ORDER BY e.vector <=> $1::vector
+            ORDER BY ann.vector <=> $1::vector
             LIMIT $6
             "#
         )
@@ -597,6 +610,7 @@ impl VectorStore for PgVectorStore {
         .bind(limit as i64)
         .bind(min_quality.map(|q| q as f64))
         .bind(since)
+        .bind(candidate_limit as i64)
         .fetch_all(&self.pool)
         .await?;
 
