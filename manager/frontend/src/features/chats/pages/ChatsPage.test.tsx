@@ -1574,6 +1574,44 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('renders generated assistant videos with playback controls', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-generated-video',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'Generated video.',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              attachments: [
+                {
+                  name: 'generated-video-1.webm',
+                  mime: 'video/webm',
+                  url: 'data:video/webm;base64,generated',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      renderChatsPage();
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        const video = screen.getByLabelText('generated-video-1.webm');
+        expect(video.tagName).toBe('VIDEO');
+        expect(video).toHaveAttribute('src', 'data:video/webm;base64,generated');
+        expect(video).toHaveAttribute('controls');
+        expect(screen.getByText('Generated video.')).toBeInTheDocument();
+      });
+    });
+
     it('reuses a thread image as the next starting image', async () => {
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,
@@ -1609,7 +1647,9 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Use as starting image' }));
       expect(screen.getByText('Starting image')).toBeInTheDocument();
       expect(
-        screen.getByText('Ask to generate or edit and this image will be the starting point.')
+        screen.getByText(
+          'Ask to generate, edit, or animate and this image will be the starting point.'
+        )
       ).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Added as starting image' })).toBeDisabled();
 

@@ -9,8 +9,16 @@ use crate::config::ComfyUiConfig;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleDecision {
     Image,
+    Video,
     Chat,
     Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationIntent {
+    Chat,
+    Image,
+    Video,
 }
 
 #[derive(Clone)]
@@ -31,23 +39,53 @@ impl ImageIntentClassifier {
 
     /// Classify a message. Any unavailable, timed-out, or malformed model result
     /// safely falls back to normal chat.
-    pub async fn is_image_request(&self, content: &str, metadata: Option<&Value>) -> bool {
+    pub async fn classify(&self, content: &str, metadata: Option<&Value>) -> GenerationIntent {
         if !self.config.enabled {
-            return false;
+            return GenerationIntent::Chat;
         }
-        if let Some(force) = metadata
+        if metadata
+            .and_then(|m| m.get("video_generation"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return GenerationIntent::Video;
+        }
+        if metadata
             .and_then(|m| m.get("image_generation"))
             .and_then(Value::as_bool)
+            == Some(true)
         {
-            return force;
+            return GenerationIntent::Image;
+        }
+        if metadata
+            .and_then(|m| m.get("video_generation"))
+            .and_then(Value::as_bool)
+            == Some(false)
+            && metadata
+                .and_then(|m| m.get("image_generation"))
+                .and_then(Value::as_bool)
+                == Some(false)
+        {
+            return GenerationIntent::Chat;
         }
 
         let has_source_image = crate::services::image_source::has_image_attachment(metadata);
         match deterministic_decision(content, has_source_image) {
-            RuleDecision::Image => true,
-            RuleDecision::Chat => false,
-            RuleDecision::Ambiguous => self.classify_ambiguous(content, has_source_image).await,
+            RuleDecision::Video => GenerationIntent::Video,
+            RuleDecision::Image => GenerationIntent::Image,
+            RuleDecision::Chat => GenerationIntent::Chat,
+            RuleDecision::Ambiguous => {
+                if self.classify_ambiguous(content, has_source_image).await {
+                    GenerationIntent::Image
+                } else {
+                    GenerationIntent::Chat
+                }
+            }
         }
+    }
+
+    pub async fn is_image_request(&self, content: &str, metadata: Option<&Value>) -> bool {
+        self.classify(content, metadata).await == GenerationIntent::Image
     }
 
     async fn classify_ambiguous(&self, content: &str, has_source_image: bool) -> bool {
@@ -143,6 +181,10 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         return RuleDecision::Chat;
     }
 
+    if is_video_request(&tokens, &has_phrase) {
+        return RuleDecision::Video;
+    }
+
     if is_edit_request(&tokens, &has_phrase)
         && (has_source_image || refers_to_existing_image(&tokens, &has_phrase))
     {
@@ -211,9 +253,14 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
 
 /// True when the prompt asks to change an image that is already on the thread.
 pub fn should_reuse_thread_image(content: &str) -> bool {
-    matches!(deterministic_decision(content, false), RuleDecision::Image) && {
-        let tokens = tokenize(content);
-        refers_to_existing_image(&tokens, &|phrase| phrase_in(&tokens, phrase))
+    let tokens = tokenize(content);
+    let has_phrase = |phrase: &[&str]| phrase_in(&tokens, phrase);
+    match deterministic_decision(content, false) {
+        RuleDecision::Image | RuleDecision::Video => {
+            refers_to_existing_image(&tokens, &has_phrase)
+                || is_animate_existing(&tokens, &has_phrase)
+        }
+        _ => false,
     }
 }
 
@@ -229,6 +276,51 @@ fn phrase_in(tokens: &[String], phrase: &[&str]) -> bool {
     tokens
         .windows(phrase.len())
         .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+}
+
+fn is_video_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    const ACTIONS: &[&str] = &["generate", "create", "make", "render", "animate"];
+    const VIDEO_NOUNS: &[&str] = &[
+        "video",
+        "videos",
+        "clip",
+        "clips",
+        "animation",
+        "animations",
+        "footage",
+    ];
+    let animate = tokens
+        .iter()
+        .take(4)
+        .any(|token| token == "animate" || token == "animating");
+    let explicit = tokens.iter().enumerate().any(|(index, token)| {
+        ACTIONS.contains(&token.as_str())
+            && tokens
+                .iter()
+                .skip(index + 1)
+                .take(7)
+                .any(|candidate| VIDEO_NOUNS.contains(&candidate.as_str()))
+    });
+    explicit
+        || animate
+        || has_phrase(&["text", "to", "video"])
+        || has_phrase(&["image", "to", "video"])
+        || has_phrase(&["make", "this", "move"])
+        || has_phrase(&["make", "it", "move"])
+        || has_phrase(&["make", "this", "a", "video"])
+        || has_phrase(&["turn", "this", "into", "a", "video"])
+        || has_phrase(&["bring", "this", "to", "life"])
+}
+
+fn is_animate_existing(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    has_phrase(&["animate", "this"])
+        || has_phrase(&["animate", "it"])
+        || has_phrase(&["make", "this", "move"])
+        || has_phrase(&["make", "it", "move"])
+        || has_phrase(&["make", "this", "a", "video"])
+        || has_phrase(&["turn", "this", "into", "a", "video"])
+        || (tokens.iter().any(|token| token == "animate")
+            && refers_to_existing_image(tokens, has_phrase))
 }
 
 fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
@@ -330,6 +422,22 @@ mod tests {
                 "{request}"
             );
         }
+        for video in [
+            "Generate a video of a red panda",
+            "Create a clip of waves crashing",
+            "Make me a video of a lighthouse",
+            "Animate this image",
+            "Turn this into a video",
+            "image to video of this photo",
+            "text to video of a fox running",
+            "Make this move",
+        ] {
+            assert_eq!(
+                deterministic_decision(video, video.contains("this") || video.contains("photo")),
+                RuleDecision::Video,
+                "{video}"
+            );
+        }
         for edit in [
             "Make this a watercolor",
             "Turn this into a painting",
@@ -381,6 +489,9 @@ mod tests {
         assert!(!should_reuse_thread_image(
             "Generate an image of a blue fox"
         ));
+        assert!(should_reuse_thread_image("Animate this image"));
+        assert!(should_reuse_thread_image("Make this a video"));
+        assert!(!should_reuse_thread_image("Generate a video of a fox"));
         assert!(!should_reuse_thread_image(
             "How do I add a hat to this image?"
         ));

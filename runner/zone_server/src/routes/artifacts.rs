@@ -42,6 +42,8 @@ pub async fn get(
             let mime = match filename.rsplit_once('.').map(|(_, ext)| ext) {
                 Some("jpg" | "jpeg") => "image/jpeg",
                 Some("webp") => "image/webp",
+                Some("webm") => "video/webm",
+                Some("mp4") => "video/mp4",
                 _ => "image/png",
             };
             Response::builder()

@@ -166,11 +166,16 @@ pub struct ComfyUiConfig {
     pub api_token: Option<String>,
     pub workflow_path: std::path::PathBuf,
     pub checkpoint: String,
+    pub video_workflow_path: std::path::PathBuf,
+    pub video_unet: String,
+    pub video_clip: String,
+    pub video_vae: String,
     pub artifact_root: std::path::PathBuf,
     pub classifier_model: String,
     pub classifier_timeout_secs: u64,
     pub request_timeout_secs: u64,
     pub generation_timeout_secs: u64,
+    pub video_generation_timeout_secs: u64,
     pub poll_interval_ms: u64,
 }
 
@@ -183,11 +188,17 @@ impl Default for ComfyUiConfig {
             workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../comfyui/workflows/flux1-schnell-fp8-api.json"),
             checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
+            video_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../comfyui/workflows/wan2.2-ti2v-5b-api.json"),
+            video_unet: "wan2.2_ti2v_5B_fp16.safetensors".to_string(),
+            video_clip: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string(),
+            video_vae: "wan2.2_vae.safetensors".to_string(),
             artifact_root: "/app/artifacts".into(),
             classifier_model: "llama3.2:3b".to_string(),
             classifier_timeout_secs: 3,
             request_timeout_secs: 15,
             generation_timeout_secs: 300,
+            video_generation_timeout_secs: 600,
             poll_interval_ms: 500,
         }
     }
@@ -209,6 +220,15 @@ impl ComfyUiConfig {
                 .into(),
             checkpoint: env::var("COMFYUI_CHECKPOINT")
                 .unwrap_or_else(|_| "flux1-schnell-fp8.safetensors".to_string()),
+            video_workflow_path: env::var("COMFYUI_VIDEO_WORKFLOW_PATH")
+                .unwrap_or_else(|_| "/app/comfyui/workflows/wan2.2-ti2v-5b-api.json".to_string())
+                .into(),
+            video_unet: env::var("COMFYUI_VIDEO_UNET")
+                .unwrap_or_else(|_| "wan2.2_ti2v_5B_fp16.safetensors".to_string()),
+            video_clip: env::var("COMFYUI_VIDEO_CLIP")
+                .unwrap_or_else(|_| "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string()),
+            video_vae: env::var("COMFYUI_VIDEO_VAE")
+                .unwrap_or_else(|_| "wan2.2_vae.safetensors".to_string()),
             artifact_root: env::var("ARTIFACT_ROOT")
                 .unwrap_or_else(|_| "/app/artifacts".to_string())
                 .into(),
@@ -217,6 +237,12 @@ impl ComfyUiConfig {
             classifier_timeout_secs: env_u64("COMFYUI_CLASSIFIER_TIMEOUT_SECS", 3, 1, 30),
             request_timeout_secs: env_u64("COMFYUI_REQUEST_TIMEOUT_SECS", 15, 1, 120),
             generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),
+            video_generation_timeout_secs: env_u64(
+                "COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS",
+                600,
+                10,
+                3600,
+            ),
             poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
         }
     }

@@ -100,6 +100,7 @@ async fn main() {
             model_reasoning: None,
             model_embedding: Some("nomic-embed-text".to_string()),
             model_image: None,
+            model_video: None,
         };
 
         let engine = embedding_engine_from_env();

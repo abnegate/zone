@@ -889,6 +889,23 @@
   color: var(--ui-error);
 }
 
+.message-videos {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ui-space-2);
+  width: min(100%, 36rem);
+  margin-bottom: var(--ui-space-2);
+}
+
+.message-video {
+  display: block;
+  width: 100%;
+  max-height: 34rem;
+  background: var(--ui-bg-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+}
+
 .message-markdown > :first-child {
   margin-top: 0;
 }

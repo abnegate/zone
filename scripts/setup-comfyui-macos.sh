@@ -10,13 +10,15 @@ INSTALL_DIR=${COMFYUI_INSTALL_DIR:-"$HOME/Library/Application Support/Zone/Comfy
 MODELS_DIR=${COMFYUI_MODELS_DIR:-"$INSTALL_DIR/models"}
 PYTHON=${PYTHON_BIN:-python3}
 MODEL_ACTION=none
+MODEL_BUNDLE=image
 
 usage() {
     cat <<EOF
-Usage: $0 [--download-model | --verify-model] [--force-model]
+Usage: $0 [--download-model | --download-video-model | --verify-model | --verify-video-model] [--force-model]
 
-Install the pinned native Apple Silicon ComfyUI runtime. Model weights are
-downloaded only when --download-model is explicitly supplied.
+Install the pinned native Apple Silicon ComfyUI runtime. Image weights are
+downloaded only when --download-model is supplied. Video weights are a
+separate explicit download.
 
 Environment:
   COMFYUI_INSTALL_DIR  Runtime directory (default: $INSTALL_DIR)
@@ -27,8 +29,10 @@ EOF
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --download-model) MODEL_ACTION=download ;;
-        --verify-model) MODEL_ACTION=verify ;;
+        --download-model) MODEL_ACTION=download; MODEL_BUNDLE=image ;;
+        --download-video-model) MODEL_ACTION=download; MODEL_BUNDLE=video ;;
+        --verify-model) MODEL_ACTION=verify; MODEL_BUNDLE=image ;;
+        --verify-video-model) MODEL_ACTION=verify; MODEL_BUNDLE=video ;;
         --force-model) MODEL_FORCE=1 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -62,7 +66,7 @@ PY
 
 if [ "$MODEL_ACTION" = "verify" ]; then
     exec "$PYTHON" "$PROJECT_DIR/comfyui/download-models.py" \
-        --models-dir "$MODELS_DIR" --verify-only
+        --models-dir "$MODELS_DIR" --bundle "$MODEL_BUNDLE" --verify-only
 fi
 
 mkdir -p "$(dirname "$INSTALL_DIR")"
@@ -91,16 +95,24 @@ VENV_PYTHON="$INSTALL_DIR/.venv/bin/python"
 "$VENV_PYTHON" -m pip install --disable-pip-version-check \
     --require-hashes -r "$PROJECT_DIR/comfyui/requirements-macos.lock"
 
-mkdir -p "$MODELS_DIR/checkpoints" "$INSTALL_DIR/models" "$INSTALL_DIR/output"
+mkdir -p \
+    "$MODELS_DIR/checkpoints" \
+    "$MODELS_DIR/diffusion_models" \
+    "$MODELS_DIR/text_encoders" \
+    "$MODELS_DIR/vae" \
+    "$INSTALL_DIR/models" \
+    "$INSTALL_DIR/output"
 if [ "$MODELS_DIR" != "$INSTALL_DIR/models" ]; then
-    CHECKPOINT_LINK="$INSTALL_DIR/models/checkpoints"
-    if [ -d "$CHECKPOINT_LINK" ] && [ ! -L "$CHECKPOINT_LINK" ] \
-        && [ -n "$(ls -A "$CHECKPOINT_LINK" 2>/dev/null)" ]; then
-        echo "Default checkpoint directory is not empty: $CHECKPOINT_LINK" >&2
-        exit 1
-    fi
-    rm -rf "$CHECKPOINT_LINK"
-    ln -s "$MODELS_DIR/checkpoints" "$CHECKPOINT_LINK"
+    for folder in checkpoints diffusion_models text_encoders vae; do
+        LINK="$INSTALL_DIR/models/$folder"
+        if [ -d "$LINK" ] && [ ! -L "$LINK" ] \
+            && [ -n "$(ls -A "$LINK" 2>/dev/null)" ]; then
+            echo "Default $folder directory is not empty: $LINK" >&2
+            exit 1
+        fi
+        rm -rf "$LINK"
+        ln -s "$MODELS_DIR/$folder" "$LINK"
+    done
 fi
 
 echo "Installed ComfyUI $COMFYUI_COMMIT at: $INSTALL_DIR"
@@ -108,7 +120,7 @@ echo "Model directory: $MODELS_DIR"
 
 if [ "$MODEL_ACTION" = "download" ]; then
     set -- "$VENV_PYTHON" "$PROJECT_DIR/comfyui/download-models.py" \
-        --models-dir "$MODELS_DIR"
+        --models-dir "$MODELS_DIR" --bundle "$MODEL_BUNDLE"
     if [ "${MODEL_FORCE:-0}" = "1" ]; then
         set -- "$@" --force
     fi

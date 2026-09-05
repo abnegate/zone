@@ -22,3 +22,16 @@ repository and preserves its license files.
 
 The model is not included in Zone images or source distributions. It is
 downloaded only when the operator runs an explicit setup command.
+
+## Wan 2.2 TI2V 5B
+
+- Packaged models: <https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged>
+- Original model: <https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B>
+- Files: `wan2.2_ti2v_5B_fp16.safetensors`, `wan2.2_vae.safetensors`,
+  `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
+- License: Apache License 2.0
+- License text: <https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B/blob/main/LICENSE.txt>
+
+These weights are not included in Zone images or source distributions. They
+are downloaded only when the operator runs the explicit video model setup
+command.

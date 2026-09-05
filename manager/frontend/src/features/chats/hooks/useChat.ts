@@ -63,6 +63,11 @@ type ServerMessage =
       attachment: NonNullable<MessageMetadata['attachments']>[number];
     }
   | {
+      type: 'video';
+      message_id: string;
+      attachment: NonNullable<MessageMetadata['attachments']>[number];
+    }
+  | {
       type: 'message_end';
       message_id: string;
       content: string;
@@ -397,6 +402,7 @@ export function useChat(
           appendReceipt(payload.message_id, payload.receipt);
           break;
         case 'image':
+        case 'video':
           if (assistantId === payload.message_id) {
             const attachments = assistantMetadata?.attachments ?? [];
             assistantMetadata = {

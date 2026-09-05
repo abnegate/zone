@@ -741,7 +741,8 @@ async fn test_ai_settings_with_all_models() {
                 "model_fast": "gpt-4o-mini",
                 "model_reasoning": "o1-preview",
                 "model_embedding": "text-embedding-3-large",
-                "model_image": "custom-image.safetensors"
+                "model_image": "custom-image.safetensors",
+                "model_video": "custom-video.safetensors"
             }),
             &token,
         )
@@ -753,6 +754,7 @@ async fn test_ai_settings_with_all_models() {
     assert_eq!(body["model_reasoning"], "o1-preview");
     assert_eq!(body["model_embedding"], "text-embedding-3-large");
     assert_eq!(body["model_image"], "custom-image.safetensors");
+    assert_eq!(body["model_video"], "custom-video.safetensors");
 }
 
 #[tokio::test]
