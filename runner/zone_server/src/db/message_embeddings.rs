@@ -215,8 +215,10 @@ pub fn fuse_message_hits(
     query: &str,
     limit: usize,
 ) -> Vec<MessageSearchResult> {
-    let mut scores: std::collections::HashMap<Uuid, (MessageSearchResult, f32, Option<usize>, Option<usize>)> =
-        std::collections::HashMap::new();
+    let mut scores: std::collections::HashMap<
+        Uuid,
+        (MessageSearchResult, f32, Option<usize>, Option<usize>),
+    > = std::collections::HashMap::new();
     for (rank, hit) in semantic.into_iter().enumerate() {
         scores.insert(hit.message_id, (hit, 0.0, None, Some(rank + 1)));
     }

@@ -58,10 +58,10 @@ pub use adapters::{AdapterRegistry, ProgressCallback, SourceAdapter, TextAdapter
 // Embedding types
 pub use embeddings::{
     CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
-    OllamaCrossEncoder, RewrittenQuery, VectorStore, default_ranker, embed_query_text,
-    hybrid_search, hybrid_search_filtered, identifier_match_boost, keyword_only_search,
-    probe_cross_encoder, rewrite_query, score_hit, semantic_only_search,
-    configure_ann_connection, ann_candidate_limit,
+    OllamaCrossEncoder, RewrittenQuery, VectorStore, ann_candidate_limit, configure_ann_connection,
+    default_ranker, embed_query_text, hybrid_search, hybrid_search_filtered,
+    identifier_match_boost, keyword_only_search, probe_cross_encoder, rewrite_query, score_hit,
+    semantic_only_search,
 };
 
 // Heuristics types

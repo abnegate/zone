@@ -14,12 +14,12 @@ use crate::content::{
     embed_char_budget, smart_chunk, split_for_embedding,
 };
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
+use crate::embeddings::rerank::min_max_norm;
 use crate::embeddings::{
     CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
-    PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_query_text,
-    keyword_only_search, semantic_only_search, sort_by_score,
+    PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_query_text, keyword_only_search,
+    semantic_only_search, sort_by_score,
 };
-use crate::embeddings::rerank::min_max_norm;
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
 use crate::stream::{AnalysisStage, GatheringCallback, GatheringEvent};

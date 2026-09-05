@@ -125,10 +125,10 @@ pub fn min_max_norm(scores: &[f32]) -> Vec<f32> {
 pub async fn probe_cross_encoder(ollama_host: &str) -> Option<Arc<dyn CrossEncoder>> {
     if let Ok(url) = std::env::var("RERANK_URL") {
         let trimmed = url.trim().to_string();
-        if !trimmed.is_empty() {
-            if let Some(encoder) = HttpCrossEncoder::probe_url(&trimmed, None).await {
-                return Some(encoder);
-            }
+        if !trimmed.is_empty()
+            && let Some(encoder) = HttpCrossEncoder::probe_url(&trimmed, None).await
+        {
+            return Some(encoder);
         }
     }
     if let Some(encoder) = HttpCrossEncoder::probe(ollama_host).await {
@@ -252,10 +252,10 @@ impl HttpCrossEncoder {
         }
         let mut scores = vec![0.0; documents.len()];
         for hit in hits {
-            if let Some(index) = hit.index {
-                if let Some(slot) = scores.get_mut(index) {
-                    *slot = hit.relevance_score.or(hit.score).unwrap_or(0.0);
-                }
+            if let Some(index) = hit.index
+                && let Some(slot) = scores.get_mut(index)
+            {
+                *slot = hit.relevance_score.or(hit.score).unwrap_or(0.0);
             }
         }
         Ok(scores)

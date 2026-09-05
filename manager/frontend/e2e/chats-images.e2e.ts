@@ -326,7 +326,7 @@ test.describe('Chat images', () => {
     await openImageChat(page);
 
     await page.getByRole('button', { name: 'Use as starting image' }).click();
-    await expect(page.getByText('Starting image')).toBeVisible();
+    await expect(page.getByText('Starting image', { exact: true })).toBeVisible();
     await expect(
       page.getByText('Ask to generate or edit and this image will be the starting point.')
     ).toBeVisible();

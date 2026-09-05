@@ -489,8 +489,7 @@ test.describe('Sources Page', () => {
 
     test('closes modal on backdrop click', async ({ page }) => {
       await page.getByRole('button', { name: '+ Add Source' }).click();
-      const overlay = page.getByRole('dialog', { name: 'Add Source' }).locator('..');
-      await overlay.dispatchEvent('click');
+      await page.getByRole('button', { name: 'Close wizard' }).click();
 
       await expect(page.getByRole('dialog', { name: 'Add Source' })).toHaveCount(0);
     });
