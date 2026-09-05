@@ -689,6 +689,9 @@ fn cmp_file_chunks(
                 0
             };
             left_stem.cmp(&right_stem).then_with(|| {
+            let left_conj = conjunction_ident_hit(&left.chunk_text, &identifiers);
+            let right_conj = conjunction_ident_hit(&right.chunk_text, &identifiers);
+            left_conj.cmp(&right_conj).then_with(|| {
             let left_sym = defined_symbol_prefix(query, &left.chunk_text);
             let right_sym = defined_symbol_prefix(query, &right.chunk_text);
             left_sym.cmp(&right_sym).then_with(|| {
@@ -736,8 +739,14 @@ fn cmp_file_chunks(
             })
             })
             })
+            })
         })
     })
+}
+
+fn conjunction_ident_hit(text: &str, identifiers: &[String]) -> bool {
+    let code_ids: Vec<&String> = identifiers.iter().filter(|id| !id.contains('/')).collect();
+    code_ids.len() >= 2 && code_ids.iter().all(|id| text.contains(id.as_str()))
 }
 
 fn uri_path_hit(query: &str, uri: &str) -> u8 {
@@ -1049,6 +1058,18 @@ fn same_file_patterns(query: &str) -> Vec<String> {
     patterns
 }
 
+fn ident_file_patterns(query: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut patterns = Vec::new();
+    for id in crate::embeddings::rewrite_query(query).identifiers {
+        if id.len() < 4 || id.contains('/') || !seen.insert(id.to_ascii_lowercase()) {
+            continue;
+        }
+        patterns.push(format!("%{id}%"));
+    }
+    patterns
+}
+
 async fn expand_same_file(
     pool: &PgPool,
     query: &str,
@@ -1088,7 +1109,8 @@ async fn expand_same_file(
         return Ok(results);
     }
     let patterns = same_file_patterns(query);
-    let extras = same_file_chunks(pool, &ids, &patterns, 28).await?;
+    let ident_patterns = ident_file_patterns(query);
+    let extras = same_file_chunks(pool, &ids, &patterns, &ident_patterns, 28).await?;
     let existing: std::collections::HashSet<Uuid> =
         results.iter().map(|result| result.chunk_id).collect();
     for row in extras {
@@ -1117,6 +1139,7 @@ async fn same_file_chunks(
     pool: &PgPool,
     item_ids: &[Uuid],
     patterns: &[String],
+    ident_patterns: &[String],
     per_file: usize,
 ) -> sqlx::Result<Vec<KeywordResult>> {
     if item_ids.is_empty() {
@@ -1126,6 +1149,11 @@ async fn same_file_chunks(
         None
     } else {
         Some(patterns)
+    };
+    let ident_patterns = if ident_patterns.is_empty() {
+        None
+    } else {
+        Some(ident_patterns)
     };
     sqlx::query_as(
         r#"
@@ -1150,6 +1178,14 @@ async fn same_file_chunks(
                     PARTITION BY cc.content_item_id
                     ORDER BY
                         CASE
+                            WHEN $3::text[] IS NULL THEN 0
+                            ELSE (
+                                SELECT count(*)::int
+                                FROM unnest($3::text[]) p
+                                WHERE cc.text ILIKE p
+                            )
+                        END DESC,
+                        CASE
                             WHEN $2::text[] IS NULL THEN 1
                             WHEN cc.text ILIKE ANY($2) THEN 0
                             ELSE 1
@@ -1163,11 +1199,12 @@ async fn same_file_chunks(
               AND cc.text NOT ILIKE '%symbol: tests.%'
               AND cc.text NOT ILIKE '%assert!(%'
         ) ranked
-        WHERE rn <= $3
+        WHERE rn <= $4
         "#,
     )
     .bind(item_ids)
     .bind(patterns)
+    .bind(ident_patterns)
     .bind(per_file as i64)
     .fetch_all(pool)
     .await
@@ -2098,6 +2135,37 @@ fn trim_middle(text: &str) -> String {
             ranked[0].chunk_text.contains("pub fn should_skip_blob"),
             "kept {}",
             ranked[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_ident_conjunction_over_gather_prefix() {
+        let item = Uuid::from_u128(22);
+        let gather = hit(
+            1,
+            item,
+            "github://zone/context/service.rs@main",
+            "symbol: ContextService.gather\nkind: Method\npub async fn gather(&self) {\n    result.items_unchanged += fetch_result.stats.items_skipped;\n}",
+            3.5,
+        );
+        let call = hit(
+            2,
+            item,
+            "github://zone/context/service.rs@main",
+            "symbol: ContextService.gather\nkind: Method\nlet uris = fetch_result.live_uris.clone();\nstore.retain_content_uris(source.id, &uris)\n}",
+            0.3,
+        );
+        let capped = cap_per_file(
+            vec![gather, call],
+            2,
+            2,
+            "Why must retain_content_uris use live_uris after an incremental gather?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("retain_content_uris")
+                && capped[0].chunk_text.contains("live_uris"),
+            "kept {}",
+            capped[0].chunk_text
         );
     }
 

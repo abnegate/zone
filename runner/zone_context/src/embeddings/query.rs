@@ -794,6 +794,11 @@ mod tests {
                 .is_empty(),
             "embeddings is too generic to path-expand"
         );
+        let live = rewrite_query(
+            "Why must retain_content_uris use live_uris after an incremental gather?",
+        );
+        assert!(live.identifiers.iter().any(|id| id == "retain_content_uris"));
+        assert!(live.identifiers.iter().any(|id| id == "live_uris"));
 
         let ident = rewrite_query("What does should_skip_blob do when a file SHA is unchanged?");
         assert!(ident.keyword.contains("should_skip_blob"));
