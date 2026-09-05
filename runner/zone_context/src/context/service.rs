@@ -641,9 +641,7 @@ impl ContextService {
             .replace_content_chunks(item_id, &persisted_chunks)
             .await?;
 
-        let pairs = self
-            .embed_chunks_resilient(item, &persisted_chunks)
-            .await?;
+        let pairs = self.embed_chunks_resilient(item, &persisted_chunks).await?;
         if pairs.is_empty() {
             return Err(ContextError::Embedding(format!(
                 "no chunks could be embedded for {}",
@@ -675,11 +673,9 @@ impl ContextService {
     ) -> Result<Vec<(ContentChunk, Vec<f32>)>> {
         let texts: Vec<&str> = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
         match self.embedding_service.embed_batch(&texts).await {
-            Ok(vectors) if vectors.len() == chunks.len() => Ok(chunks
-                .iter()
-                .cloned()
-                .zip(vectors)
-                .collect()),
+            Ok(vectors) if vectors.len() == chunks.len() => {
+                Ok(chunks.iter().cloned().zip(vectors).collect())
+            }
             Ok(_) => Err(ContextError::Embedding(
                 "embedding batch size did not match chunk count".to_string(),
             )),

@@ -923,8 +923,7 @@ impl SourceAdapter for GitHubAdapter {
                 let to_fetch: Vec<&&GitHubTreeEntry> = files
                     .iter()
                     .filter(|entry| {
-                        let uri =
-                            Self::file_uri(&config.owner, &config.repo, &entry.path, &branch);
+                        let uri = Self::file_uri(&config.owner, &config.repo, &entry.path, &branch);
                         !fetch_config.should_skip_blob(&uri, &entry.sha)
                     })
                     .collect();

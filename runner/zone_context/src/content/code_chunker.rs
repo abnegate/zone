@@ -2828,13 +2828,18 @@ class Greeter {
     fn test_oversized_uncovered_block_is_split() {
         let mut code = String::from("fn tiny() {}\n\n");
         for i in 0..400 {
-            code.push_str(&format!("const VALUE_{i}: &str = \"{}\";\n", "x".repeat(40)));
+            code.push_str(&format!(
+                "const VALUE_{i}: &str = \"{}\";\n",
+                "x".repeat(40)
+            ));
         }
         let chunks = chunk_code(&code, CodeLanguage::Rust, 80);
         assert!(chunks.len() > 1);
         let max_chars = 80usize.saturating_mul(6).max(512);
         assert!(
-            chunks.iter().all(|chunk| chunk.text.chars().count() <= max_chars + 80),
+            chunks
+                .iter()
+                .all(|chunk| chunk.text.chars().count() <= max_chars + 80),
             "every chunk should stay near the embed-safe size"
         );
     }
