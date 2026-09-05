@@ -880,6 +880,7 @@ describe('ChatsPage', () => {
     it('removes elapsed feedback when switching chats and starts fresh on return', async () => {
       const advance = controlClock();
       await sendPrompt();
+      expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
       advance(1000);
       expect(screen.getByRole('timer')).toHaveTextContent('0:01');
       fireEvent.click(screen.getByText('Chat 2'));

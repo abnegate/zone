@@ -196,7 +196,10 @@ export default function ContextSearchPage() {
     return 'Partial match';
   };
 
-  const resultScoreLabel = (result: { relevance_score: number; metadata: Record<string, unknown> }) => {
+  const resultScoreLabel = (result: {
+    relevance_score: number;
+    metadata: Record<string, unknown>;
+  }) => {
     const semantic = result.metadata.semantic_score;
     if (typeof semantic === 'number') {
       return `${Math.round(semantic * 100)}% semantic`;

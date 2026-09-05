@@ -254,6 +254,7 @@ describe('Client', () => {
       updated_at: '2024-01-01T00:00:00Z',
       archived: false,
       agent_enabled: false,
+      auto_approve: false,
     };
 
     const mockMessage = {

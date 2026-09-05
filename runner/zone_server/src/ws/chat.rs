@@ -115,10 +115,7 @@ fn snippet_line(text: &str, max_chars: usize) -> String {
 }
 
 fn format_retrieved_line(kind: &str, title: &str, uri: &str, text: &str) -> String {
-    format!(
-        "- [{kind}] {title} ({uri}): {}",
-        snippet_line(text, 500)
-    )
+    format!("- [{kind}] {title} ({uri}): {}", snippet_line(text, 500))
 }
 
 fn interleave_context_lines(
@@ -1484,8 +1481,12 @@ async fn prepare_chat(
         .await
         {
             Ok(hits) => {
-                knowledge_hits =
-                    knowledge::fuse_knowledge_hits(knowledge_hits, hits, content, MAX_CONTEXT_IN_PROMPT);
+                knowledge_hits = knowledge::fuse_knowledge_hits(
+                    knowledge_hits,
+                    hits,
+                    content,
+                    MAX_CONTEXT_IN_PROMPT,
+                );
             }
             Err(error) => tracing::warn!(%error, "Knowledge keyword search failed"),
         }

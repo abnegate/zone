@@ -23,10 +23,10 @@ pub use serving::{ann_candidate_limit, configure_ann_connection, keyword_candida
 pub use rerank::{
     CrossEncoder, OllamaCrossEncoder, blend_rank, lexical_cross_score, probe_cross_encoder,
 };
+pub use pgvector::{PgVectorStore, VECTOR_DIMENSION, align_vector};
 pub use query::{
     RewrittenQuery, embed_query_text, identifier_match_boost, rewrite_query, sanitize_search_query,
 };
-pub use pgvector::{PgVectorStore, VECTOR_DIMENSION, align_vector};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
