@@ -30,7 +30,7 @@ test.describe('Model Installation', () => {
   });
 
   test('help text explains model input', async ({ page }) => {
-    await expect(page.locator('.card .help-text').first()).toContainText('Ollama model name');
+    await expect(page.locator('.card .help-text').first()).toContainText('Ollama model');
     await expect(page.locator('.card .help-text').first()).toContainText('HuggingFace');
   });
 

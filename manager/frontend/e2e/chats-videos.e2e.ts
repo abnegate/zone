@@ -85,7 +85,7 @@ test.describe('Chat videos', () => {
     await expect(page.locator('.chat-item')).toHaveCount(1);
     await page.click('.chat-item');
 
-    const video = page.getByLabelText('generated-video-1.webm');
+    const video = page.getByLabel('generated-video-1.webm');
     await expect(video).toBeVisible();
     await expect(video).toHaveAttribute('controls');
     await expect(page.locator('.message-assistant .message-content')).toContainText(
@@ -124,7 +124,7 @@ test.describe('Chat videos', () => {
     });
 
     await expect(page.getByRole('status')).toHaveCount(0);
-    await expect(page.getByLabelText('generated-video-1.webm')).toBeVisible();
+    await expect(page.getByLabel('generated-video-1.webm')).toBeVisible();
     await expect(page.locator('.message-assistant .message-content')).toContainText(
       'Generated video.'
     );
