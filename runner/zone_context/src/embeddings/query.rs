@@ -21,7 +21,7 @@ pub fn rewrite_query(query: &str) -> RewrittenQuery {
     let keyword = if identifiers.is_empty() {
         fts_tokens(query)
     } else {
-        identifiers.join(" OR ")
+        expand_keyword_idents(&identifiers)
     };
     RewrittenQuery {
         original: query.to_string(),
@@ -125,15 +125,106 @@ fn is_camel(token: &str) -> bool {
         return false;
     }
     let mut lower = false;
-    let mut upper_after_lower = false;
+    let mut humps = 0u32;
     for c in token.chars() {
         if c.is_ascii_lowercase() {
             lower = true;
         } else if c.is_ascii_uppercase() && lower {
-            upper_after_lower = true;
+            humps += 1;
+            lower = false;
         }
     }
-    upper_after_lower && token.chars().any(|c| c.is_ascii_alphabetic())
+    // One short hump (`GitHub`, `Ollama`) is a proper noun, not a type name.
+    (humps >= 2 || (humps >= 1 && token.len() >= 10))
+        && token.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+fn expand_keyword_idents(identifiers: &[String]) -> String {
+    let mut seen = HashSet::new();
+    let mut terms = Vec::new();
+    let mut push = |token: String| {
+        if token.len() < 2 || !seen.insert(token.clone()) {
+            return;
+        }
+        terms.push(token);
+    };
+    for id in identifiers {
+        push(id.clone());
+        if is_screaming_snake(id) {
+            push(id.to_ascii_lowercase());
+            for part in id.split('_') {
+                if part.len() >= 5 && !is_generic_ident_part(part) {
+                    push(part.to_ascii_lowercase());
+                }
+            }
+        }
+        if let Some(snake) = request_style_snake(id) {
+            push(snake);
+        }
+    }
+    terms.join(" OR ")
+}
+
+fn is_screaming_snake(token: &str) -> bool {
+    token.contains('_')
+        && token.chars().any(|c| c.is_ascii_alphabetic())
+        && token
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn is_generic_ident_part(part: &str) -> bool {
+    matches!(
+        part.to_ascii_lowercase().as_str(),
+        "source"
+            | "target"
+            | "config"
+            | "default"
+            | "value"
+            | "index"
+            | "server"
+            | "client"
+            | "worker"
+            | "handle"
+            | "result"
+            | "error"
+            | "request"
+            | "state"
+            | "embed"
+            | "query"
+    )
+}
+
+fn request_style_snake(token: &str) -> Option<String> {
+    const SUFFIXES: &[&str] = &["Request", "Response", "Error", "Params", "Options", "Args"];
+    for suffix in SUFFIXES {
+        if let Some(prefix) = token.strip_suffix(suffix) {
+            if let Some(snake) = camel_to_snake(prefix) {
+                if snake.contains('_') {
+                    return Some(snake);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn camel_to_snake(token: &str) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for (index, ch) in token.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    Some(out)
 }
 
 fn fts_tokens(query: &str) -> String {
@@ -210,7 +301,12 @@ mod tests {
                 .any(|i| i.contains("content/mod.rs"))
         );
         assert!(rewritten.keyword.contains("should_skip_blob"));
-        assert!(rewritten.keyword.contains("OR"));
+        assert!(
+            !rewritten.identifiers.iter().any(|i| i == "GitHub"),
+            "proper nouns are not type identifiers: {:?}",
+            rewritten.identifiers
+        );
+        assert!(rewritten.keyword.contains("OR") || rewritten.keyword == "should_skip_blob");
     }
 
     #[test]
@@ -242,6 +338,20 @@ mod tests {
     fn extracts_camel_case() {
         let rewritten = rewrite_query("Where is GitHubAdapter constructed?");
         assert!(rewritten.identifiers.iter().any(|i| i == "GitHubAdapter"));
+    }
+
+    #[test]
+    fn keyword_expands_request_types_and_env_consts() {
+        let request = rewrite_query("What fields does CreateKnowledgeRequest require?");
+        assert!(request.keyword.contains("CreateKnowledgeRequest"));
+        assert!(request.keyword.contains("create_knowledge"));
+        assert!(request.identifiers.iter().all(|i| i != "create_knowledge"));
+
+        let env = rewrite_query("What is SOURCE_RESYNC_POLL_SECS used for?");
+        assert!(env.keyword.contains("SOURCE_RESYNC_POLL_SECS"));
+        assert!(env.keyword.contains("source_resync_poll_secs"));
+        assert!(env.keyword.contains("resync"));
+        assert!(!env.keyword.split_whitespace().any(|t| t == "source"));
     }
 
     #[test]
