@@ -80,19 +80,16 @@ jobs:
             ${{ runner.os }}-cargo-coverage-
             ${{ runner.os }}-cargo-
 
-      - name: Install cargo-llvm-cov
+      - name: Install cargo-llvm-cov and sqlx-cli
         uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
-          tool: cargo-llvm-cov@0.9.0
+          tool: cargo-llvm-cov@0.9.0,sqlx-cli@0.9.0
 
       - name: Run database migrations
-        run: |
-          for f in migrations/*.sql; do
-            psql -h localhost -U postgres -d zone_test -v ON_ERROR_STOP=1 -f "$f"
-          done
         working-directory: runner/zone_server
+        run: sqlx migrate run
         env:
-          PGPASSWORD: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
 
       # Deliberately not --all-features: that enables zone_server's default
       # local-embeddings feature, which links ONNX Runtime statically into every
