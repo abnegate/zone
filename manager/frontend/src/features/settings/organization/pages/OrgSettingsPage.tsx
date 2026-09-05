@@ -57,6 +57,7 @@ const modelOptions = {
 };
 
 const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
+const VIDEO_MODEL_OPTIONS = ['wan2.2_ti2v_5B_fp16.safetensors'];
 
 const awsRegions = [
   'us-east-1',
@@ -95,6 +96,7 @@ export default function OrgSettingsPage() {
   const [modelReasoning, setModelReasoning] = useState('');
   const [modelEmbedding, setModelEmbedding] = useState('');
   const [modelImage, setModelImage] = useState('');
+  const [modelVideo, setModelVideo] = useState('');
 
   // Track which credentials are set on server
   const [hasLitellmKey, setHasLitellmKey] = useState(false);
@@ -131,6 +133,7 @@ export default function OrgSettingsPage() {
     setModelReasoning(settings.model_reasoning || '');
     setModelEmbedding(settings.model_embedding || '');
     setModelImage(settings.model_image || '');
+    setModelVideo(settings.model_video || '');
     setHasLitellmKey(settings.has_litellm_key);
     setHasOpenaiKey(settings.has_openai_api_key);
     setHasAnthropicKey(settings.has_anthropic_api_key);
@@ -161,7 +164,9 @@ export default function OrgSettingsPage() {
         model_fast: modelFast || undefined,
         model_reasoning: modelReasoning || undefined,
         model_embedding: modelEmbedding || undefined,
-        model_image: modelImage || undefined,
+        // Empty string clears the stored override so the server default resumes.
+        model_image: modelImage,
+        model_video: modelVideo,
       };
 
       // Only include credentials if they were entered
@@ -540,6 +545,28 @@ export default function OrgSettingsPage() {
                       ComfyUI checkpoint used when a message asks for an image. Attach a photo to
                       edit it instead of generating. The matching recipe is selected automatically.
                       Leave empty to use COMFYUI_CHECKPOINT.
+                    </p>
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="model-video">Video Model</label>
+                    <select
+                      id="model-video"
+                      value={modelVideo}
+                      onChange={(e) => setModelVideo(e.target.value)}
+                      className="form-select"
+                    >
+                      <option value="">Use server default</option>
+                      {Array.from(
+                        new Set([...VIDEO_MODEL_OPTIONS, modelVideo].filter(Boolean))
+                      ).map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="form-hint">
+                      ComfyUI UNET used when a message asks for a video. Leave empty to use
+                      COMFYUI_VIDEO_UNET.
                     </p>
                   </div>
                 </div>

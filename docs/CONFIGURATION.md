@@ -120,15 +120,15 @@ For production, regenerate secrets for security.
 
 ---
 
-## 🎨 ComfyUI Image Generation
+## 🎨 ComfyUI Image and Video Generation
 
 See [COMFYUI.md](COMFYUI.md) for model setup, hardware requirements, checksum
 details, and native macOS / bundled NVIDIA instructions.
 
 ### `COMFYUI_ENABLED`
 - **Default**: `false`
-- **Description**: Enables automatic image-intent routing and direct ComfyUI
-  generation
+- **Description**: Enables automatic image- and video-intent routing and direct
+  ComfyUI generation
 - **Set to `true`** only after the runtime and verified checkpoint are ready
 
 ### `COMFYUI_BASE_URL`
@@ -155,6 +155,38 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Fallback ComfyUI checkpoint when org/workspace AI settings
   do not set `model_image`. Path separators and traversal are rejected.
   Chat image generation uses the effective `model_image` setting when present.
+
+### `COMFYUI_CLASSIFIER_MODEL`
+- **Default**: `llama3.2:3b`
+- **Description**: Fast LiteLLM model used when image-intent rules are unsure,
+  including informal edits of an attached photo (`IMAGE` vs `CHAT`, 3-token
+  reply). Org/workspace `model_fast` overrides this when set.
+- **Timeout**: `COMFYUI_CLASSIFIER_TIMEOUT_SECS` (default `3`, range 1–30).
+  Timeouts fall back to normal chat.
+
+### `COMFYUI_VIDEO_WORKFLOW_PATH`
+- **Default**: `/app/comfyui/workflows/wan2.2-ti2v-5b-api.json`
+- **Description**: In-container path to the versioned Wan 2.2 TI2V
+  text-to-video API workflow. Image-to-video uses the sibling file
+  `wan2.2-ti2v-5b-i2v-api.json` in the same directory.
+
+### `COMFYUI_VIDEO_UNET`
+- **Default**: `wan2.2_ti2v_5B_fp16.safetensors`
+- **Description**: Fallback Wan UNET when org/workspace AI settings do not set
+  `model_video`. Path separators and traversal are rejected. Chat video
+  generation uses the effective `model_video` setting when present.
+
+### `COMFYUI_VIDEO_CLIP`
+- **Default**: `umt5_xxl_fp8_e4m3fn_scaled.safetensors`
+- **Description**: Text encoder loaded with the Wan video workflow
+
+### `COMFYUI_VIDEO_VAE`
+- **Default**: `wan2.2_vae.safetensors`
+- **Description**: VAE loaded with the Wan video workflow
+
+### `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS`
+- **Default**: `600`
+- **Description**: Wall-clock timeout for a single video generation job
 
 ### `COMFYUI_COMMIT`
 - **Default**: `30bdda1ef13a3a34fce2cd2fec633f15d832122a`
@@ -440,8 +472,10 @@ Need to find a specific config? Quick lookup:
 - **Domains**: DOMAIN_HOST_WEBUI
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
-- **Image generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
-  COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_COMMIT
+- **Image and video generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
+  COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
+  COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,
+  COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS, COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
 - **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS

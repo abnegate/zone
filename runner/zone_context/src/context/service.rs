@@ -18,7 +18,7 @@ use crate::embeddings::rerank::min_max_norm;
 use crate::embeddings::{
     CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
     PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_query_text, keyword_only_search,
-    semantic_only_search, sort_by_score,
+    prefer_definition_chunks, semantic_only_search, sort_by_score,
 };
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
@@ -493,7 +493,7 @@ impl ContextService {
         config: Option<HybridSearchConfig>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
         let hybrid_config = config.unwrap_or_else(|| HybridSearchConfig::for_query(query));
-        let candidate_limit = (limit * 2).max(16);
+        let candidate_limit = (limit * 4).max(32);
         let mut results = match query_embedding {
             Some(embedding) => {
                 crate::embeddings::hybrid_search_filtered(
@@ -520,6 +520,7 @@ impl ContextService {
         if let Some(reranker) = &self.reranker {
             results = neural_rerank(reranker.as_ref(), query, results).await;
         }
+        prefer_definition_chunks(query, &mut results);
         let results = cap_per_file(results, 2, limit);
 
         let rrf = query_embedding.is_some();
@@ -837,10 +838,30 @@ async fn neural_rerank(
     match reranker.score_documents(query, &documents).await {
         Ok(scores) => {
             let norm = min_max_norm(&scores);
+            let identifiers = crate::embeddings::rewrite_query(query).identifiers;
+            let has_definition = results.iter().take(take).any(|result| {
+                crate::embeddings::ranker::identifier_role(
+                    &result.chunk_text,
+                    &result.item_uri,
+                    &identifiers,
+                )
+                .is_definition()
+            });
             for (result, neural) in results.iter_mut().zip(norm) {
-                result.score += 0.22 * (neural - 0.5);
+                let defined = crate::embeddings::ranker::identifier_role(
+                    &result.chunk_text,
+                    &result.item_uri,
+                    &identifiers,
+                )
+                .is_definition();
+                let mut delta = 0.10 * (neural - 0.5);
+                if has_definition && !defined && delta > 0.0 {
+                    delta *= 0.25;
+                }
+                result.score += delta;
             }
             sort_by_score(&mut results);
+            prefer_definition_chunks(query, &mut results);
         }
         Err(error) => {
             tracing::debug!(%error, "neural cross-encoder skipped");

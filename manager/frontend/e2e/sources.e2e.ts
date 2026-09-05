@@ -489,7 +489,10 @@ test.describe('Sources Page', () => {
 
     test('closes modal on backdrop click', async ({ page }) => {
       await page.getByRole('button', { name: '+ Add Source' }).click();
-      await page.getByRole('button', { name: 'Close wizard' }).click();
+      await expect(page.getByRole('dialog', { name: 'Add Source' })).toBeVisible();
+      // The dismiss control fills the overlay; click a corner so the centered
+      // dialog does not intercept the pointer.
+      await page.locator('.ui-wizard-dismiss').click({ position: { x: 8, y: 8 } });
 
       await expect(page.getByRole('dialog', { name: 'Add Source' })).toHaveCount(0);
     });

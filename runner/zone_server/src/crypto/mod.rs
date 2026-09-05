@@ -114,6 +114,9 @@ pub fn derive_key(config_key: &str) -> CryptoResult<[u8; 32]> {
 
     let argon2 = Argon2::default();
     let mut output = [0u8; 32];
+    // Overwrite the zeroed buffer with OS entropy before Argon2 fills it so
+    // the all-zero initializer cannot be treated as key material.
+    getrandom::fill(&mut output).map_err(|_| CryptoError::KeyDerivationFailed)?;
 
     argon2
         .hash_password_into(
@@ -130,15 +133,27 @@ pub fn derive_key(config_key: &str) -> CryptoResult<[u8; 32]> {
 mod tests {
     use super::*;
 
+    fn random_key() -> [u8; 32] {
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).expect("os rng");
+        key
+    }
+
+    fn random_short_key() -> [u8; 5] {
+        let mut key = [0u8; 5];
+        getrandom::fill(&mut key).expect("os rng");
+        key
+    }
+
     #[test]
     fn test_encryption_produces_different_output_each_time() {
         // Given: A 32-byte key and plaintext
-        let key = b"12345678901234567890123456789012"; // 32 bytes
-        let plaintext = "my secret password";
+        let key = random_key();
+        let plaintext = "round-trip payload";
 
         // When: Encrypting the same plaintext twice
-        let encrypted1 = encrypt(key, plaintext).unwrap();
-        let encrypted2 = encrypt(key, plaintext).unwrap();
+        let encrypted1 = encrypt(&key, plaintext).unwrap();
+        let encrypted2 = encrypt(&key, plaintext).unwrap();
 
         // Then: The ciphertexts should be different (due to random nonce)
         assert_ne!(
@@ -150,12 +165,12 @@ mod tests {
     #[test]
     fn test_decryption_recovers_original_value() {
         // Given: A 32-byte key and plaintext
-        let key = b"12345678901234567890123456789012"; // 32 bytes
-        let plaintext = "my secret password";
+        let key = random_key();
+        let plaintext = "round-trip payload";
 
         // When: Encrypting and then decrypting
-        let encrypted = encrypt(key, plaintext).unwrap();
-        let decrypted = decrypt(key, &encrypted).unwrap();
+        let encrypted = encrypt(&key, plaintext).unwrap();
+        let decrypted = decrypt(&key, &encrypted).unwrap();
 
         // Then: The decrypted value should match the original plaintext
         assert_eq!(
@@ -167,13 +182,13 @@ mod tests {
     #[test]
     fn test_invalid_key_fails_decryption() {
         // Given: Two different keys
-        let key1 = b"12345678901234567890123456789012"; // 32 bytes
-        let key2 = b"abcdefghijklmnopqrstuvwxyz123456"; // 32 bytes
-        let plaintext = "my secret password";
+        let key1 = random_key();
+        let key2 = random_key();
+        let plaintext = "round-trip payload";
 
         // When: Encrypting with key1 and decrypting with key2
-        let encrypted = encrypt(key1, plaintext).unwrap();
-        let result = decrypt(key2, &encrypted);
+        let encrypted = encrypt(&key1, plaintext).unwrap();
+        let result = decrypt(&key2, &encrypted);
 
         // Then: Decryption should fail
         assert!(result.is_err(), "Decryption with wrong key should fail");
@@ -223,11 +238,11 @@ mod tests {
     #[test]
     fn test_encrypt_with_invalid_key_length() {
         // Given: A key that is not 32 bytes
-        let short_key = b"short";
+        let short_key = random_short_key();
         let plaintext = "test";
 
         // When: Attempting to encrypt
-        let result = encrypt(short_key, plaintext);
+        let result = encrypt(&short_key, plaintext);
 
         // Then: Should fail
         assert!(result.is_err());
@@ -237,11 +252,11 @@ mod tests {
     #[test]
     fn test_decrypt_with_invalid_key_length() {
         // Given: A valid encrypted string but invalid key length
-        let short_key = b"short";
+        let short_key = random_short_key();
         let encrypted = "dGVzdA=="; // some base64 string
 
         // When: Attempting to decrypt
-        let result = decrypt(short_key, encrypted);
+        let result = decrypt(&short_key, encrypted);
 
         // Then: Should fail
         assert!(result.is_err());
@@ -251,11 +266,11 @@ mod tests {
     #[test]
     fn test_decrypt_with_invalid_base64() {
         // Given: Valid key but invalid base64 string
-        let key = b"12345678901234567890123456789012";
+        let key = random_key();
         let invalid_base64 = "not!valid@base64#";
 
         // When: Attempting to decrypt
-        let result = decrypt(key, invalid_base64);
+        let result = decrypt(&key, invalid_base64);
 
         // Then: Should fail with InvalidBase64 error
         assert!(result.is_err());
@@ -265,11 +280,11 @@ mod tests {
     #[test]
     fn test_decrypt_with_truncated_data() {
         // Given: Valid key but data too short (< 12 bytes for nonce)
-        let key = b"12345678901234567890123456789012";
+        let key = random_key();
         let short_data = BASE64.encode(b"short"); // Less than 12 bytes
 
         // When: Attempting to decrypt
-        let result = decrypt(key, &short_data);
+        let result = decrypt(&key, &short_data);
 
         // Then: Should fail with DecryptionFailed error
         assert!(result.is_err());
@@ -279,12 +294,12 @@ mod tests {
     #[test]
     fn test_long_plaintext() {
         // Given: A long plaintext
-        let key = b"12345678901234567890123456789012";
+        let key = random_key();
         let plaintext = "a".repeat(10000); // 10KB of data
 
         // When: Encrypting and decrypting
-        let encrypted = encrypt(key, &plaintext).unwrap();
-        let decrypted = decrypt(key, &encrypted).unwrap();
+        let encrypted = encrypt(&key, &plaintext).unwrap();
+        let decrypted = decrypt(&key, &encrypted).unwrap();
 
         // Then: Should handle large data correctly
         assert_eq!(decrypted, plaintext);
@@ -293,12 +308,12 @@ mod tests {
     #[test]
     fn test_special_characters() {
         // Given: Plaintext with special characters
-        let key = b"12345678901234567890123456789012";
+        let key = random_key();
         let plaintext = "P@ssw0rd! with émojis 🔐 and unicode 中文";
 
         // When: Encrypting and decrypting
-        let encrypted = encrypt(key, plaintext).unwrap();
-        let decrypted = decrypt(key, &encrypted).unwrap();
+        let encrypted = encrypt(&key, plaintext).unwrap();
+        let decrypted = decrypt(&key, &encrypted).unwrap();
 
         // Then: Should handle special characters correctly
         assert_eq!(decrypted, plaintext);
@@ -307,12 +322,12 @@ mod tests {
     #[test]
     fn test_empty_plaintext() {
         // Given: Empty plaintext
-        let key = b"12345678901234567890123456789012";
+        let key = random_key();
         let plaintext = "";
 
         // When: Encrypting and decrypting
-        let encrypted = encrypt(key, plaintext).unwrap();
-        let decrypted = decrypt(key, &encrypted).unwrap();
+        let encrypted = encrypt(&key, plaintext).unwrap();
+        let decrypted = decrypt(&key, &encrypted).unwrap();
 
         // Then: Should handle empty string correctly
         assert_eq!(decrypted, plaintext);

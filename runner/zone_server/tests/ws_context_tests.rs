@@ -62,7 +62,7 @@ async fn get_ws_auth_token_with_pool(pool: &PgPool) -> (String, Uuid) {
     use zone_server::db::users;
 
     let email = common::test_email();
-    let password_hash = zone_server::auth::hash_password("test_password").unwrap();
+    let password_hash = zone_server::auth::hash_password(&common::test_password()).unwrap();
 
     // Create user directly in database
     let user = users::create_user(pool, &email, &password_hash, Some("WS Test User"), false)

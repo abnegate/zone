@@ -86,6 +86,7 @@ async function prepare(
         model_reasoning: 'gpt-4o',
         model_embedding: 'text-embedding-3-small',
         model_image: 'flux1-schnell-fp8.safetensors',
+        model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
       }),
     });
   });

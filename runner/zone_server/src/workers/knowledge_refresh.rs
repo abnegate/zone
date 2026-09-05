@@ -192,8 +192,10 @@ async fn refresh_entry(state: &AppState, entry: knowledge::KnowledgeRefreshDue) 
 ///
 /// Returns the extracted text content and its SHA-256 hash.
 async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
+    let url = crate::utils::url::validate_public_url(url)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::limited(3))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -203,6 +205,8 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
         .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
+
+    crate::utils::url::validate_public_url(response.url().as_str())?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP error: {}", response.status()));

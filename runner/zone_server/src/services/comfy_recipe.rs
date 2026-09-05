@@ -111,7 +111,6 @@ pub struct RecipeCatalog {
     default_image: String,
     recipes: Vec<Recipe>,
     files: HashMap<String, String>,
-    base_models: HashMap<String, String>,
     hints: Vec<(String, String)>,
 }
 
@@ -143,7 +142,6 @@ impl RecipeCatalog {
 
         let mut recipes = Vec::with_capacity(file.recipes.len());
         let mut files = HashMap::new();
-        let mut base_models = HashMap::new();
         let mut hints = Vec::new();
 
         for spec in file.recipes {
@@ -168,9 +166,9 @@ impl RecipeCatalog {
             for filename in spec.files {
                 files.insert(filename, spec.id.clone());
             }
-            for base in spec.base_models {
-                base_models.insert(base.to_ascii_lowercase(), spec.id.clone());
-            }
+            // CivitAI-style family labels are catalog documentation. Matching a
+            // checkpoint uses `files` then `filename_hints`, never these labels.
+            let _ = spec.base_models;
             for hint in spec.filename_hints {
                 hints.push((hint.to_ascii_lowercase(), spec.id.clone()));
             }
@@ -197,7 +195,6 @@ impl RecipeCatalog {
             default_image: file.default_image,
             recipes,
             files,
-            base_models,
             hints,
         })
     }
@@ -221,9 +218,6 @@ impl RecipeCatalog {
             return id;
         }
         let lower = trimmed.to_ascii_lowercase();
-        if let Some(id) = self.base_models.get(&lower) {
-            return id;
-        }
         let mut best_id: Option<&str> = None;
         let mut best_len = 0usize;
         for (hint, id) in &self.hints {
@@ -473,6 +467,12 @@ mod tests {
                 .unwrap()
                 .id,
             "sdxl"
+        );
+        // Family labels are not checkpoint filenames; an unknown name stays
+        // on the default image recipe instead of matching "SD 1.5".
+        assert_eq!(
+            catalog.image_recipe_for("SD 1.5").unwrap().id,
+            "flux-schnell"
         );
     }
 

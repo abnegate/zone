@@ -355,11 +355,11 @@ async fn test_pgvector_dimension_validation() {
     let chunk_id = chunk.id;
     store.store_content_chunks(&[chunk]).await.unwrap();
 
-    // Create embedding with wrong dimension
-    let wrong_embedding = create_test_embedding(chunk_id, item_id, source_id, 2048);
+    // Create embedding with a width the store cannot pad or store.
+    let oversized = create_test_embedding(chunk_id, item_id, source_id, 3072);
 
     // Should fail with dimension mismatch
-    let result = store.store(&wrong_embedding).await;
+    let result = store.store(&oversized).await;
     assert!(result.is_err(), "Should fail with wrong dimension");
 
     // Clean up

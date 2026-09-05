@@ -17,12 +17,30 @@ CHUNK_SIZE = 8 * 1024 * 1024
 USER_AGENT = "zone-comfyui-model-setup/1"
 
 
+VALID_BUNDLES = {"image", "video"}
+
+
 def load_manifest(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8") as handle:
         manifest = json.load(handle)
     if manifest.get("schema_version") != 1 or not isinstance(manifest.get("models"), list):
         raise ValueError(f"unsupported model manifest: {path}")
     return manifest["models"]
+
+
+def model_bundle(model: dict[str, Any]) -> str:
+    bundle = str(model.get("bundle") or "image")
+    if bundle not in VALID_BUNDLES:
+        raise ValueError(f"unsupported model bundle: {bundle}")
+    return bundle
+
+
+def select_models(models: list[dict[str, Any]], bundle: str) -> list[dict[str, Any]]:
+    if bundle == "all":
+        return models
+    if bundle not in VALID_BUNDLES:
+        raise ValueError(f"unsupported bundle filter: {bundle}")
+    return [model for model in models if model_bundle(model) == bundle]
 
 
 def checked_target(models_dir: Path, relative_path: str) -> Path:
@@ -130,12 +148,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="replace an installed file that fails verification",
     )
+    parser.add_argument(
+        "--bundle",
+        choices=("image", "video", "all"),
+        default="image",
+        help="download or verify only this model bundle (default: image)",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    models = load_manifest(args.manifest)
+    models = select_models(load_manifest(args.manifest), args.bundle)
+    if not models:
+        raise ValueError(f"no models declared for bundle {args.bundle}")
     failures = 0
 
     for model in models:

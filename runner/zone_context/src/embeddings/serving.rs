@@ -18,7 +18,7 @@ pub fn keyword_candidate_limit(limit: usize, extra_filters: bool) -> usize {
     if extra_filters {
         limit.saturating_mul(4).clamp(24, 128)
     } else {
-        limit.max(16)
+        limit.max(24)
     }
 }
 
@@ -60,7 +60,7 @@ mod tests {
         assert_eq!(ann_candidate_limit(10, true), 120);
         assert_eq!(ann_candidate_limit(1, false), 32);
         assert_eq!(ann_candidate_limit(100, true), 256);
-        assert_eq!(keyword_candidate_limit(10, false), 16);
+        assert_eq!(keyword_candidate_limit(10, false), 24);
         assert_eq!(keyword_candidate_limit(10, true), 40);
     }
 }

@@ -1,0 +1,9 @@
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      - ["zone_server::utils::url::validate_public_url", "ReturnValue", "request-url", "manual"]
+      - ["zone_server::services::artifacts::safe_path_component", "ReturnValue", "path-injection", "manual"]
+      - ["zone_server::services::artifacts::uuid_component", "ReturnValue", "path-injection", "manual"]
+      - ["zone_installer::frontend::sanitize_writable_config_path", "ReturnValue", "path-injection", "manual"]

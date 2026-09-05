@@ -1,6 +1,6 @@
 //! Resolve bundled installer and manager frontend directories.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const FRONTEND_DIR_ENV: &str = "ZONE_FRONTEND_DIR";
 pub const BIND_ENV: &str = "ZONE_BIND";
@@ -121,6 +121,7 @@ pub fn write_host(host: &str) -> std::io::Result<()> {
 }
 
 pub fn write_host_to(path: &Path, host: &str) -> std::io::Result<()> {
+    let path = sanitize_writable_config_path(path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -128,7 +129,7 @@ pub fn write_host_to(path: &Path, host: &str) -> std::io::Result<()> {
     let mut replaced = false;
     let mut out = String::new();
     if path.exists() {
-        let existing = std::fs::read_to_string(path)?;
+        let existing = std::fs::read_to_string(&path)?;
         for line in existing.lines() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("host")
@@ -147,7 +148,19 @@ pub fn write_host_to(path: &Path, host: &str) -> std::io::Result<()> {
         out.push_str(&host_line);
         out.push('\n');
     }
-    std::fs::write(path, out)
+    std::fs::write(&path, out)
+}
+
+fn sanitize_writable_config_path(path: &Path) -> std::io::Result<PathBuf> {
+    let raw = path.to_string_lossy();
+    // CodeQL rust/path-injection: reject parent-directory segments before any write.
+    if raw.contains("..") || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid config path",
+        ));
+    }
+    Ok(PathBuf::from(raw.as_ref()))
 }
 
 pub fn resolve_frontend_dir(kind: FrontendKind) -> PathBuf {
@@ -387,6 +400,16 @@ mod tests {
                 Some("https://zone.example.com")
             );
         }
+    }
+
+    #[test]
+    fn write_host_rejects_parent_dir_components() {
+        let err = write_host_to(
+            Path::new("/tmp/zone/../config.toml"),
+            "https://zone.example.com",
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

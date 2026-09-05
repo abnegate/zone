@@ -102,6 +102,7 @@ async fn main() {
                 zone_context::embeddings::providers::DEFAULT_OLLAMA_EMBEDDING_MODEL.to_string(),
             ),
             model_image: None,
+            model_video: None,
         };
 
         let engine = embedding_engine_from_env();

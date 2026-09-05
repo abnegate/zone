@@ -104,6 +104,7 @@ const mockAiSettings: AiSettings = {
   model_reasoning: 'deepseek-r1:7b',
   model_embedding: 'nomic-embed-text',
   model_image: 'flux1-schnell-fp8.safetensors',
+  model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
 };
 
 describe('OrgSettingsPage', () => {
@@ -344,6 +345,28 @@ describe('OrgSettingsPage', () => {
 
       await waitFor(() => {
         expect(mockClient.updateOrgAiSettings).toHaveBeenCalled();
+      });
+    });
+
+    it('sends an empty video model to clear the server-default override', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        model_video: null,
+      });
+
+      render(<OrgSettingsPage />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Video Model')).toHaveValue('wan2.2_ti2v_5B_fp16.safetensors');
+      });
+
+      fireEvent.change(screen.getByLabelText('Video Model'), { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => {
+        expect(mockClient.updateOrgAiSettings).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({ model_video: '' })
+        );
       });
     });
 

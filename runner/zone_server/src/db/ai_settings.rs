@@ -27,6 +27,7 @@ pub struct OrgAiSettingsRow {
     pub model_reasoning: Option<String>,
     pub model_embedding: Option<String>,
     pub model_image: Option<String>,
+    pub model_video: Option<String>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
 }
@@ -51,6 +52,7 @@ pub struct WorkspaceAiSettingsRow {
     pub model_reasoning: Option<String>,
     pub model_embedding: Option<String>,
     pub model_image: Option<String>,
+    pub model_video: Option<String>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
 }
@@ -73,20 +75,26 @@ pub struct EffectiveAiSettings {
     pub model_reasoning: Option<String>,
     pub model_embedding: Option<String>,
     pub model_image: Option<String>,
+    pub model_video: Option<String>,
 }
 
 impl EffectiveAiSettings {
     /// Overlay workspace/org image settings onto the process ComfyUI defaults.
     ///
-    /// `model_fast` classifies ambiguous image intent. `model_image` is the
+    /// `model_fast` classifies image intent when rules are unsure, including
+    /// informal edits of an attached photo. `model_image` is the
     /// ComfyUI checkpoint used for generation; an empty value keeps
-    /// `COMFYUI_CHECKPOINT`.
+    /// `COMFYUI_CHECKPOINT`. `model_video` is the Wan UNET filename and keeps
+    /// `COMFYUI_VIDEO_UNET` when empty.
     pub fn apply_to_comfyui(&self, config: &mut crate::config::ComfyUiConfig) {
         if let Some(model) = nonempty(self.model_fast.as_deref()) {
             config.classifier_model = model.to_string();
         }
         if let Some(model) = nonempty(self.model_image.as_deref()) {
             config.checkpoint = model.to_string();
+        }
+        if let Some(model) = nonempty(self.model_video.as_deref()) {
+            config.video_unet = model.to_string();
         }
     }
 }
@@ -109,7 +117,7 @@ pub async fn get_org_ai_settings(
         SELECT id, organization_id, provider, litellm_host, litellm_key,
                openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-               model_fast, model_reasoning, model_embedding, model_image, created_at, updated_at
+               model_fast, model_reasoning, model_embedding, model_image, model_video, created_at, updated_at
         FROM organization_ai_settings
         WHERE organization_id = $1
         "#,
@@ -140,6 +148,7 @@ pub async fn upsert_org_ai_settings(
     model_reasoning: Option<&str>,
     model_embedding: Option<&str>,
     model_image: Option<&str>,
+    model_video: Option<&str>,
 ) -> DbResult<OrgAiSettingsRow> {
     let row: OrgAiSettingsRow = sqlx::query_as(
         r#"
@@ -147,8 +156,11 @@ pub async fn upsert_org_ai_settings(
             organization_id, provider, litellm_host, litellm_key,
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-            model_fast, model_reasoning, model_embedding, model_image
-        ) VALUES ($1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            model_fast, model_reasoning, model_embedding, model_image, model_video
+        ) VALUES (
+            $1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), '')
+        )
         ON CONFLICT (organization_id) DO UPDATE SET
             provider = COALESCE($2, organization_ai_settings.provider),
             litellm_host = COALESCE($3, organization_ai_settings.litellm_host),
@@ -164,12 +176,22 @@ pub async fn upsert_org_ai_settings(
             model_fast = COALESCE($13, organization_ai_settings.model_fast),
             model_reasoning = COALESCE($14, organization_ai_settings.model_reasoning),
             model_embedding = COALESCE($15, organization_ai_settings.model_embedding),
-            model_image = COALESCE($16, organization_ai_settings.model_image),
+            -- NULL keeps the previous filename; empty string clears to NULL (server default).
+            model_image = CASE
+                WHEN $16 IS NULL THEN organization_ai_settings.model_image
+                WHEN BTRIM($16) = '' THEN NULL
+                ELSE $16
+            END,
+            model_video = CASE
+                WHEN $17 IS NULL THEN organization_ai_settings.model_video
+                WHEN BTRIM($17) = '' THEN NULL
+                ELSE $17
+            END,
             updated_at = NOW()
         RETURNING id, organization_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                   bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-                  model_fast, model_reasoning, model_embedding, model_image, created_at, updated_at
+                  model_fast, model_reasoning, model_embedding, model_image, model_video, created_at, updated_at
         "#
     )
     .bind(organization_id)
@@ -188,6 +210,7 @@ pub async fn upsert_org_ai_settings(
     .bind(model_reasoning)
     .bind(model_embedding)
     .bind(model_image)
+    .bind(model_video)
     .fetch_one(pool)
     .await?;
 
@@ -218,7 +241,7 @@ pub async fn get_workspace_ai_settings(
         SELECT id, workspace_id, provider, litellm_host, litellm_key,
                openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-               model_fast, model_reasoning, model_embedding, model_image, created_at, updated_at
+               model_fast, model_reasoning, model_embedding, model_image, model_video, created_at, updated_at
         FROM workspace_ai_settings
         WHERE workspace_id = $1
         "#,
@@ -249,6 +272,7 @@ pub async fn upsert_workspace_ai_settings(
     model_reasoning: Option<&str>,
     model_embedding: Option<&str>,
     model_image: Option<&str>,
+    model_video: Option<&str>,
 ) -> DbResult<WorkspaceAiSettingsRow> {
     let row: WorkspaceAiSettingsRow = sqlx::query_as(
         r#"
@@ -256,8 +280,11 @@ pub async fn upsert_workspace_ai_settings(
             workspace_id, provider, litellm_host, litellm_key,
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-            model_fast, model_reasoning, model_embedding, model_image
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            model_fast, model_reasoning, model_embedding, model_image, model_video
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), '')
+        )
         ON CONFLICT (workspace_id) DO UPDATE SET
             provider = $2,
             litellm_host = COALESCE($3, workspace_ai_settings.litellm_host),
@@ -273,12 +300,22 @@ pub async fn upsert_workspace_ai_settings(
             model_fast = COALESCE($13, workspace_ai_settings.model_fast),
             model_reasoning = COALESCE($14, workspace_ai_settings.model_reasoning),
             model_embedding = COALESCE($15, workspace_ai_settings.model_embedding),
-            model_image = COALESCE($16, workspace_ai_settings.model_image),
+            -- NULL keeps the previous filename; empty string clears to NULL (inherit).
+            model_image = CASE
+                WHEN $16 IS NULL THEN workspace_ai_settings.model_image
+                WHEN BTRIM($16) = '' THEN NULL
+                ELSE $16
+            END,
+            model_video = CASE
+                WHEN $17 IS NULL THEN workspace_ai_settings.model_video
+                WHEN BTRIM($17) = '' THEN NULL
+                ELSE $17
+            END,
             updated_at = NOW()
         RETURNING id, workspace_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
                   bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
-                  model_fast, model_reasoning, model_embedding, model_image, created_at, updated_at
+                  model_fast, model_reasoning, model_embedding, model_image, model_video, created_at, updated_at
         "#,
     )
     .bind(workspace_id)
@@ -297,6 +334,7 @@ pub async fn upsert_workspace_ai_settings(
     .bind(model_reasoning)
     .bind(model_embedding)
     .bind(model_image)
+    .bind(model_video)
     .fetch_one(pool)
     .await?;
 
@@ -344,6 +382,7 @@ pub async fn get_effective_ai_settings(
         model_reasoning: None,
         model_embedding: None,
         model_image: None,
+        model_video: None,
     };
 
     // Apply org settings
@@ -363,6 +402,7 @@ pub async fn get_effective_ai_settings(
         effective.model_reasoning = org.model_reasoning;
         effective.model_embedding = org.model_embedding;
         effective.model_image = org.model_image;
+        effective.model_video = org.model_video;
     }
 
     // Override with workspace settings (only non-None values)
@@ -412,6 +452,9 @@ pub async fn get_effective_ai_settings(
         if ws.model_image.is_some() {
             effective.model_image = ws.model_image;
         }
+        if ws.model_video.is_some() {
+            effective.model_video = ws.model_video;
+        }
     }
 
     Ok(effective)
@@ -439,6 +482,7 @@ mod tests {
             model_reasoning: None,
             model_embedding: None,
             model_image: image.map(str::to_string),
+            model_video: None,
         }
     }
 
@@ -449,6 +493,16 @@ mod tests {
             .apply_to_comfyui(&mut config);
         assert_eq!(config.classifier_model, "llama3.2:3b");
         assert_eq!(config.checkpoint, "custom-image.safetensors");
+        assert_eq!(config.video_unet, "wan2.2_ti2v_5B_fp16.safetensors");
+    }
+
+    #[test]
+    fn apply_to_comfyui_uses_configured_video_model() {
+        let mut config = ComfyUiConfig::default();
+        let mut settings = settings(None, None);
+        settings.model_video = Some("custom-video.safetensors".to_string());
+        settings.apply_to_comfyui(&mut config);
+        assert_eq!(config.video_unet, "custom-video.safetensors");
     }
 
     #[test]

@@ -5,6 +5,7 @@ import {
   isSendable,
   isStartingImage,
   sourceAttachment,
+  videoAttachments,
 } from './attachments';
 
 describe('imageAttachments', () => {
@@ -23,6 +24,27 @@ describe('imageAttachments', () => {
   it('returns an empty list when metadata is missing', () => {
     expect(imageAttachments(undefined)).toEqual([]);
     expect(imageAttachments(null)).toEqual([]);
+  });
+});
+
+describe('videoAttachments', () => {
+  it('returns only video attachments with a url', () => {
+    expect(
+      videoAttachments({
+        attachments: [
+          { name: 'clip.webm', mime: 'video/webm', url: '/api/artifacts/ws/chat/msg/clip.webm' },
+          { name: 'shot.png', mime: 'image/png', url: 'data:image/png;base64,xx' },
+          { name: 'empty.webm', mime: 'video/webm', url: '' },
+        ],
+      })
+    ).toEqual([
+      { name: 'clip.webm', mime: 'video/webm', url: '/api/artifacts/ws/chat/msg/clip.webm' },
+    ]);
+  });
+
+  it('returns an empty list when metadata is missing', () => {
+    expect(videoAttachments(undefined)).toEqual([]);
+    expect(videoAttachments(null)).toEqual([]);
   });
 });
 

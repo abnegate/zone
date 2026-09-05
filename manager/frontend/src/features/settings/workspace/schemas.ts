@@ -144,6 +144,7 @@ export const AiSettingsSchema = z.object({
   model_reasoning: z.string().nullable(),
   model_embedding: z.string().nullable(),
   model_image: z.string().nullable(),
+  model_video: z.string().nullable(),
 });
 
 export const UpdateAiSettingsRequestSchema = z.object({
@@ -162,6 +163,7 @@ export const UpdateAiSettingsRequestSchema = z.object({
   model_reasoning: z.string().optional(),
   model_embedding: z.string().optional(),
   model_image: z.string().optional(),
+  model_video: z.string().optional(),
 });
 
 export const AiSettingsResponseSchema = z.object({
@@ -181,6 +183,7 @@ export const AiSettingsResponseSchema = z.object({
   model_reasoning: z.string().nullable(),
   model_embedding: z.string().nullable(),
   model_image: z.string().nullable(),
+  model_video: z.string().nullable(),
 });
 
 // Type exports

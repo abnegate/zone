@@ -145,6 +145,25 @@ async fn test_create_knowledge_url_validation() {
     response.assert_status(StatusCode::BAD_REQUEST);
     let body = response.json_value();
     assert!(body["error"].as_str().unwrap().contains("http"));
+
+    let private = client
+        .post_json_auth(
+            "/api/knowledge",
+            &json!({
+                "workspace_id": workspace_id,
+                "title": "Test",
+                "source_url": "http://127.0.0.1/secret"
+            }),
+            &token,
+        )
+        .await;
+    private.assert_status(StatusCode::BAD_REQUEST);
+    assert!(
+        private.json_value()["error"]
+            .as_str()
+            .unwrap()
+            .contains("Private")
+    );
 }
 
 #[tokio::test]

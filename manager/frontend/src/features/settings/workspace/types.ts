@@ -87,6 +87,7 @@ export interface AiSettings {
   model_reasoning: string | null;
   model_embedding: string | null;
   model_image: string | null;
+  model_video: string | null;
 }
 
 export interface UpdateAiSettingsRequest {
@@ -105,6 +106,7 @@ export interface UpdateAiSettingsRequest {
   model_reasoning?: string;
   model_embedding?: string;
   model_image?: string;
+  model_video?: string;
 }
 
 export interface AiSettingsResponse {

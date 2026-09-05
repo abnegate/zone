@@ -80,6 +80,22 @@ class DownloadModelsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 download_models.checked_target(Path(directory), "../outside")
 
+    def test_select_models_filters_bundle(self) -> None:
+        models = [
+            {"id": "image", "bundle": "image"},
+            {"id": "video", "bundle": "video"},
+            {"id": "legacy"},
+        ]
+        self.assertEqual(
+            [model["id"] for model in download_models.select_models(models, "image")],
+            ["image", "legacy"],
+        )
+        self.assertEqual(
+            [model["id"] for model in download_models.select_models(models, "video")],
+            ["video"],
+        )
+        self.assertEqual(len(download_models.select_models(models, "all")), 3)
+
     def test_download_resumes_partial_file(self) -> None:
         payload = b"0123456789" * 1000
         url = self.serve(payload)

@@ -9797,6 +9797,7 @@ dependencies = [
  "dashmap",
  "futures",
  "futures-util",
+ "getrandom 0.3.4",
  "hex",
  "hmac 0.13.0",
  "http-body-util",
