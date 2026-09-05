@@ -1,4 +1,4 @@
-import { type VideoHTMLAttributes, useEffect, useState } from 'react';
+import { useEffect, useState, type VideoHTMLAttributes } from 'react';
 import { fetchProtectedImage, isProtectedArtifactUrl } from '../api/protectedImages';
 
 interface AuthenticatedVideoProps

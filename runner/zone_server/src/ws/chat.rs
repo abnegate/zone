@@ -146,9 +146,12 @@ impl Generation {
     }
 
     async fn cancelled(&self, sender: &SharedSender) {
-        let _ = send_server(sender, ServerMessage::Cancelled {
-            message_id: Some(self.message_id),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Cancelled {
+                message_id: Some(self.message_id),
+            },
+        )
         .await;
     }
 }
@@ -896,9 +899,12 @@ async fn handle_image_generation(
     let client = match ComfyUiClient::new(image_config.clone()) {
         Ok(client) => client,
         Err(error) => {
-            let _ = send_server(sender, ServerMessage::Error {
-                message: format!("Image generation is not configured: {error}"),
-            })
+            let _ = send_server(
+                sender,
+                ServerMessage::Error {
+                    message: format!("Image generation is not configured: {error}"),
+                },
+            )
             .await;
             return Ok(());
         }
@@ -910,20 +916,26 @@ async fn handle_image_generation(
         {
             Ok(source) => source,
             Err(error) => {
-                let _ = send_server(sender, ServerMessage::Error {
-                    message: format!("Image generation failed: {error}"),
-                })
+                let _ = send_server(
+                    sender,
+                    ServerMessage::Error {
+                        message: format!("Image generation failed: {error}"),
+                    },
+                )
                 .await;
                 return Ok(());
             }
         };
-    let _ = send_server(sender, ServerMessage::Status {
-        message: if source.is_some() {
-            "Preparing image-to-image...".to_string()
-        } else {
-            "Preparing image generation...".to_string()
+    let _ = send_server(
+        sender,
+        ServerMessage::Status {
+            message: if source.is_some() {
+                "Preparing image-to-image...".to_string()
+            } else {
+                "Preparing image generation...".to_string()
+            },
         },
-    })
+    )
     .await;
     let _generation_permit = tokio::select! {
         biased;
@@ -959,9 +971,12 @@ async fn handle_image_generation(
     let images = match result {
         Ok(images) => images,
         Err(ComfyUiError::Cancelled) => {
-            let _ = send_server(sender, ServerMessage::Cancelled {
-                message_id: Some(assistant_message_id),
-            })
+            let _ = send_server(
+                sender,
+                ServerMessage::Cancelled {
+                    message_id: Some(assistant_message_id),
+                },
+            )
             .await;
             return Ok(());
         }
@@ -1005,9 +1020,12 @@ async fn handle_image_generation(
                 store
                     .cleanup_owner(workspace_id, chat_id, assistant_message_id)
                     .await;
-                let _ = send_server(sender, ServerMessage::Error {
-                    message: "Image generation failed: could not store the image".to_string(),
-                })
+                let _ = send_server(
+                    sender,
+                    ServerMessage::Error {
+                        message: "Image generation failed: could not store the image".to_string(),
+                    },
+                )
                 .await;
                 return Ok(());
             }
@@ -1017,9 +1035,12 @@ async fn handle_image_generation(
         }
     }
     if attachments.is_empty() {
-        let _ = send_server(sender, ServerMessage::Error {
-            message: "Image generation completed without a usable image".to_string(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Image generation completed without a usable image".to_string(),
+            },
+        )
         .await;
         return Ok(());
     }
@@ -1040,30 +1061,42 @@ async fn handle_image_generation(
         store
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
             .await;
-        let _ = send_server(sender, ServerMessage::Error {
-            message: "Image generation failed: could not save the message".to_string(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Image generation failed: could not save the message".to_string(),
+            },
+        )
         .await;
         return Ok(());
     }
-    let _ = send_server(sender, ServerMessage::MessageStart {
-        message_id: assistant_message_id,
-        role: "assistant".to_string(),
-    })
+    let _ = send_server(
+        sender,
+        ServerMessage::MessageStart {
+            message_id: assistant_message_id,
+            role: "assistant".to_string(),
+        },
+    )
     .await;
     for attachment in &attachments {
-        let _ = send_server(sender, ServerMessage::Image {
-            message_id: assistant_message_id,
-            attachment: attachment.clone(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Image {
+                message_id: assistant_message_id,
+                attachment: attachment.clone(),
+            },
+        )
         .await;
     }
-    let _ = send_server(sender, ServerMessage::MessageEnd {
-        message_id: assistant_message_id,
-        content: content.to_string(),
-        metadata,
-        error: None,
-    })
+    let _ = send_server(
+        sender,
+        ServerMessage::MessageEnd {
+            message_id: assistant_message_id,
+            content: content.to_string(),
+            metadata,
+            error: None,
+        },
+    )
     .await;
     Ok(())
 }
@@ -1089,9 +1122,12 @@ async fn handle_video_generation(
     let client = match ComfyUiClient::new(video_config.clone()) {
         Ok(client) => client,
         Err(error) => {
-            let _ = send_server(sender, ServerMessage::Error {
-                message: format!("Video generation is not configured: {error}"),
-            })
+            let _ = send_server(
+                sender,
+                ServerMessage::Error {
+                    message: format!("Video generation is not configured: {error}"),
+                },
+            )
             .await;
             return Ok(());
         }
@@ -1103,20 +1139,26 @@ async fn handle_video_generation(
         {
             Ok(source) => source,
             Err(error) => {
-                let _ = send_server(sender, ServerMessage::Error {
-                    message: format!("Video generation failed: {error}"),
-                })
+                let _ = send_server(
+                    sender,
+                    ServerMessage::Error {
+                        message: format!("Video generation failed: {error}"),
+                    },
+                )
                 .await;
                 return Ok(());
             }
         };
-    let _ = send_server(sender, ServerMessage::Status {
-        message: if source.is_some() {
-            "Preparing image-to-video...".to_string()
-        } else {
-            "Preparing video generation...".to_string()
+    let _ = send_server(
+        sender,
+        ServerMessage::Status {
+            message: if source.is_some() {
+                "Preparing image-to-video...".to_string()
+            } else {
+                "Preparing video generation...".to_string()
+            },
         },
-    })
+    )
     .await;
     let _generation_permit = tokio::select! {
         biased;
@@ -1152,9 +1194,12 @@ async fn handle_video_generation(
     let videos = match result {
         Ok(videos) => videos,
         Err(ComfyUiError::Cancelled) => {
-            let _ = send_server(sender, ServerMessage::Cancelled {
-                message_id: Some(assistant_message_id),
-            })
+            let _ = send_server(
+                sender,
+                ServerMessage::Cancelled {
+                    message_id: Some(assistant_message_id),
+                },
+            )
             .await;
             return Ok(());
         }
@@ -1197,9 +1242,12 @@ async fn handle_video_generation(
                 store
                     .cleanup_owner(workspace_id, chat_id, assistant_message_id)
                     .await;
-                let _ = send_server(sender, ServerMessage::Error {
-                    message: "Video generation failed: could not store the video".to_string(),
-                })
+                let _ = send_server(
+                    sender,
+                    ServerMessage::Error {
+                        message: "Video generation failed: could not store the video".to_string(),
+                    },
+                )
                 .await;
                 return Ok(());
             }
@@ -1209,9 +1257,12 @@ async fn handle_video_generation(
         }
     }
     if attachments.is_empty() {
-        let _ = send_server(sender, ServerMessage::Error {
-            message: "Video generation completed without a usable video".to_string(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Video generation completed without a usable video".to_string(),
+            },
+        )
         .await;
         return Ok(());
     }
@@ -1232,30 +1283,42 @@ async fn handle_video_generation(
         store
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
             .await;
-        let _ = send_server(sender, ServerMessage::Error {
-            message: "Video generation failed: could not save the message".to_string(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Video generation failed: could not save the message".to_string(),
+            },
+        )
         .await;
         return Ok(());
     }
-    let _ = send_server(sender, ServerMessage::MessageStart {
-        message_id: assistant_message_id,
-        role: "assistant".to_string(),
-    })
+    let _ = send_server(
+        sender,
+        ServerMessage::MessageStart {
+            message_id: assistant_message_id,
+            role: "assistant".to_string(),
+        },
+    )
     .await;
     for attachment in &attachments {
-        let _ = send_server(sender, ServerMessage::Video {
-            message_id: assistant_message_id,
-            attachment: attachment.clone(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Video {
+                message_id: assistant_message_id,
+                attachment: attachment.clone(),
+            },
+        )
         .await;
     }
-    let _ = send_server(sender, ServerMessage::MessageEnd {
-        message_id: assistant_message_id,
-        content: content.to_string(),
-        metadata,
-        error: None,
-    })
+    let _ = send_server(
+        sender,
+        ServerMessage::MessageEnd {
+            message_id: assistant_message_id,
+            content: content.to_string(),
+            metadata,
+            error: None,
+        },
+    )
     .await;
     Ok(())
 }
@@ -1333,9 +1396,12 @@ async fn handle_send_message(
         .await
         .unwrap_or(false)
     {
-        let _ = send_server(sender, ServerMessage::Error {
-            message: "Workspace access denied".to_string(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Workspace access denied".to_string(),
+            },
+        )
         .await;
         return;
     }
@@ -1407,9 +1473,12 @@ async fn handle_send_message(
     }.await;
     if let Err(error) = result {
         tracing::error!("Error handling send message: {error}");
-        let _ = send_server(sender, ServerMessage::Error {
-            message: "Failed to process message".to_string(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Failed to process message".to_string(),
+            },
+        )
         .await;
     }
 }
@@ -1489,9 +1558,12 @@ async fn prepare_message(
             .await
             == Some(false)
     {
-        let _ = send_server(sender, ServerMessage::Error {
-            message: crate::services::model::UNSUPPORTED.to_string(),
-        })
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: crate::services::model::UNSUPPORTED.to_string(),
+            },
+        )
         .await;
         return Ok(None);
     }
@@ -2168,9 +2240,10 @@ mod tests {
                 }
             ]
         });
-        assert_eq!(image_urls_from_metadata(Some(&metadata)), vec![
-            "data:image/png;base64,xx".to_string()
-        ]);
+        assert_eq!(
+            image_urls_from_metadata(Some(&metadata)),
+            vec!["data:image/png;base64,xx".to_string()]
+        );
         let public = serde_json::json!({
             "attachments": [{
                 "name": "remote.png",
@@ -2178,9 +2251,10 @@ mod tests {
                 "url": "https://example.test/remote.png"
             }]
         });
-        assert_eq!(image_urls_from_metadata(Some(&public)), vec![
-            "https://example.test/remote.png".to_string()
-        ]);
+        assert_eq!(
+            image_urls_from_metadata(Some(&public)),
+            vec!["https://example.test/remote.png".to_string()]
+        );
         assert!(image_urls_from_metadata(None).is_empty());
     }
 
@@ -2188,11 +2262,14 @@ mod tests {
     fn test_generated_image_attachment_builds_persistable_metadata() {
         let attachment =
             generated_image_attachment("data:image/webp;base64,abc", 0).expect("valid image");
-        assert_eq!(attachment, ChatImageAttachment {
-            name: "generated-image-1.webp".to_string(),
-            mime: "image/webp".to_string(),
-            url: "data:image/webp;base64,abc".to_string(),
-        });
+        assert_eq!(
+            attachment,
+            ChatImageAttachment {
+                name: "generated-image-1.webp".to_string(),
+                mime: "image/webp".to_string(),
+                url: "data:image/webp;base64,abc".to_string(),
+            }
+        );
 
         let metadata = image_metadata(&[attachment]).expect("image metadata");
         assert_eq!(metadata["attachments"][0]["name"], "generated-image-1.webp");

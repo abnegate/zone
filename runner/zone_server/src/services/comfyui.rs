@@ -494,6 +494,7 @@ impl ComfyUiClient {
     ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
         let mut generated = Vec::with_capacity(outputs.len());
         for output in outputs {
+            let filename = output.filename.clone();
             // reqwest 0.13 dropped RequestBuilder::query; encode onto the URL.
             let url = format!(
                 "{}/view?filename={}&subfolder={}&type={}",
@@ -514,7 +515,7 @@ impl ComfyUiClient {
                         .map(str::trim)
                         .filter(|value| value.starts_with("image/") || value.starts_with("video/"))
                         .map(str::to_string)
-                        .unwrap_or_else(|| mime_for_filename(&output.filename));
+                        .unwrap_or_else(|| mime_for_filename(&filename));
                     Ok((response.bytes().await?, mime))
                 })
                 .await?;

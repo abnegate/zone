@@ -57,30 +57,30 @@ impl ImageIntentClassifier {
         {
             return GenerationIntent::Image;
         }
-        if metadata
+        let skip_video = metadata
             .and_then(|m| m.get("video_generation"))
             .and_then(Value::as_bool)
-            == Some(false)
-            && metadata
-                .and_then(|m| m.get("image_generation"))
-                .and_then(Value::as_bool)
-                == Some(false)
-        {
+            == Some(false);
+        let skip_image = metadata
+            .and_then(|m| m.get("image_generation"))
+            .and_then(Value::as_bool)
+            == Some(false);
+        if skip_video && skip_image {
             return GenerationIntent::Chat;
         }
 
         let has_source_image = crate::services::image_source::has_image_attachment(metadata);
         match deterministic_decision(content, has_source_image) {
-            RuleDecision::Video => GenerationIntent::Video,
-            RuleDecision::Image => GenerationIntent::Image,
-            RuleDecision::Chat => GenerationIntent::Chat,
-            RuleDecision::Ambiguous => {
+            RuleDecision::Video if !skip_video => GenerationIntent::Video,
+            RuleDecision::Image if !skip_image => GenerationIntent::Image,
+            RuleDecision::Ambiguous if !skip_image => {
                 if self.classify_ambiguous(content, has_source_image).await {
                     GenerationIntent::Image
                 } else {
                     GenerationIntent::Chat
                 }
             }
+            _ => GenerationIntent::Chat,
         }
     }
 
