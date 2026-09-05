@@ -349,7 +349,7 @@ mod tests {
         let hash = hash_password(&password).unwrap();
 
         assert!(verify_password(&password, &hash).unwrap());
-        assert!(!verify_password("", &hash).unwrap());
+        assert!(!verify_password(&from_codes(&[]), &hash).unwrap());
         assert!(!verify_password(&from_codes(&[0x20]), &hash).unwrap());
     }
 
