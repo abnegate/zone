@@ -758,6 +758,67 @@ async fn test_ai_settings_with_all_models() {
 }
 
 #[tokio::test]
+async fn test_empty_model_video_clears_saved_override() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({
+                "provider": "self_hosted",
+                "model_image": "custom-image.safetensors",
+                "model_video": "custom-video.safetensors"
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let cleared = client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({
+                "provider": "self_hosted",
+                "model_image": "",
+                "model_video": ""
+            }),
+            &token,
+        )
+        .await;
+    cleared.assert_status(StatusCode::OK);
+    let body = cleared.json_value();
+    assert!(body["model_image"].is_null());
+    assert!(body["model_video"].is_null());
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({
+                "provider": "self_hosted",
+                "model_video": "keep-video.safetensors"
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let omitted = client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({ "provider": "self_hosted" }),
+            &token,
+        )
+        .await;
+    omitted.assert_status(StatusCode::OK);
+    assert_eq!(
+        omitted.json_value()["model_video"],
+        "keep-video.safetensors"
+    );
+}
+
+#[tokio::test]
 async fn test_credentials_not_exposed_in_response() {
     let client = TestClient::with_db().await;
     let token = get_auth_token(&client).await;

@@ -75,8 +75,6 @@ pub struct ComfyUiClient {
     client: Client,
     workflow: Value,
     img2img_workflow: Value,
-    video_workflow: Value,
-    i2v_workflow: Value,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +147,31 @@ fn collect_output_files(node: &Value, mode: OutputMode) -> Result<Vec<OutputImag
     Ok(files)
 }
 
+fn outputs_from_history_entry(
+    status: &str,
+    nodes: Option<&serde_json::Map<String, Value>>,
+    mode: OutputMode,
+) -> Result<Option<Vec<OutputImage>>, ComfyUiError> {
+    if status == "error" {
+        return Err(ComfyUiError::InvalidResponse("workflow execution failed"));
+    }
+    let mut files = Vec::new();
+    if let Some(nodes) = nodes {
+        for node in nodes.values() {
+            files.extend(collect_output_files(node, mode)?);
+        }
+    }
+    if files.is_empty() {
+        if status == "success" {
+            return Err(ComfyUiError::InvalidResponse(
+                "workflow completed without a usable output",
+            ));
+        }
+        return Ok(None);
+    }
+    Ok(Some(files))
+}
+
 impl ComfyUiClient {
     pub fn new(config: ComfyUiConfig) -> Result<Self, ComfyUiError> {
         if config.base_url.trim().is_empty() {
@@ -159,24 +182,6 @@ impl ComfyUiClient {
                 "COMFYUI_CHECKPOINT must be a checkpoint filename",
             ));
         }
-        for (value, message) in [
-            (
-                config.video_unet.as_str(),
-                "COMFYUI_VIDEO_UNET must be a diffusion model filename",
-            ),
-            (
-                config.video_clip.as_str(),
-                "COMFYUI_VIDEO_CLIP must be a text encoder filename",
-            ),
-            (
-                config.video_vae.as_str(),
-                "COMFYUI_VIDEO_VAE must be a VAE filename",
-            ),
-        ] {
-            if !is_model_filename(value) {
-                return Err(ComfyUiError::Configuration(message));
-            }
-        }
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(config.request_timeout_secs))
@@ -185,18 +190,38 @@ impl ComfyUiClient {
         validate_workflow(&workflow)?;
         let img2img_workflow = load_img2img_workflow(&config.workflow_path)?;
         validate_img2img_workflow(&img2img_workflow)?;
-        let video_workflow = load_video_workflow(&config.video_workflow_path)?;
-        validate_video_workflow(&video_workflow)?;
-        let i2v_workflow = load_i2v_workflow(&config.video_workflow_path)?;
-        validate_i2v_workflow(&i2v_workflow)?;
         Ok(Self {
             config,
             client,
             workflow,
             img2img_workflow,
-            video_workflow,
-            i2v_workflow,
         })
+    }
+
+    fn video_workflows(&self) -> Result<(Value, Value), ComfyUiError> {
+        for (value, message) in [
+            (
+                self.config.video_unet.as_str(),
+                "COMFYUI_VIDEO_UNET must be a diffusion model filename",
+            ),
+            (
+                self.config.video_clip.as_str(),
+                "COMFYUI_VIDEO_CLIP must be a text encoder filename",
+            ),
+            (
+                self.config.video_vae.as_str(),
+                "COMFYUI_VIDEO_VAE must be a VAE filename",
+            ),
+        ] {
+            if !is_model_filename(value) {
+                return Err(ComfyUiError::Configuration(message));
+            }
+        }
+        let video_workflow = load_video_workflow(&self.config.video_workflow_path)?;
+        validate_video_workflow(&video_workflow)?;
+        let i2v_workflow = load_i2v_workflow(&self.config.video_workflow_path)?;
+        validate_i2v_workflow(&i2v_workflow)?;
+        Ok((video_workflow, i2v_workflow))
     }
 
     pub async fn generate(
@@ -269,6 +294,7 @@ impl ComfyUiClient {
         if cancel.try_recv().is_ok() {
             return Err(ComfyUiError::Cancelled);
         }
+        let (video_workflow, i2v_workflow) = self.video_workflows()?;
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.config.video_generation_timeout_secs);
         let prompt = if prompt.trim().is_empty() {
@@ -284,7 +310,7 @@ impl ComfyUiClient {
             let _ = progress.send("Uploading source image...".to_string());
             let uploaded = self.upload_source(source, cancel, deadline).await?;
             configure_wan_i2v_workflow(
-                self.i2v_workflow.clone(),
+                i2v_workflow,
                 prompt,
                 &self.config.video_unet,
                 &self.config.video_clip,
@@ -294,7 +320,7 @@ impl ComfyUiClient {
             )?
         } else {
             configure_wan_t2v_workflow(
-                self.video_workflow.clone(),
+                video_workflow,
                 prompt,
                 &self.config.video_unet,
                 &self.config.video_clip,
@@ -470,20 +496,11 @@ impl ComfyUiClient {
             .pointer("/status/status_str")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if status == "error" {
-            return Err(ComfyUiError::InvalidResponse("workflow execution failed"));
-        }
-        let Some(nodes) = entry.get("outputs").and_then(Value::as_object) else {
-            return Ok(None);
-        };
-        let mut files = Vec::new();
-        for node in nodes.values() {
-            files.extend(collect_output_files(node, mode)?);
-        }
-        if files.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(files))
+        outputs_from_history_entry(
+            status,
+            entry.get("outputs").and_then(Value::as_object),
+            mode,
+        )
     }
 
     async fn fetch_outputs(
@@ -1079,6 +1096,57 @@ mod tests {
             validate_workflow(&workflow),
             Err(ComfyUiError::Configuration(
                 "workflow output must use temporary PreviewImage storage"
+            ))
+        ));
+    }
+
+    #[test]
+    fn image_client_accepts_empty_video_unet() {
+        ComfyUiClient::new(ComfyUiConfig {
+            video_unet: String::new(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn successful_history_without_video_is_an_error() {
+        let nodes = json!({
+            "10": {"images": [{"filename": "still.png", "subfolder": "", "type": "output"}]}
+        });
+        assert!(matches!(
+            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Video),
+            Err(ComfyUiError::InvalidResponse(
+                "workflow completed without a usable output"
+            ))
+        ));
+    }
+
+    #[test]
+    fn incomplete_history_without_files_keeps_polling() {
+        assert!(
+            outputs_from_history_entry("executing", None, OutputMode::Video)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_video_rejects_empty_video_unet() {
+        let client = ComfyUiClient::new(ComfyUiConfig {
+            enabled: true,
+            video_unet: String::new(),
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        assert!(matches!(
+            client
+                .generate_video("a fox", None, &mut cancel_rx, progress_tx)
+                .await,
+            Err(ComfyUiError::Configuration(
+                "COMFYUI_VIDEO_UNET must be a diffusion model filename"
             ))
         ));
     }

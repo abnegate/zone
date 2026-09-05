@@ -396,7 +396,7 @@ fn generated_media_attachment(url: &str, mime: &str, index: usize) -> Option<Cha
         || url.starts_with("http://")
         || url.starts_with("/api/artifacts/")
     {
-        if !mime.is_empty() {
+        if mime.starts_with("image/") || mime.starts_with("video/") {
             mime.to_string()
         } else if url.ends_with(".webm") {
             "video/webm".to_string()
@@ -2303,6 +2303,18 @@ mod tests {
         let attachment =
             generated_media_attachment("/api/artifacts/ws/chat/msg/clip.webm", "video/webm", 0)
                 .expect("valid video");
+        assert_eq!(attachment.name, "generated-video-1.webm");
+        assert_eq!(attachment.mime, "video/webm");
+    }
+
+    #[test]
+    fn test_generated_video_attachment_ignores_non_media_mime() {
+        let attachment = generated_media_attachment(
+            "/api/artifacts/ws/chat/msg/clip.webm",
+            "application/octet-stream",
+            0,
+        )
+        .expect("valid video");
         assert_eq!(attachment.name, "generated-video-1.webm");
         assert_eq!(attachment.mime, "video/webm");
     }

@@ -348,6 +348,30 @@ describe('OrgSettingsPage', () => {
       });
     });
 
+    it('sends an empty video model to clear the server-default override', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        model_video: null,
+      });
+
+      render(<OrgSettingsPage />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Video Model')).toHaveValue(
+          'wan2.2_ti2v_5B_fp16.safetensors'
+        );
+      });
+
+      fireEvent.change(screen.getByLabelText('Video Model'), { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => {
+        expect(mockClient.updateOrgAiSettings).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({ model_video: '' })
+        );
+      });
+    });
+
     it('shows success message after save', async () => {
       mockClient.updateOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
 

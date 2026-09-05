@@ -242,7 +242,7 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         return RuleDecision::Video;
     }
 
-    if is_edit_request(&tokens, &has_phrase, has_source_image)
+    if is_edit_request(&tokens, &has_phrase)
         && (has_source_image || refers_to_existing_image(&tokens, &has_phrase))
     {
         return RuleDecision::Image;
@@ -383,11 +383,7 @@ fn is_animate_existing(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool)
             && refers_to_existing_image(tokens, has_phrase))
 }
 
-fn is_edit_request(
-    tokens: &[String],
-    has_phrase: &impl Fn(&[&str]) -> bool,
-    has_source_image: bool,
-) -> bool {
+fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
     const STRONG_EDITS: &[&str] = &[
         "add",
         "remove",
@@ -422,7 +418,7 @@ fn is_edit_request(
     tokens
         .iter()
         .any(|token| STRONG_EDITS.contains(&token.as_str()))
-        || (weak_edit && (has_source_image || refers_to_existing_image(tokens, has_phrase)))
+        || (weak_edit && refers_to_existing_image(tokens, has_phrase))
         || has_phrase(&["get", "rid"])
         || has_phrase(&["take", "out"])
         || has_phrase(&["take", "off"])
@@ -476,9 +472,10 @@ fn refers_to_existing_image(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> 
         || has_phrase(&["place", "this"])
         || has_phrase(&["put", "it"])
         || has_phrase(&["place", "it"])
-        || tokens
-            .iter()
-            .any(|token| token == "background" || token == "watermark")
+        || has_phrase(&["this", "background"])
+        || has_phrase(&["the", "background"])
+        || has_phrase(&["this", "watermark"])
+        || has_phrase(&["the", "watermark"])
 }
 
 fn is_removal_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
@@ -657,6 +654,20 @@ mod tests {
         assert!(!should_reuse_thread_image(
             "Generate an image of the environment"
         ));
+        assert!(!should_reuse_thread_image(
+            "Generate an image of a wolf with a snowy background"
+        ));
+        assert!(should_reuse_thread_image(
+            "Change the background to a forest"
+        ));
+        assert_eq!(
+            deterministic_decision("please take a look, can you fix it?", true),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(
+            deterministic_decision("please take a look, can you fix it?", false),
+            RuleDecision::Chat
+        );
         assert!(should_reuse_thread_image("Animate this image"));
         assert!(should_reuse_thread_image("Make this a video"));
         assert!(!should_reuse_thread_image("Generate a video of a fox"));

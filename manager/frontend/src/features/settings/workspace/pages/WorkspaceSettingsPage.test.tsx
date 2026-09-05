@@ -815,5 +815,25 @@ describe('WorkspaceSettingsPage', () => {
         expect(mockClient.getEffectiveAiSettings).toHaveBeenCalled();
       });
     });
+
+    it('sends an empty video model to resume organization inheritance', async () => {
+      const user = userEvent.setup();
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(user);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Video Model')).toHaveValue(
+          'wan2.2_ti2v_5B_fp16.safetensors'
+        );
+      });
+      await user.selectOptions(screen.getByLabelText('Video Model'), '');
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+      await waitFor(() => {
+        expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.any(String),
+          expect.objectContaining({ model_video: '' })
+        );
+      });
+    });
   });
 });

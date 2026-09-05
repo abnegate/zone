@@ -157,7 +157,10 @@ pub async fn upsert_org_ai_settings(
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
             model_fast, model_reasoning, model_embedding, model_image, model_video
-        ) VALUES ($1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        ) VALUES (
+            $1, COALESCE($2, 'self_hosted'), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), '')
+        )
         ON CONFLICT (organization_id) DO UPDATE SET
             provider = COALESCE($2, organization_ai_settings.provider),
             litellm_host = COALESCE($3, organization_ai_settings.litellm_host),
@@ -173,8 +176,17 @@ pub async fn upsert_org_ai_settings(
             model_fast = COALESCE($13, organization_ai_settings.model_fast),
             model_reasoning = COALESCE($14, organization_ai_settings.model_reasoning),
             model_embedding = COALESCE($15, organization_ai_settings.model_embedding),
-            model_image = COALESCE($16, organization_ai_settings.model_image),
-            model_video = COALESCE($17, organization_ai_settings.model_video),
+            -- NULL keeps the previous filename; empty string clears to NULL (server default).
+            model_image = CASE
+                WHEN $16 IS NULL THEN organization_ai_settings.model_image
+                WHEN BTRIM($16) = '' THEN NULL
+                ELSE $16
+            END,
+            model_video = CASE
+                WHEN $17 IS NULL THEN organization_ai_settings.model_video
+                WHEN BTRIM($17) = '' THEN NULL
+                ELSE $17
+            END,
             updated_at = NOW()
         RETURNING id, organization_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
@@ -269,7 +281,10 @@ pub async fn upsert_workspace_ai_settings(
             openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,
             bedrock_region, bedrock_access_key, bedrock_secret_key, bedrock_use_iam_role,
             model_fast, model_reasoning, model_embedding, model_image, model_video
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), '')
+        )
         ON CONFLICT (workspace_id) DO UPDATE SET
             provider = $2,
             litellm_host = COALESCE($3, workspace_ai_settings.litellm_host),
@@ -285,8 +300,17 @@ pub async fn upsert_workspace_ai_settings(
             model_fast = COALESCE($13, workspace_ai_settings.model_fast),
             model_reasoning = COALESCE($14, workspace_ai_settings.model_reasoning),
             model_embedding = COALESCE($15, workspace_ai_settings.model_embedding),
-            model_image = COALESCE($16, workspace_ai_settings.model_image),
-            model_video = COALESCE($17, workspace_ai_settings.model_video),
+            -- NULL keeps the previous filename; empty string clears to NULL (inherit).
+            model_image = CASE
+                WHEN $16 IS NULL THEN workspace_ai_settings.model_image
+                WHEN BTRIM($16) = '' THEN NULL
+                ELSE $16
+            END,
+            model_video = CASE
+                WHEN $17 IS NULL THEN workspace_ai_settings.model_video
+                WHEN BTRIM($17) = '' THEN NULL
+                ELSE $17
+            END,
             updated_at = NOW()
         RETURNING id, workspace_id, provider, litellm_host, litellm_key,
                   openai_api_key, openai_base_url, anthropic_api_key, anthropic_base_url,

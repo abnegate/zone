@@ -164,8 +164,9 @@ export default function OrgSettingsPage() {
         model_fast: modelFast || undefined,
         model_reasoning: modelReasoning || undefined,
         model_embedding: modelEmbedding || undefined,
-        model_image: modelImage || undefined,
-        model_video: modelVideo || undefined,
+        // Empty string clears the stored override so the server default resumes.
+        model_image: modelImage,
+        model_video: modelVideo,
       };
 
       // Only include credentials if they were entered
