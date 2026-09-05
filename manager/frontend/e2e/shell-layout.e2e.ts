@@ -61,6 +61,7 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
         model_reasoning: 'deepseek-r1:7b',
         model_embedding: 'nomic-embed-text',
         model_image: 'flux1-schnell-fp8.safetensors',
+        model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
         override_ai_settings: false,
       },
     });

@@ -35,7 +35,7 @@ FROM ${CUDA_IMAGE}
 ARG COMFYUI_COMMIT=30bdda1ef13a3a34fce2cd2fec633f15d832122a
 
 LABEL org.opencontainers.image.title="Zone ComfyUI runtime" \
-      org.opencontainers.image.description="Pinned ComfyUI runtime for FLUX.1 Schnell FP8" \
+      org.opencontainers.image.description="Pinned ComfyUI runtime for FLUX.1 Schnell and Wan 2.2 TI2V" \
       org.opencontainers.image.source="https://github.com/comfyanonymous/ComfyUI" \
       org.opencontainers.image.revision="${COMFYUI_COMMIT}" \
       org.opencontainers.image.licenses="GPL-3.0"
@@ -62,6 +62,9 @@ COPY --chown=comfy:comfy model-manifest.json download-models.py /opt/zone/
 
 RUN mkdir -p \
         /workspace/ComfyUI/models/checkpoints \
+        /workspace/ComfyUI/models/diffusion_models \
+        /workspace/ComfyUI/models/text_encoders \
+        /workspace/ComfyUI/models/vae \
         /workspace/ComfyUI/output \
         /workspace/ComfyUI/temp \
         /workspace/ComfyUI/user \

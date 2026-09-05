@@ -511,7 +511,12 @@ pub async fn search(
             Some(parts)
         }
     });
-    if query.categories.as_ref().is_some_and(|s| !s.trim().is_empty()) && categories.is_none() {
+    if query
+        .categories
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty())
+        && categories.is_none()
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(format!(

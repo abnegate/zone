@@ -288,9 +288,7 @@ impl ChatTools {
         if !receipts::is_write_tool(name) {
             return None;
         }
-        let Some(scope) = self.scope.as_ref() else {
-            return None;
-        };
+        let scope = self.scope.as_ref()?;
         let actor_name = match users::get_user_by_id(scope.state.db(), scope.user_id).await {
             Ok(Some(user)) => user
                 .display_name

@@ -1,4 +1,10 @@
 //! Hybrid image-generation intent classification.
+//!
+//! High-confidence rules route immediately. Anything leftover — including
+//! informal edits of an attached photo that the word lists miss — is decided
+//! by a short LiteLLM call (`COMFYUI_CLASSIFIER_MODEL` / workspace `model_fast`,
+//! default `llama3.2:3b`) with a small token budget. Timeouts and empty hosts
+//! fall back to chat.
 
 use serde_json::Value;
 use std::time::Duration;
@@ -9,8 +15,27 @@ use crate::config::ComfyUiConfig;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleDecision {
     Image,
+    Video,
     Chat,
     Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationIntent {
+    Chat,
+    Image,
+    Video,
+}
+
+impl GenerationIntent {
+    /// Agent chats still generate images. Video requests become normal chat so
+    /// the agent can use tools instead of being replaced by a ComfyUI job.
+    pub fn yielding_to_agent(self, agent_enabled: bool) -> Self {
+        match self {
+            Self::Video if agent_enabled => Self::Chat,
+            other => other,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -31,26 +56,59 @@ impl ImageIntentClassifier {
 
     /// Classify a message. Any unavailable, timed-out, or malformed model result
     /// safely falls back to normal chat.
-    pub async fn is_image_request(&self, content: &str, metadata: Option<&Value>) -> bool {
+    pub async fn classify(&self, content: &str, metadata: Option<&Value>) -> GenerationIntent {
         if !self.config.enabled {
-            return false;
+            return GenerationIntent::Chat;
         }
-        if let Some(force) = metadata
+        if metadata
+            .and_then(|m| m.get("video_generation"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return GenerationIntent::Video;
+        }
+        if metadata
             .and_then(|m| m.get("image_generation"))
             .and_then(Value::as_bool)
+            == Some(true)
         {
-            return force;
+            return GenerationIntent::Image;
+        }
+        let skip_video = metadata
+            .and_then(|m| m.get("video_generation"))
+            .and_then(Value::as_bool)
+            == Some(false);
+        let skip_image = metadata
+            .and_then(|m| m.get("image_generation"))
+            .and_then(Value::as_bool)
+            == Some(false);
+        if skip_video && skip_image {
+            return GenerationIntent::Chat;
         }
 
         let has_source_image = crate::services::image_source::has_image_attachment(metadata);
         match deterministic_decision(content, has_source_image) {
-            RuleDecision::Image => true,
-            RuleDecision::Chat => false,
-            RuleDecision::Ambiguous => self.classify_ambiguous(content, has_source_image).await,
+            RuleDecision::Video if !skip_video => GenerationIntent::Video,
+            RuleDecision::Image if !skip_image => GenerationIntent::Image,
+            RuleDecision::Ambiguous if !skip_image => {
+                if self.classify_ambiguous(content, has_source_image).await {
+                    GenerationIntent::Image
+                } else {
+                    GenerationIntent::Chat
+                }
+            }
+            _ => GenerationIntent::Chat,
         }
     }
 
+    pub async fn is_image_request(&self, content: &str, metadata: Option<&Value>) -> bool {
+        self.classify(content, metadata).await == GenerationIntent::Image
+    }
+
     async fn classify_ambiguous(&self, content: &str, has_source_image: bool) -> bool {
+        if self.litellm_host.trim().is_empty() {
+            return false;
+        }
         let client = LlmClient::new(LlmConfig {
             base_url: self.litellm_host.clone(),
             api_key: self.litellm_key.clone(),
@@ -61,14 +119,17 @@ impl ImageIntentClassifier {
         let prompt = if has_source_image {
             format!(
                 "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
-                 or wants the attached image edited now: add, remove, replace, restyle, or transform. \
-                 Discussion, analysis, prompt-writing, coding, and questions about the attached \
-                 image are CHAT.\nUser: {content}"
+                 or wants the attached image edited now: add, remove, replace, restyle, transform, \
+                 change the background or environment, place the subject in a different setting, \
+                 or any other change to the photo, including short or informal wording. \
+                 Greetings, thanks, opinions, discussion, analysis, prompt-writing, coding, and \
+                 questions about the attached image are CHAT.\nUser: {content}"
             )
         } else {
             format!(
                 "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
-                 or wants something added to, removed from, or changed on an existing image now. \
+                 or wants something added to, removed from, or changed on an existing image now, \
+                 including a new background or environment, even if the wording is informal. \
                  Discussion, analysis, prompt-writing, coding, and how-to questions are CHAT.\nUser: {content}"
             )
         };
@@ -93,6 +154,51 @@ impl ImageIntentClassifier {
             return false;
         };
         answer.trim().eq_ignore_ascii_case("IMAGE")
+    }
+
+    /// Turn an attached-image edit request into a CLIP prompt for img2img.
+    /// Falls back to a heuristic if the classifier model is unavailable.
+    pub async fn edit_prompt(&self, content: &str) -> String {
+        let fallback = heuristic_edit_prompt(content);
+        if self.litellm_host.trim().is_empty() {
+            return fallback;
+        }
+        let client = LlmClient::new(LlmConfig {
+            base_url: self.litellm_host.clone(),
+            api_key: self.litellm_key.clone(),
+            default_model: self.config.classifier_model.clone(),
+            temperature: 0.2,
+            max_tokens: 160,
+        });
+        let prompt = format!(
+            "Rewrite the user's request as a positive prompt for an image model that starts from \
+             the attached photo. Describe the finished photograph, not the editing instruction. \
+             Keep the same main subject, identity, and pose unless the user asked to change them. \
+             If they asked to remove something, describe the scene without it and with that area \
+             filled in naturally; do not name the removed thing. If they asked to change the \
+             environment or background, describe the same subject in that new setting. \
+             No quotes, labels, or preamble. One or two sentences.\nUser: {content}"
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(self.config.classifier_timeout_secs),
+            client.chat_with_model(
+                &self.config.classifier_model,
+                vec![Message::user(prompt)],
+                None,
+            ),
+        )
+        .await;
+        let Ok(Ok(response)) = result else {
+            return fallback;
+        };
+        let Some(answer) = response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.content.as_deref())
+        else {
+            return fallback;
+        };
+        sanitize_rewritten_prompt(answer, content).unwrap_or(fallback)
     }
 }
 
@@ -141,6 +247,10 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
             && (has("generate") || has("create") || has("make") || has("add") || has("remove")));
     if analysis_request || prompt_request || discussion_request || discusses_code || asks_how {
         return RuleDecision::Chat;
+    }
+
+    if is_video_request(&tokens, &has_phrase) {
+        return RuleDecision::Video;
     }
 
     if is_edit_request(&tokens, &has_phrase)
@@ -202,7 +312,10 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         .any(|token| ACTIONS.contains(&token.as_str()) || VISUAL_NOUNS.contains(&token.as_str()))
         || has("visualize")
         || has("visualise")
+        || has_source_image
     {
+        // Attached photos: let the fast classifier catch informal edits the
+        // word lists miss ("same subject at night", "without the chair").
         RuleDecision::Ambiguous
     } else {
         RuleDecision::Chat
@@ -211,9 +324,14 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
 
 /// True when the prompt asks to change an image that is already on the thread.
 pub fn should_reuse_thread_image(content: &str) -> bool {
-    matches!(deterministic_decision(content, false), RuleDecision::Image) && {
-        let tokens = tokenize(content);
-        refers_to_existing_image(&tokens, &|phrase| phrase_in(&tokens, phrase))
+    let tokens = tokenize(content);
+    let has_phrase = |phrase: &[&str]| phrase_in(&tokens, phrase);
+    match deterministic_decision(content, false) {
+        RuleDecision::Image | RuleDecision::Video => {
+            refers_to_existing_image(&tokens, &has_phrase)
+                || is_animate_existing(&tokens, &has_phrase)
+        }
+        _ => false,
     }
 }
 
@@ -229,6 +347,51 @@ fn phrase_in(tokens: &[String], phrase: &[&str]) -> bool {
     tokens
         .windows(phrase.len())
         .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+}
+
+fn is_video_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    const ACTIONS: &[&str] = &["generate", "create", "make", "render", "animate"];
+    const VIDEO_NOUNS: &[&str] = &[
+        "video",
+        "videos",
+        "clip",
+        "clips",
+        "animation",
+        "animations",
+        "footage",
+    ];
+    let animate = tokens
+        .iter()
+        .take(4)
+        .any(|token| token == "animate" || token == "animating");
+    let explicit = tokens.iter().enumerate().any(|(index, token)| {
+        ACTIONS.contains(&token.as_str())
+            && tokens
+                .iter()
+                .skip(index + 1)
+                .take(7)
+                .any(|candidate| VIDEO_NOUNS.contains(&candidate.as_str()))
+    });
+    explicit
+        || animate
+        || has_phrase(&["text", "to", "video"])
+        || has_phrase(&["image", "to", "video"])
+        || has_phrase(&["make", "this", "move"])
+        || has_phrase(&["make", "it", "move"])
+        || has_phrase(&["make", "this", "a", "video"])
+        || has_phrase(&["turn", "this", "into", "a", "video"])
+        || has_phrase(&["bring", "this", "to", "life"])
+}
+
+fn is_animate_existing(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    has_phrase(&["animate", "this"])
+        || has_phrase(&["animate", "it"])
+        || has_phrase(&["make", "this", "move"])
+        || has_phrase(&["make", "it", "move"])
+        || has_phrase(&["make", "this", "a", "video"])
+        || has_phrase(&["turn", "this", "into", "a", "video"])
+        || (tokens.iter().any(|token| token == "animate")
+            && refers_to_existing_image(tokens, has_phrase))
 }
 
 fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
@@ -254,18 +417,19 @@ fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> 
         "modify",
         "convert",
         "wipe",
+        "relocate",
     ];
     const WEAK_EDITS: &[&str] = &[
-        "put", "take", "fill", "hide", "fix", "clean", "clear", "brighten", "darken", "sharpen",
-        "blur", "vary", "swap", "move",
+        "put", "place", "take", "fill", "hide", "fix", "clean", "clear", "brighten", "darken",
+        "sharpen", "blur", "vary", "swap", "move",
     ];
+    let weak_edit = tokens
+        .iter()
+        .any(|token| WEAK_EDITS.contains(&token.as_str()));
     tokens
         .iter()
         .any(|token| STRONG_EDITS.contains(&token.as_str()))
-        || (tokens
-            .iter()
-            .any(|token| WEAK_EDITS.contains(&token.as_str()))
-            && refers_to_existing_image(tokens, has_phrase))
+        || (weak_edit && refers_to_existing_image(tokens, has_phrase))
         || has_phrase(&["get", "rid"])
         || has_phrase(&["take", "out"])
         || has_phrase(&["take", "off"])
@@ -276,6 +440,19 @@ fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> 
         || has_phrase(&["turn", "it"])
         || has_phrase(&["change", "this"])
         || has_phrase(&["change", "the"])
+        || has_phrase(&["put", "this"])
+        || has_phrase(&["place", "this"])
+        || has_phrase(&["put", "it"])
+        || has_phrase(&["place", "it"])
+        || has_phrase(&["move", "this"])
+        || has_phrase(&["different", "environment"])
+        || has_phrase(&["new", "environment"])
+        || has_phrase(&["another", "environment"])
+        || has_phrase(&["different", "background"])
+        || has_phrase(&["new", "background"])
+        || has_phrase(&["different", "setting"])
+        || has_phrase(&["new", "setting"])
+        || has_phrase(&["another", "scene"])
         || has_phrase(&["based", "on", "this"])
         || has_phrase(&["from", "this"])
         || has_phrase(&["using", "this"])
@@ -285,7 +462,7 @@ fn is_edit_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> 
         || has_phrase(&["into", "this"])
 }
 
-fn refers_to_existing_image(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+fn refers_to_existing_image(_tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
     has_phrase(&["this", "image"])
         || has_phrase(&["this", "picture"])
         || has_phrase(&["this", "photo"])
@@ -296,9 +473,90 @@ fn refers_to_existing_image(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> 
         || has_phrase(&["that", "picture"])
         || has_phrase(&["that", "photo"])
         || has_phrase(&["the", "attached"])
-        || tokens
-            .iter()
-            .any(|token| token == "background" || token == "watermark")
+        || has_phrase(&["this", "object"])
+        || has_phrase(&["the", "object"])
+        || has_phrase(&["this", "subject"])
+        || has_phrase(&["this", "one"])
+        || has_phrase(&["from", "an", "image"])
+        || has_phrase(&["from", "this"])
+        || has_phrase(&["put", "this"])
+        || has_phrase(&["place", "this"])
+        || has_phrase(&["put", "it"])
+        || has_phrase(&["place", "it"])
+        || has_phrase(&["this", "background"])
+        || has_phrase(&["the", "background"])
+        || has_phrase(&["this", "watermark"])
+        || has_phrase(&["the", "watermark"])
+}
+
+fn is_removal_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    ["remove", "delete", "erase", "wipe"]
+        .iter()
+        .any(|word| tokens.iter().any(|token| token == *word))
+        || has_phrase(&["get", "rid"])
+        || has_phrase(&["take", "out"])
+        || has_phrase(&["take", "off"])
+        || has_phrase(&["cut", "out"])
+}
+
+fn is_environment_change(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "environment" | "background" | "setting" | "scene" | "backdrop"
+        )
+    }) || has_phrase(&["put", "this"])
+        || has_phrase(&["place", "this"])
+        || has_phrase(&["put", "it"])
+        || has_phrase(&["place", "it"])
+        || has_phrase(&["in", "a"])
+        || has_phrase(&["into", "a"])
+}
+
+/// CLIP text for img2img when the classifier model cannot rewrite the request.
+pub fn heuristic_edit_prompt(content: &str) -> String {
+    let tokens = tokenize(content);
+    let has_phrase = |phrase: &[&str]| phrase_in(&tokens, phrase);
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return "the same subject, edited as requested, photorealistic".to_string();
+    }
+    if is_removal_request(&tokens, &has_phrase) {
+        format!(
+            "the same photograph with the requested object gone, that area filled in naturally \
+             to match the surrounding scene, no leftover object or hole, photorealistic. {trimmed}"
+        )
+    } else if is_environment_change(&tokens, &has_phrase) {
+        format!(
+            "the same subject in the new environment described, keep the subject's identity, \
+             pose, and appearance, only change the setting, matching lighting, photorealistic. \
+             {trimmed}"
+        )
+    } else {
+        format!(
+            "the same subject with the requested edits applied, keep identity and composition \
+             unless asked to change them, photorealistic. {trimmed}"
+        )
+    }
+}
+
+fn sanitize_rewritten_prompt(answer: &str, original: &str) -> Option<String> {
+    let mut text = answer.trim().trim_matches('"').trim_matches('\'').trim();
+    if let Some(stripped) = text.strip_prefix("Prompt:") {
+        text = stripped.trim();
+    }
+    if text.is_empty()
+        || text.len() > 4_000
+        || text.eq_ignore_ascii_case("IMAGE")
+        || text.eq_ignore_ascii_case("CHAT")
+        || text.eq_ignore_ascii_case("VIDEO")
+    {
+        return None;
+    }
+    if text.eq_ignore_ascii_case(original.trim()) {
+        return Some(heuristic_edit_prompt(original));
+    }
+    Some(format!("{text} {}", original.trim()))
 }
 
 #[cfg(test)]
@@ -308,6 +566,26 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[test]
+    fn agent_mode_keeps_images_and_yields_video_to_chat() {
+        assert_eq!(
+            GenerationIntent::Image.yielding_to_agent(true),
+            GenerationIntent::Image
+        );
+        assert_eq!(
+            GenerationIntent::Video.yielding_to_agent(true),
+            GenerationIntent::Chat
+        );
+        assert_eq!(
+            GenerationIntent::Video.yielding_to_agent(false),
+            GenerationIntent::Video
+        );
+        assert_eq!(
+            GenerationIntent::Chat.yielding_to_agent(true),
+            GenerationIntent::Chat
+        );
+    }
 
     #[test]
     fn classifier_rule_matrix() {
@@ -330,6 +608,22 @@ mod tests {
                 "{request}"
             );
         }
+        for video in [
+            "Generate a video of a red panda",
+            "Create a clip of waves crashing",
+            "Make me a video of a lighthouse",
+            "Animate this image",
+            "Turn this into a video",
+            "image to video of this photo",
+            "text to video of a fox running",
+            "Make this move",
+        ] {
+            assert_eq!(
+                deterministic_decision(video, video.contains("this") || video.contains("photo")),
+                RuleDecision::Video,
+                "{video}"
+            );
+        }
         for edit in [
             "Make this a watercolor",
             "Turn this into a painting",
@@ -346,6 +640,10 @@ mod tests {
             "Take the logo off this image",
             "Get rid of the background",
             "Replace the sky in this picture",
+            "Put this object in a different environment",
+            "Remove this object from an image",
+            "Place this on a beach",
+            "Put this in a snowy forest",
         ] {
             assert_eq!(
                 deterministic_decision(edit, true),
@@ -370,6 +668,9 @@ mod tests {
             "Add a hat to this picture",
             "Edit this image to add a sunset",
             "Change the background to a forest",
+            "Put this object in a different environment",
+            "Remove this object from an image",
+            "Place this on a beach",
         ] {
             assert_eq!(
                 deterministic_decision(named_image, false),
@@ -381,6 +682,26 @@ mod tests {
         assert!(!should_reuse_thread_image(
             "Generate an image of a blue fox"
         ));
+        assert!(!should_reuse_thread_image(
+            "Generate an image of the environment"
+        ));
+        assert!(!should_reuse_thread_image(
+            "Generate an image of a wolf with a snowy background"
+        ));
+        assert!(should_reuse_thread_image(
+            "Change the background to a forest"
+        ));
+        assert_eq!(
+            deterministic_decision("please take a look, can you fix it?", true),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(
+            deterministic_decision("please take a look, can you fix it?", false),
+            RuleDecision::Chat
+        );
+        assert!(should_reuse_thread_image("Animate this image"));
+        assert!(should_reuse_thread_image("Make this a video"));
+        assert!(!should_reuse_thread_image("Generate a video of a fox"));
         assert!(!should_reuse_thread_image(
             "How do I add a hat to this image?"
         ));
@@ -414,6 +735,22 @@ mod tests {
         );
         assert_eq!(
             deterministic_decision("Could you design a logo for Acme?", false),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(
+            deterministic_decision("the same subject at night", false),
+            RuleDecision::Chat
+        );
+        assert_eq!(
+            deterministic_decision("the same subject at night", true),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(
+            deterministic_decision("without the chair", true),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(
+            deterministic_decision("thanks", true),
             RuleDecision::Ambiguous
         );
     }
@@ -545,6 +882,193 @@ mod tests {
         assert!(
             !classifier
                 .is_image_request("Design a logo for Acme", None)
+                .await
+        );
+    }
+
+    #[test]
+    fn heuristic_edit_prompt_rewrites_environment_and_removal() {
+        let environment = heuristic_edit_prompt("Put this object in a different environment");
+        assert!(environment.contains("new environment"));
+        assert!(environment.contains("Put this object in a different environment"));
+
+        let beach = heuristic_edit_prompt("Place this on a beach");
+        assert!(beach.contains("new environment"));
+        assert!(beach.contains("Place this on a beach"));
+
+        let removal = heuristic_edit_prompt("Remove this object from an image");
+        assert!(removal.contains("requested object gone"));
+        assert!(removal.contains("Remove this object from an image"));
+
+        let style = heuristic_edit_prompt("Make this a watercolor");
+        assert!(style.contains("requested edits"));
+        assert!(style.contains("Make this a watercolor"));
+    }
+
+    #[test]
+    fn sanitize_rewritten_prompt_keeps_original_instruction() {
+        let rewritten = sanitize_rewritten_prompt(
+            "A wooden chair on a misty forest path, photorealistic.",
+            "Put this object in a different environment",
+        )
+        .unwrap();
+        assert!(rewritten.contains("wooden chair on a misty forest path"));
+        assert!(rewritten.contains("Put this object in a different environment"));
+
+        assert!(sanitize_rewritten_prompt("IMAGE", "remove the chair").is_none());
+        let echoed = sanitize_rewritten_prompt(
+            "Remove this object from an image",
+            "Remove this object from an image",
+        )
+        .unwrap();
+        assert!(echoed.contains("requested object gone"));
+    }
+
+    #[tokio::test]
+    async fn edit_prompt_uses_rewritten_scene_and_keeps_original() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "rewrite",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fast",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "A wooden chair on a misty forest path, photorealistic."
+                    },
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: "fast".to_string(),
+                ..Default::default()
+            },
+            server.uri(),
+            "key".to_string(),
+        );
+        let prompt = classifier
+            .edit_prompt("Put this object in a different environment")
+            .await;
+        assert!(prompt.contains("wooden chair on a misty forest path"));
+        assert!(prompt.contains("Put this object in a different environment"));
+    }
+
+    #[tokio::test]
+    async fn edit_prompt_falls_back_when_host_is_empty() {
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            String::new(),
+            String::new(),
+        );
+        let prompt = classifier
+            .edit_prompt("Remove this object from an image")
+            .await;
+        assert!(prompt.contains("requested object gone"));
+        assert!(prompt.contains("Remove this object from an image"));
+    }
+
+    fn attached_png() -> serde_json::Value {
+        serde_json::json!({
+            "attachments": [{
+                "name": "photo.png",
+                "mime": "image/png",
+                "url": "data:image/png;base64,aaa"
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn attached_informal_edit_uses_fast_classifier() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "classification",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fast",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "IMAGE"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: "fast".to_string(),
+                ..Default::default()
+            },
+            server.uri(),
+            "key".to_string(),
+        );
+        assert!(
+            classifier
+                .is_image_request("the same subject at night", Some(&attached_png()))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_thanks_stays_chat_when_classifier_says_chat() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "classification",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fast",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "CHAT"},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: "fast".to_string(),
+                ..Default::default()
+            },
+            server.uri(),
+            "key".to_string(),
+        );
+        assert!(
+            !classifier
+                .is_image_request("thanks", Some(&attached_png()))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn attached_informal_edit_stays_chat_without_classifier_host() {
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            String::new(),
+            String::new(),
+        );
+        assert!(
+            !classifier
+                .is_image_request("the same subject at night", Some(&attached_png()))
                 .await
         );
     }

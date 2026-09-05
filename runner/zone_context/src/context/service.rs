@@ -14,12 +14,12 @@ use crate::content::{
     embed_char_budget, smart_chunk, split_for_embedding,
 };
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
+use crate::embeddings::rerank::min_max_norm;
 use crate::embeddings::{
     CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
-    PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_query_text,
-    keyword_only_search, semantic_only_search, sort_by_score,
+    PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_query_text, keyword_only_search,
+    semantic_only_search, sort_by_score,
 };
-use crate::embeddings::rerank::min_max_norm;
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
 use crate::stream::{AnalysisStage, GatheringCallback, GatheringEvent};
@@ -479,14 +479,8 @@ impl ContextService {
                 None
             }
         };
-        self.search_hybrid_with_embedding(
-            query,
-            query_embedding.as_deref(),
-            limit,
-            filters,
-            config,
-        )
-        .await
+        self.search_hybrid_with_embedding(query, query_embedding.as_deref(), limit, filters, config)
+            .await
     }
 
     /// Hybrid search using an embedding the caller already computed.
@@ -694,9 +688,7 @@ impl ContextService {
             .replace_content_chunks(item_id, &persisted_chunks)
             .await?;
 
-        let pairs = self
-            .embed_chunks_resilient(item, &persisted_chunks)
-            .await?;
+        let pairs = self.embed_chunks_resilient(item, &persisted_chunks).await?;
         if pairs.is_empty() {
             return Err(ContextError::Embedding(format!(
                 "no chunks could be embedded for {}",
@@ -728,11 +720,9 @@ impl ContextService {
     ) -> Result<Vec<(ContentChunk, Vec<f32>)>> {
         let texts: Vec<&str> = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
         match self.embedding_service.embed_batch(&texts).await {
-            Ok(vectors) if vectors.len() == chunks.len() => Ok(chunks
-                .iter()
-                .cloned()
-                .zip(vectors)
-                .collect()),
+            Ok(vectors) if vectors.len() == chunks.len() => {
+                Ok(chunks.iter().cloned().zip(vectors).collect())
+            }
             Ok(_) => Err(ContextError::Embedding(
                 "embedding batch size did not match chunk count".to_string(),
             )),

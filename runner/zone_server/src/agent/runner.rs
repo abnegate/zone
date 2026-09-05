@@ -52,6 +52,7 @@ impl LoopBudget {
 
 /// What the loop reports as it runs.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     /// A fragment of the assistant's visible answer.
     Chunk(String),

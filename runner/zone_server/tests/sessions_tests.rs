@@ -36,12 +36,6 @@ async fn create_test_user(pool: &sqlx::PgPool, prefix: &str) -> Uuid {
 async fn test_create_session() {
     let pool = create_test_pool().await;
 
-    // Run migrations to ensure sessions table exists
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     let user_id = create_test_user(&pool, "session_create@test.com").await;
     let token = unique_token("test_refresh_token_12345");
     let token_hash = hash_token(&token);
@@ -83,11 +77,6 @@ async fn test_create_session() {
 async fn test_get_session_by_token() {
     let pool = create_test_pool().await;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     let user_id = create_test_user(&pool, "session_get@test.com").await;
     let token = unique_token("test_refresh_token_get_12345");
     let token_hash = hash_token(&token);
@@ -127,11 +116,6 @@ async fn test_get_session_by_token() {
 async fn test_get_session_by_token_not_found() {
     let pool = create_test_pool().await;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     let token_hash = hash_token(&unique_token("nonexistent_token"));
 
     // Try to get non-existent session
@@ -145,11 +129,6 @@ async fn test_get_session_by_token_not_found() {
 #[tokio::test]
 async fn test_update_last_active() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_active@test.com").await;
     let token = unique_token("test_refresh_token_active_12345");
@@ -198,11 +177,6 @@ async fn test_update_last_active() {
 #[tokio::test]
 async fn test_revoke_session() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_revoke@test.com").await;
     let token = unique_token("test_refresh_token_revoke_12345");
@@ -256,11 +230,6 @@ async fn test_revoke_session() {
 #[tokio::test]
 async fn test_revoke_all_user_sessions() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_revoke_all@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);
@@ -340,11 +309,6 @@ async fn test_revoke_all_user_sessions() {
 async fn test_list_user_sessions() {
     let pool = create_test_pool().await;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     let user_id = create_test_user(&pool, "session_list@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);
 
@@ -398,11 +362,6 @@ async fn test_list_user_sessions() {
 #[tokio::test]
 async fn test_cleanup_expired_sessions() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_cleanup@test.com").await;
 
@@ -467,11 +426,6 @@ async fn test_cleanup_expired_sessions() {
 async fn test_session_cascade_delete_on_user_deletion() {
     let pool = create_test_pool().await;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     let user_id = create_test_user(&pool, "session_cascade@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);
 
@@ -509,11 +463,6 @@ async fn test_session_cascade_delete_on_user_deletion() {
 #[tokio::test]
 async fn test_list_active_sessions_only() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_active_only@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);
@@ -571,11 +520,6 @@ async fn test_list_active_sessions_only() {
 #[tokio::test]
 async fn test_revoke_session_idempotent() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     let user_id = create_test_user(&pool, "session_idempotent@test.com").await;
     let expires_at = Utc::now() + Duration::days(7);

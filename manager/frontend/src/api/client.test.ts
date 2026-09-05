@@ -254,6 +254,7 @@ describe('Client', () => {
       updated_at: '2024-01-01T00:00:00Z',
       archived: false,
       agent_enabled: false,
+      auto_approve: false,
     };
 
     const mockMessage = {
@@ -1448,6 +1449,7 @@ describe('Client', () => {
       model_reasoning: 'gpt-4o',
       model_embedding: 'text-embedding-3-small',
       model_image: 'flux1-schnell-fp8.safetensors',
+      model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
     };
 
     describe('Organization AI Settings', () => {

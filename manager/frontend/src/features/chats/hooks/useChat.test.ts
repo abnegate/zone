@@ -843,6 +843,45 @@ describe('useChat', () => {
     });
   });
 
+  it('adds streamed assistant videos and keeps final metadata', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const attachment = {
+      name: 'generated-video-1.webm',
+      mime: 'video/webm',
+      url: '/api/artifacts/ws/chat/msg/generated-video-1.webm',
+    };
+    lastSocket?.emit({ type: 'message_start', message_id: 'm-video', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'video',
+      message_id: 'm-video',
+      attachment,
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    });
+
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm-video',
+      content: 'Generated video.',
+      metadata: { attachments: [attachment] },
+    });
+
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('Generated video.');
+      expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    });
+  });
+
   it('should handle sending message with error', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

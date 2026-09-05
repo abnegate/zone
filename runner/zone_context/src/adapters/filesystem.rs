@@ -495,9 +495,7 @@ impl SourceAdapter for FilesystemAdapter {
                     .filter(|file_path| {
                         let uri = Self::file_uri(file_path);
                         match Self::file_fingerprint(file_path) {
-                            Some(fingerprint) => {
-                                !fetch_config.should_skip_blob(&uri, &fingerprint)
-                            }
+                            Some(fingerprint) => !fetch_config.should_skip_blob(&uri, &fingerprint),
                             None => true,
                         }
                     })

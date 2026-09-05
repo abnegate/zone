@@ -117,6 +117,7 @@ const mockAiSettings: AiSettings = {
   model_reasoning: 'deepseek-r1:7b',
   model_embedding: 'nomic-embed-text',
   model_image: 'flux1-schnell-fp8.safetensors',
+  model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
 };
 
 describe('WorkspaceSettingsPage', () => {
@@ -602,6 +603,7 @@ describe('WorkspaceSettingsPage', () => {
         model_reasoning: null,
         model_embedding: null,
         model_image: null,
+        model_video: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -632,6 +634,7 @@ describe('WorkspaceSettingsPage', () => {
         model_reasoning: null,
         model_embedding: null,
         model_image: null,
+        model_video: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -662,6 +665,7 @@ describe('WorkspaceSettingsPage', () => {
         model_reasoning: null,
         model_embedding: null,
         model_image: null,
+        model_video: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -698,6 +702,7 @@ describe('WorkspaceSettingsPage', () => {
         model_reasoning: null,
         model_embedding: null,
         model_image: null,
+        model_video: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -735,6 +740,7 @@ describe('WorkspaceSettingsPage', () => {
         model_reasoning: null,
         model_embedding: null,
         model_image: null,
+        model_video: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -778,6 +784,7 @@ describe('WorkspaceSettingsPage', () => {
         model_reasoning: null,
         model_embedding: null,
         model_image: null,
+        model_video: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -806,6 +813,24 @@ describe('WorkspaceSettingsPage', () => {
       await waitFor(() => {
         expect(mockClient.getWorkspaceAiSettings).toHaveBeenCalled();
         expect(mockClient.getEffectiveAiSettings).toHaveBeenCalled();
+      });
+    });
+
+    it('sends an empty video model to resume organization inheritance', async () => {
+      const user = userEvent.setup();
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(user);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Video Model')).toHaveValue('wan2.2_ti2v_5B_fp16.safetensors');
+      });
+      await user.selectOptions(screen.getByLabelText('Video Model'), '');
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+      await waitFor(() => {
+        expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.any(String),
+          expect.objectContaining({ model_video: '' })
+        );
       });
     });
   });

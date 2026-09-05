@@ -103,9 +103,7 @@ fn is_rust_path(token: &str) -> bool {
 
 fn is_snake(token: &str) -> bool {
     token.contains('_')
-        && token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && token.chars().any(|c| c.is_ascii_alphabetic())
 }
 
@@ -113,9 +111,7 @@ fn is_kebab(token: &str) -> bool {
     token.contains('-')
         && !token.starts_with('-')
         && !token.ends_with('-')
-        && token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         && token.chars().any(|c| c.is_ascii_alphabetic())
 }
 
@@ -161,7 +157,11 @@ pub fn embed_query_text(model: &str, query: &str) -> String {
 }
 
 fn model_family(model: &str) -> String {
-    model.split(':').next().unwrap_or(model).to_ascii_lowercase()
+    model
+        .split(':')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase()
 }
 
 /// Additive RRF-scale boost when a hit literally contains an extracted identifier.
@@ -197,8 +197,18 @@ mod tests {
         let rewritten = rewrite_query(
             "What does should_skip_blob do when a GitHub file SHA is unchanged in content/mod.rs?",
         );
-        assert!(rewritten.identifiers.iter().any(|i| i == "should_skip_blob"));
-        assert!(rewritten.identifiers.iter().any(|i| i.contains("content/mod.rs")));
+        assert!(
+            rewritten
+                .identifiers
+                .iter()
+                .any(|i| i == "should_skip_blob")
+        );
+        assert!(
+            rewritten
+                .identifiers
+                .iter()
+                .any(|i| i.contains("content/mod.rs"))
+        );
         assert!(rewritten.keyword.contains("should_skip_blob"));
         assert!(rewritten.keyword.contains("OR"));
     }
@@ -208,9 +218,24 @@ mod tests {
         let rewritten = rewrite_query(
             "What dimension does get_model_dimension return for nomic-embed-text at /api/embeddings?",
         );
-        assert!(rewritten.identifiers.iter().any(|i| i == "nomic-embed-text"));
-        assert!(rewritten.identifiers.iter().any(|i| i == "get_model_dimension"));
-        assert!(rewritten.identifiers.iter().any(|i| i == "/api/embeddings" || i.contains("api/embeddings")));
+        assert!(
+            rewritten
+                .identifiers
+                .iter()
+                .any(|i| i == "nomic-embed-text")
+        );
+        assert!(
+            rewritten
+                .identifiers
+                .iter()
+                .any(|i| i == "get_model_dimension")
+        );
+        assert!(
+            rewritten
+                .identifiers
+                .iter()
+                .any(|i| i == "/api/embeddings" || i.contains("api/embeddings"))
+        );
     }
 
     #[test]
@@ -221,7 +246,10 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_underscores() {
-        assert_eq!(sanitize_search_query("should_skip_blob"), "should_skip_blob");
+        assert_eq!(
+            sanitize_search_query("should_skip_blob"),
+            "should_skip_blob"
+        );
     }
 
     #[test]

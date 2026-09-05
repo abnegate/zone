@@ -177,3 +177,10 @@ export function imageAttachments(
 ) {
   return metadata?.attachments?.filter((a) => a.mime.startsWith('image/') && Boolean(a.url)) ?? [];
 }
+
+/** Videos stored on a message so the thread can render them after send. */
+export function videoAttachments(
+  metadata?: { attachments?: { name: string; mime: string; url: string }[] } | null
+) {
+  return metadata?.attachments?.filter((a) => a.mime.startsWith('video/') && Boolean(a.url)) ?? [];
+}

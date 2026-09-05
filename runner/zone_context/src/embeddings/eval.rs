@@ -108,11 +108,7 @@ pub fn average_precision(grades: &[u8], relevant: u8) -> f64 {
         }
     }
     let total = grades.iter().filter(|g| **g >= relevant).count();
-    if total == 0 {
-        0.0
-    } else {
-        acc / total as f64
-    }
+    if total == 0 { 0.0 } else { acc / total as f64 }
 }
 
 pub fn first_relevant_rank(grades: &[u8], relevant: u8) -> Option<usize> {
@@ -146,7 +142,9 @@ pub fn assert_graded_coverage(set: &RetrievalEvalSet) {
         );
         for needle in &case.expect_uri_contains {
             assert!(
-                case.judgments.iter().any(|j| j.uri_contains.contains(needle) && j.grade >= 3),
+                case.judgments
+                    .iter()
+                    .any(|j| j.uri_contains.contains(needle) && j.grade >= 3),
                 "case {} expect_uri_contains {needle} must have a grade-3 judgment",
                 case.id
             );
@@ -185,10 +183,7 @@ mod tests {
         }];
         let grades = unique_file_grades(
             [
-                (
-                    "github://zone/content/mod.rs@a",
-                    "fn should_skip_blob()",
-                ),
+                ("github://zone/content/mod.rs@a", "fn should_skip_blob()"),
                 (
                     "github://zone/content/mod.rs@b",
                     "fn should_skip_blob() again",
@@ -219,7 +214,10 @@ mod tests {
             grade_hit("github://zone/content/mod.rs", "unrelated", &judgments),
             0
         );
-        assert_eq!(grade_hit("github://zone/other.rs", "should_skip_blob", &judgments), 0);
+        assert_eq!(
+            grade_hit("github://zone/other.rs", "should_skip_blob", &judgments),
+            0
+        );
     }
 
     #[test]

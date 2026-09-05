@@ -8,6 +8,7 @@ import { isProtectedArtifactUrl } from '../api/protectedImages';
 import {
   ActionReceipts,
   AuthenticatedImage,
+  AuthenticatedVideo,
   Citations,
   Generation,
   MessageContent,
@@ -26,6 +27,7 @@ import {
   isStartingImage,
   readAttachment,
   sourceAttachment,
+  videoAttachments,
 } from '../utils';
 import './ChatsPage.css';
 
@@ -661,6 +663,7 @@ export default function ChatsPage() {
               ) : (
                 displayedChat.messages.map((message) => {
                   const images = imageAttachments(message.metadata);
+                  const videos = videoAttachments(message.metadata);
                   const toolCalls = message.metadata?.tool_calls ?? [];
                   const citations = message.metadata?.citations ?? [];
                   const receipts = message.metadata?.action_receipts ?? [];
@@ -713,6 +716,18 @@ export default function ChatsPage() {
                               </div>
                             );
                           })}
+                        </div>
+                      )}
+                      {videos.length > 0 && (
+                        <div className="message-videos">
+                          {videos.map((a, index) => (
+                            <AuthenticatedVideo
+                              key={a.url}
+                              src={a.url}
+                              label={a.name || `Generated video ${index + 1}`}
+                              data-testid="message-video"
+                            />
+                          ))}
                         </div>
                       )}
                       {toolCalls.length > 0 && (
@@ -801,7 +816,8 @@ export default function ChatsPage() {
               )}
               {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
                 <p className="message-form-hint">
-                  Ask to generate or edit and this image will be the starting point.
+                  Ask to generate, edit, remove an object, change the setting, or animate and this
+                  image will be the starting point.
                 </p>
               ) : null}
 

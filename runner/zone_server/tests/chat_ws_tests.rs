@@ -1201,6 +1201,128 @@ async fn test_image_request_routes_directly_and_serves_protected_artifact() {
 }
 
 #[tokio::test]
+async fn test_video_request_routes_directly_and_serves_protected_artifact() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .and(wiremock::matchers::body_string_contains(
+            "custom-video.safetensors",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "wan-1"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/wan-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "wan-1": {
+                "status": {"status_str": "success"},
+                "outputs": {"10": {"gifs": [{
+                    "filename": "zone.webm", "subfolder": "", "type": "output"
+                }]}}
+            }
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/webm")
+                .set_body_bytes(b"webm-bytes"),
+        )
+        .expect(1)
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-video-artifacts-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    config.comfyui.video_unet = "custom-video.safetensors".to_string();
+    let addr = spawn_server_with_config(config).await;
+
+    let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "Please generate a video of a blue fox running",
+                "metadata": {"video_generation": true}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut video_url = None;
+    let mut assistant_message_id = None;
+    let mut saw_progress = false;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("status") => saw_progress = true,
+            Some("video") => {
+                video_url = frame["attachment"]["url"].as_str().map(str::to_string);
+                assert_eq!(frame["attachment"]["mime"], "video/webm");
+                assert_eq!(frame["attachment"]["name"], "generated-video-1.webm");
+            }
+            Some("message_end") => {
+                assistant_message_id = frame["message_id"].as_str().map(str::to_string);
+                break;
+            }
+            Some("error") => panic!("unexpected video generation error: {frame}"),
+            _ => {}
+        }
+    }
+    assert!(saw_progress);
+    let video_url = video_url.expect("video event must contain an artifact URL");
+    let assistant_message_id =
+        assistant_message_id.expect("message_end must contain the persisted message ID");
+    assert!(video_url.starts_with("/api/artifacts/"));
+    assert!(video_url.contains(&format!("/{assistant_message_id}/")));
+
+    let artifact = reqwest::Client::new()
+        .get(format!("http://{addr}{video_url}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(artifact.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        artifact.headers().get("content-type").unwrap(),
+        "video/webm"
+    );
+    assert_eq!(artifact.bytes().await.unwrap().as_ref(), b"webm-bytes");
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let persisted = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["metadata"]["attachments"][0]["url"] == video_url)
+        .expect("generated video metadata must survive reload");
+    assert_eq!(persisted["id"], assistant_message_id);
+    assert_eq!(persisted["content"], "Generated video.");
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
 async fn test_attached_image_routes_to_image_to_image() {
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))

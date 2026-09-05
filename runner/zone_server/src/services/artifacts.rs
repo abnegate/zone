@@ -109,6 +109,8 @@ fn safe_extension(extension: &str) -> Result<&str, ArtifactError> {
         "png" => Ok("png"),
         "jpg" | "jpeg" => Ok("jpg"),
         "webp" => Ok("webp"),
+        "webm" => Ok("webm"),
+        "mp4" => Ok("mp4"),
         _ => Err(ArtifactError::InvalidPath),
     }
 }
@@ -150,6 +152,8 @@ mod tests {
         assert!(safe_filename("4f20_image-1.png"));
         assert!(safe_extension("../png").is_err());
         assert!(safe_extension("svg").is_err());
+        assert_eq!(safe_extension("webm").unwrap(), "webm");
+        assert_eq!(safe_extension("mp4").unwrap(), "mp4");
     }
 
     #[test]

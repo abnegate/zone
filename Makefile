@@ -1,7 +1,7 @@
 .PHONY: help setup up down restart logs logs-follow ps health check \
 	pull-models clean clean-volumes backup restore \
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
-	verify-comfyui-model validate test \
+	setup-comfyui-video-model verify-comfyui-model verify-comfyui-video-model validate test \
 	up-vpn up-monitoring up-comfyui up-all dev rebuild update \
 	shell-ollama shell-litellm shell-manager shell-console \
 	shell-postgres shell-valkey db-shell db-migrate \
@@ -55,6 +55,15 @@ setup-comfyui-model: ## Explicitly download and checksum-verify FLUX.1 Schnell F
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
+		--bundle image \
+		$(if $(filter 1 true yes,$(FORCE)),--force,)
+
+setup-comfyui-video-model: ## Explicitly download Wan 2.2 TI2V 5B video weights (~16.9 GB)
+	@$(DOCKER_COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle video \
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
 verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-256
@@ -62,6 +71,15 @@ verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-25
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
+		--bundle image \
+		--verify-only
+
+verify-comfyui-video-model: ## Verify the installed Wan 2.2 TI2V 5B size and SHA-256
+	@$(DOCKER_COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle video \
 		--verify-only
 
 setup-auth: ## Generate basic auth credentials

@@ -162,15 +162,7 @@ pub async fn hybrid_search(
         ..Default::default()
     };
 
-    hybrid_search_filtered(
-        pool,
-        query,
-        query_embedding,
-        limit,
-        Some(&filters),
-        config,
-    )
-    .await
+    hybrid_search_filtered(pool, query, query_embedding, limit, Some(&filters), config).await
 }
 
 /// Hybrid search that honors the same filters as semantic `VectorStore::search`.

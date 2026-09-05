@@ -1,12 +1,13 @@
-# ComfyUI and FLUX.1 Schnell
+# ComfyUI, FLUX.1 Schnell, and Wan 2.2 TI2V
 
-Zone supports a pinned ComfyUI runtime with the single-file FLUX.1 Schnell FP8
-checkpoint. The runtime is native on Apple Silicon and an optional NVIDIA
-Compose profile on Linux.
+Zone supports a pinned ComfyUI runtime with FLUX.1 Schnell FP8 for images and
+Wan 2.2 TI2V 5B for text-to-video and image-to-video. The runtime is native on
+Apple Silicon and an optional NVIDIA Compose profile on Linux.
 
-The checkpoint is **not** downloaded during a build or normal startup. Model
-setup is an explicit operation and verifies both the exact byte count and
-SHA-256 before the file is accepted.
+Weights are **not** downloaded during a build or normal startup. Model setup is
+an explicit operation and verifies both the exact byte count and SHA-256 before
+a file is accepted. Image and video weights are separate bundles so operators
+can install only what they need.
 
 ## Pinned artifacts
 
@@ -20,6 +21,17 @@ SHA-256 before the file is accepted.
 - CUDA base image manifest:
   `sha256:14d94b039cb94bbd5da559f303b46bc4b0d5d6c24ab1a9d7b186e566ed3400dc`
 
+### Wan 2.2 TI2V 5B (video)
+
+- Model repository: `Comfy-Org/Wan_2.2_ComfyUI_Repackaged`
+- Model revision: `c4f60d30c55a624e35427060fdd217579a6c1d77`
+- UNET: `wan2.2_ti2v_5B_fp16.safetensors` (`9,999,658,848` bytes)
+- VAE: `wan2.2_vae.safetensors` (`1,409,400,960` bytes)
+- CLIP: `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (`6,735,906,897` bytes)
+- Combined size: approximately 16.9 GB
+- Model license: Apache-2.0
+- Default output: 832×480, 49 frames (~2s at 24 fps), WebM VP9
+
 The machine-readable source of truth is `comfyui/model-manifest.json`.
 Third-party attribution is in `comfyui/NOTICE.md`.
 Python dependencies are fully resolved and hash-verified in the platform
@@ -32,9 +44,10 @@ specific `comfyui/requirements*.lock` files.
 - Apple Silicon (arm64); Intel Macs are not supported by this installer
 - Python 3.11 through 3.13, running as arm64
 - Git / Xcode Command Line Tools
-- At least 25 GB free disk space
+- At least 25 GB free disk space for the image checkpoint, or about 45 GB if
+  also downloading the video bundle
 - 32 GB unified memory recommended; 24 GB may work with memory pressure and
-  substantially lower resolutions
+  substantially lower resolutions. Video generation needs the higher figure.
 
 Install the pinned runtime without downloading model weights:
 
@@ -48,11 +61,18 @@ Download the checkpoint only when ready:
 ./scripts/setup-comfyui-macos.sh --download-model
 ```
 
+Download the video weights only when ready:
+
+```bash
+./scripts/setup-comfyui-macos.sh --download-video-model
+```
+
 An interrupted download is retained as a `.part` file and resumes on the next
 run. Verify an existing checkpoint without network access:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --verify-model
+./scripts/setup-comfyui-macos.sh --verify-video-model
 ```
 
 Start the pinned runtime:
@@ -119,7 +139,8 @@ Use the same overrides for later verification and startup.
 - Current NVIDIA driver compatible with CUDA 13
 - NVIDIA Container Toolkit configured for Docker
 - At least 24 GB VRAM recommended
-- At least 25 GB free Docker volume storage
+- At least 25 GB free Docker volume storage for the image checkpoint, or about
+  45 GB if also downloading the video bundle
 
 Set the manager's internal endpoint in `.env`:
 
@@ -134,6 +155,13 @@ Explicitly download and verify the model into the persistent
 ```bash
 make setup-comfyui-model
 make verify-comfyui-model
+```
+
+Video weights are a separate bundle:
+
+```bash
+make setup-comfyui-video-model
+make verify-comfyui-video-model
 ```
 
 If verification reports that an existing final file is invalid, inspect the
@@ -190,12 +218,58 @@ Node `11` scales the source to 1024×1024 with a centered crop. Node `12`
 VAE-encodes it. Packaged denoise is `0.75` so Schnell's four Euler/simple
 steps still transform the source instead of ignoring it.
 
+When chat has a source image (an attachment or a reused thread image), it
+rewrites the user instruction into a positive CLIP prompt — a description of
+the finished photograph — before filling node `6`. Denoise stays at the
+packaged `0.75`. The original instruction is kept in that prompt so edits
+such as removing an object or placing the subject in a new environment stay
+grounded in what the user asked.
+
+Routing is hybrid. High-confidence phrases (`generate an image`, `remove this
+object`, `put this in a forest`) skip the model. If an image is attached and
+the word lists do not match, a fast LiteLLM classifier (`IMAGE` / `CHAT`, max
+3 tokens) decides. Default model is `llama3.2:3b` via
+`COMFYUI_CLASSIFIER_MODEL`, overridable with workspace/org `model_fast`.
+Timeouts and an empty LiteLLM host fall back to chat. How-to, analysis, and
+coding questions never call the classifier.
+
 The packaged defaults are Schnell-appropriate: four Euler/simple steps and CFG
 1. Node `4` defaults to the manifest filename and is never changed from
 untrusted request data. Zone copies successful temporary output into its
 protected artifact store and clears the ComfyUI history entry; cancelled
 running jobs remain only in ComfyUI's temporary lifecycle. Remote `http(s)`
 attachment URLs are never fetched as img2img sources.
+
+## Video workflow contract
+
+`comfyui/workflows/wan2.2-ti2v-5b-api.json` is the text-to-video API-format
+workflow. It uses only built-in ComfyUI nodes. Integration code may replace
+only these inputs:
+
+- node `1`: UNET filename from trusted server configuration (`model_video` /
+  `COMFYUI_VIDEO_UNET`)
+- node `2`: CLIP filename (`COMFYUI_VIDEO_CLIP`)
+- node `3`: VAE filename (`COMFYUI_VIDEO_VAE`)
+- node `5`: positive prompt text
+- node `8`: seed
+
+`comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json` is the image-to-video sibling.
+Chat uses it when the current message includes an image attachment (a data URL
+or a same-chat `/api/artifacts/...` URL) and the request is classified as
+video. The manager uploads that image to ComfyUI's input folder, then may also
+replace:
+
+- node `11`: uploaded source filename, wired as `start_image` on the latent
+  node
+
+Packaged defaults are Wan-appropriate: 832×480, length 49, 20 `uni_pc`/`simple`
+steps, CFG 5, and ModelSamplingSD3 shift 8. The negative prompt stays the
+packaged Chinese Wan default and is never taken from untrusted request data.
+
+Unlike the image workflows, video uses ComfyUI's built-in `SaveWEBM` node,
+which writes WebM VP9 into ComfyUI's **output** folder rather than temp.
+Zone copies that file into the protected artifact store and clears the ComfyUI
+history entry. Chat can force this path with `metadata.video_generation: true`.
 
 ## Troubleshooting
 

@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'manager/frontend/**'
+      - 'manager/frontend/e2e/**'
       - 'runner/zone_installer/src/setup.html'
       - '.github/workflows/frontend-tests.yml'
   pull_request:
     paths:
       - 'manager/frontend/**'
+      - 'manager/frontend/e2e/**'
       - 'runner/zone_installer/src/setup.html'
       - '.github/workflows/frontend-tests.yml'
 
@@ -56,8 +58,17 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Install from manager/frontend so bunx uses this workspace's Playwright
+      # (1.62), not a different version fetched from the repo root. Headless
+      # Chromium in 1.62 launches chromium-headless-shell, not full chromium.
       - name: Install Playwright browser
-        run: bunx playwright install --with-deps ${{ matrix.browser }}
+        working-directory: manager/frontend
+        run: |
+          if [ "${{ matrix.browser }}" = "chromium" ]; then
+            bunx playwright install --with-deps chromium chromium-headless-shell
+          else
+            bunx playwright install --with-deps ${{ matrix.browser }}
+          fi
 
       - name: Run Playwright tests
         working-directory: manager/frontend

@@ -825,15 +825,19 @@ describe('ChatsPage', () => {
     });
 
     function controlClock(): (elapsed: number) => void {
-      let tick: (() => void) | undefined;
+      const ticks = new Map<number, () => void>();
+      let nextIntervalId = 1;
       const now = spyOn(performance, 'now').mockReturnValue(0);
       const interval = spyOn(window, 'setInterval').mockImplementation((callback: TimerHandler) => {
-        tick = () => {
+        const id = nextIntervalId++;
+        ticks.set(id, () => {
           if (typeof callback === 'function') callback();
-        };
-        return 1;
+        });
+        return id;
       });
-      const clear = spyOn(window, 'clearInterval').mockImplementation(() => {});
+      const clear = spyOn(window, 'clearInterval').mockImplementation((id) => {
+        ticks.delete(Number(id));
+      });
       restoreClock = () => {
         now.mockRestore();
         interval.mockRestore();
@@ -841,7 +845,9 @@ describe('ChatsPage', () => {
       };
       return (elapsed: number): void => {
         now.mockReturnValue(elapsed);
-        act(() => tick?.());
+        act(() => {
+          for (const tick of ticks.values()) tick();
+        });
       };
     }
 
@@ -1574,6 +1580,44 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('renders generated assistant videos with playback controls', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-generated-video',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'Generated video.',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              attachments: [
+                {
+                  name: 'generated-video-1.webm',
+                  mime: 'video/webm',
+                  url: 'data:video/webm;base64,generated',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      renderChatsPage();
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        const video = screen.getByLabelText('generated-video-1.webm');
+        expect(video.tagName).toBe('VIDEO');
+        expect(video).toHaveAttribute('src', 'data:video/webm;base64,generated');
+        expect(video).toHaveAttribute('controls');
+        expect(screen.getByText('Generated video.')).toBeInTheDocument();
+      });
+    });
+
     it('reuses a thread image as the next starting image', async () => {
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,
@@ -1609,7 +1653,9 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Use as starting image' }));
       expect(screen.getByText('Starting image')).toBeInTheDocument();
       expect(
-        screen.getByText('Ask to generate or edit and this image will be the starting point.')
+        screen.getByText(
+          'Ask to generate, edit, remove an object, change the setting, or animate and this image will be the starting point.'
+        )
       ).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Added as starting image' })).toBeDisabled();
 

@@ -238,15 +238,18 @@ pub fn fit_pairwise(
             let s_neg = ranker.score(neg);
             // d/ds log(σ(s_pos - s_neg)) = σ(s_neg - s_pos)
             let error = sigmoid(s_neg - s_pos);
-            for i in 0..FEATURE_COUNT {
-                grad_w[i] += error * (pos.values[i] - neg.values[i]);
+            for (grad, (pos_v, neg_v)) in grad_w
+                .iter_mut()
+                .zip(pos.values.iter().zip(neg.values.iter()))
+            {
+                *grad += error * (*pos_v - *neg_v);
             }
             grad_b += error * 0.05;
         }
         let n = pairs.len() as f32;
-        for i in 0..FEATURE_COUNT {
-            let l2 = 0.002 * ranker.weights[i];
-            ranker.weights[i] += learning_rate * (grad_w[i] / n - l2);
+        for (weight, grad) in ranker.weights.iter_mut().zip(grad_w.iter()) {
+            let l2 = 0.002 * *weight;
+            *weight += learning_rate * (*grad / n - l2);
         }
         ranker.bias += learning_rate * (grad_b / n);
     }
@@ -322,15 +325,7 @@ fn features_for_judgment(query: &str, identifiers: &[String], judgment: &Judgmen
         _ => (Some(0.50), Some(0.03), Some(12), Some(8), 0.008),
     };
     extract_features(
-        query,
-        &uri,
-        &title,
-        &text,
-        semantic,
-        keyword,
-        kw_rank,
-        sem_rank,
-        fusion,
+        query, &uri, &title, &text, semantic, keyword, kw_rank, sem_rank, fusion,
     )
 }
 

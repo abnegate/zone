@@ -56,14 +56,15 @@ async fn setup_test_data(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid), sqlx::Erro
     sqlx::query(
         r#"
         INSERT INTO content_items (
-            id, source_id, category, uri, title, content, content_type,
+            id, source_id, workspace_id, category, uri, title, content, content_type,
             token_count, metadata_only, content_hash, metadata, fetched_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
         "#,
     )
     .bind(content_item_id)
     .bind(source_id)
+    .bind(workspace_id)
     .bind("text")
     .bind("test.txt")
     .bind("Test Document")
@@ -128,14 +129,15 @@ async fn setup_test_data(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid), sqlx::Erro
 
         sqlx::query(
             r#"
-            INSERT INTO embeddings (id, chunk_id, content_item_id, source_id, vector, model, created_at)
-            VALUES ($1, $2, $3, $4, $5::vector, $6, NOW())
+            INSERT INTO embeddings (id, chunk_id, content_item_id, source_id, workspace_id, vector, model, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6::vector, $7, NOW())
             "#
         )
         .bind(Uuid::new_v4())
         .bind(chunk_id)
         .bind(content_item_id)
         .bind(source_id)
+        .bind(workspace_id)
         .bind(&vector_str)
         .bind("test-model")
         .execute(pool)

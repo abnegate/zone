@@ -840,8 +840,7 @@ pub async fn search_messages(
         }
     };
 
-    let results =
-        message_embeddings::fuse_message_hits(semantic, keyword, &params.query, limit);
+    let results = message_embeddings::fuse_message_hits(semantic, keyword, &params.query, limit);
     let response: Vec<MessageSearchResponse> = results
         .into_iter()
         .map(MessageSearchResponse::from)
