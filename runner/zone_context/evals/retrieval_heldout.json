@@ -1,0 +1,165 @@
+{
+  "comment": "Held-out graded set. Do not train RankNet on this file. Queries must not appear in retrieval.json.",
+  "cases": [
+    {
+      "id": "webhook_hmac",
+      "query": "How does the server verify a GitHub webhook signature?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["sync/github.rs"],
+      "judgments": [
+        {"uri_contains": "sync/github.rs", "grade": 3, "must_contain": ["verify_signature"]},
+        {"uri_contains": "sync/mod.rs", "grade": 1}
+      ]
+    },
+    {
+      "id": "cors_wildcard",
+      "query": "When does the API allow all CORS origins?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["main.rs"],
+      "judgments": [
+        {"uri_contains": "zone_server/src/main.rs", "grade": 3, "must_contain": ["cors_origins"]},
+        {"uri_contains": "config.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "rate_limit_cleanup",
+      "query": "How does the rate limiter prevent unbounded memory growth?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["rate_limit.rs"],
+      "judgments": [
+        {"uri_contains": "utils/rate_limit.rs", "grade": 3, "must_contain": ["cleanup"]},
+        {"uri_contains": "state.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "knowledge_refresh_interval",
+      "query": "How often does the knowledge refresh worker wake up?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["knowledge_refresh.rs"],
+      "judgments": [
+        {"uri_contains": "workers/knowledge_refresh.rs", "grade": 3, "must_contain": ["REFRESH_CHECK_INTERVAL_SECS"]},
+        {"uri_contains": "db/knowledge.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "artifact_auth",
+      "query": "How are generated chat artifacts authorized before serving?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["artifacts.rs"],
+      "judgments": [
+        {"uri_contains": "routes/artifacts.rs", "grade": 3, "must_contain": ["ArtifactStore"]},
+        {"uri_contains": "services/artifacts.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "onnx_cross_encoder",
+      "query": "Where is the in-process Jina ONNX cross-encoder constructed?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["local_rerank.rs"],
+      "judgments": [
+        {"uri_contains": "embeddings/local_rerank.rs", "grade": 3, "must_contain": ["jina-reranker"]},
+        {"uri_contains": "embeddings/rerank.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "jwt_subject",
+      "query": "How does user_id parse the JWT subject on Claims?",
+      "expect_identifiers": ["user_id"],
+      "expect_uri_contains": ["auth/jwt.rs"],
+      "judgments": [
+        {"uri_contains": "auth/jwt.rs", "grade": 3, "must_contain": ["parse_str"]},
+        {"uri_contains": "auth/middleware.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "email_from_env",
+      "query": "What error is returned when SMTP is not configured?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["email.rs"],
+      "judgments": [
+        {"uri_contains": "services/email.rs", "grade": 3, "must_contain": ["Email service not configured"]},
+        {"uri_contains": "zone_server/src/main.rs", "grade": 1}
+      ]
+    },
+    {
+      "id": "derive_encryption_key",
+      "query": "Where is the AES-256-GCM encryption key derived with Argon2id?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["crypto/mod.rs"],
+      "judgments": [
+        {"uri_contains": "crypto/mod.rs", "grade": 3, "must_contain": ["derive_key"]},
+        {"uri_contains": "state.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "notion_adapter",
+      "query": "Where is NotionAdapter implemented?",
+      "expect_identifiers": ["NotionAdapter"],
+      "expect_uri_contains": ["adapters/notion.rs"],
+      "judgments": [
+        {"uri_contains": "adapters/notion.rs", "grade": 3, "must_contain": ["NotionAdapter"]},
+        {"uri_contains": "adapters/mod.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "trim_command_output",
+      "query": "How does run_command trim oversized stdout?",
+      "expect_identifiers": ["run_command"],
+      "expect_uri_contains": ["tools/command.rs"],
+      "judgments": [
+        {"uri_contains": "tools/command.rs", "grade": 3, "must_contain": ["trim_middle"]},
+        {"uri_contains": "agent/compact.rs", "grade": 1}
+      ]
+    },
+    {
+      "id": "validate_public_url",
+      "query": "How does validate_public_url reject private IP addresses?",
+      "expect_identifiers": ["validate_public_url"],
+      "expect_uri_contains": ["utils/url.rs"],
+      "judgments": [
+        {"uri_contains": "utils/url.rs", "grade": 3, "must_contain": ["is_private_ip"]},
+        {"uri_contains": "workers/knowledge_refresh.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "generate_reset_token",
+      "query": "How does generate_token produce a password-reset secret?",
+      "expect_identifiers": ["generate_token"],
+      "expect_uri_contains": ["utils/crypto.rs"],
+      "judgments": [
+        {"uri_contains": "utils/crypto.rs", "grade": 3, "must_contain": ["generate_token"]},
+        {"uri_contains": "db/password_reset.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "check_rate_limit",
+      "query": "What does check_rate_limit return when the window is exceeded?",
+      "expect_identifiers": ["check_rate_limit"],
+      "expect_uri_contains": ["rate_limit.rs"],
+      "judgments": [
+        {"uri_contains": "utils/rate_limit.rs", "grade": 3, "must_contain": ["check_rate_limit"]},
+        {"uri_contains": "routes/context.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "list_due_refresh",
+      "query": "Where is list_entries_due_for_refresh implemented?",
+      "expect_identifiers": ["list_entries_due_for_refresh"],
+      "expect_uri_contains": ["db/knowledge.rs"],
+      "judgments": [
+        {"uri_contains": "db/knowledge.rs", "grade": 3, "must_contain": ["list_entries_due_for_refresh"]},
+        {"uri_contains": "workers/knowledge_refresh.rs", "grade": 2}
+      ]
+    },
+    {
+      "id": "mcp_hub",
+      "query": "Where is the process-wide MCP hub stored on AppState?",
+      "expect_identifiers": [],
+      "expect_uri_contains": ["state.rs"],
+      "judgments": [
+        {"uri_contains": "zone_server/src/state.rs", "grade": 3, "must_contain": ["McpHub"]},
+        {"uri_contains": "zone_core", "grade": 1}
+      ]
+    }
+  ]
+}
