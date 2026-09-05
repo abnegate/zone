@@ -621,6 +621,40 @@ services:
     networks:
       - internal
 
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:${DOCKER_VERSION_CADVISOR:-v0.52.1}@${DOCKER_DIGEST_CADVISOR:-sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435}
+    container_name: cadvisor
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    privileged: true
+    cgroup: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    command:
+      - --housekeeping_interval=15s
+      - --docker_only=true
+      - --disable_metrics=advtcp,cpu_topology,disk,diskIO,hugetlb,memory_numa,process,referenced_memory,resctrl,sched,tcp,udp,percpu,perf_event,cpuset
+    networks:
+      - internal
+
+  blackbox:
+    image: prom/blackbox-exporter:${DOCKER_VERSION_BLACKBOX:-v0.27.0}@${DOCKER_DIGEST_BLACKBOX:-sha256:a50c4c0eda297baa1678cd4dc4712a67fdea713b832d43ce7fcc5f9bea05094d}
+    container_name: blackbox
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    volumes:
+      - ./prometheus/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - --config.file=/etc/blackbox_exporter/config.yml
+    networks:
+      - internal
+      - edge
+
   # Utilities (installer profile)
   installer:
     build:

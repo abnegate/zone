@@ -355,6 +355,7 @@ pub async fn login(
     let user = match users::get_user_by_email(state.db(), &req.email).await {
         Ok(Some(user)) => user,
         Ok(None) => {
+            crate::metrics::record_login("invalid_credentials");
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse::new("Invalid email or password")),
@@ -363,6 +364,7 @@ pub async fn login(
         }
         Err(e) => {
             tracing::error!("Database error: {}", e);
+            crate::metrics::record_login("error");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
@@ -375,6 +377,7 @@ pub async fn login(
     match verify_password(&req.password, &user.password_hash) {
         Ok(true) => {}
         Ok(false) => {
+            crate::metrics::record_login("invalid_credentials");
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse::new("Invalid email or password")),
@@ -383,6 +386,7 @@ pub async fn login(
         }
         Err(e) => {
             tracing::error!("Password verification error: {}", e);
+            crate::metrics::record_login("error");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
@@ -393,6 +397,7 @@ pub async fn login(
 
     // Check if user is active
     if !user.is_active.unwrap_or(true) {
+        crate::metrics::record_login("disabled");
         return (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse::new("Account is disabled")),
@@ -429,9 +434,13 @@ pub async fn login(
     let (access_token, refresh_token) = match generate_tokens(&state, &user_perms, None, None).await
     {
         Ok(tokens) => tokens,
-        Err(response) => return response.into_response(),
+        Err(response) => {
+            crate::metrics::record_login("error");
+            return response.into_response();
+        }
     };
 
+    crate::metrics::record_login("ok");
     Json(AuthResponse {
         access_token,
         refresh_token,

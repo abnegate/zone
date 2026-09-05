@@ -3,6 +3,7 @@
 //! Creates embedding service providers based on AI settings from database.
 
 use std::sync::Arc;
+use std::time::Instant;
 use zone_context::embeddings::{
     EmbeddingService,
     providers::{AiSettings, EmbeddingProviderFactory},
@@ -37,6 +38,65 @@ pub fn create_embedding_service(
     };
 
     EmbeddingProviderFactory::create(&ai_settings)
+        .map(|inner| instrument_embeddings(inner, engine.unwrap_or("ollama")))
+}
+
+struct InstrumentedEmbedding {
+    inner: Arc<dyn EmbeddingService>,
+    engine: String,
+}
+
+fn instrument_embeddings(
+    inner: Arc<dyn EmbeddingService>,
+    engine: &str,
+) -> Arc<dyn EmbeddingService> {
+    Arc::new(InstrumentedEmbedding {
+        inner,
+        engine: engine.to_string(),
+    })
+}
+
+#[async_trait::async_trait]
+impl EmbeddingService for InstrumentedEmbedding {
+    async fn embed(&self, text: &str) -> ContextResult<Vec<f32>> {
+        let start = Instant::now();
+        let result = self.inner.embed(text).await;
+        crate::metrics::record_embedding(
+            &self.engine,
+            self.inner.model(),
+            "single",
+            if result.is_ok() { "ok" } else { "error" },
+            start.elapsed(),
+            1,
+        );
+        result
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> ContextResult<Vec<Vec<f32>>> {
+        let start = Instant::now();
+        let result = self.inner.embed_batch(texts).await;
+        crate::metrics::record_embedding(
+            &self.engine,
+            self.inner.model(),
+            "batch",
+            if result.is_ok() { "ok" } else { "error" },
+            start.elapsed(),
+            texts.len(),
+        );
+        result
+    }
+
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+
+    fn max_tokens(&self) -> usize {
+        self.inner.max_tokens()
+    }
 }
 
 /// Read `EMBEDDING_ENGINE` from the environment, treating blank as unset.

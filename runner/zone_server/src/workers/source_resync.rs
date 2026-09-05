@@ -183,6 +183,12 @@ async fn consider_source(
         ?reason,
         "queueing incremental source index"
     );
+    crate::metrics::record_resync(match reason {
+        ResyncReason::NeverSynced => "never_synced",
+        ResyncReason::RemoteChanged => "remote_changed",
+        ResyncReason::MissingEmbeddings => "missing_embeddings",
+        ResyncReason::ScheduleDue => "schedule_due",
+    });
     indexing::spawn_index_source(state.clone(), source.id, source.workspace_id, user_id, true);
     Ok(true)
 }

@@ -202,10 +202,13 @@ impl AgentCallback for DatabaseTaskCallback {
 ///
 /// All events are persisted to the database via DatabaseTaskCallback for monitoring.
 pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
+    let mut obs = crate::metrics::TaskObs::new();
+
     // Acquire semaphore permit to limit concurrent executions
     let _permit = match get_semaphore().acquire().await {
         Ok(p) => p,
         Err(_) => {
+            obs.set_status("semaphore_denied");
             tracing::error!("Task semaphore closed for run {}", run_id);
             if let Err(e) = tasks::complete_task_run(
                 state.db(),
@@ -232,6 +235,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     let task = match tasks::get_task(state.db(), task_id).await {
         Ok(Some(t)) => t,
         Ok(None) => {
+            obs.set_status("not_found");
             tracing::error!("Task {} not found", task_id);
             if let Err(e) =
                 tasks::complete_task_run(state.db(), run_id, "failed", Some("Task not found"), None)
@@ -242,6 +246,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             return;
         }
         Err(e) => {
+            obs.set_status("error");
             tracing::error!("Failed to fetch task {}: {}", task_id, e);
             if let Err(e) = tasks::complete_task_run(
                 state.db(),
@@ -364,6 +369,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
 
     match result {
         Ok(Ok(outcome)) => {
+            obs.set_status("completed");
             let summary = if outcome.summary.trim().is_empty() {
                 "Task completed".to_string()
             } else {
@@ -429,6 +435,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             }
         }
         Ok(Err(e)) => {
+            obs.set_status("failed");
             // Agent failed with error
             tracing::error!("Task run {} failed: {}", run_id, e);
             if let Err(e) =
@@ -439,6 +446,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             }
         }
         Err(_) => {
+            obs.set_status("timeout");
             // Task timed out
             tracing::error!(
                 "Task run {} timed out after {} seconds",

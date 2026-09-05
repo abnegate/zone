@@ -54,6 +54,8 @@ async fn test_metrics_endpoint_is_public() {
         body.contains("/health"),
         "health request should be recorded: {body}"
     );
+
+    client.head("/metrics").await.assert_status(StatusCode::OK);
 }
 
 // =============================================================================

@@ -88,26 +88,42 @@ pub async fn require_auth(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, AuthError> {
+    // Axum can run this layer on unmatched paths after a merge. Never gate
+    // liveness/scrape — Prometheus uses those to set `up{job="manager"}`.
+    let path = request.uri().path();
+    if path == "/health" || path == "/metrics" {
+        return Ok(next.run(request).await);
+    }
+
     // Get the Authorization header
     let auth_header = request
         .headers()
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
-        .ok_or(AuthError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "Missing authorization header".to_string(),
+        .ok_or_else(|| {
+            crate::metrics::record_auth_failure("missing_header");
+            AuthError {
+                status: StatusCode::UNAUTHORIZED,
+                message: "Missing authorization header".to_string(),
+            }
         })?;
 
     // Extract the bearer token
-    let token = extract_bearer_token(auth_header).ok_or(AuthError {
-        status: StatusCode::UNAUTHORIZED,
-        message: "Invalid authorization header format".to_string(),
+    let token = extract_bearer_token(auth_header).ok_or_else(|| {
+        crate::metrics::record_auth_failure("bad_format");
+        AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Invalid authorization header format".to_string(),
+        }
     })?;
 
     // Validate the token
-    let claims = validate_token(token, state.config().jwt_secret()).map_err(|e| AuthError {
-        status: StatusCode::UNAUTHORIZED,
-        message: format!("Invalid token: {}", e),
+    let claims = validate_token(token, state.config().jwt_secret()).map_err(|e| {
+        crate::metrics::record_auth_failure("invalid_token");
+        AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: format!("Invalid token: {}", e),
+        }
     })?;
 
     // Add claims to request extensions

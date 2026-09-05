@@ -144,20 +144,35 @@ impl SearxngClient {
 
     /// Query SearXNG and return at most `result_count` hits.
     pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>, SearchError> {
+        let started = std::time::Instant::now();
         let query = sanitize_query(query);
         if query.is_empty() {
+            crate::metrics::record_searxng("empty_query", started.elapsed(), 0);
             return Ok(Vec::new());
         }
 
         let url = build_search_url(&self.config.query_url, &query);
-        let response = self.http.get(&url).send().await?;
+        let response = match self.http.get(&url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                crate::metrics::record_searxng("http_error", started.elapsed(), 0);
+                return Err(error.into());
+            }
+        };
         let status = response.status();
         if !status.is_success() {
+            crate::metrics::record_searxng("status_error", started.elapsed(), 0);
             return Err(SearchError::Status(status.as_u16()));
         }
 
-        let body: SearxngResponse = response.json().await?;
-        Ok(body
+        let body: SearxngResponse = match response.json().await {
+            Ok(body) => body,
+            Err(error) => {
+                crate::metrics::record_searxng("http_error", started.elapsed(), 0);
+                return Err(error.into());
+            }
+        };
+        let hits = body
             .results
             .into_iter()
             .filter_map(|result| {
@@ -173,7 +188,9 @@ impl SearxngClient {
                 })
             })
             .take(self.config.result_count)
-            .collect())
+            .collect::<Vec<_>>();
+        crate::metrics::record_searxng("ok", started.elapsed(), hits.len());
+        Ok(hits)
     }
 }
 

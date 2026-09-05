@@ -348,6 +348,40 @@ impl ComfyUiClient {
         saving: &str,
         mode: OutputMode,
     ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
+        let started = std::time::Instant::now();
+        let kind = match mode {
+            OutputMode::Image => "image",
+            OutputMode::Video => "video",
+        };
+        let result = self
+            .submit_and_collect_inner(
+                workflow, cancel, deadline, progress, queued, generating, saving, mode,
+            )
+            .await;
+        let status = match &result {
+            Ok(_) => "ok",
+            Err(ComfyUiError::Disabled) => "disabled",
+            Err(ComfyUiError::Timeout) => "timeout",
+            Err(ComfyUiError::Cancelled) => "cancelled",
+            Err(ComfyUiError::Http(_)) => "http_error",
+            Err(ComfyUiError::Configuration(_)) => "config_error",
+            Err(ComfyUiError::InvalidResponse(_)) => "invalid_response",
+        };
+        crate::metrics::record_comfyui(kind, status, started.elapsed());
+        result
+    }
+
+    async fn submit_and_collect_inner(
+        &self,
+        workflow: Value,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+        progress: mpsc::UnboundedSender<String>,
+        queued: &str,
+        generating: &str,
+        saving: &str,
+        mode: OutputMode,
+    ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
         let request = self
             .authorize(self.client.post(format!("{}/prompt", self.config.base_url)))
             .json(&json!({

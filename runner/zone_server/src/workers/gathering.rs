@@ -99,10 +99,13 @@ pub async fn execute_gathering(
     force_refresh: bool,
     index_mode: bool,
 ) {
+    let mut obs = crate::metrics::GatheringObs::new(index_mode);
+
     // Acquire semaphore permit to limit concurrent gatherings
     let _permit = match get_semaphore().acquire().await {
         Ok(p) => p,
         Err(_) => {
+            obs.set_status("semaphore_denied");
             tracing::error!("Gathering semaphore closed for gathering {}", gathering_id);
             if let Err(e) = context_gatherings::update_gathering_status(
                 state.db(),
@@ -145,6 +148,7 @@ pub async fn execute_gathering(
     let context_service = match state.context_service() {
         Some(svc) => svc,
         None => {
+            obs.set_status("unavailable");
             tracing::error!("Context service not available");
             if let Err(e) = context_gatherings::update_gathering_status(
                 state.db(),
@@ -169,6 +173,7 @@ pub async fn execute_gathering(
     {
         Ok(s) => s,
         Err(e) => {
+            obs.set_status("error");
             tracing::error!("Failed to fetch sources from database: {}", e);
             if let Err(e) = context_gatherings::update_gathering_status(
                 state.db(),
@@ -194,6 +199,7 @@ pub async fn execute_gathering(
         .collect();
 
     if sources.is_empty() {
+        obs.set_status("no_sources");
         tracing::warn!("No valid sources to gather from");
         if let Err(e) = context_gatherings::update_gathering_status(
             state.db(),
@@ -233,6 +239,10 @@ pub async fn execute_gathering(
 
     match result {
         Ok(Ok(gathering_result)) => {
+            obs.set_stats(
+                gathering_result.embeddings_created as u64,
+                gathering_result.items_unchanged as u64,
+            );
             // Gathering completed successfully
             tracing::info!(
                 "Gathering {} completed: sources={}, items={}, embeddings={}, duration={}ms",
@@ -254,6 +264,7 @@ pub async fn execute_gathering(
             let searchable =
                 gathering_result.embeddings_created > 0 || gathering_result.items_unchanged > 0;
             if index_mode && gathering_result.items_gathered > 0 && !searchable {
+                obs.set_status("failed");
                 let message = format!(
                     "Indexing produced no searchable chunks ({} items fetched, {} errors)",
                     gathering_result.items_gathered,
@@ -277,6 +288,7 @@ pub async fn execute_gathering(
                 return;
             }
 
+            obs.set_status("completed");
             if let Err(e) =
                 context_gatherings::update_status(state.db(), gathering_id, "completed").await
             {
@@ -299,6 +311,7 @@ pub async fn execute_gathering(
             }
         }
         Ok(Err(e)) => {
+            obs.set_status("failed");
             // Gathering failed with error
             tracing::error!("Gathering {} failed: {}", gathering_id, e);
             if let Err(e) = context_gatherings::update_gathering_status(
@@ -317,6 +330,7 @@ pub async fn execute_gathering(
             }
         }
         Err(_) => {
+            obs.set_status("timeout");
             // Gathering timed out
             tracing::error!(
                 "Gathering {} timed out after {} seconds",

@@ -68,11 +68,6 @@ pub fn create_router(state: AppState) -> Router {
     // Public routes (no auth required)
     // Note: WebSocket routes use in-message auth, not middleware
     let public_routes = Router::new()
-        .route("/health", get(health::health_check))
-        .route(
-            "/metrics",
-            get(crate::metrics::scrape).head(crate::metrics::scrape),
-        )
         .route("/api/auth/register", post(auth::register))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/refresh", post(auth::refresh))
@@ -305,8 +300,14 @@ pub fn create_router(state: AppState) -> Router {
         )
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
-    // Combine all routes. Metrics wrap auth so 401s are still recorded.
+    // Health and metrics sit on the outer router so a merge/auth fallback
+    // cannot 401 Prometheus and flip `up{job="manager"}` to 0.
     Router::new()
+        .route("/health", get(health::health_check))
+        .route(
+            "/metrics",
+            get(crate::metrics::scrape).head(crate::metrics::scrape),
+        )
         .merge(public_routes)
         .merge(protected_routes)
         .layer(middleware::from_fn(crate::metrics::track_http))

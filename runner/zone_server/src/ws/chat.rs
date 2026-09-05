@@ -532,6 +532,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     let _permit = match semaphore.try_acquire() {
         Ok(permit) => permit,
         Err(_) => {
+            crate::metrics::record_ws_chat("rejected", "too_many");
             tracing::warn!("Too many connections for chat {}, rejecting", chat_id);
             let error_msg = ServerMessage::Error {
                 message: "Too many connections".to_string(),
@@ -560,6 +561,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 match validate_token(&token, state.config().jwt_secret()) {
                     Ok(claims) => claims,
                     Err(e) => {
+                        crate::metrics::record_ws_chat("rejected", "auth_failed");
                         tracing::warn!("Authentication failed for chat {}: {}", chat_id, e);
                         let error_msg = ServerMessage::Error {
                             message: "Authentication failed".to_string(),
@@ -571,6 +573,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 }
             }
             _ => {
+                crate::metrics::record_ws_chat("rejected", "bad_format");
                 let error_msg = ServerMessage::Error {
                     message: "Invalid message format".to_string(),
                 };
@@ -581,6 +584,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
         },
         Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return,
         _ => {
+            crate::metrics::record_ws_chat("rejected", "timeout");
             let error_msg = ServerMessage::Error {
                 message: "Authentication timeout or error".to_string(),
             };
@@ -651,6 +655,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
             );
         }
         Ok(false) => {
+            crate::metrics::record_ws_chat("rejected", "access_denied");
             tracing::warn!(
                 "User {} attempted to access chat {} without permission",
                 user_id,
@@ -683,6 +688,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     if sender.send(init_msg.to_ws_message()).await.is_err() {
         return;
     }
+    let _ws_active = crate::metrics::WsActiveGuard::acquire();
     let sender = Arc::new(Mutex::new(sender));
     let mut titles = crate::workers::titles::subscribe();
     let mut actions = crate::db::actions::subscribe();

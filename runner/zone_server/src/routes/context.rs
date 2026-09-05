@@ -406,12 +406,14 @@ pub async fn search(
     Query(query): Query<SearchQuery>,
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
+    let mut obs = crate::metrics::SearchObs::new();
 
     // Extract user ID for authorization
     let user_id = match auth.0.user_id() {
         Ok(id) => id,
         Err(_) => {
             tracing::error!("Failed to parse user ID from auth claims");
+            obs.set_status("error");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Authentication error")),
@@ -430,6 +432,7 @@ pub async fn search(
                 user_id,
                 query.workspace_id
             );
+            obs.set_status("forbidden");
             return (
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse::new("Access denied")),
@@ -438,6 +441,7 @@ pub async fn search(
         }
         Err(e) => {
             tracing::error!("Database error checking workspace access: {}", e);
+            obs.set_status("error");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
@@ -449,6 +453,7 @@ pub async fn search(
     // Trim query and validate length
     let trimmed_query = query.q.trim();
     if trimmed_query.is_empty() || trimmed_query.len() > MAX_QUERY_LENGTH {
+        obs.set_status("bad_request");
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(format!(
@@ -487,6 +492,7 @@ pub async fn search(
     });
 
     if query.source_ids.is_some() && source_ids.is_none() {
+        obs.set_status("bad_request");
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(format!(
@@ -517,6 +523,7 @@ pub async fn search(
         .is_some_and(|s| !s.trim().is_empty())
         && categories.is_none()
     {
+        obs.set_status("bad_request");
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse::new(format!(
@@ -536,6 +543,7 @@ pub async fn search(
                     user_id,
                     query.workspace_id
                 );
+                obs.set_status("forbidden");
                 return (
                     StatusCode::FORBIDDEN,
                     Json(ErrorResponse::new("Access denied to specified sources")),
@@ -544,6 +552,7 @@ pub async fn search(
             }
             Err(e) => {
                 tracing::error!("Database error checking source ownership: {}", e);
+                obs.set_status("error");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse::new("Internal server error")),
@@ -557,6 +566,7 @@ pub async fn search(
     let context_service = match state.context_service() {
         Some(svc) => svc,
         None => {
+            obs.set_status("unavailable");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ErrorResponse::new("Search service not available")),
@@ -576,6 +586,7 @@ pub async fn search(
 
     // Determine search mode
     let search_mode = query.mode.to_lowercase();
+    obs.set_mode(search_mode.clone());
 
     // Perform search based on mode
     let results_vec = match search_mode.as_str() {
@@ -612,6 +623,7 @@ pub async fn search(
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("Hybrid search failed: {}", e);
+                    obs.set_status("error");
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse::new("Search failed")),
@@ -631,6 +643,7 @@ pub async fn search(
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("Keyword search failed: {}", e);
+                    obs.set_status("error");
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse::new("Search failed")),
@@ -654,6 +667,7 @@ pub async fn search(
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!("Semantic search failed: {}", e);
+                    obs.set_status("error");
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse::new("Search failed")),
@@ -663,6 +677,7 @@ pub async fn search(
             }
         }
         _ => {
+            obs.set_status("bad_request");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse::new(
@@ -693,6 +708,7 @@ pub async fn search(
 
     let total_results = result_items.len();
     let search_time_ms = start.elapsed().as_millis() as u64;
+    obs.succeed(total_results);
 
     let response = SearchResponse {
         results: result_items,

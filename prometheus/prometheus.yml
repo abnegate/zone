@@ -49,3 +49,41 @@ scrape_configs:
   - job_name: 'gluetun'
     static_configs:
       - targets: ['gluetun:8001']
+
+  # Container RSS/CPU (manager embeddings are the memory hog)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'container_(memory_working_set_bytes|cpu_usage_seconds_total|fs_usage_bytes|network_receive_bytes_total|network_transmit_bytes_total|spec_memory_limit_bytes)|machine_memory_bytes'
+        action: keep
+      - source_labels: [id]
+        regex: '^/$'
+        action: drop
+
+  # Host Ollama, host ComfyUI, and SearXNG-through-Gluetun
+  - job_name: 'blackbox'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://host.docker.internal:11434/api/tags
+        labels:
+          probe: ollama
+      - targets:
+          - http://host.docker.internal:8188/system_stats
+        labels:
+          probe: comfyui
+      - targets:
+          - http://gluetun:8080/
+        labels:
+          probe: searxng
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115

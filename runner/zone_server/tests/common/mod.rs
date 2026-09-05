@@ -117,6 +117,17 @@ impl TestClient {
         self.send(request).await
     }
 
+    /// Make a HEAD request
+    pub async fn head(&self, uri: &str) -> TestResponse {
+        let request = Request::builder()
+            .method("HEAD")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+
+        self.send(request).await
+    }
+
     /// Make a GET request with authorization
     pub async fn get_auth(&self, uri: &str, token: &str) -> TestResponse {
         let request = Request::builder()
