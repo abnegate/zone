@@ -1,7 +1,12 @@
-import { BrowseResponseSchema, ModelsResponseSchema } from '../features/models/schemas';
+import {
+  BrowseResponseSchema,
+  DiskUsageSchema,
+  ModelsResponseSchema,
+} from '../features/models/schemas';
 import type {
   BrowseOptions,
   BrowseResponse,
+  DiskUsage,
   ModelSource,
   ModelsResponse,
 } from '../features/models/types';
@@ -105,6 +110,19 @@ export const modelsApi = {
     }
     const data = await response.json();
     return { content: data.content, gguf_size: data.gguf_size };
+  },
+
+  /**
+   * Host filesystem usage for the volume that stores models
+   */
+  async getDisk(): Promise<DiskUsage> {
+    const response = await fetch(`${API_BASE}/api/models/disk`, {
+      headers: client.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch disk usage: ${response.status}`);
+    }
+    return parse(DiskUsageSchema, await response.json());
   },
 
   /**

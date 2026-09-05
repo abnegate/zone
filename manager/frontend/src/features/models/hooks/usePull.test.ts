@@ -23,11 +23,10 @@ mock.module('../../../features/auth', () => ({
   AuthProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-let usePull: typeof import('./usePull').usePull;
-let PullProvider: typeof import('./usePull').PullProvider;
+let usePullState: typeof import('./usePull').usePullState;
 
 beforeAll(async () => {
-  ({ usePull, PullProvider } = await import('./usePull'));
+  ({ usePullState } = await import('./usePull'));
 });
 
 afterAll(() => {
@@ -54,10 +53,6 @@ function createMockWebSocket(): MockWebSocket {
   };
 }
 
-function renderPull() {
-  return renderHook(() => usePull(), { wrapper: PullProvider });
-}
-
 async function flushReconnect(): Promise<void> {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -76,7 +71,7 @@ describe('usePull', () => {
   });
 
   it('initializes with default state', () => {
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     expect(result.current.pulling).toBe(false);
     expect(result.current.progress).toBeNull();
@@ -87,7 +82,7 @@ describe('usePull', () => {
   it('does not pull when not authenticated', async () => {
     authState = { isAuthenticated: false, accessToken: '' };
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     let pullResult = false;
     await act(async () => {
@@ -99,7 +94,7 @@ describe('usePull', () => {
   });
 
   it('does not pull with empty model name', async () => {
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     let pullResult = false;
     await act(async () => {
@@ -111,7 +106,7 @@ describe('usePull', () => {
   });
 
   it('resets state', () => {
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.reset();
@@ -123,7 +118,7 @@ describe('usePull', () => {
   });
 
   it('cancels pull without active WebSocket', () => {
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.cancel();
@@ -137,7 +132,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -150,7 +145,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -163,7 +158,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -183,7 +178,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -201,7 +196,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -217,47 +212,11 @@ describe('usePull', () => {
     expect(result.current.progress).toBe(50);
   });
 
-  it('completes earlier pending steps when a new step starts', async () => {
-    const mockWs = createMockWebSocket();
-    mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
-
-    const { result } = renderPull();
-
-    act(() => {
-      result.current.pull('qwen3.8:27b');
-    });
-
-    act(() => {
-      mockWs.onmessage?.({
-        data: JSON.stringify({ type: 'step', status: 'pulling manifest' }),
-      } as MessageEvent);
-      mockWs.onmessage?.({
-        data: JSON.stringify({ type: 'step', status: 'pulling 6ccbab317026' }),
-      } as MessageEvent);
-    });
-
-    expect(result.current.steps).toEqual([
-      { name: 'pulling manifest', message: '', status: 'success' },
-      { name: 'pulling 6ccbab317026', message: '', status: 'pending' },
-    ]);
-
-    act(() => {
-      mockWs.onclose?.();
-    });
-    await flushReconnect();
-
-    expect(result.current.steps.map((step) => step.status)).toEqual(['success', 'error']);
-    expect(result.current.result).toEqual({
-      success: false,
-      message: 'Connection closed before installation completed',
-    });
-  });
-
   it('handles step message - new step', async () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -286,7 +245,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -318,7 +277,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     let _pullResult: boolean | undefined;
     act(() => {
@@ -343,7 +302,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -364,7 +323,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     let _pullResult: boolean | undefined;
     act(() => {
@@ -389,7 +348,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -407,7 +366,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     let _pullResult: boolean | undefined;
     act(() => {
@@ -416,6 +375,7 @@ describe('usePull', () => {
       });
     });
 
+    // Simulate WebSocket error
     act(() => {
       mockWs.onerror?.({} as Event);
     });
@@ -437,7 +397,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -457,7 +417,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('llama2');
@@ -479,7 +439,7 @@ describe('usePull', () => {
     const mockWs = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(mockWs as unknown as WebSocket);
 
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
 
     act(() => {
       result.current.pull('  llama2  ');
@@ -500,7 +460,7 @@ describe('pull lifecycle regressions', () => {
     it(`settles pending steps on ${outcome} while preserving completed steps`, async () => {
       const socket = createMockWebSocket();
       mockCreatePullWebSocket.mockReturnValueOnce(socket);
-      const { result } = renderPull();
+      const { result } = renderHook(() => usePullState());
       let pending!: Promise<boolean>;
       act(() => {
         pending = result.current.pull('qwen3.8:27b');
@@ -538,7 +498,7 @@ describe('pull lifecycle regressions', () => {
     const first = createMockWebSocket();
     const second = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(first).mockReturnValueOnce(second);
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
     act(() => {
       result.current.pull('missing');
       first.onmessage?.({
@@ -575,7 +535,7 @@ describe('pull lifecycle regressions', () => {
     it(`settles on ${outcome}`, async () => {
       const socket = createMockWebSocket();
       mockCreatePullWebSocket.mockReturnValueOnce(socket);
-      const { result, unmount } = renderPull();
+      const { result, unmount } = renderHook(() => usePullState());
       let pending!: Promise<boolean>;
       act(() => {
         pending = result.current.pull('llama2');
@@ -599,7 +559,7 @@ describe('pull lifecycle regressions', () => {
     const first = createMockWebSocket();
     const second = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(first).mockReturnValueOnce(second);
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
     let pending!: Promise<boolean>;
     act(() => {
       pending = result.current.pull('qwen3.8:27b');
@@ -625,7 +585,7 @@ describe('pull lifecycle regressions', () => {
     sessionStorage.setItem('zone.activePull', 'llama2');
     const socket = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(socket);
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
     await act(async () => {
       await Promise.resolve();
     });
@@ -638,33 +598,74 @@ describe('pull lifecycle regressions', () => {
     mockCreatePullWebSocket.mockImplementationOnce(() => {
       throw new Error('blocked');
     });
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
     await act(async () => {
       expect(await result.current.pull('llama2')).toBe(false);
     });
     expect(result.current.pulling).toBe(false);
   });
 
-  it('sends the model only once and ignores a replaced connection', async () => {
+  it('keeps an in-flight pull when a second model starts', async () => {
     const first = createMockWebSocket();
     const second = createMockWebSocket();
     mockCreatePullWebSocket.mockReturnValueOnce(first).mockReturnValueOnce(second);
-    const { result } = renderPull();
+    const { result } = renderHook(() => usePullState());
     let pending!: Promise<boolean>;
     act(() => {
       pending = result.current.pull('old');
-    });
-    const late = first.onmessage;
-    act(() => {
       result.current.pull('new');
     });
-    expect(await pending).toBe(false);
+    expect(result.current.jobs).toHaveLength(2);
+    expect(result.current.activeCount).toBe(2);
     act(() => {
-      late?.({ data: JSON.stringify({ type: 'error', message: 'Old error' }) } as MessageEvent);
+      first.onmessage?.({
+        data: JSON.stringify({ type: 'error', message: 'Old error' }),
+      } as MessageEvent);
       second.onmessage?.({ data: JSON.stringify({ type: 'authenticated' }) } as MessageEvent);
       second.onmessage?.({ data: JSON.stringify({ type: 'authenticated' }) } as MessageEvent);
     });
-    expect(result.current.result).toBeNull();
+    expect(await pending).toBe(false);
+    expect(result.current.jobs[0].result).toEqual({ success: false, message: 'Old error' });
     expect(second.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a fifth concurrent pull', async () => {
+    const sockets = Array.from({ length: 4 }, () => createMockWebSocket());
+    for (const socket of sockets) {
+      mockCreatePullWebSocket.mockReturnValueOnce(socket);
+    }
+    const { result } = renderHook(() => usePullState());
+    act(() => {
+      for (let index = 0; index < 4; index += 1) {
+        void result.current.pull(`model-${index}`);
+      }
+    });
+    let fifth = true;
+    await act(async () => {
+      fifth = await result.current.pull('model-4');
+    });
+    expect(fifth).toBe(false);
+    expect(result.current.activeCount).toBe(4);
+    expect(result.current.canStart('model-4')).toBe(false);
+    expect(mockCreatePullWebSocket).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps a successful job visible until it is dismissed', async () => {
+    const socket = createMockWebSocket();
+    mockCreatePullWebSocket.mockReturnValueOnce(socket);
+    const { result } = renderHook(() => usePullState());
+    act(() => {
+      result.current.pull('llama2');
+      socket.onmessage?.({ data: JSON.stringify({ type: 'complete' }) } as MessageEvent);
+    });
+    expect(result.current.jobs).toHaveLength(1);
+    expect(result.current.result).toEqual({
+      success: true,
+      message: 'Model installed successfully',
+    });
+    act(() => {
+      result.current.dismiss(result.current.jobs[0].id);
+    });
+    expect(result.current.jobs).toEqual([]);
   });
 });

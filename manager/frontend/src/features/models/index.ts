@@ -1,7 +1,7 @@
 // Types
 
 // Components
-export { PullDownloadIndicator, VirtualBrowseList } from './components';
+export { DownloadDock, VirtualBrowseList } from './components';
 // Hooks
 export { PullProvider, useBrowse, useModels, usePull } from './hooks';
 // Pages
@@ -10,6 +10,7 @@ export { ModelsPage } from './pages';
 export {
   BrowseModelSchema,
   BrowseResponseSchema,
+  DiskUsageSchema,
   InstalledModelSchema,
   ModelSourceSchema,
   ModelsResponseSchema,
@@ -19,6 +20,7 @@ export type {
   BrowseModel,
   BrowseOptions,
   BrowseResponse,
+  DiskUsage,
   InstalledModel,
   ModelCardResponse,
   ModelSizeFilter,
@@ -26,14 +28,17 @@ export type {
   ModelSource,
   ModelsResponse,
   PullChunk,
+  PullJob,
   PullProgress,
   Step,
 } from './types';
 export {
   ALL_SOURCES,
+  MAX_PARALLEL_PULLS,
   MODEL_FAMILY_FILTERS,
   MODEL_SIZE_FILTERS,
   MODEL_SORT_OPTIONS,
+  PULL_SUCCESS_DISMISS_MS,
 } from './types';
 
 // Utils

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
 import { useAuth } from '../../../features/auth';
-import type { InstalledModel } from '../types';
+import type { DiskUsage, InstalledModel } from '../types';
 
 export function useModels() {
   const { isAuthenticated, isLoading: authLoading, logout } = useAuth();
   const [models, setModels] = useState<InstalledModel[]>([]);
+  const [disk, setDisk] = useState<DiskUsage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,6 +29,12 @@ export function useModels() {
     } finally {
       setLoading(false);
     }
+
+    try {
+      setDisk(await modelsApi.getDisk());
+    } catch {
+      setDisk(null);
+    }
   }, [authLoading, isAuthenticated, logout]);
 
   useEffect(() => {
@@ -46,5 +53,5 @@ export function useModels() {
     }
   }, []);
 
-  return { models, loading, error, refresh: fetchModels, deleteModel };
+  return { models, disk, loading, error, refresh: fetchModels, deleteModel };
 }

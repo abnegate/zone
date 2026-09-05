@@ -11,7 +11,7 @@ import {
 } from './features/auth';
 import { ChatsPage } from './features/chats';
 import { ContextSearchPage, WikiPage } from './features/knowledge';
-import { ModelsPage, PullDownloadIndicator, PullProvider } from './features/models';
+import { ModelsPage, PullProvider } from './features/models';
 import { ProjectsPage } from './features/projects';
 import { OrgSettingsPage, WorkspaceSettingsPage } from './features/settings';
 import { SourcesPage } from './features/sources';
@@ -27,11 +27,10 @@ function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
-        <PullProvider>
-          <WorkspaceProvider>
+        <WorkspaceProvider>
+          <PullProvider>
             <WorkspaceTheme />
             <BrowserRouter>
-              <PullDownloadIndicator />
               <Routes>
                 {/* Public routes */}
                 <Route path="/login" element={<LoginPage />} />
@@ -142,8 +141,8 @@ function App() {
                 </Route>
               </Routes>
             </BrowserRouter>
-          </WorkspaceProvider>
-        </PullProvider>
+          </PullProvider>
+        </WorkspaceProvider>
       </AuthProvider>
     </ThemeProvider>
   );

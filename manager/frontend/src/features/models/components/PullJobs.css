@@ -1,0 +1,48 @@
+.pull-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-4);
+}
+
+.pull-job-title {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.pull-job-name {
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-secondary);
+  word-break: break-all;
+}
+
+.pull-job .progress-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ui-space-3);
+}
+
+.pull-job-action {
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ui-accent-500);
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.pull-job-action:hover {
+  text-decoration: underline;
+}
+
+.pull-job .progress-chunk {
+  margin: 0 0 var(--ui-space-3);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+  font-variant-numeric: tabular-nums;
+}

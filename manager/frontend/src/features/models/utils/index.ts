@@ -9,3 +9,4 @@ export {
   modelDownloadSizes,
 } from './formatters';
 export { sortBrowseModels } from './sortModels';
+export { modelSourceUrl } from './sourceUrl';

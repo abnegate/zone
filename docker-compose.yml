@@ -285,6 +285,7 @@ services:
         condition: service_healthy
     environment:
       - OLLAMA_HOST=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - ZONE_DISK_PATH=${ZONE_DISK_PATH:-/}
       - EMBEDDING_ENGINE=${EMBEDDING_ENGINE:-ollama}
       - ZONE_EMBED_CACHE_DIR=/app/embed-cache
       - LITELLM_HOST=http://litellm:4000

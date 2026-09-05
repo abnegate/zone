@@ -141,6 +141,26 @@ export interface Step {
   status: 'pending' | 'success' | 'error';
 }
 
+export const MAX_PARALLEL_PULLS = 4;
+export const PULL_SUCCESS_DISMISS_MS = 10_000;
+
+export interface PullJob {
+  id: string;
+  modelName: string;
+  pulling: boolean;
+  progress: number | null;
+  chunk?: PullChunk | null;
+  steps: Step[];
+  result: { success: boolean; message: string } | null;
+}
+
+export interface DiskUsage {
+  used_bytes: number;
+  total_bytes: number;
+  available_bytes: number;
+  percent: number;
+}
+
 export interface ModelsResponse {
   models: InstalledModel[];
 }

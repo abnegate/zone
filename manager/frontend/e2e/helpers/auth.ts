@@ -153,6 +153,19 @@ export async function mockCommonEndpoints(page: Page): Promise<void> {
       return;
     }
     const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/api/models/disk')) {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          used_bytes: 40,
+          total_bytes: 100,
+          available_bytes: 60,
+          percent: 40,
+        }),
+      });
+      return;
+    }
     const source = url.searchParams.get('source');
 
     if (source) {

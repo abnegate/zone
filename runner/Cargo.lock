@@ -9805,6 +9805,7 @@ dependencies = [
  "lettre",
  "metrics",
  "metrics-exporter-prometheus",
+ "nix",
  "once_cell",
  "rand 0.10.2",
  "redis",

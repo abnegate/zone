@@ -109,6 +109,7 @@ afterAll(() => {
 
 const defaultModelsHook = {
   models: [],
+  disk: null,
   loading: false,
   error: null,
   refresh: mock(),
@@ -138,15 +139,21 @@ const defaultBrowseHook = {
 };
 
 const defaultPullHook = {
+  jobs: [],
   pulling: false,
+  activeCount: 0,
   progress: null,
   chunk: null,
   steps: [],
   result: null,
   model: null,
+  minimized: false,
+  setMinimized: mock(),
+  canStart: () => true,
   pull: mock(),
   reset: mock(),
   cancel: mock(),
+  dismiss: mock(),
 };
 
 const createWrapper = () => {
@@ -284,8 +291,20 @@ describe('ModelsPage', () => {
     it('shows pull progress', () => {
       mockUsePull.mockReturnValue({
         ...defaultPullHook,
+        jobs: [
+          {
+            id: '1',
+            modelName: 'llama2',
+            pulling: true,
+            progress: 50,
+            steps: [],
+            result: null,
+          },
+        ],
         pulling: true,
+        activeCount: 1,
         progress: 50,
+        canStart: (name: string) => name !== 'llama2',
       });
       renderModelsPage();
 
@@ -296,8 +315,18 @@ describe('ModelsPage', () => {
     it('shows pull steps', () => {
       mockUsePull.mockReturnValue({
         ...defaultPullHook,
+        jobs: [
+          {
+            id: '1',
+            modelName: 'llama2',
+            pulling: true,
+            progress: null,
+            steps: [{ name: 'Downloading', message: 'In progress', status: 'pending' }],
+            result: null,
+          },
+        ],
         pulling: true,
-        steps: [{ name: 'Downloading', message: 'In progress', status: 'pending' }],
+        activeCount: 1,
       });
       renderModelsPage();
 
@@ -307,6 +336,16 @@ describe('ModelsPage', () => {
     it('shows pull result success', () => {
       mockUsePull.mockReturnValue({
         ...defaultPullHook,
+        jobs: [
+          {
+            id: '1',
+            modelName: 'llama2',
+            pulling: false,
+            progress: 100,
+            steps: [],
+            result: { success: true, message: 'Model installed!' },
+          },
+        ],
         result: { success: true, message: 'Model installed!' },
       });
       renderModelsPage();
@@ -318,11 +357,32 @@ describe('ModelsPage', () => {
     it('shows pull result error', () => {
       mockUsePull.mockReturnValue({
         ...defaultPullHook,
+        jobs: [
+          {
+            id: '1',
+            modelName: 'llama2',
+            pulling: false,
+            progress: null,
+            steps: [],
+            result: { success: false, message: 'Failed to install' },
+          },
+        ],
         result: { success: false, message: 'Failed to install' },
       });
       renderModelsPage();
 
       expect(screen.getByText('Installation failed')).toBeInTheDocument();
+    });
+
+    it('shows disk usage in the header', () => {
+      mockUseModels.mockReturnValue({
+        ...defaultModelsHook,
+        disk: { used_bytes: 50, total_bytes: 100, available_bytes: 50, percent: 42.4 },
+      });
+      renderModelsPage();
+
+      expect(screen.getByLabelText('Disk space used')).toBeInTheDocument();
+      expect(screen.getByText('42%')).toBeInTheDocument();
     });
   });
 
@@ -624,6 +684,8 @@ describe('ModelsPage', () => {
         expect(screen.getByText('Size')).toBeInTheDocument();
       });
       expect(screen.getByText('Modified')).toBeInTheDocument();
+      const source = screen.getByRole('link', { name: 'View source' });
+      expect(source).toHaveAttribute('href', 'https://ollama.com/library/llama2');
     });
 
     it('closes modal on close button click', async () => {

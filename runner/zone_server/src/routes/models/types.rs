@@ -194,3 +194,12 @@ pub struct BrowseResponse {
     /// Cursor for the next page (if more results available)
     pub next_cursor: Option<String>,
 }
+
+/// Host filesystem usage for the volume that stores models.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct DiskUsage {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub percent: f64,
+}
