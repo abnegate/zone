@@ -477,6 +477,13 @@ fn get_popular_ollama_models() -> Vec<ModelResponse> {
             &["Coding"],
         ),
         (
+            "qwen3-embedding:0.6b",
+            "qwen",
+            "0.6B",
+            "Qwen3 Embedding 0.6B — 1024-d instruction-aware embeddings for code and text.",
+            &["Embeddings"],
+        ),
+        (
             "nomic-embed-text",
             "nomic",
             "137M",

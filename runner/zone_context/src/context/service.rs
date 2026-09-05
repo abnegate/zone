@@ -15,8 +15,9 @@ use crate::content::{
 };
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
 use crate::embeddings::{
-    Embedding, EmbeddingService, HybridSearchConfig, PgVectorStore, SearchFilters, VectorStore,
-    hybrid_search, keyword_only_search, semantic_only_search,
+    Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult, PgVectorStore,
+    SearchFilters, VectorStore, embed_query_text, hybrid_search, keyword_only_search,
+    semantic_only_search,
 };
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
@@ -51,8 +52,14 @@ pub struct SearchResultWithAnalysis {
     pub content_item_id: Uuid,
     /// Source ID
     pub source_id: Uuid,
-    /// Similarity score (0.0-1.0)
+    /// Semantic cosine when available, otherwise the ranking score for this mode
     pub similarity: f32,
+    /// Reciprocal rank fusion score. This is *not* cosine; rank-1 is ~0.01.
+    pub rrf_score: Option<f32>,
+    /// Cosine similarity (0.0-1.0) when the semantic leg contributed
+    pub semantic_score: Option<f32>,
+    /// PostgreSQL `ts_rank` when the keyword leg contributed
+    pub keyword_score: Option<f32>,
     /// Chunk text
     pub chunk_text: String,
     /// Content item URI
@@ -61,6 +68,40 @@ pub struct SearchResultWithAnalysis {
     pub item_title: String,
     /// Heuristic analysis (if loaded)
     pub analysis: Option<HeuristicAnalysis>,
+}
+
+impl SearchResultWithAnalysis {
+    fn from_search_result(r: crate::embeddings::SearchResult) -> Self {
+        Self {
+            chunk_id: r.chunk_id,
+            content_item_id: r.content_item_id,
+            source_id: r.source_id,
+            similarity: r.similarity,
+            rrf_score: None,
+            semantic_score: Some(r.similarity),
+            keyword_score: None,
+            chunk_text: r.chunk_text,
+            item_uri: r.item_uri,
+            item_title: r.item_title,
+            analysis: None,
+        }
+    }
+
+    fn from_hybrid(r: HybridSearchResult, rrf: bool) -> Self {
+        Self {
+            chunk_id: r.chunk_id,
+            content_item_id: r.content_item_id,
+            source_id: r.source_id,
+            similarity: r.semantic_score.unwrap_or(r.score),
+            rrf_score: rrf.then_some(r.score),
+            semantic_score: r.semantic_score,
+            keyword_score: r.keyword_score,
+            chunk_text: r.chunk_text,
+            item_uri: r.item_uri,
+            item_title: r.item_title,
+            analysis: None,
+        }
+    }
 }
 
 enum StoreOutcome {
@@ -384,7 +425,10 @@ impl ContextService {
         filters: Option<SearchFilters>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
         // Generate query embedding
-        let query_embedding = self.embedding_service.embed(query).await?;
+        let query_embedding = self
+            .embedding_service
+            .embed(&embed_query_text(self.embedding_service.model(), query))
+            .await?;
 
         // Search vector store
         let results = self
@@ -392,19 +436,9 @@ impl ContextService {
             .search(&query_embedding, limit, None, filters)
             .await?;
 
-        // Convert to SearchResultWithAnalysis
         let enriched_results = results
             .into_iter()
-            .map(|r| SearchResultWithAnalysis {
-                chunk_id: r.chunk_id,
-                content_item_id: r.content_item_id,
-                source_id: r.source_id,
-                similarity: r.similarity,
-                chunk_text: r.chunk_text,
-                item_uri: r.item_uri,
-                item_title: r.item_title,
-                analysis: None, // Could be loaded from DB if needed
-            })
+            .map(SearchResultWithAnalysis::from_search_result)
             .collect();
 
         Ok(enriched_results)
@@ -428,7 +462,10 @@ impl ContextService {
         config: Option<HybridSearchConfig>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
         // Generate query embedding for semantic search
-        let query_embedding = self.embedding_service.embed(query).await?;
+        let query_embedding = self
+            .embedding_service
+            .embed(&embed_query_text(self.embedding_service.model(), query))
+            .await?;
 
         // Use default config if not provided
         let hybrid_config = config.unwrap_or_default();
@@ -452,16 +489,7 @@ impl ContextService {
         // Convert to SearchResultWithAnalysis
         let enriched_results = results
             .into_iter()
-            .map(|r| SearchResultWithAnalysis {
-                chunk_id: r.chunk_id,
-                content_item_id: r.content_item_id,
-                source_id: r.source_id,
-                similarity: r.score, // Use combined RRF score as similarity
-                chunk_text: r.chunk_text,
-                item_uri: r.item_uri,
-                item_title: r.item_title,
-                analysis: None, // Could be loaded from DB if needed
-            })
+            .map(|r| SearchResultWithAnalysis::from_hybrid(r, true))
             .collect();
 
         Ok(enriched_results)
@@ -484,16 +512,7 @@ impl ContextService {
 
         let enriched_results = results
             .into_iter()
-            .map(|r| SearchResultWithAnalysis {
-                chunk_id: r.chunk_id,
-                content_item_id: r.content_item_id,
-                source_id: r.source_id,
-                similarity: r.score,
-                chunk_text: r.chunk_text,
-                item_uri: r.item_uri,
-                item_title: r.item_title,
-                analysis: None,
-            })
+            .map(|r| SearchResultWithAnalysis::from_hybrid(r, false))
             .collect();
 
         Ok(enriched_results)
@@ -511,7 +530,10 @@ impl ContextService {
         min_similarity: f32,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
         // Generate query embedding
-        let query_embedding = self.embedding_service.embed(query).await?;
+        let query_embedding = self
+            .embedding_service
+            .embed(&embed_query_text(self.embedding_service.model(), query))
+            .await?;
 
         let results =
             semantic_only_search(&self.pool, &query_embedding, limit, filters, min_similarity)
@@ -519,16 +541,7 @@ impl ContextService {
 
         let enriched_results = results
             .into_iter()
-            .map(|r| SearchResultWithAnalysis {
-                chunk_id: r.chunk_id,
-                content_item_id: r.content_item_id,
-                source_id: r.source_id,
-                similarity: r.score,
-                chunk_text: r.chunk_text,
-                item_uri: r.item_uri,
-                item_title: r.item_title,
-                analysis: None,
-            })
+            .map(|r| SearchResultWithAnalysis::from_hybrid(r, false))
             .collect();
 
         Ok(enriched_results)
@@ -800,6 +813,9 @@ mod tests {
             content_item_id: Uuid::new_v4(),
             source_id: Uuid::new_v4(),
             similarity: 0.85,
+            rrf_score: None,
+            semantic_score: Some(0.85),
+            keyword_score: None,
             chunk_text: "Test chunk".to_string(),
             item_uri: "/test.txt".to_string(),
             item_title: "Test".to_string(),

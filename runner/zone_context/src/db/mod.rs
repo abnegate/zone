@@ -23,7 +23,7 @@ pub struct ContextDb {
 impl ContextDb {
     /// Create a new database handle
     ///
-    /// Note: The embedding dimension is hardcoded to 1536 to match the database schema.
+    /// Note: The embedding dimension is hardcoded to 1024 to match the database schema.
     pub fn new(pool: PgPool) -> Self {
         let vector_store = PgVectorStore::new(pool.clone());
         Self { pool, vector_store }

@@ -53,7 +53,7 @@ pub struct SearchQuery {
     semantic_weight: Option<f32>, // 0.0-1.0, default 0.7 for hybrid mode
     rrf_k: Option<f32>,           // RRF constant, default 60
     min_keyword_score: Option<f32>, // Minimum keyword score, default 0.0
-    min_semantic_score: Option<f32>, // Minimum semantic score, default 0.5
+    min_semantic_score: Option<f32>, // Minimum semantic score, default 0.35
 }
 
 fn default_search_mode() -> String {
@@ -90,6 +90,12 @@ pub struct SearchResultItem {
     content_item_id: Uuid,
     source_id: Uuid,
     similarity: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rrf_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keyword_score: Option<f32>,
     title: String,
     uri: String,
     snippet: String,
@@ -558,7 +564,7 @@ pub async fn search(
                 semantic_weight: query.semantic_weight.unwrap_or(0.7).clamp(0.0, 1.0),
                 rrf_k: query.rrf_k.unwrap_or(60.0),
                 min_keyword_score: query.min_keyword_score.unwrap_or(0.0).clamp(0.0, 1.0),
-                min_semantic_score: query.min_semantic_score.unwrap_or(0.5).clamp(0.0, 1.0),
+                min_semantic_score: query.min_semantic_score.unwrap_or(0.35).clamp(0.0, 1.0),
             };
 
             tracing::info!(
@@ -604,7 +610,7 @@ pub async fn search(
             }
         }
         "semantic" => {
-            let min_similarity = query.min_semantic_score.unwrap_or(0.5).clamp(0.0, 1.0);
+            let min_similarity = query.min_semantic_score.unwrap_or(0.35).clamp(0.0, 1.0);
             tracing::info!("Semantic-only search: min_similarity={}", min_similarity);
 
             match context_service
@@ -641,6 +647,9 @@ pub async fn search(
             content_item_id: r.content_item_id,
             source_id: r.source_id,
             similarity: r.similarity,
+            rrf_score: r.rrf_score,
+            semantic_score: r.semantic_score,
+            keyword_score: r.keyword_score,
             title: r.item_title,
             uri: r.item_uri,
             snippet: truncate_snippet(&r.chunk_text, SNIPPET_MAX_LENGTH),

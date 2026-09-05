@@ -116,7 +116,7 @@ async fn setup_test_data(pool: &PgPool) -> Result<(Uuid, Uuid, Uuid), sqlx::Erro
         .await?;
 
         // Create dummy embedding (normally would be from embedding service)
-        let dummy_vector = vec![0.1_f32; 1536];
+        let dummy_vector = vec![0.1_f32; 1024];
         let vector_str = format!(
             "[{}]",
             dummy_vector
@@ -197,7 +197,7 @@ async fn test_semantic_only_search() {
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
 
     // Create query embedding (normally from embedding service)
-    let query_embedding = vec![0.15_f32; 1536]; // Slightly different from stored embeddings
+    let query_embedding = vec![0.15_f32; 1024]; // Slightly different from stored embeddings
 
     let results = semantic_only_search(
         &pool,
@@ -244,7 +244,7 @@ async fn test_hybrid_search() {
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
 
     let query = "Rust async programming";
-    let query_embedding = vec![0.15_f32; 1536];
+    let query_embedding = vec![0.15_f32; 1024];
     let config = HybridSearchConfig::default();
 
     let results = hybrid_search(
@@ -294,7 +294,7 @@ async fn test_hybrid_search_weighting() {
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
 
     let query = "Rust tokio";
-    let query_embedding = vec![0.15_f32; 1536];
+    let query_embedding = vec![0.15_f32; 1024];
 
     // Test semantic-heavy weighting
     let semantic_config = HybridSearchConfig {
@@ -355,7 +355,7 @@ async fn test_hybrid_search_no_keyword_matches() {
 
     // Query with terms that don't match keywords but may match semantically
     let query = "completely unrelated xyz abc123";
-    let query_embedding = vec![0.15_f32; 1536];
+    let query_embedding = vec![0.15_f32; 1024];
     let config = HybridSearchConfig::default();
 
     let results = hybrid_search(
@@ -391,7 +391,7 @@ async fn test_hybrid_search_phrase_search() {
 
     // Test exact phrase matching with quotes (websearch_to_tsquery syntax)
     let query = "\"Rust async programming\"";
-    let query_embedding = vec![0.15_f32; 1536];
+    let query_embedding = vec![0.15_f32; 1024];
     let config = HybridSearchConfig::default();
 
     let results = hybrid_search(
@@ -425,7 +425,7 @@ async fn test_hybrid_search_source_filter() {
     let (workspace_id, source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
 
     let query = "Rust";
-    let query_embedding = vec![0.15_f32; 1536];
+    let query_embedding = vec![0.15_f32; 1024];
     let config = HybridSearchConfig::default();
 
     // Search with source filter
@@ -460,7 +460,7 @@ async fn test_hybrid_search_limit() {
     let (workspace_id, _source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
 
     let query = "Rust";
-    let query_embedding = vec![0.15_f32; 1536];
+    let query_embedding = vec![0.15_f32; 1024];
     let config = HybridSearchConfig::default();
 
     // Request only 2 results
@@ -501,7 +501,7 @@ fn test_hybrid_config_default() {
     assert_eq!(config.semantic_weight, 0.7);
     assert_eq!(config.rrf_k, 60.0);
     assert_eq!(config.min_keyword_score, 0.0);
-    assert_eq!(config.min_semantic_score, 0.5);
+    assert_eq!(config.min_semantic_score, 0.35);
 }
 
 // Cleanup helper

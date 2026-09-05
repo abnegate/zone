@@ -1390,7 +1390,13 @@ async fn prepare_chat(
         let mut context_lines: Vec<String> = Vec::new();
 
         if let Some(embedding_service) = state.embedding_service() {
-            match embedding_service.embed(content).await {
+            match embedding_service
+                .embed(&zone_context::embed_query_text(
+                    embedding_service.model(),
+                    content,
+                ))
+                .await
+            {
                 Ok(query_embedding) => {
                     match knowledge::search_knowledge_entries(
                         state.db(),
@@ -1434,7 +1440,7 @@ async fn prepare_chat(
                 since: None,
             };
             match context_service
-                .search(content, MAX_CONTEXT_RESULTS, Some(filters))
+                .search_hybrid(content, MAX_CONTEXT_RESULTS, Some(filters), None)
                 .await
             {
                 Ok(results) => {

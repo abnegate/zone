@@ -36,22 +36,41 @@ struct EmbeddingResponse {
     embedding: Vec<f32>,
 }
 
+/// Default Ollama embedding model (native 1024-d, instruction-aware).
+pub const DEFAULT_OLLAMA_EMBEDDING_MODEL: &str = "qwen3-embedding:0.6b";
+
+fn model_base(model: &str) -> String {
+    model
+        .split(':')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase()
+}
+
 /// Get the dimension for a given model name
 fn get_model_dimension(model: &str) -> usize {
-    match model {
-        "nomic-embed-text" => 768,
+    let name = model_base(model);
+    if name.starts_with("qwen3-embedding") || name.contains("qwen3-embedding") {
+        return 1024;
+    }
+    match name.as_str() {
+        "nomic-embed-text" | "nomic-embed-text-v1.5" | "nomic-embed-text-v1" => 768,
         "mxbai-embed-large" => 1024,
         "snowflake-arctic-embed" => 1024,
         "bge-small-en" | "bge-small-en-v1.5" => 384,
         "all-minilm" | "all-minilm-l6-v2" => 384,
-        _ => 768, // Default to nomic dimension
+        _ => 768, // Pad shorter unknowns to VECTOR_DIMENSION
     }
 }
 
 /// Get the maximum tokens supported by a model
 fn get_model_max_tokens(model: &str) -> usize {
-    match model {
-        "nomic-embed-text" => 8192,
+    let name = model_base(model);
+    if name.starts_with("qwen3-embedding") {
+        return 8192;
+    }
+    match name.as_str() {
+        "nomic-embed-text" | "nomic-embed-text-v1.5" | "nomic-embed-text-v1" => 8192,
         "mxbai-embed-large" => 512,
         "bge-small-en" | "bge-small-en-v1.5" => 512,
         "all-minilm" | "all-minilm-l6-v2" => 256,
@@ -125,9 +144,8 @@ impl OllamaProvider {
 
         let model = settings
             .model_embedding
-            .as_ref()
-            .unwrap_or(&"nomic-embed-text".to_string())
-            .clone();
+            .clone()
+            .unwrap_or_else(|| DEFAULT_OLLAMA_EMBEDDING_MODEL.to_string());
 
         let dimension = get_model_dimension(&model);
 
@@ -340,6 +358,13 @@ mod tests {
     #[test]
     fn test_get_model_dimension_nomic() {
         assert_eq!(get_model_dimension("nomic-embed-text"), 768);
+        assert_eq!(get_model_dimension("nomic-embed-text:latest"), 768);
+    }
+
+    #[test]
+    fn test_get_model_dimension_qwen() {
+        assert_eq!(get_model_dimension("qwen3-embedding:0.6b"), 1024);
+        assert_eq!(get_model_dimension("qwen3-embedding"), 1024);
     }
 
     #[test]

@@ -3,14 +3,17 @@
 //! This module provides the `EmbeddingService` trait for generating embeddings
 //! and `VectorStore` for storing and searching embeddings in PostgreSQL with pgvector.
 
+pub mod eval;
 pub mod hybrid;
 pub mod pgvector;
 pub mod providers;
+pub mod query;
 
 pub use hybrid::{
     HybridSearchConfig, HybridSearchResult, hybrid_search, keyword_only_search,
     semantic_only_search,
 };
+pub use query::{RewrittenQuery, embed_query_text, rewrite_query, sanitize_search_query};
 pub use pgvector::{PgVectorStore, VECTOR_DIMENSION, align_vector};
 
 use async_trait::async_trait;
