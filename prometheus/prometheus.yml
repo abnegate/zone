@@ -29,9 +29,12 @@ scrape_configs:
     static_configs:
       - targets: ['ollama-metrics:8080']
 
-  # LiteLLM metrics
+  # LiteLLM metrics (endpoint requires Authorization: Bearer $LITELLM_MASTER_KEY)
   - job_name: 'litellm'
     metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /tmp/litellm_bearer_token
     static_configs:
       - targets: ['litellm:4000']
 

@@ -12,6 +12,7 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod metrics;
 pub mod routes;
 pub mod services;
 pub mod state;

@@ -29,6 +29,33 @@ async fn test_health_check() {
     assert!(body["version"].is_string());
 }
 
+#[tokio::test]
+async fn test_metrics_endpoint_is_public() {
+    let client = TestClient::with_db().await;
+
+    let _ = client.get("/health").await;
+    let response = client.get("/metrics").await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.text();
+    assert!(
+        body.contains("http_requests_total"),
+        "expected RED counter in scrape: {body}"
+    );
+    assert!(
+        body.contains("http_request_duration_seconds"),
+        "expected RED histogram in scrape: {body}"
+    );
+    assert!(
+        body.contains("http_requests_in_flight"),
+        "expected in-flight gauge in scrape: {body}"
+    );
+    assert!(
+        body.contains("/health"),
+        "health request should be recorded: {body}"
+    );
+}
+
 // =============================================================================
 // Auth - Registration Tests
 // =============================================================================

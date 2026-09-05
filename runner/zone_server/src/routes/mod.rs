@@ -63,10 +63,13 @@ pub fn create_router(state: AppState) -> Router {
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
         .allow_credentials(true);
 
+    crate::metrics::init();
+
     // Public routes (no auth required)
     // Note: WebSocket routes use in-message auth, not middleware
     let public_routes = Router::new()
         .route("/health", get(health::health_check))
+        .route("/metrics", get(crate::metrics::scrape))
         .route("/api/auth/register", post(auth::register))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/refresh", post(auth::refresh))
@@ -299,10 +302,11 @@ pub fn create_router(state: AppState) -> Router {
         )
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
-    // Combine all routes
+    // Combine all routes. Metrics wrap auth so 401s are still recorded.
     Router::new()
         .merge(public_routes)
         .merge(protected_routes)
+        .layer(middleware::from_fn(crate::metrics::track_http))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

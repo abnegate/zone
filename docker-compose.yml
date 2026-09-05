@@ -477,8 +477,12 @@ services:
     restart: unless-stopped
     profiles:
       - monitoring
+    entrypoint: ["/bin/sh", "/etc/prometheus/entrypoint.sh"]
+    environment:
+      - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/entrypoint.sh:/etc/prometheus/entrypoint.sh:ro
       - prometheus_data:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -518,8 +522,11 @@ services:
     depends_on:
       prometheus:
         condition: service_healthy
+    entrypoint: ["/bin/bash", "/grafana-entrypoint.sh"]
     environment:
       - GF_SECURITY_ADMIN_USER=${MONITORING_GRAFANA_ADMIN_USER:-admin}
+      # Applied on every start via grafana/entrypoint.sh (Grafana ignores this
+      # env after the first boot once grafana.db exists).
       - GF_SECURITY_ADMIN_PASSWORD=${MONITORING_GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=http://grafana.${DOMAIN_HOST_WEBUI}
@@ -538,6 +545,7 @@ services:
       - ALERT_EMAIL_RECIPIENTS=${ALERT_EMAIL_RECIPIENTS:-admin@example.com}
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/entrypoint.sh:/grafana-entrypoint.sh:ro
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     networks:

@@ -1,5 +1,13 @@
 # Grafana Alert Rules Provisioning
 # Critical alerts for Zone AI Stack infrastructure
+#
+# Grafana 11+ unified alerting cannot use a raw Prometheus range/instant
+# series as the condition ("only reduced data can be alerted on"). Each
+# rule is: PromQL (A) → last() (B) → threshold (C).
+#
+# Availability queries `up{job}` (not `up == 0`). A healthy target is 1;
+# down or vanished is 0 after last() replaceNN. NoData on `up == 0` was
+# empty-when-healthy and false-fired when noDataState was Alerting.
 
 apiVersion: 1
 
@@ -12,10 +20,9 @@ groups:
     folder: Zone Alerts
     interval: 1m
     rules:
-      # Manager Service Down
       - uid: manager-down
         title: Manager Service Down
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -23,8 +30,47 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: up{job="manager"} == 0
+              editorMode: code
+              expr: up{job="manager"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: replaceNN
+                replaceWithValue: 0
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: Alerting
         execErrState: Alerting
         for: 2m
@@ -35,10 +81,9 @@ groups:
           severity: critical
           service: manager
 
-      # Traefik Down
       - uid: traefik-down
         title: Traefik Reverse Proxy Down
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -46,8 +91,47 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: up{job="traefik"} == 0
+              editorMode: code
+              expr: up{job="traefik"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: replaceNN
+                replaceWithValue: 0
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: Alerting
         execErrState: Alerting
         for: 2m
@@ -58,10 +142,9 @@ groups:
           severity: critical
           service: traefik
 
-      # PostgreSQL Down
       - uid: postgres-down
         title: PostgreSQL Database Down
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -69,8 +152,47 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: up{job="postgres"} == 0
+              editorMode: code
+              expr: up{job="postgres"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: replaceNN
+                replaceWithValue: 0
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: Alerting
         execErrState: Alerting
         for: 2m
@@ -81,10 +203,9 @@ groups:
           severity: critical
           service: postgres
 
-      # Valkey/Redis Down
       - uid: valkey-down
         title: Valkey Cache Down
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -92,8 +213,47 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: up{job="valkey"} == 0
+              editorMode: code
+              expr: up{job="valkey"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: replaceNN
+                replaceWithValue: 0
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: Alerting
         execErrState: Alerting
         for: 2m
@@ -104,10 +264,9 @@ groups:
           severity: critical
           service: valkey
 
-      # Ollama Down
       - uid: ollama-down
         title: Ollama LLM Service Down
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -115,8 +274,47 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: up{job="ollama"} == 0
+              editorMode: code
+              expr: up{job="ollama"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: replaceNN
+                replaceWithValue: 0
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: Alerting
         execErrState: Alerting
         for: 5m
@@ -127,10 +325,9 @@ groups:
           severity: critical
           service: ollama
 
-      # LiteLLM Down
       - uid: litellm-down
         title: LiteLLM API Gateway Down
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -138,8 +335,47 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: up{job="litellm"} == 0
+              editorMode: code
+              expr: up{job="litellm"}
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: replaceNN
+                replaceWithValue: 0
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: Alerting
         execErrState: Alerting
         for: 2m
@@ -158,10 +394,9 @@ groups:
     folder: Zone Alerts
     interval: 1m
     rules:
-      # High Latency - Manager P95 > 2s
       - uid: manager-high-latency
         title: Manager High Latency
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -169,8 +404,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="manager"}[5m])) by (le)) > 2
+              editorMode: code
+              expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="manager"}[5m])) by (le))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 2
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -181,10 +452,9 @@ groups:
           severity: warning
           service: manager
 
-      # High Error Rate - Manager 5xx > 5%
       - uid: manager-high-error-rate
         title: Manager High Error Rate
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -192,8 +462,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: (sum(rate(http_requests_total{job="manager", status=~"5.."}[5m])) / sum(rate(http_requests_total{job="manager"}[5m]))) > 0.05
+              editorMode: code
+              expr: sum(rate(http_requests_total{job="manager", status=~"5.."}[5m])) / sum(rate(http_requests_total{job="manager"}[5m]))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.05
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -204,10 +510,9 @@ groups:
           severity: warning
           service: manager
 
-      # Traefik High Error Rate
       - uid: traefik-high-error-rate
         title: Traefik High Error Rate
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -215,8 +520,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: (sum(rate(traefik_service_requests_total{code=~"5.."}[5m])) / sum(rate(traefik_service_requests_total[5m]))) > 0.05
+              editorMode: code
+              expr: sum(rate(traefik_service_requests_total{code=~"5.."}[5m])) / sum(rate(traefik_service_requests_total[5m]))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.05
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -235,10 +576,9 @@ groups:
     folder: Zone Alerts
     interval: 1m
     rules:
-      # PostgreSQL Too Many Connections
       - uid: postgres-too-many-connections
         title: PostgreSQL High Connection Count
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -246,8 +586,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: pg_stat_activity_count > 80
+              editorMode: code
+              expr: pg_stat_activity_count
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 80
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -258,10 +634,9 @@ groups:
           severity: warning
           service: postgres
 
-      # PostgreSQL Low Cache Hit Ratio
       - uid: postgres-low-cache-hit
         title: PostgreSQL Low Cache Hit Ratio
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -269,8 +644,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: pg_stat_database_blks_hit / (pg_stat_database_blks_hit + pg_stat_database_blks_read) < 0.90
+              editorMode: code
+              expr: pg_stat_database_blks_hit / (pg_stat_database_blks_hit + pg_stat_database_blks_read)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.90
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 10m
@@ -289,10 +700,9 @@ groups:
     folder: Zone Alerts
     interval: 1m
     rules:
-      # Valkey High Memory Usage
       - uid: valkey-high-memory
         title: Valkey High Memory Usage
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -300,8 +710,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.90
+              editorMode: code
+              expr: redis_memory_used_bytes / redis_memory_max_bytes
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.90
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -312,10 +758,9 @@ groups:
           severity: warning
           service: valkey
 
-      # Valkey Evictions
       - uid: valkey-evictions
         title: Valkey Key Evictions
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -323,8 +768,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: rate(redis_evicted_keys_total[5m]) > 10
+              editorMode: code
+              expr: rate(redis_evicted_keys_total[5m])
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 10
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -335,10 +816,9 @@ groups:
           severity: warning
           service: valkey
 
-      # Valkey Low Cache Hit Rate
       - uid: valkey-low-hit-rate
         title: Valkey Low Cache Hit Rate
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -346,8 +826,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: (redis_keyspace_hits_total / (redis_keyspace_hits_total + redis_keyspace_misses_total)) < 0.80
+              editorMode: code
+              expr: redis_keyspace_hits_total / (redis_keyspace_hits_total + redis_keyspace_misses_total)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.80
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 10m
@@ -366,10 +882,9 @@ groups:
     folder: Zone Alerts
     interval: 1m
     rules:
-      # LiteLLM High Latency
       - uid: litellm-high-latency
         title: LiteLLM High Latency
-        condition: A
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -377,8 +892,44 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: histogram_quantile(0.95, sum(rate(litellm_request_duration_seconds_bucket[5m])) by (le)) > 30
+              editorMode: code
+              expr: histogram_quantile(0.95, sum(rate(litellm_request_total_latency_metric_bucket[5m])) by (le))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 30
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 5m
@@ -389,10 +940,9 @@ groups:
           severity: warning
           service: litellm
 
-      # LiteLLM Rate Limiting
       - uid: litellm-rate-limited
-        title: LiteLLM Rate Limiting Active
-        condition: A
+        title: LiteLLM High API Failure Rate
+        condition: C
         data:
           - refId: A
             relativeTimeRange:
@@ -400,14 +950,50 @@ groups:
               to: 0
             datasourceUid: prometheus
             model:
-              expr: rate(litellm_requests_total{status="429"}[5m]) > 0.1
+              editorMode: code
+              expr: sum(rate(litellm_llm_api_failed_requests_metric_total[5m]))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
               refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.1
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
         noDataState: OK
         execErrState: Error
         for: 5m
         annotations:
           summary: LiteLLM is rate limiting requests
-          description: LiteLLM is returning 429 rate limit responses.
+          description: LiteLLM is returning failed LLM API requests at more than 0.1 per second (LiteLLM does not expose a 429 counter).
         labels:
           severity: warning
           service: litellm
