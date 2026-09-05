@@ -254,8 +254,21 @@ pub fn test_email() -> String {
 }
 
 /// Helper to generate a valid test password
+///
+/// The value is generated once per process so register/login pairs that call
+/// this helper more than once still share the same secret.
 pub fn test_password() -> String {
-    "SecurePassword123!".to_string()
+    static PASSWORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PASSWORD
+        .get_or_init(|| {
+            let id = uuid::Uuid::new_v4();
+            let mut chars: Vec<char> = id.simple().to_string().chars().collect();
+            if let Some(letter) = chars.iter_mut().find(|ch| ch.is_ascii_lowercase()) {
+                *letter = letter.to_ascii_uppercase();
+            }
+            chars.into_iter().collect()
+        })
+        .clone()
 }
 
 /// Create a test config with a custom litellm_host for mocking external services

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 mod common;
 
-use common::create_test_pool;
+use common::{create_test_pool, test_password};
 use zone_server::db::sessions;
 use zone_server::utils::crypto::hash_token;
 
@@ -18,7 +18,7 @@ fn unique_token(prefix: &str) -> String {
 /// Helper to create a test user with a unique email
 async fn create_test_user(pool: &sqlx::PgPool, prefix: &str) -> Uuid {
     let email = format!("{}-{}@test.com", prefix, Uuid::new_v4());
-    let password_hash = zone_server::auth::hash_password("test_password").unwrap();
+    let password_hash = zone_server::auth::hash_password(&test_password()).unwrap();
 
     sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO users (email, password_hash, email_verified)

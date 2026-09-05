@@ -6,10 +6,12 @@ on:
     paths:
       - 'runner/**'
       - '.github/workflows/rust-codeql.yml'
+      - '.github/codeql/**'
   pull_request:
     paths:
       - 'runner/**'
       - '.github/workflows/rust-codeql.yml'
+      - '.github/codeql/**'
   schedule:
     # Run weekly on Sunday at midnight UTC
     - cron: '0 0 * * 0'
@@ -47,6 +49,7 @@ jobs:
         with:
           languages: rust
           build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4

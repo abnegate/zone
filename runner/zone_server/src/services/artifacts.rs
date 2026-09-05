@@ -35,9 +35,9 @@ impl ArtifactStore {
         let filename = format!("{artifact_id}.{extension}");
         let directory = self
             .root
-            .join(workspace_id.to_string())
-            .join(chat_id.to_string())
-            .join(owner_id.to_string());
+            .join(uuid_component(workspace_id)?)
+            .join(uuid_component(chat_id)?)
+            .join(uuid_component(owner_id)?);
         fs::create_dir_all(&directory).await?;
         fs::write(directory.join(&filename), bytes).await?;
         Ok(format!(
@@ -57,9 +57,9 @@ impl ArtifactStore {
         }
         let candidate = self
             .root
-            .join(workspace_id.to_string())
-            .join(chat_id.to_string())
-            .join(owner_id.to_string())
+            .join(uuid_component(workspace_id)?)
+            .join(uuid_component(chat_id)?)
+            .join(uuid_component(owner_id)?)
             .join(filename);
         ensure_lexically_beneath(&self.root, &candidate)?;
         let root = fs::canonicalize(&self.root).await?;
@@ -71,10 +71,9 @@ impl ArtifactStore {
     }
 
     pub async fn cleanup_chat(&self, workspace_id: Uuid, chat_id: Uuid) {
-        let path = self
-            .root
-            .join(workspace_id.to_string())
-            .join(chat_id.to_string());
+        let Some(path) = self.safe_chat_dir(workspace_id, chat_id) else {
+            return;
+        };
         if let Err(error) = fs::remove_dir_all(path).await
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -87,11 +86,9 @@ impl ArtifactStore {
     }
 
     pub async fn cleanup_owner(&self, workspace_id: Uuid, chat_id: Uuid, owner_id: Uuid) {
-        let path = self
-            .root
-            .join(workspace_id.to_string())
-            .join(chat_id.to_string())
-            .join(owner_id.to_string());
+        let Some(path) = self.safe_owner_dir(workspace_id, chat_id, owner_id) else {
+            return;
+        };
         if let Err(error) = fs::remove_dir_all(path).await
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -101,6 +98,36 @@ impl ArtifactStore {
                 error
             );
         }
+    }
+
+    fn safe_chat_dir(&self, workspace_id: Uuid, chat_id: Uuid) -> Option<PathBuf> {
+        let path = self
+            .root
+            .join(uuid_component(workspace_id).ok()?)
+            .join(uuid_component(chat_id).ok()?);
+        ensure_lexically_beneath(&self.root, &path).ok()?;
+        Some(path)
+    }
+
+    fn safe_owner_dir(&self, workspace_id: Uuid, chat_id: Uuid, owner_id: Uuid) -> Option<PathBuf> {
+        let path = self
+            .safe_chat_dir(workspace_id, chat_id)?
+            .join(uuid_component(owner_id).ok()?);
+        ensure_lexically_beneath(&self.root, &path).ok()?;
+        Some(path)
+    }
+}
+
+fn uuid_component(id: Uuid) -> Result<String, ArtifactError> {
+    Ok(safe_path_component(&id.as_hyphenated().to_string())?.to_string())
+}
+
+fn safe_path_component(component: &str) -> Result<&str, ArtifactError> {
+    // CodeQL rust/path-injection: reject parent-directory segments before join.
+    if component.contains("..") {
+        Err(ArtifactError::InvalidPath)
+    } else {
+        Ok(component)
     }
 }
 
@@ -154,6 +181,9 @@ mod tests {
         assert!(safe_extension("svg").is_err());
         assert_eq!(safe_extension("webm").unwrap(), "webm");
         assert_eq!(safe_extension("mp4").unwrap(), "mp4");
+        assert!(safe_path_component("..").is_err());
+        assert!(safe_path_component("../secret").is_err());
+        assert!(safe_path_component(&Uuid::new_v4().to_string()).is_ok());
     }
 
     #[test]

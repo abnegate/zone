@@ -902,15 +902,8 @@ pub async fn create_knowledge(
             )
                 .into_response();
         }
-        // Basic URL validation
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "URL must start with http:// or https://",
-                )),
-            )
-                .into_response();
+        if let Err(error) = crate::utils::url::validate_public_url(url) {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(error))).into_response();
         }
     }
 
@@ -1163,9 +1156,12 @@ pub async fn create_knowledge(
 async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
     use sha2::{Digest, Sha256};
 
+    let url = crate::utils::url::validate_public_url(url)?;
+
     // Timeout for fetching
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(3))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -1175,6 +1171,8 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
         .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
+
+    crate::utils::url::validate_public_url(response.url().as_str())?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP error: {}", response.status()));
