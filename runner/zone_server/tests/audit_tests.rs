@@ -10,12 +10,6 @@ use uuid::Uuid;
 async fn test_log_action_basic() {
     let pool = create_test_pool().await;
 
-    // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     // Create real org, workspace, and user
     let (org_id, workspace_id, user_id) = setup_test_data(&pool).await;
 
@@ -70,11 +64,6 @@ async fn test_log_action_basic() {
 async fn test_log_action_minimal_context() {
     let pool = create_test_pool().await;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     let ctx = zone_server::db::audit::AuditContext {
         org_id: None,
         workspace_id: None,
@@ -110,11 +99,6 @@ async fn test_log_action_minimal_context() {
 #[tokio::test]
 async fn test_list_audit_logs_basic() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     // Create real org, workspace, and user
     let (org_id, _workspace_id, user_id) = setup_test_data(&pool).await;
@@ -159,11 +143,6 @@ async fn test_list_audit_logs_basic() {
 #[tokio::test]
 async fn test_list_audit_logs_with_filters() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     // Create real org, workspace, and user
     let (org_id, _workspace_id, user_id) = setup_test_data(&pool).await;
@@ -261,11 +240,6 @@ async fn test_list_audit_logs_with_filters() {
 async fn test_list_audit_logs_date_range() {
     let pool = create_test_pool().await;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     // Create real org, workspace, and user
     let (org_id, _workspace_id, user_id) = setup_test_data(&pool).await;
 
@@ -310,11 +284,6 @@ async fn test_list_audit_logs_date_range() {
 #[tokio::test]
 async fn test_list_audit_logs_pagination() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     // Create real org, workspace, and user
     let (org_id, _workspace_id, user_id) = setup_test_data(&pool).await;
@@ -368,11 +337,6 @@ async fn test_list_audit_logs_pagination() {
 async fn test_count_audit_logs() {
     let pool = create_test_pool().await;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     // Create real org, workspace, and user
     let (org_id, _workspace_id, user_id) = setup_test_data(&pool).await;
 
@@ -420,11 +384,6 @@ async fn test_count_audit_logs() {
 #[tokio::test]
 async fn test_export_audit_logs_csv() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     // Create real org, workspace, and user
     let (org_id, _workspace_id, user_id) = setup_test_data(&pool).await;
@@ -495,11 +454,6 @@ async fn test_export_audit_logs_csv() {
 async fn test_get_audit_log_not_found() {
     let pool = create_test_pool().await;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
-
     let result = zone_server::db::audit::get_audit_log(&pool, Uuid::new_v4())
         .await
         .expect("Failed to query audit log");
@@ -510,11 +464,6 @@ async fn test_get_audit_log_not_found() {
 #[tokio::test]
 async fn test_audit_logs_isolation_by_org() {
     let pool = create_test_pool().await;
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
 
     // Create real organizations and users
     let (org1, _ws1, user1) = setup_test_data(&pool).await;
