@@ -7,6 +7,7 @@ import type {
   BrowseOptions,
   BrowseResponse,
   DiskUsage,
+  ModelSizeOption,
   ModelSource,
   ModelsResponse,
 } from '../features/models/types';
@@ -99,9 +100,11 @@ export const modelsApi = {
   /**
    * Get detailed information about a model
    */
-  async getModelInfo(
-    modelId: string
-  ): Promise<{ content: string | null; gguf_size: number | null }> {
+  async getModelInfo(modelId: string): Promise<{
+    content: string | null;
+    gguf_size: number | null;
+    sizes?: ModelSizeOption[] | null;
+  }> {
     const response = await fetch(`${API_BASE}/api/models/${encodeURIComponent(modelId)}`, {
       headers: client.getHeaders(),
     });
@@ -109,7 +112,7 @@ export const modelsApi = {
       throw new Error(`Failed to fetch model info: ${response.status}`);
     }
     const data = await response.json();
-    return { content: data.content, gguf_size: data.gguf_size };
+    return { content: data.content, gguf_size: data.gguf_size, sizes: data.sizes };
   },
 
   /**

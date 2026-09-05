@@ -264,6 +264,9 @@ pub async fn get(
                         .into_response(),
                 }
             } else if response.status() == StatusCode::NOT_FOUND {
+                if let Some(info) = huggingface_details_or_none(&state, &name).await {
+                    return Json(info).into_response();
+                }
                 (
                     StatusCode::NOT_FOUND,
                     Json(ErrorResponse::new(format!("Model not found: {}", name))),
@@ -277,15 +280,35 @@ pub async fn get(
                     .into_response()
             }
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new(format!(
-                "Failed to connect to Ollama: {}",
-                e
-            ))),
-        )
-            .into_response(),
+        Err(e) => {
+            if let Some(info) = huggingface_details_or_none(&state, &name).await {
+                return Json(info).into_response();
+            }
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse::new(format!(
+                    "Failed to connect to Ollama: {}",
+                    e
+                ))),
+            )
+                .into_response()
+        }
     }
+}
+
+async fn huggingface_details_or_none(
+    state: &AppState,
+    name: &str,
+) -> Option<types::HuggingFaceModelInfo> {
+    let repo = providers::huggingface_repo_id(name)?;
+    let info = providers::huggingface_repo_downloads(
+        &state.config().huggingface_models_url,
+        state.config().model_search_proxy_url.as_deref(),
+        repo,
+    )
+    .await
+    .ok()?;
+    (info.sizes.is_some() || info.gguf_size.is_some()).then_some(info)
 }
 
 /// DELETE /api/models/:name

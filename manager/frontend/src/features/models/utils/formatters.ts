@@ -52,3 +52,59 @@ export function formatDownloadSizeLabel(option: ModelSizeOption): string {
 export function defaultDownloadName(model: BrowseModel): string {
   return modelDownloadSizes(model)[0]?.name ?? model.name;
 }
+
+const QUANT_TOKEN_RE = /\b((?:IQ|Q)\d+[A-Z0-9_]*|BF16|F16|F32)\b/i;
+const PARAM_PREFIX_RE = /^(\d+(?:\.\d+)?[BM])\s·\s(.+)$/i;
+
+export function quantizationFromLabel(label: string): string | null {
+  return label.toUpperCase().match(QUANT_TOKEN_RE)?.[1] ?? null;
+}
+
+export function quantizationBitLabel(quant: string): string | null {
+  const token = quant.toUpperCase();
+  if (token === 'F16' || token === 'BF16') return '16-bit';
+  if (token === 'F32') return '32-bit';
+  const bits = token.match(/(?:IQ|Q)(\d+)/)?.[1];
+  return bits ? `${bits}-bit` : null;
+}
+
+export type DownloadOptionRow = {
+  heading: string | null;
+  group: string | null;
+  option: ModelSizeOption;
+};
+
+/** Group GGUF quants by bit-width (or parameter size) so each file is a row. */
+export function downloadOptionRows(options: ModelSizeOption[]): DownloadOptionRow[] {
+  if (options.length === 0) return [];
+
+  const withParam = options.map((option) => {
+    const match = option.label.match(PARAM_PREFIX_RE);
+    return { option, param: match?.[1]?.toUpperCase() ?? null };
+  });
+  const distinctParams = new Set(withParam.map((row) => row.param).filter(Boolean));
+  if (distinctParams.size > 1) {
+    return rowsFromGroups(withParam.map((row) => ({ option: row.option, group: row.param })));
+  }
+
+  const withBits = options.map((option) => ({
+    option,
+    group: quantizationBitLabel(quantizationFromLabel(option.label) ?? ''),
+  }));
+  if (withBits.every((row) => row.group)) {
+    return rowsFromGroups(withBits);
+  }
+
+  return options.map((option) => ({ heading: null, group: null, option }));
+}
+
+function rowsFromGroups(
+  items: Array<{ option: ModelSizeOption; group: string | null }>
+): DownloadOptionRow[] {
+  let last: string | null = null;
+  return items.map(({ option, group }) => {
+    const heading = group && group !== last ? group : null;
+    last = group;
+    return { heading, group, option };
+  });
+}

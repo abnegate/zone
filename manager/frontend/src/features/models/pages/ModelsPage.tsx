@@ -1,8 +1,9 @@
-import { Badge, Button, EmptyState, Modal, Select, Tabs, TabsList, TabsTrigger } from '@zone/ui';
+import { Badge, Button, EmptyState, Modal, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
 import Capabilities from '../components/Capabilities';
+import DownloadOptions from '../components/DownloadOptions';
 import PullJobs from '../components/PullJobs';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
@@ -20,7 +21,6 @@ import {
   formatBytes,
   formatContextLength,
   formatDate,
-  formatDownloadSizeLabel,
   formatNumber,
   modelDownload,
   modelDownloadSizes,
@@ -130,6 +130,14 @@ export default function ModelsPage() {
         const info = await modelsApi.getModelInfo(modelId);
         setModelCard(info.content);
         setModelSize(info.gguf_size);
+        if (info.sizes && info.sizes.length > 1) {
+          setDetailsModel((current) => {
+            if (!current || isInstalledModel(current) || current.name !== modelId) {
+              return current;
+            }
+            return { ...current, sizes: info.sizes };
+          });
+        }
       } catch {
         setModelCard(null);
         setModelSize(null);
@@ -730,22 +738,16 @@ export default function ModelsPage() {
                   </div>
                 )}
 
-                {download?.name && modelDownloadSizes(detailsModel).length > 1 && (
-                  <div className="details-size-picker">
-                    <Select
-                      label="Size"
-                      value={selectedSize}
-                      onValueChange={setSelectedSize}
-                      helpText="This model is published in more than one size."
-                      options={modelDownloadSizes(detailsModel).map((option) => ({
-                        value: option.name,
-                        label: formatDownloadSizeLabel(option),
-                      }))}
-                    />
-                  </div>
+                {download?.name && (
+                  <DownloadOptions
+                    model={detailsModel}
+                    options={modelDownloadSizes(detailsModel)}
+                    pulling={!pull.canStart(download.name)}
+                    onInstall={(name) => handleInstall(detailsModel, name)}
+                  />
                 )}
 
-                {download?.name && (
+                {download?.name && modelDownloadSizes(detailsModel).length < 2 && (
                   <div className="details-install">
                     <span className="details-label">Install command</span>
                     <code>{download.name}</code>
@@ -792,16 +794,21 @@ export default function ModelsPage() {
                   </div>
                 )}
 
-                <div className="modal-actions">
-                  <Button
-                    disabled={!download?.name || !pull.canStart(download.name)}
-                    onClick={() =>
-                      handleInstall(detailsModel, selectedSize || defaultDownloadName(detailsModel))
-                    }
-                  >
-                    {download?.name ? 'Install Model' : download?.label}
-                  </Button>
-                </div>
+                {modelDownloadSizes(detailsModel).length < 2 && (
+                  <div className="modal-actions">
+                    <Button
+                      disabled={!download?.name || !pull.canStart(download.name)}
+                      onClick={() =>
+                        handleInstall(
+                          detailsModel,
+                          selectedSize || defaultDownloadName(detailsModel)
+                        )
+                      }
+                    >
+                      {download?.name ? 'Install Model' : download?.label}
+                    </Button>
+                  </div>
+                )}
               </>
             )}
           </div>

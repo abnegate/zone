@@ -11,8 +11,8 @@ use std::time::Duration;
 use crate::config::{DEFAULT_GPT4ALL_MODELS_URL, DEFAULT_HUGGINGFACE_MODELS_URL};
 
 use super::types::{
-    BrowseQuery, BrowseResponse, ErrorResponse, ModelCapability, ModelDetails, ModelResponse,
-    ModelSize, ModelSizeFilter, ModelSort,
+    BrowseQuery, BrowseResponse, ErrorResponse, HuggingFaceModelInfo, ModelCapability,
+    ModelDetails, ModelResponse, ModelSize, ModelSizeFilter, ModelSort,
 };
 
 pub const DEFAULT_PAGE_SIZE: usize = 20;
@@ -35,6 +35,15 @@ static BILLION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)(\d+(?:\.\d+)?)\s*billion").expect("billion regex"));
 static PULLS_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)([\d,.]+[KMBkmb]?)\s*Pulls").expect("pulls regex"));
+/// Longer GGUF tags first so `Q4_K_M` wins over a shorter neighbor.
+static QUANT_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[^A-Za-z0-9])(IQ1_S|IQ1_M|IQ2_XXS|IQ2_XS|IQ2_S|IQ2_M|IQ3_XXS|IQ3_XS|IQ3_S|IQ3_M|IQ4_XS|IQ4_NL|Q2_K_S|Q2_K|Q3_K_L|Q3_K_M|Q3_K_S|Q4_K_M|Q4_K_S|Q4_1|Q4_0|Q5_K_M|Q5_K_S|Q5_1|Q5_0|Q6_K|Q8_0|BF16|F16|F32)(?:[^A-Za-z0-9]|$)",
+    )
+    .expect("quant regex")
+});
+static GGUF_SHARD_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)-\d{5}-of-\d{5}$").expect("gguf shard regex"));
 
 fn build_http_client(proxy_url: Option<&str>) -> Result<Client, ProviderError> {
     let mut builder = Client::builder()
@@ -722,6 +731,7 @@ async fn fetch_huggingface_page(
         "createdAt",
         "author",
         "lastModified",
+        "siblings",
     ] {
         url.push_str("&expand%5B%5D=");
         url.push_str(field);
@@ -821,6 +831,15 @@ struct HuggingFaceModel {
     card_data: Option<HuggingFaceCardData>,
     #[serde(default)]
     gguf: Option<HuggingFaceGguf>,
+    #[serde(default)]
+    siblings: Option<Vec<HuggingFaceSibling>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HuggingFaceSibling {
+    rfilename: String,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -904,6 +923,7 @@ fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
             .take(8)
             .collect(),
     );
+    let sizes = huggingface_size_variants(&model_id, m.siblings.as_deref().unwrap_or(&[]));
 
     ModelResponse {
         name: model_id.clone(),
@@ -918,6 +938,7 @@ fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
         tags: public_tags,
         use_cases,
         capabilities,
+        sizes,
         details: Some(ModelDetails {
             format: Some("gguf".to_string()),
             family,
@@ -1174,18 +1195,48 @@ where
 
 /// Extract quantization level from filename (e.g., "Q4_0", "Q5_K_M")
 fn extract_quantization(filename: &str) -> Option<String> {
-    let patterns = [
-        "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_1", "Q5_0", "Q4_K_M", "Q4_K_S", "Q4_1", "Q4_0",
-        "Q3_K_M", "Q3_K_S", "Q2_K", "IQ4_XS", "IQ3_M", "IQ2_S",
-    ];
+    QUANT_RE.captures(filename).map(|cap| cap[1].to_uppercase())
+}
 
-    let filename_upper = filename.to_uppercase();
-    for pattern in patterns {
-        if filename_upper.contains(pattern) {
-            return Some(pattern.to_string());
-        }
+/// Strip `hf.co/` / `:tag` so a pull name maps back to a HuggingFace repo.
+pub fn huggingface_repo_id(name: &str) -> Option<&str> {
+    let name = name
+        .strip_prefix("hf.co/")
+        .or_else(|| name.strip_prefix("huggingface.co/"))
+        .unwrap_or(name);
+    let repo = name.split_once(':').map(|(repo, _)| repo).unwrap_or(name);
+    repo.contains('/').then_some(repo)
+}
+
+/// Fetch GGUF file sizes for a HuggingFace repo (used when opening details).
+pub async fn huggingface_repo_downloads(
+    catalog_url: &str,
+    proxy_url: Option<&str>,
+    repo_id: &str,
+) -> Result<HuggingFaceModelInfo, ProviderError> {
+    let client = build_http_client(proxy_url)?;
+    let encoded = repo_id
+        .split('/')
+        .map(urlencoding::encode)
+        .collect::<Vec<_>>()
+        .join("/");
+    let url = format!("{catalog_url}/{encoded}?blobs=true&expand%5B%5D=gguf&expand%5B%5D=siblings");
+    let response = client.get(&url).send().await?;
+    if !response.status().is_success() {
+        return Err(ProviderError::Unavailable(format!(
+            "HuggingFace API returned status: {}",
+            response.status()
+        )));
     }
-    None
+    let parsed: HuggingFaceModel = response.json().await.map_err(|e| {
+        ProviderError::ParseError(format!("Failed to parse HuggingFace model: {e}"))
+    })?;
+    let model = huggingface_to_model(parsed);
+    Ok(HuggingFaceModelInfo {
+        content: None,
+        gguf_size: model.size,
+        sizes: model.sizes,
+    })
 }
 
 pub struct OpenRouterProvider {
@@ -1715,6 +1766,179 @@ fn ollama_size_variants(model_name: &str, labels: &[String]) -> Option<Vec<Model
             })
             .collect(),
     )
+}
+
+struct GgufVariant {
+    stem: String,
+    quant: Option<String>,
+    param_size: Option<String>,
+    size: Option<u64>,
+}
+
+fn is_gguf_weight_file(filename: &str) -> bool {
+    let name = filename
+        .rsplit('/')
+        .next()
+        .unwrap_or(filename)
+        .to_lowercase();
+    name.ends_with(".gguf") && !name.contains("mmproj") && !name.contains("imatrix")
+}
+
+fn gguf_file_stem(filename: &str) -> String {
+    let name = filename.rsplit('/').next().unwrap_or(filename);
+    let stem = name
+        .strip_suffix(".gguf")
+        .or_else(|| name.strip_suffix(".GGUF"))
+        .unwrap_or(name);
+    GGUF_SHARD_RE.replace(stem, "").into_owned()
+}
+
+fn filename_param_size(filename: &str) -> Option<String> {
+    extract_all_param_sizes(filename)
+        .into_iter()
+        .next()
+        .or_else(|| extract_param_size(filename).filter(|label| !label.contains('·')))
+}
+
+/// Distinct GGUF quantizations in a HuggingFace repo, each a separate pull.
+fn huggingface_size_variants(
+    model_id: &str,
+    siblings: &[HuggingFaceSibling],
+) -> Option<Vec<ModelSize>> {
+    let mut files: Vec<GgufVariant> = Vec::new();
+    for sibling in siblings {
+        if !is_gguf_weight_file(&sibling.rfilename) {
+            continue;
+        }
+        let stem = gguf_file_stem(&sibling.rfilename);
+        if let Some(existing) = files.iter_mut().find(|file| file.stem == stem) {
+            existing.size = match (existing.size, sibling.size) {
+                (Some(left), Some(right)) => Some(left + right),
+                (left, right) => left.or(right),
+            };
+            continue;
+        }
+        files.push(GgufVariant {
+            stem,
+            quant: extract_quantization(&sibling.rfilename),
+            param_size: filename_param_size(&sibling.rfilename),
+            size: sibling.size,
+        });
+    }
+
+    if files.len() < 2 {
+        return None;
+    }
+
+    let distinct_params = files
+        .iter()
+        .filter_map(|file| file.param_size.as_deref())
+        .collect::<std::collections::HashSet<_>>();
+    let needs_param = distinct_params.len() > 1;
+
+    let mut sizes: Vec<ModelSize> = files
+        .iter()
+        .map(|file| {
+            let same_quant_count = file
+                .quant
+                .as_deref()
+                .map(|quant| {
+                    files
+                        .iter()
+                        .filter(|other| other.quant.as_deref() == Some(quant))
+                        .count()
+                })
+                .unwrap_or(0);
+            let tag = if let Some(quant) = &file.quant {
+                if same_quant_count == 1 {
+                    quant.clone()
+                } else if needs_param {
+                    match &file.param_size {
+                        Some(param) => format!("{param}-{quant}"),
+                        None => file.stem.clone(),
+                    }
+                } else {
+                    file.stem.clone()
+                }
+            } else {
+                file.stem.clone()
+            };
+            let label = match (needs_param, &file.param_size, &file.quant) {
+                (true, Some(param), Some(quant)) => format!("{param} · {quant}"),
+                (_, _, Some(quant)) => quant.clone(),
+                _ => file.stem.clone(),
+            };
+            ModelSize {
+                name: format!("{model_id}:{tag}"),
+                label,
+                size: file.size,
+            }
+        })
+        .collect();
+
+    sizes.sort_by(cmp_gguf_downloads);
+    Some(sizes)
+}
+
+fn cmp_gguf_downloads(left: &ModelSize, right: &ModelSize) -> std::cmp::Ordering {
+    cmp_optional(
+        download_param_billions(&left.label),
+        download_param_billions(&right.label),
+    )
+    .then_with(|| {
+        cmp_optional(
+            quantization_bit_width(&left.label),
+            quantization_bit_width(&right.label),
+        )
+    })
+    .then_with(|| quantization_preference(&left.label).cmp(&quantization_preference(&right.label)))
+    .then_with(|| left.label.cmp(&right.label))
+}
+
+fn download_param_billions(label: &str) -> Option<f64> {
+    label
+        .split_once('·')
+        .map(|(prefix, _)| prefix.trim())
+        .and_then(parse_param_billions)
+}
+
+fn quantization_token(label: &str) -> Option<&str> {
+    QUANT_RE
+        .captures(label)
+        .and_then(|cap| cap.get(1).map(|m| m.as_str()))
+}
+
+fn quantization_bit_width(label: &str) -> Option<u8> {
+    let token = quantization_token(label)?.to_uppercase();
+    if matches!(token.as_str(), "F16" | "BF16") {
+        return Some(16);
+    }
+    if token == "F32" {
+        return Some(32);
+    }
+    let digits: String = token
+        .chars()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+fn quantization_preference(label: &str) -> u8 {
+    let token = quantization_token(label).unwrap_or(label).to_uppercase();
+    if token.contains("K_M") {
+        0
+    } else if token.ends_with("_0") {
+        1
+    } else if token.contains("K_S") {
+        2
+    } else if token.ends_with("_1") {
+        3
+    } else if token.contains("K_L") {
+        4
+    } else {
+        5
+    }
 }
 
 fn format_param_sizes(mut sizes: Vec<String>) -> Option<String> {
@@ -2277,6 +2501,106 @@ mod tests {
             Some("IQ4_XS".to_string())
         );
         assert_eq!(extract_quantization("model.gguf"), None);
+        assert_eq!(
+            extract_quantization("model.BF16.gguf"),
+            Some("BF16".to_string())
+        );
+        assert_eq!(
+            extract_quantization("model-Q4_K_M-00001-of-00002.gguf"),
+            Some("Q4_K_M".to_string())
+        );
+    }
+
+    fn sibling(name: &str, size: Option<u64>) -> HuggingFaceSibling {
+        HuggingFaceSibling {
+            rfilename: name.to_string(),
+            size,
+        }
+    }
+
+    #[test]
+    fn test_huggingface_repo_id() {
+        assert_eq!(
+            huggingface_repo_id("TheBloke/Mistral-7B-Instruct-v0.2-GGUF"),
+            Some("TheBloke/Mistral-7B-Instruct-v0.2-GGUF")
+        );
+        assert_eq!(
+            huggingface_repo_id("hf.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF:Q4_0"),
+            Some("TheBloke/Mistral-7B-Instruct-v0.2-GGUF")
+        );
+        assert_eq!(huggingface_repo_id("llama3.2:3b"), None);
+    }
+
+    #[test]
+    fn test_huggingface_size_variants_are_separate_quants() {
+        let sizes = huggingface_size_variants(
+            "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+            &[
+                sibling("README.md", Some(100)),
+                sibling("mistral-7b-instruct-v0.2.Q4_0.gguf", Some(4_108_917_024)),
+                sibling("mistral-7b-instruct-v0.2.Q5_K_M.gguf", Some(5_131_409_696)),
+                sibling("mistral-7b-instruct-v0.2.Q8_0.gguf", Some(7_695_857_952)),
+                sibling("mmproj-model-f16.gguf", Some(600_000_000)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(sizes.len(), 3);
+        assert_eq!(sizes[0].name, "TheBloke/Mistral-7B-Instruct-v0.2-GGUF:Q4_0");
+        assert_eq!(sizes[0].label, "Q4_0");
+        assert_eq!(sizes[0].size, Some(4_108_917_024));
+        assert_eq!(sizes[1].label, "Q5_K_M");
+        assert_eq!(sizes[2].label, "Q8_0");
+    }
+
+    #[test]
+    fn test_huggingface_size_variants_skip_single_file() {
+        assert!(
+            huggingface_size_variants("owner/model", &[sibling("model-Q4_0.gguf", Some(100))])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_huggingface_size_variants_merge_shards_and_disambiguate() {
+        let sizes = huggingface_size_variants(
+            "Qwen/Qwen3-GGUF",
+            &[
+                sibling("Qwen3-0.6B-Q4_K_M-00001-of-00002.gguf", Some(200)),
+                sibling("Qwen3-0.6B-Q4_K_M-00002-of-00002.gguf", Some(150)),
+                sibling("Qwen3-8B-Q4_K_M.gguf", Some(4_700_000_000)),
+                sibling("Qwen3-8B-Q8_0.gguf", Some(8_500_000_000)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(sizes.len(), 3);
+        assert_eq!(sizes[0].label, "0.6B · Q4_K_M");
+        assert_eq!(sizes[0].name, "Qwen/Qwen3-GGUF:0.6B-Q4_K_M");
+        assert_eq!(sizes[0].size, Some(350));
+        assert_eq!(sizes[1].label, "8B · Q4_K_M");
+        assert_eq!(sizes[2].label, "8B · Q8_0");
+    }
+
+    #[test]
+    fn test_huggingface_to_model_exposes_gguf_downloads() {
+        let json = r#"{
+            "id": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+            "modelId": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+            "gguf": {"totalFileSize": 3083098400, "architecture": "llama"},
+            "siblings": [
+                {"rfilename": "mistral-7b-instruct-v0.2.Q4_0.gguf", "size": 4108917024},
+                {"rfilename": "mistral-7b-instruct-v0.2.Q5_K_M.gguf", "size": 5131409696},
+                {"rfilename": "mistral-7b-instruct-v0.2.Q8_0.gguf", "size": 7695857952}
+            ]
+        }"#;
+        let parsed: HuggingFaceModel = serde_json::from_str(json).unwrap();
+        let model = huggingface_to_model(parsed);
+        let sizes = model.sizes.expect("gguf downloads");
+        assert_eq!(sizes.len(), 3);
+        assert_eq!(sizes[0].label, "Q4_0");
+        assert_eq!(sizes[1].label, "Q5_K_M");
+        assert_eq!(sizes[2].label, "Q8_0");
     }
 
     #[test]
@@ -2613,6 +2937,60 @@ mod tests {
                 .iter()
                 .any(|c| c == "Tool use" || c == "Agents" || c == "Chat")
         );
+    }
+
+    #[tokio::test]
+    async fn test_huggingface_repo_downloads_reads_file_sizes() {
+        let router = axum::Router::new().route(
+            "/api/models/{owner}/{repo}",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "id": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+                    "modelId": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+                    "gguf": {"totalFileSize": 4108917024_u64, "architecture": "llama"},
+                    "siblings": [
+                        {"rfilename": "mistral-7b-instruct-v0.2.Q4_0.gguf", "size": 4108917024_u64},
+                        {"rfilename": "mistral-7b-instruct-v0.2.Q5_K_M.gguf", "size": 5131409696_u64},
+                        {"rfilename": "mistral-7b-instruct-v0.2.Q8_0.gguf", "size": 7695857952_u64}
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let catalog = format!("http://{addr}/api/models");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        for _ in 0..50 {
+            if client
+                .get(format!(
+                    "{catalog}/TheBloke/Mistral-7B-Instruct-v0.2-GGUF?blobs=true"
+                ))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let info =
+            huggingface_repo_downloads(&catalog, None, "TheBloke/Mistral-7B-Instruct-v0.2-GGUF")
+                .await
+                .unwrap();
+        let sizes = info.sizes.expect("gguf downloads");
+        assert_eq!(info.gguf_size, Some(4_108_917_024));
+        assert_eq!(sizes.len(), 3);
+        assert_eq!(sizes[0].label, "Q4_0");
+        assert_eq!(sizes[1].label, "Q5_K_M");
+        assert_eq!(sizes[2].label, "Q8_0");
     }
 
     #[test]

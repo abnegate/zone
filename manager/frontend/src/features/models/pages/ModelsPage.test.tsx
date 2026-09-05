@@ -894,10 +894,10 @@ describe('ModelsPage', () => {
       fireEvent.click(screen.getByText('Install'));
 
       await waitFor(() => {
-        expect(screen.getByLabelText('Size')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Install 1B/ })).toBeInTheDocument();
       });
       expect(pullMock).not.toHaveBeenCalled();
-      expect(screen.getByText('llama3.2:1b')).toBeInTheDocument();
+      expect(screen.getByText('1B')).toBeInTheDocument();
     });
   });
 
@@ -939,7 +939,7 @@ describe('ModelsPage', () => {
       });
     });
 
-    it('shows a size picker and installs the selected size', async () => {
+    it('shows separate downloads and installs the selected size', async () => {
       const pullMock = mock(() => Promise.resolve(true));
       mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
       mockUseBrowse.mockReturnValue({
@@ -971,21 +971,76 @@ describe('ModelsPage', () => {
       fireEvent.click(screen.getByText('Details'));
 
       await waitFor(() => {
-        expect(screen.getByLabelText('Size')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Install 1B/ })).toBeInTheDocument();
       });
       expect(
         screen.getByText('This model is published in more than one size.')
       ).toBeInTheDocument();
-      expect(screen.getByText('llama3.2:1b')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Install Model' })).not.toBeInTheDocument();
 
-      fireEvent.click(screen.getByRole('button', { name: 'Install Model' }));
+      fireEvent.click(screen.getByRole('button', { name: /Install 1B/ }));
 
       await waitFor(() => {
         expect(pullMock).toHaveBeenCalledWith('llama3.2:1b');
       });
     });
 
-    it('hides the size picker when a model has only one download', async () => {
+    it('offers each GGUF quantization as its own download', async () => {
+      const pullMock = mock(() => Promise.resolve(true));
+      mockUsePull.mockReturnValue({ ...defaultPullHook, pull: pullMock });
+      mockUseBrowse.mockReturnValue({
+        ...defaultBrowseHook,
+        source: 'huggingface',
+        models: [
+          {
+            id: 'mistral-gguf',
+            name: 'TheBloke/Mistral-7B-Instruct-v0.2-GGUF',
+            source: 'huggingface',
+            sizes: [
+              {
+                name: 'TheBloke/Mistral-7B-Instruct-v0.2-GGUF:Q4_0',
+                label: 'Q4_0',
+                size: 4108917024,
+              },
+              {
+                name: 'TheBloke/Mistral-7B-Instruct-v0.2-GGUF:Q5_K_M',
+                label: 'Q5_K_M',
+                size: 5131409696,
+              },
+              {
+                name: 'TheBloke/Mistral-7B-Instruct-v0.2-GGUF:Q8_0',
+                label: 'Q8_0',
+                size: 7695857952,
+              },
+            ],
+          },
+        ],
+      });
+
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Browse' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('browse-model-mistral-gguf')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText('Details'));
+
+      expect(await screen.findByText('4-bit')).toBeInTheDocument();
+      expect(screen.getByText('5-bit')).toBeInTheDocument();
+      expect(screen.getByText('8-bit')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /Install 8-bit Q8_0/ }));
+
+      await waitFor(() => {
+        expect(pullMock).toHaveBeenCalledWith('hf.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF:Q8_0');
+      });
+    });
+
+    it('hides download options when a model has only one download', async () => {
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
         source: 'ollama',
@@ -1014,7 +1069,8 @@ describe('ModelsPage', () => {
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Install Model' })).toBeInTheDocument();
       });
-      expect(screen.queryByLabelText('Size')).not.toBeInTheDocument();
+      expect(screen.queryByText('Download options')).not.toBeInTheDocument();
+      expect(screen.queryByText('GGUF downloads')).not.toBeInTheDocument();
     });
 
     it('shows install button in browse model details', async () => {

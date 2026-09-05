@@ -89,10 +89,19 @@ pub enum ModelCapability {
 pub struct ModelSize {
     /// Name passed to `ollama pull`
     pub name: String,
-    /// Human label, e.g. `1B`
+    /// Human label, e.g. `1B` or `Q4_0`
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+}
+
+/// HuggingFace repository details used when a GGUF repo is not installed locally.
+#[derive(Debug, Serialize, Clone, PartialEq, Default)]
+pub struct HuggingFaceModelInfo {
+    pub content: Option<String>,
+    pub gguf_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<Vec<ModelSize>>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Default)]
