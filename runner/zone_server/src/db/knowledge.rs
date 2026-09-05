@@ -327,33 +327,41 @@ pub fn fuse_knowledge_hits(
     query: &str,
     limit: usize,
 ) -> Vec<KnowledgeSearchHit> {
-    let identifiers = zone_context::rewrite_query(query).identifiers;
-    let mut scores: std::collections::HashMap<Uuid, (KnowledgeSearchHit, f32)> =
-        std::collections::HashMap::new();
+    let mut scores: std::collections::HashMap<
+        Uuid,
+        (KnowledgeSearchHit, Option<usize>, Option<usize>),
+    > = std::collections::HashMap::new();
     for (rank, hit) in semantic.into_iter().enumerate() {
-        let boost = zone_context::identifier_match_boost(
-            "",
-            &hit.title,
-            &hit.content,
-            &identifiers,
-        );
-        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
-        scores.insert(hit.entry_id, (hit, rrf + boost));
+        scores.insert(hit.entry_id, (hit, None, Some(rank + 1)));
     }
     for (rank, hit) in keyword.into_iter().enumerate() {
-        let boost = zone_context::identifier_match_boost(
-            "",
-            &hit.title,
-            &hit.content,
-            &identifiers,
-        );
-        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
         scores
             .entry(hit.entry_id)
-            .and_modify(|(_, score)| *score += rrf)
-            .or_insert((hit, rrf + boost));
+            .and_modify(|(existing, kw_rank, _)| {
+                *kw_rank = Some(rank + 1);
+                if existing.content.is_empty() {
+                    *existing = hit.clone();
+                }
+            })
+            .or_insert((hit, Some(rank + 1), None));
     }
-    let mut fused: Vec<_> = scores.into_values().collect();
+    let mut fused: Vec<_> = scores
+        .into_values()
+        .map(|(hit, kw_rank, sem_rank)| {
+            let score = zone_context::score_hit(
+                query,
+                &format!("knowledge://{}", hit.entry_id),
+                &hit.title,
+                &hit.content,
+                sem_rank.map(|_| hit.similarity as f32),
+                kw_rank.map(|_| hit.similarity as f32),
+                kw_rank,
+                sem_rank,
+                0.0,
+            );
+            (hit, score)
+        })
+        .collect();
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     fused.into_iter().take(limit).map(|(hit, _)| hit).collect()
 }

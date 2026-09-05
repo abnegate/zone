@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hit /api/context/search with the retrieval eval set.
+"""Hit /api/context/search with graded chunk judgments.
 
 Env:
   ZONE_EVAL_BASE_URL   default http://127.0.0.1:8000
@@ -10,18 +10,75 @@ Env:
 from __future__ import annotations
 
 import json
+import math
 import os
+import ssl
 import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 EVAL_PATH = Path(__file__).with_name("retrieval.json")
+K = 10
+RELEVANT = 3
 
 
-def first_hit_rank(uris: list[str], expected: list[str]) -> int | None:
-    for index, uri in enumerate(uris, start=1):
-        if any(needle in uri for needle in expected):
+def grade_hit(uri: str, text: str, judgments: list[dict]) -> int:
+    best = 0
+    for judgment in judgments:
+        if judgment["uri_contains"] not in uri:
+            continue
+        needles = judgment.get("must_contain") or []
+        if needles and not any(needle in text or needle in uri for needle in needles):
+            continue
+        best = max(best, int(judgment["grade"]))
+    return best
+
+
+def unique_file_grades(hits: list[dict], judgments: list[dict]) -> list[int]:
+    grades: list[int] = []
+    seen: set[str] = set()
+    for item in hits:
+        uri = item.get("uri") or ""
+        file_key = uri.split("@", 1)[0]
+        if file_key in seen:
+            continue
+        seen.add(file_key)
+        passage = item.get("text") or item.get("snippet") or ""
+        grades.append(grade_hit(uri, passage, judgments))
+    return grades
+
+
+def dcg(grades: list[int]) -> float:
+    return sum((2**grade - 1) / math.log2(index + 2) for index, grade in enumerate(grades))
+
+
+def ndcg_at(grades: list[int], ideal: list[int], k: int) -> float:
+    actual = grades[:k]
+    gold = sorted(ideal, reverse=True)[:k]
+    gold.extend([0] * max(0, len(actual) - len(gold)))
+    denom = dcg(gold)
+    if denom == 0:
+        return 0.0
+    return min(1.0, dcg(actual) / denom)
+
+
+def average_precision(grades: list[int], relevant: int) -> float:
+    seen = 0.0
+    acc = 0.0
+    total = sum(1 for grade in grades if grade >= relevant)
+    if total == 0:
+        return 0.0
+    for index, grade in enumerate(grades):
+        if grade >= relevant:
+            seen += 1
+            acc += seen / (index + 1)
+    return acc / total
+
+
+def first_relevant_rank(grades: list[int], relevant: int) -> int | None:
+    for index, grade in enumerate(grades, start=1):
+        if grade >= relevant:
             return index
     return None
 
@@ -36,48 +93,68 @@ def main() -> int:
 
     cases = json.loads(EVAL_PATH.read_text())["cases"]
     failed = 0
+    ndcgs: list[float] = []
+    maps: list[float] = []
     reciprocal_ranks: list[float] = []
-    hit_ranks: list[int] = []
     for case in cases:
         params = urllib.parse.urlencode(
             {
                 "q": case["query"],
                 "workspace_id": workspace,
                 "mode": "hybrid",
-                "limit": "10",
+                "limit": str(K),
             }
         )
         req = urllib.request.Request(
             f"{base}/api/context/search?{params}",
             headers={"Authorization": f"Bearer {token}"},
         )
+        context = ssl._create_unverified_context() if os.environ.get("ZONE_EVAL_INSECURE") else None
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=90, context=context) as resp:
                 body = json.loads(resp.read().decode())
         except Exception as exc:
             print(f"FAIL {case['id']}: request error {exc}")
             failed += 1
+            ndcgs.append(0.0)
+            maps.append(0.0)
             reciprocal_ranks.append(0.0)
             continue
 
-        uris = [item.get("uri") or "" for item in body.get("results", [])]
-        expected = case.get("expect_uri_contains") or []
-        rank = first_hit_rank(uris, expected)
+        hits = body.get("results") or []
+        grades = unique_file_grades(hits, case.get("judgments") or [])
+        ideal = [int(j["grade"]) for j in case.get("judgments") or []]
+        ndcg = ndcg_at(grades, ideal, K)
+        ap = average_precision(grades, RELEVANT)
+        rank = first_relevant_rank(grades, RELEVANT)
+        ndcgs.append(ndcg)
+        maps.append(ap)
         if rank is None:
-            print(f"FAIL {case['id']}: wanted {expected} in {uris[:5]}")
+            top = [
+                (item.get("uri") or "")[-72:]
+                for item in hits[:3]
+            ]
+            print(
+                f"FAIL {case['id']}: no grade>={RELEVANT} chunk in top {K}  "
+                f"ndcg={ndcg:.3f}  {grades[:5]}  top={top}"
+            )
             failed += 1
             reciprocal_ranks.append(0.0)
             continue
-
-        print(f"PASS {case['id']} rank={rank}")
+        print(
+            f"PASS {case['id']} rank={rank}  nDCG@{K}={ndcg:.3f}  AP={ap:.3f}  grades={grades[:5]}"
+        )
         reciprocal_ranks.append(1.0 / rank)
-        hit_ranks.append(rank)
 
     total = len(cases)
     passed = total - failed
+    mean_ndcg = sum(ndcgs) / total if total else 0.0
+    mean_map = sum(maps) / total if total else 0.0
     mrr = sum(reciprocal_ranks) / total if total else 0.0
-    mean_rank = sum(hit_ranks) / len(hit_ranks) if hit_ranks else 0.0
-    print(f"{passed}/{total} hit@10  MRR={mrr:.3f}  mean_first_rank={mean_rank:.2f}")
+    print(
+        f"{passed}/{total} grade>={RELEVANT}@{K}  "
+        f"nDCG@{K}={mean_ndcg:.3f}  MAP={mean_map:.3f}  MRR={mrr:.3f}"
+    )
     return 1 if failed else 0
 
 

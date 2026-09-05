@@ -178,7 +178,7 @@ pub async fn search_messages_keyword(
                     m.id as message_id,
                     m.chat_id,
                     ts_rank(
-                        to_tsvector('english', m.content),
+                        m.search_vector,
                         websearch_to_tsquery('english', $1)
                     )::REAL as similarity,
                     m.role,
@@ -188,8 +188,7 @@ pub async fn search_messages_keyword(
                 JOIN chats c ON c.id = m.chat_id
                 WHERE m.chat_id = $2
                   AND c.workspace_id = $3
-                  AND to_tsvector('english', m.content)
-                      @@ websearch_to_tsquery('english', $1)
+                  AND m.search_vector @@ websearch_to_tsquery('english', $1)
                 ORDER BY similarity DESC
                 LIMIT $4
                 "#,
@@ -208,7 +207,7 @@ pub async fn search_messages_keyword(
                     m.id as message_id,
                     m.chat_id,
                     ts_rank(
-                        to_tsvector('english', m.content),
+                        m.search_vector,
                         websearch_to_tsquery('english', $1)
                     )::REAL as similarity,
                     m.role,
@@ -217,8 +216,7 @@ pub async fn search_messages_keyword(
                 FROM messages m
                 JOIN chats c ON c.id = m.chat_id
                 WHERE c.workspace_id = $2
-                  AND to_tsvector('english', m.content)
-                      @@ websearch_to_tsquery('english', $1)
+                  AND m.search_vector @@ websearch_to_tsquery('english', $1)
                 ORDER BY similarity DESC
                 LIMIT $3
                 "#,
@@ -241,23 +239,39 @@ pub fn fuse_message_hits(
     query: &str,
     limit: usize,
 ) -> Vec<MessageSearchResult> {
-    let identifiers = zone_context::rewrite_query(query).identifiers;
-    let mut scores: std::collections::HashMap<Uuid, (MessageSearchResult, f32)> =
+    let mut scores: std::collections::HashMap<Uuid, (MessageSearchResult, f32, Option<usize>, Option<usize>)> =
         std::collections::HashMap::new();
     for (rank, hit) in semantic.into_iter().enumerate() {
-        let boost = zone_context::identifier_match_boost("", "", &hit.content, &identifiers);
-        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
-        scores.insert(hit.message_id, (hit, rrf + boost));
+        scores.insert(hit.message_id, (hit, 0.0, None, Some(rank + 1)));
     }
     for (rank, hit) in keyword.into_iter().enumerate() {
-        let boost = zone_context::identifier_match_boost("", "", &hit.content, &identifiers);
-        let rrf = 1.0 / (60.0 + rank as f32 + 1.0);
         scores
             .entry(hit.message_id)
-            .and_modify(|(_, score)| *score += rrf)
-            .or_insert((hit, rrf + boost));
+            .and_modify(|(existing, _, kw_rank, _)| {
+                *kw_rank = Some(rank + 1);
+                if existing.content.is_empty() {
+                    *existing = hit.clone();
+                }
+            })
+            .or_insert((hit, 0.0, Some(rank + 1), None));
     }
-    let mut fused: Vec<_> = scores.into_values().collect();
+    let mut fused: Vec<_> = scores
+        .into_values()
+        .map(|(hit, _, kw_rank, sem_rank)| {
+            let score = zone_context::score_hit(
+                query,
+                "",
+                "",
+                &hit.content,
+                sem_rank.map(|_| hit.similarity),
+                kw_rank.map(|_| hit.similarity),
+                kw_rank,
+                sem_rank,
+                0.0,
+            );
+            (hit, score)
+        })
+        .collect();
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     fused.into_iter().take(limit).map(|(hit, _)| hit).collect()
 }

@@ -8,10 +8,18 @@ pub mod hybrid;
 pub mod pgvector;
 pub mod providers;
 pub mod query;
+pub mod ranker;
+pub mod rerank;
+#[cfg(feature = "local-embeddings")]
+pub mod local_rerank;
 
 pub use hybrid::{
-    HybridSearchConfig, HybridSearchResult, hybrid_search, hybrid_search_filtered,
-    keyword_only_search, semantic_only_search,
+    HybridSearchConfig, HybridSearchResult, apply_local_rerank, cap_per_file, finalize_ranking,
+    hybrid_search, hybrid_search_filtered, keyword_only_search, semantic_only_search, sort_by_score,
+};
+pub use ranker::{LinearRanker, default_ranker, score_hit};
+pub use rerank::{
+    CrossEncoder, OllamaCrossEncoder, blend_rank, lexical_cross_score, probe_cross_encoder,
 };
 pub use query::{
     RewrittenQuery, embed_query_text, identifier_match_boost, rewrite_query, sanitize_search_query,

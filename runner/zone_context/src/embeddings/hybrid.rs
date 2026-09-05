@@ -79,8 +79,10 @@ pub struct HybridSearchResult {
     pub chunk_text: String,
     pub item_uri: String,
     pub item_title: String,
-    /// Combined RRF score
+    /// Final ranking score (learned ranker + cross-encoder after fusion).
     pub score: f32,
+    /// Raw RRF / first-stage fusion score, kept for honest API reporting.
+    pub fusion_score: f32,
     /// Keyword rank (None if not in keyword results)
     pub keyword_rank: Option<usize>,
     /// Semantic rank (None if not in semantic results)
@@ -205,11 +207,7 @@ pub async fn hybrid_search_filtered(
     .await?;
 
     let combined = reciprocal_rank_fusion(keyword_results, semantic_results, config);
-    Ok(finalize_ranking(
-        combined,
-        &rewritten.identifiers,
-        limit,
-    ))
+    Ok(finalize_ranking(combined, query, limit))
 }
 
 /// Keyword search using PostgreSQL full-text search
@@ -400,6 +398,7 @@ fn reciprocal_rank_fusion(
                 item_uri: s.item_uri,
                 item_title: s.item_title,
                 score: final_score,
+                fusion_score: final_score,
                 keyword_rank: s.keyword_rank,
                 semantic_rank: s.semantic_rank,
                 keyword_score: s.keyword_score,
@@ -423,41 +422,66 @@ fn reciprocal_rank_fusion(
     results
 }
 
-/// Boost exact identifier hits and keep at most two chunks per file.
-fn finalize_ranking(
-    mut results: Vec<HybridSearchResult>,
-    identifiers: &[String],
+/// Learned ranker + lexical cross-encoder, then at most two chunks per file.
+pub fn finalize_ranking(
+    results: Vec<HybridSearchResult>,
+    query: &str,
     limit: usize,
 ) -> Vec<HybridSearchResult> {
+    cap_per_file(apply_local_rerank(query, results), 2, limit)
+}
+
+pub fn apply_local_rerank(
+    query: &str,
+    mut results: Vec<HybridSearchResult>,
+) -> Vec<HybridSearchResult> {
     for result in &mut results {
-        result.score += crate::embeddings::identifier_match_boost(
+        if result.fusion_score == 0.0 {
+            result.fusion_score = result.score;
+        }
+        result.score = crate::embeddings::ranker::score_hit(
+            query,
             &result.item_uri,
             &result.item_title,
             &result.chunk_text,
-            identifiers,
+            result.semantic_score,
+            result.keyword_score,
+            result.keyword_rank,
+            result.semantic_rank,
+            result.fusion_score,
         );
     }
-    results.sort_by(|a, b| {
-        match (a.score.is_nan(), b.score.is_nan()) {
-            (true, true) => std::cmp::Ordering::Equal,
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
-            (false, false) => b
-                .score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        }
-    });
+    sort_by_score(&mut results);
+    results
+}
+
+pub fn cap_per_file(
+    results: Vec<HybridSearchResult>,
+    max_per_file: usize,
+    limit: usize,
+) -> Vec<HybridSearchResult> {
     let mut per_item = HashMap::<Uuid, usize>::new();
     results
         .into_iter()
         .filter(|result| {
             let seen = per_item.entry(result.content_item_id).or_insert(0);
             *seen += 1;
-            *seen <= 2
+            *seen <= max_per_file
         })
         .take(limit)
         .collect()
+}
+
+pub fn sort_by_score(results: &mut [HybridSearchResult]) {
+    results.sort_by(|a, b| match (a.score.is_nan(), b.score.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => b
+            .score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal),
+    });
 }
 
 /// Convert a vector to PostgreSQL vector string format
@@ -519,13 +543,14 @@ pub async fn keyword_only_search(
             item_uri: r.item_uri,
             item_title: r.item_title,
             score: r.score,
+            fusion_score: r.score,
             keyword_rank: Some(rank + 1),
             semantic_rank: None,
             keyword_score: Some(r.score),
             semantic_score: None,
         })
         .collect();
-    Ok(finalize_ranking(mapped, &rewritten.identifiers, limit))
+    Ok(finalize_ranking(mapped, query, limit))
 }
 
 /// Semantic-only search (no keyword component)
@@ -559,6 +584,7 @@ pub async fn semantic_only_search(
             item_uri: r.item_uri,
             item_title: r.item_title,
             score: r.similarity,
+            fusion_score: r.similarity,
             keyword_rank: None,
             semantic_rank: Some(rank + 1),
             keyword_score: None,
@@ -681,7 +707,7 @@ mod tests {
             similarity: 0.51,
         }];
         let fused = reciprocal_rank_fusion(keyword_results, semantic_results, &config);
-        let ranked = finalize_ranking(fused, &["should_skip_blob".to_string()], 5);
+        let ranked = finalize_ranking(fused, "What does should_skip_blob do?", 5);
         assert_eq!(ranked[0].chunk_id, keyword_id);
     }
 
@@ -697,13 +723,14 @@ mod tests {
                 item_uri: "github://zone/content/mod.rs".to_string(),
                 item_title: "mod.rs".to_string(),
                 score: 1.0 - i as f32 * 0.01,
+                fusion_score: 1.0 - i as f32 * 0.01,
                 keyword_rank: Some(i + 1),
                 semantic_rank: None,
                 keyword_score: Some(0.1),
                 semantic_score: None,
             })
             .collect();
-        let ranked = finalize_ranking(results, &["should_skip_blob".to_string()], 10);
+        let ranked = finalize_ranking(results, "should_skip_blob", 10);
         assert_eq!(ranked.len(), 2);
     }
 
