@@ -33,6 +33,12 @@ pub fn load_retrieval_eval() -> RetrievalEvalSet {
         .expect("evals/retrieval.json must parse")
 }
 
+/// Held-out judgments. RankNet must keep training on `load_retrieval_eval` only.
+pub fn load_heldout_eval() -> RetrievalEvalSet {
+    serde_json::from_str(include_str!("../../evals/retrieval_heldout.json"))
+        .expect("evals/retrieval_heldout.json must parse")
+}
+
 /// Grade a hit against the case judgments. Unjudged documents are 0.
 pub fn grade_hit(uri: &str, text: &str, judgments: &[Judgment]) -> u8 {
     let mut best = 0u8;
@@ -164,6 +170,30 @@ mod tests {
     #[test]
     fn retrieval_json_has_graded_judgments() {
         assert_graded_coverage(&load_retrieval_eval());
+    }
+
+    #[test]
+    fn heldout_is_graded_and_disjoint_from_train() {
+        let train = load_retrieval_eval();
+        let heldout = load_heldout_eval();
+        assert_graded_coverage(&heldout);
+        assert_rewrite_coverage(&heldout);
+        let train_ids: std::collections::HashSet<_> =
+            train.cases.iter().map(|case| case.id.as_str()).collect();
+        let train_queries: std::collections::HashSet<_> =
+            train.cases.iter().map(|case| case.query.as_str()).collect();
+        for case in &heldout.cases {
+            assert!(
+                !train_ids.contains(case.id.as_str()),
+                "held-out id {} leaks into the train set",
+                case.id
+            );
+            assert!(
+                !train_queries.contains(case.query.as_str()),
+                "held-out query for {} is in the train set",
+                case.id
+            );
+        }
     }
 
     #[test]

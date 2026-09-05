@@ -84,6 +84,11 @@ pub fn identifier_role(text: &str, uri: &str, identifiers: &[String]) -> Identif
     for id in identifiers {
         best = max_role(best, role_for_identifier(text, &uri_l, id));
     }
+    // Indexed unit tests copy `fn name()` / `fn ident` examples and would
+    // otherwise outrank the real impl.
+    if is_test_chunk(uri, text) && best.is_definition() {
+        return IdentifierRole::Mention;
+    }
     best
 }
 
@@ -97,41 +102,65 @@ fn max_role(left: IdentifierRole, right: IdentifierRole) -> IdentifierRole {
     }
 }
 
+fn ident_form(text: &str, form: &str) -> bool {
+    let mut start = 0;
+    while let Some(offset) = text[start..].find(form) {
+        let at = start + offset;
+        let after = text[at + form.len()..].chars().next();
+        if !matches!(after, Some(c) if c.is_ascii_alphanumeric() || c == '_')
+            && !is_inside_quotes(text, at)
+        {
+            return true;
+        }
+        start = at + form.len();
+    }
+    false
+}
+
+fn is_inside_quotes(text: &str, at: usize) -> bool {
+    let line_start = text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    text[line_start..at].chars().filter(|&c| c == '"').count() % 2 == 1
+}
+
 fn role_for_identifier(text: &str, uri_l: &str, id: &str) -> IdentifierRole {
     if id.is_empty() {
         return IdentifierRole::None;
     }
-    if text.contains(&format!("pub fn {id}"))
-        || text.contains(&format!("pub async fn {id}"))
-        || text.contains(&format!("pub struct {id}"))
-        || text.contains(&format!("pub enum {id}"))
-        || text.contains(&format!("pub const {id}"))
-        || text.contains(&format!("pub static {id}"))
-        || text.contains(&format!("pub type {id}"))
+    if ident_form(text, &format!("pub fn {id}"))
+        || ident_form(text, &format!("pub async fn {id}"))
+        || ident_form(text, &format!("pub struct {id}"))
+        || ident_form(text, &format!("pub enum {id}"))
+        || ident_form(text, &format!("pub const {id}"))
+        || ident_form(text, &format!("pub static {id}"))
+        || ident_form(text, &format!("pub type {id}"))
     {
         return IdentifierRole::Exported;
     }
-    if text.contains(&format!("pub(crate) fn {id}"))
-        || text.contains(&format!("fn {id}"))
-        || text.contains(&format!("async fn {id}"))
-        || text.contains(&format!("struct {id}"))
-        || text.contains(&format!("enum {id}"))
-        || text.contains(&format!("type {id}"))
-        || text.contains(&format!("const {id}"))
-        || text.contains(&format!("static {id}"))
-        || text.contains(&format!("CREATE TABLE {id}"))
-        || text.contains(&format!("CREATE TABLE IF NOT EXISTS {id}"))
-        || text.contains(&format!("CREATE OR REPLACE FUNCTION {id}"))
+    if ident_form(text, &format!("pub(crate) fn {id}"))
+        || ident_form(text, &format!("fn {id}"))
+        || ident_form(text, &format!("async fn {id}"))
+        || ident_form(text, &format!("struct {id}"))
+        || ident_form(text, &format!("enum {id}"))
+        || ident_form(text, &format!("type {id}"))
+        || ident_form(text, &format!("const {id}"))
+        || ident_form(text, &format!("static {id}"))
+        || ident_form(text, &format!("CREATE TABLE {id}"))
+        || ident_form(text, &format!("CREATE TABLE IF NOT EXISTS {id}"))
+        || ident_form(text, &format!("CREATE OR REPLACE FUNCTION {id}"))
         || text.contains(&format!("name: \"{id}\""))
         || text.contains(&format!("\"{id}\" =>"))
         || text.contains(&format!("'{id}' =>"))
         || text.contains(&format!("env_u64(\"{id}\""))
         || text.contains(&format!("env::var(\"{id}\""))
-        || (text.contains("fn name(") && text.contains(&format!("\"{id}\"")))
+        || tool_name_def(text, id)
+        || ident_form(text, &format!("pub {id}:"))
+        || ident_form(text, &format!("pub(crate) {id}:"))
+        || reexport_def(text, id)
     {
         return IdentifierRole::Defined;
     }
     if id.contains('/')
+        && !looks_like_unit_test_body(text)
         && (text.contains(&format!("\"{id}\""))
             || text.contains(&format!("'{id}'"))
             || (text.contains(id)
@@ -162,39 +191,195 @@ fn role_for_identifier(text: &str, uri_l: &str, id: &str) -> IdentifierRole {
 fn editorial_bonus(query: &str, uri: &str, text: &str) -> f32 {
     let identifiers = rewrite_query(query).identifiers;
     let role = identifier_role(text, uri, &identifiers);
+    let covered = ident_hit_count(text, &identifiers);
+    let frac = if identifiers.is_empty() {
+        1.0
+    } else {
+        covered as f32 / identifiers.len() as f32
+    };
     let mut bonus = match role {
         IdentifierRole::Exported => 1.05,
         IdentifierRole::Defined => 0.7,
         IdentifierRole::Mention | IdentifierRole::None => 0.0,
-    };
-    if is_file_header(text) {
+    } * frac;
+    if identifiers.len() >= 2 && covered == identifiers.len() {
+        bonus += 0.5;
+    }
+    bonus += 0.2 * ident_part_coverage(text, &identifiers);
+    if is_outline_chunk(text) {
         bonus -= 0.95;
     }
-    if fixture_penalty(&uri.to_ascii_lowercase()) > 0.0 {
+    if is_fixture_uri(uri) {
         bonus -= 1.1;
     }
-    if is_test_module(uri, text, role) {
-        bonus -= 0.35;
+    if is_test_chunk(uri, text) {
+        bonus -= 0.8;
+    }
+    if is_sql_migration(uri) && !query_wants_schema(query) {
+        bonus -= 0.7;
     }
     bonus
 }
 
-pub fn is_file_header(text: &str) -> bool {
-    let head: String = text.chars().take(400).collect();
-    head.contains("kind: file_header")
+fn tool_name_def(text: &str, id: &str) -> bool {
+    let quoted = format!("\"{id}\"");
+    let mut start = 0;
+    while let Some(rel) = text[start..].find("fn name(") {
+        let at = start + rel;
+        if is_inside_quotes(text, at) {
+            start = at + 8;
+            continue;
+        }
+        let end = (at + 160).min(text.len());
+        if text[at..end].contains(&quoted) {
+            return true;
+        }
+        start = at + 8;
+    }
+    false
 }
 
-fn is_test_module(uri: &str, text: &str, role: IdentifierRole) -> bool {
-    if role.is_definition() {
-        return false;
+fn reexport_def(text: &str, id: &str) -> bool {
+    text.contains("pub use ")
+        && (text.contains(&format!("::{id}"))
+            || text.contains(&format!(" {id};"))
+            || text.contains(&format!("::{id};")))
+}
+
+fn ident_hit_count(text: &str, identifiers: &[String]) -> usize {
+    identifiers
+        .iter()
+        .filter(|id| text.contains(id.as_str()))
+        .count()
+}
+
+/// How many underscore/hyphen parts of the query identifiers appear in `text`.
+pub fn ident_part_coverage(text: &str, identifiers: &[String]) -> f32 {
+    let text_l = text.to_ascii_lowercase();
+    let mut parts = Vec::new();
+    for id in identifiers {
+        for part in id.split(['_', '-', '/']) {
+            if part.len() >= 4 {
+                parts.push(part.to_ascii_lowercase());
+            }
+        }
     }
+    if parts.is_empty() {
+        return 0.0;
+    }
+    parts.iter().filter(|part| text_l.contains(*part)).count() as f32 / parts.len() as f32
+}
+
+/// Higher is better. Used to pack real answers ahead of tests and outlines.
+pub fn chunk_rank_tier(query: &str, uri: &str, text: &str) -> u8 {
+    let identifiers = rewrite_query(query).identifiers;
+    if is_test_chunk(uri, text) || is_fixture_uri(uri) {
+        return 0;
+    }
+    let defined = code_definition(text, uri, &identifiers);
+    if is_outline_chunk(text) && !defined {
+        return 1;
+    }
+    let code_ids: Vec<String> = identifiers
+        .iter()
+        .filter(|id| !id.contains('/'))
+        .cloned()
+        .collect();
+    let covered_code = ident_hit_count(text, &code_ids);
+    let all_code = code_ids.len() >= 2 && covered_code == code_ids.len();
+    if defined && all_code {
+        return 5;
+    }
+    if all_code {
+        return 4;
+    }
+    if defined {
+        return 3;
+    }
+    2
+}
+
+/// A path hit like `/api/chats/search` is not a code definition of `search_messages`.
+fn code_definition(text: &str, uri: &str, identifiers: &[String]) -> bool {
+    let code_ids: Vec<String> = identifiers
+        .iter()
+        .filter(|id| !id.contains('/'))
+        .cloned()
+        .collect();
+    if code_ids.is_empty() {
+        return identifier_role(text, uri, identifiers).is_definition();
+    }
+    identifier_role(text, uri, &code_ids).is_definition()
+}
+
+pub fn role_strength(text: &str, uri: &str, identifiers: &[String]) -> u8 {
+    match identifier_role(text, uri, identifiers) {
+        IdentifierRole::Exported => 3,
+        IdentifierRole::Defined => 2,
+        IdentifierRole::Mention => 1,
+        IdentifierRole::None => 0,
+    }
+}
+
+pub fn is_file_header(text: &str) -> bool {
+    is_outline_chunk(text)
+}
+
+pub fn is_outline_chunk(text: &str) -> bool {
+    let head: String = text.chars().take(400).collect();
+    head.contains("kind: file_header") || head.contains("kind: api_surface")
+}
+
+pub fn is_fixture_uri(uri: &str) -> bool {
+    fixture_penalty(&uri.to_ascii_lowercase()) > 0.0
+}
+
+/// File-header / API-surface bags and eval fixtures crowd out the impl.
+pub fn is_nav_chunk(text: &str, uri: &str) -> bool {
+    is_outline_chunk(text) || is_fixture_uri(uri)
+}
+
+pub fn is_test_chunk(uri: &str, text: &str) -> bool {
     let uri_l = uri.to_ascii_lowercase();
-    uri_l.contains("/tests/")
+    if uri_l.contains("/tests/")
         || uri_l.contains(".test.")
-        || uri_l.ends_with("_test.rs")
+        || uri_l.contains("_test.rs")
+        || uri_l.contains("/e2e/")
+        || uri_l.contains(".sqlx/")
+    {
+        return true;
+    }
+    let head: String = text.chars().take(500).collect();
+    let head_l = head.to_ascii_lowercase();
+    head_l.contains("symbol: tests\n")
+        || head_l.contains("symbol: tests.")
+        || head_l.contains("parent: tests")
+        || head_l.contains("parents: tests")
         || text.contains("#[cfg(test)]")
-        || text.contains("#[test]")
-        || text.contains("assert!(")
+        || head.contains("#[test]")
+        || text.contains("assert_eq!(")
+        || text.contains("assert_ne!(")
+}
+
+fn looks_like_unit_test_body(text: &str) -> bool {
+    text.contains("assert_eq!(")
+        || text.contains("assert_ne!(")
+        || text.contains("score_hit(")
+        || text.contains("identifier_role(")
+}
+
+fn is_sql_migration(uri: &str) -> bool {
+    let uri_l = uri.to_ascii_lowercase();
+    uri_l.contains("/migrations/") && uri_l.contains(".sql")
+}
+
+fn query_wants_schema(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    q.contains("schema")
+        || q.contains("migration")
+        || q.contains("column")
+        || q.contains("table")
+        || q.contains("sql")
 }
 
 pub fn extract_features(
@@ -276,11 +461,7 @@ pub fn extract_features(
             inv_rank(semantic_rank),
             fixture_penalty(&uri_l),
             if role.is_definition() { 1.0 } else { 0.0 },
-            if is_test_module(uri, text, role) {
-                1.0
-            } else {
-                0.0
-            },
+            if is_test_chunk(uri, text) { 1.0 } else { 0.0 },
         ],
     }
 }
@@ -298,6 +479,7 @@ fn fixture_penalty(uri_l: &str) -> f32 {
         || uri_l.contains("retrieval.json")
         || uri_l.contains("/tests/")
         || uri_l.contains(".test.")
+        || uri_l.contains(".sqlx/")
     {
         1.0
     } else {
@@ -533,6 +715,56 @@ mod tests {
                 r#"assert!(rewritten.identifiers.iter().any(|i| i == "should_skip_blob"));"#,
                 "embeddings/query.rs",
                 &["should_skip_blob".into()],
+            ),
+            IdentifierRole::Mention
+        );
+        assert_eq!(
+            identifier_role(
+                "pub async fn search_knowledge_entries(pool: &PgPool)",
+                "db/knowledge.rs",
+                &["search_knowledge".into()],
+            ),
+            IdentifierRole::Mention
+        );
+        assert_eq!(
+            identifier_role(
+                "symbol: tests.quoted_tool\nfn name(&self) -> &str { \"search_knowledge\" }",
+                "embeddings/ranker.rs",
+                &["search_knowledge".into()],
+            ),
+            IdentifierRole::Mention
+        );
+        assert_eq!(
+            identifier_role(
+                "pub use github::GitHubAdapter;",
+                "adapters/mod.rs",
+                &["GitHubAdapter".into()],
+            ),
+            IdentifierRole::Defined
+        );
+        assert_eq!(
+            identifier_role(
+                "pub live_uris: Vec<String>,",
+                "content/mod.rs",
+                &["live_uris".into()],
+            ),
+            IdentifierRole::Defined
+        );
+        assert_eq!(
+            identifier_role(
+                r#"let query = "What does should_skip_blob do?";
+            "pub fn should_skip_blob(&self, uri: &str, blob_sha: &str) -> bool { true }",
+"#,
+                "embeddings/local_rerank.rs",
+                &["should_skip_blob".into()],
+            ),
+            IdentifierRole::Mention
+        );
+        assert_eq!(
+            identifier_role(
+                "let method = score_hit(query, \"ollama.rs\", \"format!(/api/embeddings)\");",
+                "embeddings/ranker.rs",
+                &["/api/embeddings".into()],
             ),
             IdentifierRole::Mention
         );

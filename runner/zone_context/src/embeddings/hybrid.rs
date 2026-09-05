@@ -185,28 +185,38 @@ pub async fn hybrid_search_filtered(
     let keyword_fetch = crate::embeddings::serving::keyword_candidate_limit(fetch_limit, extra);
     let ann_fetch = crate::embeddings::serving::ann_candidate_limit(fetch_limit, extra);
 
-    let keyword_results = keyword_search(
-        pool,
-        &rewritten.keyword,
-        keyword_fetch,
+    let keyword_results = keep_answer_chunks(
+        keyword_search(
+            pool,
+            &rewritten.keyword,
+            (keyword_fetch * 2).min(128),
+            fetch_limit * 2,
+            filters,
+            config.min_keyword_score,
+        )
+        .await?,
         fetch_limit,
-        filters,
-        config.min_keyword_score,
-    )
-    .await?;
+        &rewritten.identifiers,
+        |row| (row.chunk_text.as_str(), row.item_uri.as_str()),
+    );
 
     let query_embedding = crate::embeddings::align_vector(query_embedding)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
-    let semantic_results = semantic_search(
-        pool,
-        &query_embedding,
-        ann_fetch,
+    let semantic_results = keep_answer_chunks(
+        semantic_search(
+            pool,
+            &query_embedding,
+            ann_fetch,
+            fetch_limit * 2,
+            filters,
+            config.min_semantic_score,
+        )
+        .await?,
         fetch_limit,
-        filters,
-        config.min_semantic_score,
-    )
-    .await?;
+        &rewritten.identifiers,
+        |row| (row.chunk_text.as_str(), row.item_uri.as_str()),
+    );
 
     let combined = reciprocal_rank_fusion(keyword_results, semantic_results, config);
     Ok(finalize_ranking(combined, query, limit))
@@ -453,7 +463,12 @@ pub fn finalize_ranking(
     query: &str,
     limit: usize,
 ) -> Vec<HybridSearchResult> {
-    cap_per_file(apply_local_rerank(query, results), 2, limit)
+    let ranked = apply_local_rerank(query, results);
+    let ranked = ranked
+        .into_iter()
+        .filter(|result| !crate::embeddings::ranker::is_fixture_uri(&result.item_uri))
+        .collect();
+    cap_per_file(ranked, 2, limit)
 }
 
 pub fn apply_local_rerank(
@@ -477,6 +492,8 @@ pub fn apply_local_rerank(
         );
     }
     sort_by_score(&mut results);
+    boost_impl_neighbors(query, &mut results);
+    sort_by_score(&mut results);
     prefer_definition_chunks(query, &mut results);
     results
 }
@@ -489,25 +506,147 @@ pub fn prefer_definition_chunks(query: &str, results: &mut [HybridSearchResult])
         return;
     }
     results.sort_by(|a, b| {
-        let a_header = crate::embeddings::ranker::is_file_header(&a.chunk_text);
-        let b_header = crate::embeddings::ranker::is_file_header(&b.chunk_text);
-        let a_def = !a_header
-            && crate::embeddings::ranker::identifier_role(&a.chunk_text, &a.item_uri, &identifiers)
-                .is_definition();
-        let b_def = !b_header
-            && crate::embeddings::ranker::identifier_role(&b.chunk_text, &b.item_uri, &identifiers)
-                .is_definition();
-        match (a_def, b_def, a_header, b_header) {
-            (true, false, _, _) => std::cmp::Ordering::Less,
-            (false, true, _, _) => std::cmp::Ordering::Greater,
-            (false, false, false, true) => std::cmp::Ordering::Less,
-            (false, false, true, false) => std::cmp::Ordering::Greater,
-            _ => b
-                .score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal),
+        let ta = crate::embeddings::ranker::chunk_rank_tier(query, &a.item_uri, &a.chunk_text);
+        let tb = crate::embeddings::ranker::chunk_rank_tier(query, &b.item_uri, &b.chunk_text);
+        match tb.cmp(&ta) {
+            std::cmp::Ordering::Equal => {
+                let ra = crate::embeddings::ranker::role_strength(
+                    &a.chunk_text,
+                    &a.item_uri,
+                    &identifiers,
+                );
+                let rb = crate::embeddings::ranker::role_strength(
+                    &b.chunk_text,
+                    &b.item_uri,
+                    &identifiers,
+                );
+                match rb.cmp(&ra) {
+                    std::cmp::Ordering::Equal => {
+                        let ca = crate::embeddings::ranker::ident_part_coverage(
+                            &a.chunk_text,
+                            &identifiers,
+                        );
+                        let cb = crate::embeddings::ranker::ident_part_coverage(
+                            &b.chunk_text,
+                            &identifiers,
+                        );
+                        cb.partial_cmp(&ca)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| {
+                                b.score
+                                    .partial_cmp(&a.score)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                    }
+                    other => other,
+                }
+            }
+            other => other,
         }
     });
+}
+
+fn boost_impl_neighbors(query: &str, results: &mut [HybridSearchResult]) {
+    let identifiers = crate::embeddings::rewrite_query(query).identifiers;
+    if identifiers.is_empty() {
+        return;
+    }
+    let def_uris: Vec<String> = results
+        .iter()
+        .filter(|result| {
+            !crate::embeddings::ranker::is_test_chunk(&result.item_uri, &result.chunk_text)
+                && crate::embeddings::ranker::identifier_role(
+                    &result.chunk_text,
+                    &result.item_uri,
+                    &identifiers,
+                )
+                .is_definition()
+        })
+        .map(|result| result.item_uri.clone())
+        .collect();
+    if def_uris.is_empty() {
+        return;
+    }
+    for result in results.iter_mut() {
+        if crate::embeddings::ranker::identifier_role(
+            &result.chunk_text,
+            &result.item_uri,
+            &identifiers,
+        )
+        .is_definition()
+        {
+            continue;
+        }
+        let bonus = def_uris
+            .iter()
+            .map(|uri| path_affinity(&result.item_uri, uri))
+            .fold(0.0f32, f32::max);
+        result.score += bonus;
+    }
+}
+
+fn path_affinity(uri: &str, def_uri: &str) -> f32 {
+    let left = dir_of(uri);
+    let right = dir_of(def_uri);
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    if left == right {
+        return 0.22;
+    }
+    let crate_left = crate_of(uri);
+    let crate_right = crate_of(def_uri);
+    if !crate_left.is_empty() && crate_left == crate_right {
+        return 0.12;
+    }
+    0.0
+}
+
+fn strip_uri_path(uri: &str) -> &str {
+    let rest = uri.split("://").nth(1).unwrap_or(uri);
+    rest.split('@').next().unwrap_or(rest)
+}
+
+fn dir_of(uri: &str) -> &str {
+    let path = strip_uri_path(uri);
+    path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("")
+}
+
+fn crate_of(uri: &str) -> &str {
+    let path = strip_uri_path(uri);
+    path.find("/src/")
+        .map(|idx| &path[..idx])
+        .unwrap_or_else(|| dir_of(uri))
+}
+
+fn keep_answer_chunks<T>(
+    items: Vec<T>,
+    limit: usize,
+    identifiers: &[String],
+    parts: impl Fn(&T) -> (&str, &str),
+) -> Vec<T> {
+    let mut body = Vec::new();
+    let mut nav = Vec::new();
+    for item in items {
+        let (text, uri) = parts(&item);
+        if crate::embeddings::ranker::is_fixture_uri(uri) {
+            continue;
+        }
+        let outline = crate::embeddings::ranker::is_outline_chunk(text);
+        let defined =
+            crate::embeddings::ranker::identifier_role(text, uri, identifiers).is_definition();
+        if outline && !defined {
+            nav.push(item);
+        } else {
+            body.push(item);
+            if body.len() >= limit {
+                return body;
+            }
+        }
+    }
+    let need = limit.saturating_sub(body.len());
+    body.extend(nav.into_iter().take(need));
+    body
 }
 
 /// Keep unique files first so a second gold can enter the window, then
@@ -616,15 +755,20 @@ pub async fn keyword_only_search(
         filters.as_ref().and_then(|f| f.min_quality).is_some(),
         filters.as_ref().and_then(|f| f.since).is_some(),
     );
-    let results = keyword_search(
-        pool,
-        &rewritten.keyword,
-        crate::embeddings::serving::keyword_candidate_limit(limit, extra),
+    let results = keep_answer_chunks(
+        keyword_search(
+            pool,
+            &rewritten.keyword,
+            crate::embeddings::serving::keyword_candidate_limit(limit * 2, extra),
+            limit * 2,
+            filters.as_ref(),
+            min_score,
+        )
+        .await?,
         limit,
-        filters.as_ref(),
-        min_score,
-    )
-    .await?;
+        &rewritten.identifiers,
+        |row| (row.chunk_text.as_str(), row.item_uri.as_str()),
+    );
     let mapped = results
         .into_iter()
         .enumerate()
@@ -875,6 +1019,33 @@ mod tests {
     }
 
     #[test]
+    fn keep_answer_chunks_drops_headers_first() {
+        let header = KeywordResult {
+            chunk_id: Uuid::from_u128(1),
+            content_item_id: Uuid::from_u128(10),
+            source_id: Uuid::nil(),
+            chunk_text: "path: x kind: file_header\n\nidentifiers: should_skip_blob".into(),
+            item_uri: "github://zone/content/mod.rs".into(),
+            item_title: "mod.rs".into(),
+            score: 0.9,
+        };
+        let body = KeywordResult {
+            chunk_id: Uuid::from_u128(2),
+            content_item_id: Uuid::from_u128(10),
+            source_id: Uuid::nil(),
+            chunk_text: "pub fn should_skip_blob(&self) -> bool { true }".into(),
+            item_uri: "github://zone/content/mod.rs".into(),
+            item_title: "mod.rs".into(),
+            score: 0.4,
+        };
+        let kept = keep_answer_chunks(vec![header, body], 1, &["should_skip_blob".into()], |row| {
+            (row.chunk_text.as_str(), row.item_uri.as_str())
+        });
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].chunk_text.contains("pub fn should_skip_blob"));
+    }
+
+    #[test]
     fn prefers_definition_chunk_over_same_file_mention() {
         let item = Uuid::parse_str("00000000-0000-0000-0000-0000000000bb").unwrap();
         let mention = HybridSearchResult {
@@ -915,6 +1086,46 @@ mod tests {
             ranked[0].chunk_text.contains("pub fn should_skip_blob"),
             "kept {}",
             ranked[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn conjunction_outranks_single_ident_definition() {
+        let query = "Why must retain_content_uris use live_uris after an incremental gather?";
+        let store = HybridSearchResult {
+            chunk_id: Uuid::from_u128(1),
+            content_item_id: Uuid::from_u128(1),
+            source_id: Uuid::nil(),
+            chunk_text: "pub async fn retain_content_uris(&self, source_id: Uuid, uris: &[String])"
+                .into(),
+            item_uri: "github://zone/embeddings/pgvector.rs".into(),
+            item_title: "pgvector.rs".into(),
+            score: 2.0,
+            fusion_score: 2.0,
+            keyword_rank: Some(1),
+            semantic_rank: None,
+            keyword_score: Some(0.5),
+            semantic_score: None,
+        };
+        let caller = HybridSearchResult {
+            chunk_id: Uuid::from_u128(2),
+            content_item_id: Uuid::from_u128(2),
+            source_id: Uuid::nil(),
+            chunk_text: "store.retain_content_uris(source.id, &fetch_result.live_uris)".into(),
+            item_uri: "github://zone/context/service.rs".into(),
+            item_title: "service.rs".into(),
+            score: 1.0,
+            fusion_score: 1.0,
+            keyword_rank: Some(2),
+            semantic_rank: None,
+            keyword_score: Some(0.2),
+            semantic_score: None,
+        };
+        let ranked = finalize_ranking(vec![store, caller], query, 2);
+        assert!(
+            ranked[0].item_uri.contains("service.rs"),
+            "kept {}",
+            ranked[0].item_uri
         );
     }
 

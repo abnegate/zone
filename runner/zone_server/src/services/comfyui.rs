@@ -183,6 +183,7 @@ impl ComfyUiClient {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(config.request_timeout_secs))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))?;
         let _ = catalog.image_recipe_for(&config.checkpoint)?;
