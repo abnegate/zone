@@ -13,8 +13,8 @@ pub use hybrid::{
     HybridSearchConfig, HybridSearchResult, hybrid_search, keyword_only_search,
     semantic_only_search,
 };
-pub use query::{RewrittenQuery, embed_query_text, rewrite_query, sanitize_search_query};
 pub use pgvector::{PgVectorStore, VECTOR_DIMENSION, align_vector};
+pub use query::{RewrittenQuery, embed_query_text, rewrite_query, sanitize_search_query};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

@@ -1568,7 +1568,10 @@ async fn prepare_message(
         state.config().litellm_host.clone(),
         state.config().litellm_key.clone(),
     );
-    let intent = classifier.classify(content, metadata).await;
+    let intent = classifier
+        .classify(content, metadata)
+        .await
+        .yielding_to_agent(chat.agent_enabled);
 
     if intent == crate::services::image_intent::GenerationIntent::Chat
         && crate::services::model::Model::completion(&state.config().ollama_host, &chat.model_name)
@@ -1585,14 +1588,10 @@ async fn prepare_message(
         return Ok(None);
     }
 
-    Ok(Some(if chat.agent_enabled {
-        Routing::Chat(chat)
-    } else {
-        match intent {
-            crate::services::image_intent::GenerationIntent::Video => Routing::Video(image_config),
-            crate::services::image_intent::GenerationIntent::Image => Routing::Image(image_config),
-            crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
-        }
+    Ok(Some(match intent {
+        crate::services::image_intent::GenerationIntent::Video => Routing::Video(image_config),
+        crate::services::image_intent::GenerationIntent::Image => Routing::Image(image_config),
+        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
     }))
 }
 

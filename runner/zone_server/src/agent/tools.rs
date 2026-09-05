@@ -451,7 +451,10 @@ impl SearchKnowledgeTool {
 
         if let Some(embedding_service) = ctx.state.embedding_service() {
             match embedding_service
-                .embed(&zone_context::embed_query_text(embedding_service.model(), query))
+                .embed(&zone_context::embed_query_text(
+                    embedding_service.model(),
+                    query,
+                ))
                 .await
             {
                 Ok(query_embedding) => {
@@ -590,7 +593,10 @@ impl SearchChatHistoryTool {
         };
 
         let embedding = match embedding_service
-            .embed(&zone_context::embed_query_text(embedding_service.model(), query))
+            .embed(&zone_context::embed_query_text(
+                embedding_service.model(),
+                query,
+            ))
             .await
         {
             Ok(e) => e,

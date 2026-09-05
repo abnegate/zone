@@ -403,15 +403,8 @@ pub async fn keyword_only_search(
     let source_ids = filters.as_ref().and_then(|f| f.source_ids.as_deref());
 
     let keyword = crate::embeddings::rewrite_query(query).keyword;
-    let results = keyword_search(
-        pool,
-        &keyword,
-        limit,
-        workspace_id,
-        source_ids,
-        min_score,
-    )
-    .await?;
+    let results =
+        keyword_search(pool, &keyword, limit, workspace_id, source_ids, min_score).await?;
 
     Ok(results
         .into_iter()

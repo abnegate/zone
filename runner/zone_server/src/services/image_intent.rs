@@ -27,6 +27,17 @@ pub enum GenerationIntent {
     Video,
 }
 
+impl GenerationIntent {
+    /// Agent chats still generate images. Video requests become normal chat so
+    /// the agent can use tools instead of being replaced by a ComfyUI job.
+    pub fn yielding_to_agent(self, agent_enabled: bool) -> Self {
+        match self {
+            Self::Video if agent_enabled => Self::Chat,
+            other => other,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ImageIntentClassifier {
     config: ComfyUiConfig,
@@ -555,6 +566,26 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[test]
+    fn agent_mode_keeps_images_and_yields_video_to_chat() {
+        assert_eq!(
+            GenerationIntent::Image.yielding_to_agent(true),
+            GenerationIntent::Image
+        );
+        assert_eq!(
+            GenerationIntent::Video.yielding_to_agent(true),
+            GenerationIntent::Chat
+        );
+        assert_eq!(
+            GenerationIntent::Video.yielding_to_agent(false),
+            GenerationIntent::Video
+        );
+        assert_eq!(
+            GenerationIntent::Chat.yielding_to_agent(true),
+            GenerationIntent::Chat
+        );
+    }
 
     #[test]
     fn classifier_rule_matrix() {
