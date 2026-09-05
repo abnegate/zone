@@ -8,6 +8,10 @@ mock.module('../Sidebar/Sidebar', () => ({
   },
 }));
 
+mock.module('../../../features/models', () => ({
+  DownloadDock: () => null,
+}));
+
 // Mock react-router-dom
 mock.module('react-router-dom', () => ({
   Outlet: () => <div data-testid="outlet">Outlet content</div>,

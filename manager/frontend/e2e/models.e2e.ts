@@ -34,6 +34,19 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
     const method = route.request().method();
 
     if (method === 'GET') {
+      if (url.includes('/api/models/disk')) {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            used_bytes: 40,
+            total_bytes: 100,
+            available_bytes: 60,
+            percent: 40,
+          }),
+        });
+        return;
+      }
       if (url.includes('?')) {
         // Browse request with query params like ?source=ollama
         route.fulfill({
@@ -342,6 +355,15 @@ test.describe('Models Page', () => {
     await expect(page.locator('.modal-details')).toBeVisible();
     await expect(page.locator('.modal-details-header h3')).toHaveText('llama3.2:latest');
     await expect(page.locator('.details-source')).toHaveText('Installed');
+    await expect(page.getByRole('link', { name: 'View source' })).toHaveAttribute(
+      'href',
+      'https://ollama.com/library/llama3.2'
+    );
+  });
+
+  test('shows used disk space on the models screen', async ({ page }) => {
+    await expect(page.getByLabelText('Disk space used')).toBeVisible();
+    await expect(page.locator('.models-disk-value')).toHaveText('40%');
   });
 
   test('closes modal on backdrop click', async ({ page }) => {

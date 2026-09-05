@@ -1,2 +1,2 @@
 // Backward compatibility re-export
-export { usePull } from '../features/models/hooks/usePull';
+export { PullProvider, usePull } from '../features/models/hooks/usePull';

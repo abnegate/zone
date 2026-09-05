@@ -217,7 +217,7 @@ pub async fn hybrid_search_filtered(
         });
 
     let combined = reciprocal_rank_fusion(keyword_results, semantic_results, config);
-    let combined = expand_same_file(pool, query, combined).await?;
+    let combined = expand_same_file(pool, query, combined, filters).await?;
     Ok(finalize_ranking(combined, query, limit))
 }
 
@@ -675,9 +675,34 @@ fn cmp_file_chunks(
             &right.chunk_text,
         );
         left_def.cmp(&right_def).then_with(|| {
-            let left_cover = question_coverage(query, &left.chunk_text, &identifiers);
-            let right_cover = question_coverage(query, &right.chunk_text, &identifiers);
-            left_cover.cmp(&right_cover).then_with(|| {
+            let same_symbol = defined_leaf_symbol(&left.chunk_text)
+                .zip(defined_leaf_symbol(&right.chunk_text))
+                .is_some_and(|(left_sym, right_sym)| left_sym == right_sym);
+            let left_stem = if same_symbol {
+                filename_stem_hits(&left.item_uri, &left.chunk_text)
+            } else {
+                0
+            };
+            let right_stem = if same_symbol {
+                filename_stem_hits(&right.item_uri, &right.chunk_text)
+            } else {
+                0
+            };
+            left_stem.cmp(&right_stem).then_with(|| {
+            let left_conj = conjunction_ident_hit(&left.chunk_text, &identifiers);
+            let right_conj = conjunction_ident_hit(&right.chunk_text, &identifiers);
+            left_conj.cmp(&right_conj).then_with(|| {
+            let left_sym = defined_symbol_prefix(query, &left.chunk_text);
+            let right_sym = defined_symbol_prefix(query, &right.chunk_text);
+            left_sym.cmp(&right_sym).then_with(|| {
+            let left_excl =
+                exclusive_question_hits(query, &left.chunk_text, &right.chunk_text);
+            let right_excl =
+                exclusive_question_hits(query, &right.chunk_text, &left.chunk_text);
+            left_excl.cmp(&right_excl).then_with(|| {
+                let left_cover = question_coverage(query, &left.chunk_text, &identifiers);
+                let right_cover = question_coverage(query, &right.chunk_text, &identifiers);
+                left_cover.cmp(&right_cover).then_with(|| {
                 let left_role = crate::embeddings::ranker::role_strength(
                     &left.chunk_text,
                     &left.item_uri,
@@ -711,8 +736,160 @@ fn cmp_file_chunks(
                         })
                 })
             })
+            })
+            })
+            })
+            })
         })
     })
+}
+
+fn conjunction_ident_hit(text: &str, identifiers: &[String]) -> bool {
+    let code_ids: Vec<&String> = identifiers.iter().filter(|id| !id.contains('/')).collect();
+    code_ids.len() >= 2 && code_ids.iter().all(|id| text.contains(id.as_str()))
+}
+
+fn uri_path_hit(query: &str, uri: &str) -> u8 {
+    let uri_l = uri.to_ascii_lowercase();
+    crate::embeddings::path_uri_tokens(query)
+        .iter()
+        .any(|token| uri_l.contains(&format!("/{token}.")) || uri_l.contains(&format!("/{token}@")))
+        .then_some(1)
+        .unwrap_or(0)
+}
+
+async fn path_matched_item_ids(
+    pool: &PgPool,
+    query: &str,
+    filters: Option<&SearchFilters>,
+    limit: usize,
+) -> sqlx::Result<Vec<Uuid>> {
+    let patterns = crate::embeddings::path_uri_patterns(query);
+    if patterns.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let workspace_id = filters.and_then(|filters| filters.workspace_id);
+    sqlx::query_scalar(
+        r#"
+        SELECT ci.id
+        FROM content_items ci
+        WHERE ($2::uuid IS NULL OR ci.workspace_id = $2)
+          AND ci.uri ILIKE ANY($1::text[])
+        ORDER BY length(ci.uri), ci.uri
+        LIMIT $3
+        "#,
+    )
+    .bind(&patterns)
+    .bind(workspace_id)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+}
+
+fn exclusive_question_hits(query: &str, text: &str, other: &str) -> u32 {
+    let text_l = text.to_ascii_lowercase();
+    let other_l = other.to_ascii_lowercase();
+    let text_docs = doc_comment_text(text);
+    let text_code = strip_doc_comments(text);
+    let other_code = strip_doc_comments(other);
+    let tokens = crate::embeddings::nl_content_tokens(query);
+    let doc_words = tokens
+        .iter()
+        .filter(|token| text_docs.contains(*token) && !other_l.contains(*token))
+        .count() as u32;
+    let body_words = tokens
+        .iter()
+        .filter(|token| {
+            text_l.contains(*token) && !text_docs.contains(*token) && !other_l.contains(*token)
+        })
+        .count() as u32;
+    let phrases = crate::embeddings::nl_question_phrases(query)
+        .into_iter()
+        .filter(|phrase| text_code.contains(phrase.as_str()) && !other_code.contains(phrase.as_str()))
+        .count() as u32;
+    doc_words * 3 + body_words + phrases * 2
+}
+
+fn strip_doc_comments(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("///") && !trimmed.starts_with("//!")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase()
+}
+
+fn doc_comment_text(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("///") || trimmed.starts_with("//!")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase()
+}
+
+fn filename_stem_hits(uri: &str, text: &str) -> u32 {
+    let Some(stem) = uri_file_stem(uri) else {
+        return 0;
+    };
+    let mut stems = vec![stem.clone()];
+    if stem.ends_with('s') && !stem.ends_with("ss") && stem.len() >= 5 {
+        stems.push(stem[..stem.len() - 1].to_string());
+    }
+    ident_like_tokens(text)
+        .into_iter()
+        .filter(|token| {
+            let lower = token.to_ascii_lowercase();
+            stems.iter().any(|stem| {
+                lower.starts_with(stem)
+                    && lower.len() > stem.len()
+                    && (token.chars().any(|c| c.is_ascii_uppercase()) || token.contains('_'))
+            })
+        })
+        .count() as u32
+}
+
+fn uri_stem_matches_ident(uri: &str, identifiers: &[String]) -> bool {
+    let Some(stem) = uri_file_stem(uri) else {
+        return false;
+    };
+    identifiers.iter().any(|id| {
+        let id_l = id.to_ascii_lowercase();
+        stem == id_l
+            || id_l.split(['_', '-', '/']).any(|part| part.len() >= 4 && (stem == part || stem.contains(part)))
+    })
+}
+
+fn uri_file_stem(uri: &str) -> Option<String> {
+    let name = uri
+        .rsplit('/')
+        .next()?
+        .split('@')
+        .next()?
+        .split('.')
+        .next()?
+        .to_ascii_lowercase();
+    (name.len() >= 4).then_some(name)
+}
+
+fn ident_like_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            current.push(c);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
 }
 
 fn file_row_tier(uri: &str, text: &str) -> u8 {
@@ -770,6 +947,24 @@ fn doc_comment_coverage(query: &str, text: &str) -> u32 {
         .into_iter()
         .filter(|token| comments.contains(token))
         .count() as u32
+}
+
+fn defined_symbol_prefix(query: &str, text: &str) -> u32 {
+    if !function_kind(text) {
+        return 0;
+    }
+    let Some(leaf) = defined_leaf_symbol(text) else {
+        return 0;
+    };
+    crate::embeddings::nl_content_tokens(query)
+        .into_iter()
+        .chain(question_stems(query))
+        .any(|token| {
+            leaf.starts_with(&token)
+                || (token.len() >= 6 && leaf.contains(&token))
+        })
+        .then_some(1)
+        .unwrap_or(0)
 }
 
 fn defined_symbol_overlap(query: &str, text: &str) -> u32 {
@@ -863,26 +1058,59 @@ fn same_file_patterns(query: &str) -> Vec<String> {
     patterns
 }
 
+fn ident_file_patterns(query: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut patterns = Vec::new();
+    for id in crate::embeddings::rewrite_query(query).identifiers {
+        if id.len() < 4 || id.contains('/') || !seen.insert(id.to_ascii_lowercase()) {
+            continue;
+        }
+        patterns.push(format!("%{id}%"));
+    }
+    patterns
+}
+
 async fn expand_same_file(
     pool: &PgPool,
     query: &str,
     mut results: Vec<HybridSearchResult>,
+    filters: Option<&SearchFilters>,
 ) -> sqlx::Result<Vec<HybridSearchResult>> {
-    if results.is_empty() {
-        return Ok(results);
-    }
+    let identifiers = crate::embeddings::rewrite_query(query).identifiers;
     let mut ids = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for result in &results {
         if seen.insert(result.content_item_id) {
             ids.push(result.content_item_id);
-            if ids.len() >= 8 {
+            if ids.len() >= 16 {
                 break;
             }
         }
     }
+    for result in &results {
+        if ids.len() >= 20 {
+            break;
+        }
+        if seen.contains(&result.content_item_id) {
+            continue;
+        }
+        if !uri_stem_matches_ident(&result.item_uri, &identifiers) {
+            continue;
+        }
+        seen.insert(result.content_item_id);
+        ids.push(result.content_item_id);
+    }
+    for id in path_matched_item_ids(pool, query, filters, 6).await? {
+        if seen.insert(id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        return Ok(results);
+    }
     let patterns = same_file_patterns(query);
-    let extras = same_file_chunks(pool, &ids, &patterns, 28).await?;
+    let ident_patterns = ident_file_patterns(query);
+    let extras = same_file_chunks(pool, &ids, &patterns, &ident_patterns, 28).await?;
     let existing: std::collections::HashSet<Uuid> =
         results.iter().map(|result| result.chunk_id).collect();
     for row in extras {
@@ -911,6 +1139,7 @@ async fn same_file_chunks(
     pool: &PgPool,
     item_ids: &[Uuid],
     patterns: &[String],
+    ident_patterns: &[String],
     per_file: usize,
 ) -> sqlx::Result<Vec<KeywordResult>> {
     if item_ids.is_empty() {
@@ -920,6 +1149,11 @@ async fn same_file_chunks(
         None
     } else {
         Some(patterns)
+    };
+    let ident_patterns = if ident_patterns.is_empty() {
+        None
+    } else {
+        Some(ident_patterns)
     };
     sqlx::query_as(
         r#"
@@ -944,6 +1178,14 @@ async fn same_file_chunks(
                     PARTITION BY cc.content_item_id
                     ORDER BY
                         CASE
+                            WHEN $3::text[] IS NULL THEN 0
+                            ELSE (
+                                SELECT count(*)::int
+                                FROM unnest($3::text[]) p
+                                WHERE cc.text ILIKE p
+                            )
+                        END DESC,
+                        CASE
                             WHEN $2::text[] IS NULL THEN 1
                             WHEN cc.text ILIKE ANY($2) THEN 0
                             ELSE 1
@@ -955,12 +1197,14 @@ async fn same_file_chunks(
             WHERE cc.content_item_id = ANY($1)
               AND cc.text NOT ILIKE '%symbol: tests%'
               AND cc.text NOT ILIKE '%symbol: tests.%'
+              AND cc.text NOT ILIKE '%assert!(%'
         ) ranked
-        WHERE rn <= $3
+        WHERE rn <= $4
         "#,
     )
     .bind(item_ids)
     .bind(patterns)
+    .bind(ident_patterns)
     .bind(per_file as i64)
     .fetch_all(pool)
     .await
@@ -993,9 +1237,6 @@ pub fn cap_per_file(
     let mut chosen = Vec::new();
     let mut taken = std::collections::HashSet::<Uuid>::new();
     for key in &order {
-        if chosen.len() >= limit {
-            break;
-        }
         let Some(indices) = groups.get(key) else {
             continue;
         };
@@ -1011,7 +1252,11 @@ pub fn cap_per_file(
     chosen.sort_by(|left, right| {
         file_row_tier(&right.item_uri, &right.chunk_text)
             .cmp(&file_row_tier(&left.item_uri, &left.chunk_text))
+            .then_with(|| {
+                uri_path_hit(query, &right.item_uri).cmp(&uri_path_hit(query, &left.item_uri))
+            })
     });
+    chosen.truncate(limit);
     if max_per_file > 1 && chosen.len() < limit {
         let mut extras: HashMap<String, usize> = HashMap::new();
         for result in &results {
@@ -1110,7 +1355,7 @@ pub async fn keyword_only_search(
         &rewritten.identifiers,
         |row| (row.chunk_text.as_str(), row.item_uri.as_str()),
     );
-    let mapped = results
+    let mapped: Vec<HybridSearchResult> = results
         .into_iter()
         .enumerate()
         .map(|(rank, r)| HybridSearchResult {
@@ -1128,7 +1373,15 @@ pub async fn keyword_only_search(
             semantic_score: None,
         })
         .collect();
-    let mapped = expand_same_file(pool, query, mapped).await?;
+    if crate::embeddings::ranker::first_stage_answered(
+        query,
+        mapped
+            .iter()
+            .map(|result| (result.item_uri.as_str(), result.chunk_text.as_str())),
+    ) {
+        return Ok(finalize_ranking(mapped, query, limit));
+    }
+    let mapped = expand_same_file(pool, query, mapped, filters.as_ref()).await?;
     Ok(finalize_ranking(mapped, query, limit))
 }
 
@@ -1327,6 +1580,73 @@ mod tests {
     }
 
     #[test]
+    fn cap_per_file_prefers_filename_type_over_same_symbol_guard() {
+        let item = Uuid::from_u128(19);
+        let auth = hit(
+            1,
+            item,
+            "github://zone/routes/artifacts.rs@main",
+            "symbol: get\nkind: Function\nlet authorized = match chats::get_chat(state.db(), chat_id).await {\n    // Do not reveal whether an artifact exists\n};",
+            2.8,
+        );
+        let store = hit(
+            2,
+            item,
+            "github://zone/routes/artifacts.rs@main",
+            "symbol: get\nkind: Function\nlet store = ArtifactStore::new(state.config().comfyui.artifact_root.clone());\nmatch store.read(workspace_id, chat_id, owner_id, &filename).await {",
+            0.4,
+        );
+        let capped = cap_per_file(
+            vec![auth, store],
+            2,
+            2,
+            "How are generated chat artifacts authorized before serving?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("ArtifactStore"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_surfaces_path_named_file() {
+        let noise = (0..10).map(|idx| {
+            hit(
+                idx + 1,
+                Uuid::from_u128(30 + idx as u128),
+                &format!("github://zone/other/file{idx}.rs@main"),
+                "fn helper() {}",
+                2.0,
+            )
+        });
+        let artifact = hit(
+            20,
+            Uuid::from_u128(50),
+            "github://zone/routes/artifacts.rs@main",
+            "//! Authorized generated-artifact serving.\nasync fn get(State(state): State<AppState>)",
+            0.1,
+        );
+        let capped = cap_per_file(
+            noise.chain(std::iter::once(artifact)).collect(),
+            2,
+            10,
+            "How are generated chat artifacts authorized before serving?",
+        );
+        assert!(
+            capped.iter().any(|row| row.item_uri.contains("artifacts.rs")),
+            "uris {:?}",
+            capped.iter().map(|row| row.item_uri.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            capped[0].item_uri.contains("artifacts.rs")
+                || capped.get(1).is_some_and(|row| row.item_uri.contains("artifacts.rs")),
+            "top {:?}",
+            capped.iter().take(2).map(|row| row.item_uri.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn cap_per_file_prefers_unique_files() {
         let files = [
             Uuid::parse_str("00000000-0000-0000-0000-0000000000a1").unwrap(),
@@ -1520,13 +1840,89 @@ NotConfigured,"#,
     }
 
     #[test]
+    fn cap_per_file_prefers_trim_over_execute_stdout() {
+        let item = Uuid::from_u128(21);
+        let execute = hit(
+            1,
+            item,
+            "github://abnegate/zone/runner/zone_core/src/tools/command.rs@main",
+            r#"symbol: RunCommandTool.execute
+kind: Method
+Parent: RunCommandTool
+Signature: async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError>
+
+        let mut cmd = Command::new(&params.command);
+        cmd.args(&params.args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+"#,
+            4.0,
+        );
+        let helper = hit(
+            2,
+            item,
+            "github://abnegate/zone/runner/zone_core/src/tools/command.rs@main",
+            r#"symbol: trim_middle
+kind: Function
+Signature: fn trim_middle(text: &str) -> String
+
+fn trim_middle(text: &str) -> String {
+    format!("{head}\n\n[… {} characters trimmed …]\n\n{tail}", chars.len())
+}
+"#,
+            0.2,
+        );
+        let capped = cap_per_file(
+            vec![execute, helper],
+            2,
+            2,
+            "How does run_command trim oversized stdout?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("trim_middle"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_cleanup_over_constructor() {
+        let item = Uuid::from_u128(18);
+        let ctor = hit(
+            1,
+            item,
+            "github://zone/utils/rate_limit.rs@main",
+            "symbol: RateLimiter.new\nkind: Method\n/// Create a new rate limiter with the given configuration\npub fn new(config: RateLimitConfig)",
+            3.4,
+        );
+        let cleanup = hit(
+            2,
+            item,
+            "github://zone/utils/rate_limit.rs@main",
+            "symbol: RateLimiter.cleanup\nkind: Method\n/// Clean up old entries (optional, for memory management)\npub fn cleanup(&self)",
+            0.4,
+        );
+        let capped = cap_per_file(
+            vec![ctor, cleanup],
+            2,
+            2,
+            "How does the rate limiter prevent unbounded memory growth?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("fn cleanup"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
     fn cap_per_file_prefers_cleanup_over_check() {
         let item = Uuid::from_u128(15);
         let check = hit(
             1,
             item,
             "github://zone/utils/rate_limit.rs@main",
-            "symbol: RateLimiter.check_rate_limit\nParent: RateLimiter\npub fn check_rate_limit(&self, user_id: Uuid)",
+            "symbol: RateLimiter.check_rate_limit\nkind: Method\nParent: RateLimiter\n// This prevents race condition where two concurrent requests both see count=9\npub fn check_rate_limit(&self, user_id: Uuid)",
             3.0,
         );
         let cleanup = hit(
@@ -1739,6 +2135,37 @@ NotConfigured,"#,
             ranked[0].chunk_text.contains("pub fn should_skip_blob"),
             "kept {}",
             ranked[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_ident_conjunction_over_gather_prefix() {
+        let item = Uuid::from_u128(22);
+        let gather = hit(
+            1,
+            item,
+            "github://zone/context/service.rs@main",
+            "symbol: ContextService.gather\nkind: Method\npub async fn gather(&self) {\n    result.items_unchanged += fetch_result.stats.items_skipped;\n}",
+            3.5,
+        );
+        let call = hit(
+            2,
+            item,
+            "github://zone/context/service.rs@main",
+            "symbol: ContextService.gather\nkind: Method\nlet uris = fetch_result.live_uris.clone();\nstore.retain_content_uris(source.id, &uris)\n}",
+            0.3,
+        );
+        let capped = cap_per_file(
+            vec![gather, call],
+            2,
+            2,
+            "Why must retain_content_uris use live_uris after an incremental gather?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("retain_content_uris")
+                && capped[0].chunk_text.contains("live_uris"),
+            "kept {}",
+            capped[0].chunk_text
         );
     }
 

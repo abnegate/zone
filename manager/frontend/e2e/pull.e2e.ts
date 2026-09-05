@@ -34,7 +34,7 @@ test('authenticates model pulls and displays provider errors before allowing a s
   await page.goto('/models');
   const input = page.locator('.model-form input');
   const install = page.locator('.model-form button[type="submit"]');
-  const panel = page.locator('.models-install-panel');
+  const panel = page.locator('.pull-jobs-panel, .models-install-panel');
   await expect(panel).toContainText('Ollama model:tag');
   await expect(panel).toContainText('hf.co/owner/Model-GGUF');
   await input.fill('qwen/qwen3.8-27b');
@@ -163,7 +163,7 @@ test.describe('catalog download references', () => {
         }
         await expect.poll(() => requests).toEqual([reference]);
         await page.getByRole('tab', { name: 'Installed', exact: true }).click();
-        await expect(page.locator('.models-install-panel')).toContainText('Installation complete');
+        await expect(page.locator('.pull-jobs-panel')).toContainText('Installation complete');
         await expect(
           page.getByRole('heading', { name: 'Installed Models', exact: true })
         ).toBeVisible();
@@ -211,12 +211,12 @@ test('keeps a chunked download running after leaving Models', async ({ context, 
   await expect(page.locator('.progress-chunk')).toContainText('42 B / 100 B');
 
   await page.getByRole('link', { name: 'Chats', exact: true }).click();
-  const indicator = page.locator('.pull-download-indicator');
-  await expect(indicator).toContainText('Downloading qwen3.8:27b');
-  await expect(indicator).toContainText('42%');
-  await expect(page.locator('.models-install-panel')).toHaveCount(0);
+  const dock = page.locator('.download-dock');
+  await expect(dock).toContainText('qwen3.8:27b');
+  await expect(dock).toContainText('42%');
+  await expect(page.locator('.pull-jobs-panel')).toHaveCount(0);
 
   await page.getByRole('link', { name: 'Models', exact: true }).click();
-  await expect(page.locator('.models-install-panel')).toContainText('42%');
-  await expect(page.locator('.pull-download-indicator')).toHaveCount(0);
+  await expect(page.locator('.pull-jobs-panel')).toContainText('42%');
+  await expect(page.locator('.download-dock')).toHaveCount(0);
 });

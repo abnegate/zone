@@ -10,8 +10,8 @@ pub use providers::{
     ProviderError, get_provider, get_provider_with_proxy,
 };
 pub use types::{
-    BrowseQuery, BrowseResponse, ErrorResponse, ListModelsQuery, ModelDetails, ModelResponse,
-    ModelSizeFilter, ModelSort,
+    BrowseQuery, BrowseResponse, DiskUsage, ErrorResponse, ListModelsQuery, ModelDetails,
+    ModelResponse, ModelSizeFilter, ModelSort,
 };
 
 use axum::{
@@ -338,5 +338,53 @@ pub async fn delete(
             ))),
         )
             .into_response(),
+    }
+}
+
+/// GET /api/models/disk
+pub async fn disk(_auth: AuthUser) -> impl IntoResponse {
+    let path = std::env::var("ZONE_DISK_PATH").unwrap_or_else(|_| "/".to_string());
+    match filesystem_usage(&path) {
+        Some(usage) => Json(usage).into_response(),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("Unable to read disk usage")),
+        )
+            .into_response(),
+    }
+}
+
+pub(crate) fn filesystem_usage(path: &str) -> Option<DiskUsage> {
+    let stat = nix::sys::statvfs::statvfs(path).ok()?;
+    let fragment_size = stat.fragment_size() as u64;
+    let total_bytes = (stat.blocks() as u64).saturating_mul(fragment_size);
+    if total_bytes == 0 {
+        return None;
+    }
+    let available_bytes = (stat.blocks_available() as u64).saturating_mul(fragment_size);
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+    Some(DiskUsage {
+        used_bytes,
+        total_bytes,
+        available_bytes,
+        percent: (used_bytes as f64 / total_bytes as f64) * 100.0,
+    })
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use super::filesystem_usage;
+
+    #[test]
+    fn reads_root_filesystem() {
+        let usage = filesystem_usage("/").expect("root filesystem");
+        assert!(usage.total_bytes > 0);
+        assert!(usage.percent >= 0.0 && usage.percent <= 100.0);
+        assert_eq!(usage.used_bytes + usage.available_bytes, usage.total_bytes);
+    }
+
+    #[test]
+    fn missing_path_returns_none() {
+        assert!(filesystem_usage("/this/path/does/not/exist").is_none());
     }
 }

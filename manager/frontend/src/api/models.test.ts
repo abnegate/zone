@@ -20,6 +20,20 @@ describe('Namespaced model requests', () => {
     );
   });
 
+  it('requests disk usage from the dedicated endpoint', async () => {
+    const disk = {
+      used_bytes: 50,
+      total_bytes: 100,
+      available_bytes: 50,
+      percent: 50,
+    };
+    const request = mock(async () => Response.json(disk));
+    global.fetch = request as typeof fetch;
+
+    expect(await modelsApi.getDisk()).toEqual(disk);
+    expect(request).toHaveBeenCalledWith('/api/models/disk', expect.anything());
+  });
+
   it('encodes the complete model name when deleting it', async () => {
     const request = mock(async () => new Response(null, { status: 204 }));
     global.fetch = request as typeof fetch;

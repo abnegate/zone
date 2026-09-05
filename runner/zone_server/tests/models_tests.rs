@@ -873,3 +873,43 @@ async fn test_get_model_details() {
     assert_eq!(model["details"]["family"], "mistral");
     assert_eq!(model["details"]["quantization_level"], "Q4_K_M");
 }
+
+#[tokio::test]
+async fn test_disk_usage_requires_auth() {
+    let router = create_test_router_with_ollama("http://localhost:9999").await;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/models/disk")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_disk_usage_returns_percent() {
+    let router = create_test_router_with_ollama("http://localhost:9999").await;
+    let token = get_auth_token(&router).await;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/models/disk")
+        .header("Authorization", format!("Bearer {}", token))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let disk: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(disk["total_bytes"].as_u64().unwrap() > 0);
+    assert!(disk["percent"].as_f64().is_some());
+    assert_eq!(
+        disk["used_bytes"].as_u64().unwrap() + disk["available_bytes"].as_u64().unwrap(),
+        disk["total_bytes"].as_u64().unwrap()
+    );
+}

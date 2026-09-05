@@ -3,12 +3,18 @@ import DOMPurify from 'dompurify';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
 import Capabilities from '../components/Capabilities';
+import PullJobs from '../components/PullJobs';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
 import { usePull } from '../hooks/usePull';
 import type { BrowseModel, InstalledModel, ModelSort } from '../types';
-import { MODEL_FAMILY_FILTERS, MODEL_SIZE_FILTERS, MODEL_SORT_OPTIONS } from '../types';
+import {
+  MAX_PARALLEL_PULLS,
+  MODEL_FAMILY_FILTERS,
+  MODEL_SIZE_FILTERS,
+  MODEL_SORT_OPTIONS,
+} from '../types';
 import {
   defaultDownloadName,
   formatBytes,
@@ -18,13 +24,21 @@ import {
   formatNumber,
   modelDownload,
   modelDownloadSizes,
+  modelSourceUrl,
 } from '../utils';
 import './ModelsPage.css';
 
 type Tab = 'installed' | 'browse';
 
 export default function ModelsPage() {
-  const { models, loading: modelsLoading, error: modelsError, refresh, deleteModel } = useModels();
+  const {
+    models,
+    disk,
+    loading: modelsLoading,
+    error: modelsError,
+    refresh,
+    deleteModel,
+  } = useModels();
   const browse = useBrowse();
   const pull = usePull();
 
@@ -50,7 +64,7 @@ export default function ModelsPage() {
 
   const handlePull = async (e: FormEvent) => {
     e.preventDefault();
-    if (!modelInput.trim() || pull.pulling) return;
+    if (!modelInput.trim() || !pull.canStart(modelInput.trim())) return;
 
     const success = await pull.pull(modelInput.trim());
     if (success) {
@@ -83,7 +97,7 @@ export default function ModelsPage() {
       void handleShowDetails(model);
       return;
     }
-    if (pull.pulling) return;
+    if (!pull.canStart(download.name)) return;
     const sizes = modelDownloadSizes(model);
     if (sizes.length > 1 && !pullName) {
       void handleShowDetails(model);
@@ -134,6 +148,16 @@ export default function ModelsPage() {
     detailsModel && !isInstalledModel(detailsModel)
       ? modelDownload(detailsModel, selectedSize || undefined, browse.source)
       : null;
+  const sourceUrl = detailsModel
+    ? modelSourceUrl(
+        detailsModel.name,
+        isInstalledModel(detailsModel) ? null : detailsModel.url,
+        isInstalledModel(detailsModel) ? null : detailsModel.source || browse.source
+      )
+    : null;
+  const currentName = modelInput.trim();
+  const currentJob = pull.jobs.find((job) => job.pulling && job.modelName === currentName);
+  const modelsBytes = models.reduce((sum, model) => sum + (model.size || 0), 0);
 
   return (
     <div className="page page--workspace models-page">
@@ -142,6 +166,30 @@ export default function ModelsPage() {
           <h1>Models</h1>
           <p>Manage your Ollama models</p>
         </div>
+        {disk && (
+          <div
+            className="models-disk"
+            title={`${formatBytes(disk.used_bytes)} used of ${formatBytes(disk.total_bytes)}${
+              modelsBytes ? ` · ${formatBytes(modelsBytes)} in models` : ''
+            }`}
+          >
+            <span className="models-disk-label">Disk</span>
+            <div
+              className="models-disk-track"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(disk.percent)}
+              aria-label="Disk space used"
+            >
+              <div
+                className="models-disk-fill"
+                style={{ width: `${Math.min(100, Math.max(0, disk.percent))}%` }}
+              />
+            </div>
+            <span className="models-disk-value">{Math.round(disk.percent)}%</span>
+          </div>
+        )}
         <Tabs
           value={activeTab}
           onValueChange={(v) => setActiveTab(v as Tab)}
@@ -158,6 +206,18 @@ export default function ModelsPage() {
       </header>
 
       <div className="models-body">
+        {pull.jobs.length > 0 && (
+          <section className="card pull-jobs-panel">
+            <div className="pull-jobs-panel-header">
+              <h2>Downloads</h2>
+              <span className="help-text">
+                {pull.activeCount} of {MAX_PARALLEL_PULLS} slots in use
+              </span>
+            </div>
+            <PullJobs jobs={pull.jobs} onCancel={pull.cancel} onDismiss={pull.dismiss} />
+          </section>
+        )}
+
         {/* Installed Tab Content */}
         {activeTab === 'installed' && (
           <>
@@ -177,72 +237,21 @@ export default function ModelsPage() {
                     placeholder="Model name..."
                     value={modelInput}
                     onChange={(e) => setModelInput(e.target.value)}
-                    disabled={pull.pulling}
+                    disabled={pull.activeCount >= MAX_PARALLEL_PULLS}
                   />
-                  <Button type="submit" loading={pull.pulling} disabled={!modelInput.trim()}>
-                    {pull.pulling ? 'Installing...' : 'Install'}
+                  <Button
+                    type="submit"
+                    loading={Boolean(currentJob)}
+                    disabled={!currentName || !pull.canStart(currentName)}
+                  >
+                    {currentJob
+                      ? 'Installing...'
+                      : pull.activeCount >= MAX_PARALLEL_PULLS
+                        ? 'Slots full'
+                        : 'Install'}
                   </Button>
                 </div>
               </form>
-
-              {/* Pull Progress */}
-              {(pull.pulling || pull.result) && (
-                <div className="progress-section">
-                  <div className="progress-header">
-                    {pull.pulling
-                      ? `Installing ${pull.model || 'model'}...`
-                      : pull.result?.success
-                        ? 'Installation complete'
-                        : 'Installation failed'}
-                    {pull.pulling && (
-                      <Button type="button" variant="ghost" size="sm" onClick={pull.cancel}>
-                        Cancel
-                      </Button>
-                    )}
-                  </div>
-
-                  {pull.progress !== null && (
-                    <div className="progress-bar-container">
-                      <div className="progress-bar" style={{ width: `${pull.progress}%` }} />
-                      <span className="progress-text">{Math.round(pull.progress)}%</span>
-                    </div>
-                  )}
-
-                  {pull.chunk && (
-                    <p className="progress-chunk">
-                      {formatBytes(pull.chunk.completed)} / {formatBytes(pull.chunk.total)}
-                      {pull.chunk.digest
-                        ? ` · ${pull.chunk.digest.replace(/^sha256:/, '').slice(0, 12)}`
-                        : ''}
-                    </p>
-                  )}
-
-                  {pull.steps.length > 0 && (
-                    <div className="steps-list">
-                      {pull.steps.map((step) => (
-                        <div
-                          key={`${step.name}-${step.status}`}
-                          className={`step-item step-${step.status}`}
-                        >
-                          <span className="step-icon">
-                            {step.status === 'success' ? '✓' : step.status === 'error' ? '✗' : '○'}
-                          </span>
-                          <span className="step-name">{step.name}</span>
-                          <span className="step-message">{step.message}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {pull.result && (
-                    <div
-                      className={`result-message ${pull.result.success ? 'result-success' : 'result-error'}`}
-                    >
-                      {pull.result.message}
-                    </div>
-                  )}
-                </div>
-              )}
             </section>
 
             {/* Installed Models Section */}
@@ -544,6 +553,14 @@ export default function ModelsPage() {
               </span>
             </div>
 
+            {sourceUrl && (
+              <div className="details-link">
+                <a href={sourceUrl} target="_blank" rel="noreferrer">
+                  View source
+                </a>
+              </div>
+            )}
+
             {isInstalledModel(detailsModel) ? (
               <>
                 {detailsModel.details?.description && (
@@ -713,14 +730,6 @@ export default function ModelsPage() {
                   </div>
                 )}
 
-                {detailsModel.url && (
-                  <div className="details-link">
-                    <a href={detailsModel.url} target="_blank" rel="noreferrer">
-                      View source
-                    </a>
-                  </div>
-                )}
-
                 {download?.name && modelDownloadSizes(detailsModel).length > 1 && (
                   <div className="details-size-picker">
                     <Select
@@ -785,7 +794,7 @@ export default function ModelsPage() {
 
                 <div className="modal-actions">
                   <Button
-                    disabled={!download?.name || pull.pulling}
+                    disabled={!download?.name || !pull.canStart(download.name)}
                     onClick={() =>
                       handleInstall(detailsModel, selectedSize || defaultDownloadName(detailsModel))
                     }

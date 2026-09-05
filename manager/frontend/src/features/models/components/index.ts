@@ -1,2 +1,3 @@
-export { default as PullDownloadIndicator } from './PullDownloadIndicator';
+export { default as DownloadDock } from './DownloadDock';
+export { default as PullJobs } from './PullJobs';
 export { default as VirtualBrowseList } from './VirtualBrowseList';

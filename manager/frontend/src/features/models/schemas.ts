@@ -53,6 +53,13 @@ export const ModelsResponseSchema = z.object({
   models: z.array(InstalledModelSchema),
 });
 
+export const DiskUsageSchema = z.object({
+  used_bytes: z.number(),
+  total_bytes: z.number(),
+  available_bytes: z.number(),
+  percent: z.number(),
+});
+
 export const BrowseResponseSchema = z.object({
   models: z.array(BrowseModelSchema),
   next_cursor: z.string().nullable(),

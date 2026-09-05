@@ -347,7 +347,13 @@ pub fn first_stage_answered<'a>(
             && code_definition(text, uri, &identifiers)
             && !(name_only_definition(text, &identifiers)
                 && definition_misses_question(query, text))
+            && conjunction_satisfied(text, &identifiers)
     })
+}
+
+fn conjunction_satisfied(text: &str, identifiers: &[String]) -> bool {
+    let code_ids: Vec<&String> = identifiers.iter().filter(|id| !id.contains('/')).collect();
+    code_ids.len() < 2 || code_ids.iter().all(|id| text.contains(id.as_str()))
 }
 
 pub fn answers_as_definition(query: &str, uri: &str, text: &str) -> bool {
@@ -936,5 +942,39 @@ mod tests {
                 "fn name(&self) -> &str {\n        \"run_command\"\n    }",
             )],
         ));
+        assert!(
+            !first_stage_answered(
+                "Why must retain_content_uris use live_uris after an incremental gather?",
+                [(
+                    "github://zone/embeddings/pgvector.rs@main",
+                    "pub async fn retain_content_uris(&self, source_id: Uuid, uris: &[String]) { }",
+                )],
+            ),
+            "one identifier is not enough when the question names two"
+        );
+        let execute = concat!(
+            "symbol: RunCommandTool.execute\nkind: Method\nParent: RunCommandTool\n",
+            "async fn execute(&self, params: Value, context: &ToolContext) {\n",
+            "    cmd.stdout(Stdio::piped());\n",
+            "}\n",
+        );
+        assert!(
+            !first_stage_answered(
+                "How does run_command trim oversized stdout?",
+                [(
+                    "github://abnegate/zone/runner/zone_core/src/tools/command.rs@main",
+                    execute,
+                )],
+            ),
+            "execute is not a run_command definition"
+        );
+        assert!(
+            !answers_as_definition(
+                "How does run_command trim oversized stdout?",
+                "github://abnegate/zone/runner/zone_core/src/tools/command.rs@main",
+                execute,
+            ),
+            "execute should not win the file row as a definition"
+        );
     }
 }
