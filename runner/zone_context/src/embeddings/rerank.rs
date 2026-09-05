@@ -78,7 +78,15 @@ pub fn lexical_cross_score(query: &str, uri: &str, title: &str, text: &str) -> f
         0.0
     };
 
-    (ident + 0.22 * coverage + phrase + title_hit + path_hit).clamp(0.0, 1.0)
+    let mut bridge = 0.0f32;
+    for term in crate::embeddings::nl_bridge_terms(query) {
+        if term.contains('_') && text_l.contains(&term) {
+            bridge += 0.12;
+        }
+    }
+    bridge = bridge.min(0.24);
+
+    (ident + 0.22 * coverage + phrase + title_hit + path_hit + bridge).clamp(0.0, 1.0)
 }
 
 #[async_trait]

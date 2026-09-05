@@ -246,7 +246,7 @@ fn reexport_def(text: &str, id: &str) -> bool {
             || text.contains(&format!("::{id};")))
 }
 
-fn ident_hit_count(text: &str, identifiers: &[String]) -> usize {
+pub fn ident_hit_count(text: &str, identifiers: &[String]) -> usize {
     identifiers
         .iter()
         .filter(|id| text.contains(id.as_str()))

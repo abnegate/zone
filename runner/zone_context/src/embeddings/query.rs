@@ -18,10 +18,28 @@ pub fn rewrite_query(query: &str) -> RewrittenQuery {
     // `to_tsvector('english', 'should_skip_blob')` stores one lexeme — splitting
     // on `_` would miss the hit. OR multiple identifiers so a path + symbol
     // query does not require both tokens in the same chunk.
+    let nl_terms = expand_nl_terms(query);
     let keyword = if identifiers.is_empty() {
-        fts_tokens(query)
+        if nl_terms.is_empty() {
+            fts_tokens(query)
+        } else {
+            nl_terms.join(" OR ")
+        }
     } else {
-        expand_keyword_idents(&identifiers)
+        let ident = expand_keyword_idents(&identifiers);
+        let extra: Vec<String> = nl_terms
+            .into_iter()
+            .filter(|term| {
+                !ident
+                    .split_whitespace()
+                    .any(|part| part.eq_ignore_ascii_case(term))
+            })
+            .collect();
+        if extra.is_empty() {
+            ident
+        } else {
+            format!("{ident} OR {}", extra.join(" OR "))
+        }
     };
     RewrittenQuery {
         original: query.to_string(),
@@ -235,6 +253,174 @@ fn fts_tokens(query: &str) -> String {
         .join(" ")
 }
 
+/// English FTS ANDs unquoted words, so NL questions miss `verify_signature`
+/// unless we OR distinctive tokens and snake-case bridges (`cors` + `origins`
+/// → `cors_origins`) that already appear in indexed `symbol:` / Signature
+/// lines. Identifier queries stay on `expand_keyword_idents`.
+pub fn nl_bridge_terms(query: &str) -> Vec<String> {
+    expand_nl_terms(query)
+}
+
+/// Distinctive NL tokens used to decide which chunk of a file answers the question.
+pub fn nl_content_tokens(query: &str) -> Vec<String> {
+    let identifiers: HashSet<String> = extract_identifiers(query)
+        .into_iter()
+        .map(|token| token.to_ascii_lowercase())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut tokens = Vec::new();
+    for token in tokenize(query) {
+        let token = token.to_ascii_lowercase();
+        if identifiers.contains(&token)
+            || is_nl_stopword(&token)
+            || !token.chars().any(|c| c.is_ascii_alphabetic())
+            || !keep_nl_pair_token(&token)
+            || !seen.insert(token.clone())
+        {
+            continue;
+        }
+        tokens.push(token);
+        if tokens.len() == 8 {
+            break;
+        }
+    }
+    tokens
+}
+
+fn expand_nl_terms(query: &str) -> Vec<String> {
+    let tokens = nl_content_tokens(query);
+    let mut seen: HashSet<String> = tokens.iter().cloned().collect();
+    let mut terms = Vec::new();
+    for token in &tokens {
+        if keep_nl_singleton(token) {
+            terms.push(token.clone());
+        }
+    }
+    let mut push_pair = |left: &str, right: &str| {
+        if left.len() < 4 || right.len() < 4 {
+            return;
+        }
+        let snake = format!("{left}_{right}");
+        if snake.len() >= 8 && seen.insert(snake.clone()) {
+            terms.push(snake);
+        }
+    };
+    for pair in tokens.windows(2) {
+        push_pair(&pair[0], &pair[1]);
+    }
+    if let (Some(first), Some(last)) = (tokens.first(), tokens.last())
+        && first != last
+    {
+        push_pair(first, last);
+    }
+    terms
+}
+
+fn keep_nl_pair_token(token: &str) -> bool {
+    token.len() >= 4
+        || matches!(
+            token,
+            "cors" | "jwt" | "smtp" | "mcp" | "hmac" | "aes" | "gcm" | "sha" | "sql"
+        )
+}
+
+fn keep_nl_singleton(token: &str) -> bool {
+    if matches!(
+        token,
+        "generated" | "serving" | "prevent" | "unbounded" | "growth" | "often" | "wake" | "stored"
+    ) {
+        return false;
+    }
+    token.len() >= 6
+        || matches!(
+            token,
+            "cors" | "jwt" | "smtp" | "mcp" | "hmac" | "aes" | "gcm"
+        )
+}
+
+fn is_nl_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "how"
+            | "does"
+            | "do"
+            | "did"
+            | "the"
+            | "a"
+            | "an"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "when"
+            | "what"
+            | "where"
+            | "why"
+            | "who"
+            | "which"
+            | "for"
+            | "from"
+            | "with"
+            | "that"
+            | "this"
+            | "into"
+            | "onto"
+            | "than"
+            | "then"
+            | "just"
+            | "used"
+            | "using"
+            | "after"
+            | "before"
+            | "about"
+            | "over"
+            | "under"
+            | "and"
+            | "or"
+            | "not"
+            | "can"
+            | "could"
+            | "should"
+            | "would"
+            | "will"
+            | "its"
+            | "their"
+            | "our"
+            | "must"
+            | "have"
+            | "has"
+            | "been"
+            | "being"
+            | "all"
+            | "any"
+            | "each"
+            | "return"
+            | "returned"
+            | "returns"
+            | "implement"
+            | "implemented"
+            | "please"
+            | "tell"
+            | "me"
+            | "on"
+            | "in"
+            | "at"
+            | "of"
+            | "to"
+            | "by"
+            | "up"
+            | "out"
+            | "off"
+            | "if"
+            | "as"
+            | "so"
+            | "no"
+            | "yes"
+            | "server"
+            | "client"
+    )
+}
+
 /// Qwen3-Embedding is instruction-aware; document vectors stay raw.
 pub fn embed_query_text(model: &str, query: &str) -> String {
     if model_family(model).contains("qwen") {
@@ -367,6 +553,47 @@ mod tests {
         assert!(text.contains("Instruct:"));
         assert!(text.contains("should_skip_blob"));
         assert_eq!(embed_query_text("nomic-embed-text", "hello"), "hello");
+    }
+
+    #[test]
+    fn nl_query_ors_distinctive_tokens_and_snake_bridges() {
+        let webhook = rewrite_query("How does the server verify a GitHub webhook signature?");
+        assert!(webhook.identifiers.is_empty());
+        assert!(webhook.keyword.contains(" OR "));
+        assert!(webhook.keyword.contains("webhook"));
+        assert!(webhook.keyword.contains("signature"));
+        assert!(
+            webhook.keyword.contains("webhook_signature")
+                || webhook.keyword.contains("verify_signature")
+        );
+
+        let cors = rewrite_query("When does the API allow all CORS origins?");
+        assert!(cors.keyword.to_ascii_lowercase().contains("cors"));
+        assert!(cors.keyword.contains("cors_origins"));
+
+        let rate = rewrite_query("How does the rate limiter prevent unbounded memory growth?");
+        assert!(rate.keyword.contains("rate_limiter"));
+
+        let refresh = rewrite_query("How often does the knowledge refresh worker wake up?");
+        assert!(refresh.keyword.contains("knowledge_refresh"));
+
+        let email = rewrite_query("What error is returned when SMTP is not configured?");
+        assert!(email.keyword.contains("smtp"));
+        assert!(
+            !email.keyword.split(" OR ").any(|term| term == "error"),
+            "bare 'error' floods error.rs: {}",
+            email.keyword
+        );
+
+        let ident = rewrite_query("What does should_skip_blob do when a file SHA is unchanged?");
+        assert!(ident.keyword.contains("should_skip_blob"));
+        assert!(ident.keyword.contains("unchanged"));
+        assert!(!ident.keyword.contains("what_does"));
+        assert!(
+            nl_bridge_terms(&ident.original)
+                .iter()
+                .any(|term| term == "unchanged")
+        );
     }
 
     #[test]

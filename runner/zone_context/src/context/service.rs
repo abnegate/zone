@@ -841,7 +841,7 @@ fn assemble_hybrid_results(
     limit: usize,
 ) -> Vec<SearchResultWithAnalysis> {
     prefer_definition_chunks(query, &mut results);
-    cap_per_file(results, 2, limit)
+    cap_per_file(results, 2, limit, query)
         .into_iter()
         .map(|result| SearchResultWithAnalysis::from_hybrid(result, used_embedding))
         .collect()

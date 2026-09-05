@@ -466,7 +466,7 @@ pub fn finalize_ranking(
         .into_iter()
         .filter(|result| !crate::embeddings::ranker::is_fixture_uri(&result.item_uri))
         .collect();
-    cap_per_file(ranked, 2, limit)
+    cap_per_file(ranked, 2, limit, query)
 }
 
 pub fn apply_local_rerank(
@@ -500,9 +500,6 @@ pub fn apply_local_rerank(
 /// definition first so unique-file eval and the 1-per-file pass keep the impl.
 pub fn prefer_definition_chunks(query: &str, results: &mut [HybridSearchResult]) {
     let identifiers = crate::embeddings::rewrite_query(query).identifiers;
-    if identifiers.is_empty() {
-        return;
-    }
     results.sort_by(|a, b| {
         let ta = crate::embeddings::ranker::chunk_rank_tier(query, &a.item_uri, &a.chunk_text);
         let tb = crate::embeddings::ranker::chunk_rank_tier(query, &b.item_uri, &b.chunk_text);
@@ -647,42 +644,146 @@ fn keep_answer_chunks<T>(
     body
 }
 
+fn file_key(result: &HybridSearchResult) -> String {
+    result
+        .item_uri
+        .split('@')
+        .next()
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(result.item_uri.as_str())
+        .to_string()
+}
+
+fn cmp_file_chunks(
+    query: &str,
+    left: &HybridSearchResult,
+    right: &HybridSearchResult,
+) -> std::cmp::Ordering {
+    let left_tier = file_row_tier(&left.item_uri, &left.chunk_text);
+    let right_tier = file_row_tier(&right.item_uri, &right.chunk_text);
+    let identifiers = crate::embeddings::rewrite_query(query).identifiers;
+    left_tier.cmp(&right_tier).then_with(|| {
+        let left_cover = question_coverage(query, &left.chunk_text, &identifiers);
+        let right_cover = question_coverage(query, &right.chunk_text, &identifiers);
+        left_cover.cmp(&right_cover).then_with(|| {
+            let left_role = crate::embeddings::ranker::role_strength(
+                &left.chunk_text,
+                &left.item_uri,
+                &identifiers,
+            );
+            let right_role = crate::embeddings::ranker::role_strength(
+                &right.chunk_text,
+                &right.item_uri,
+                &identifiers,
+            );
+            left_role.cmp(&right_role).then_with(|| {
+                let left_lex = crate::embeddings::lexical_cross_score(
+                    query,
+                    &left.item_uri,
+                    &left.item_title,
+                    &left.chunk_text,
+                );
+                let right_lex = crate::embeddings::lexical_cross_score(
+                    query,
+                    &right.item_uri,
+                    &right.item_title,
+                    &right.chunk_text,
+                );
+                left_lex
+                    .partial_cmp(&right_lex)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        left.score
+                            .partial_cmp(&right.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            })
+        })
+    })
+}
+
+fn file_row_tier(uri: &str, text: &str) -> u8 {
+    if crate::embeddings::ranker::is_test_chunk(uri, text)
+        || crate::embeddings::ranker::is_fixture_uri(uri)
+    {
+        return 0;
+    }
+    if crate::embeddings::ranker::is_outline_chunk(text) {
+        return 1;
+    }
+    2
+}
+
+fn question_coverage(query: &str, text: &str, identifiers: &[String]) -> u32 {
+    let ident_hits = crate::embeddings::ranker::ident_hit_count(text, identifiers) as u32;
+    let text_l = text.to_ascii_lowercase();
+    let bridges = crate::embeddings::nl_bridge_terms(query)
+        .into_iter()
+        .filter(|term| text_l.contains(term))
+        .count() as u32;
+    let words = crate::embeddings::nl_content_tokens(query)
+        .into_iter()
+        .filter(|term| text_l.contains(term))
+        .count() as u32;
+    ident_hits * 2 + bridges + words
+}
+
 /// Keep unique files first so a second gold can enter the window, then
 /// fill leftover slots with extra chunks (up to `max_per_file`).
+///
+/// The row that represents a file is the best retrieved chunk of that file
+/// (body / definition / lexical overlap), not whichever chunk RRF surfaced
+/// first. Unique-file eval only grades that first row.
 pub fn cap_per_file(
     results: Vec<HybridSearchResult>,
     max_per_file: usize,
     limit: usize,
+    query: &str,
 ) -> Vec<HybridSearchResult> {
     if limit == 0 || max_per_file == 0 {
         return Vec::new();
     }
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut order = Vec::new();
+    for (idx, result) in results.iter().enumerate() {
+        let key = file_key(result);
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(idx);
+    }
     let mut chosen = Vec::new();
-    let mut per_item = HashMap::<Uuid, usize>::new();
     let mut taken = std::collections::HashSet::<Uuid>::new();
-    for result in &results {
+    for key in &order {
         if chosen.len() >= limit {
             break;
         }
-        let seen = per_item.entry(result.content_item_id).or_insert(0);
-        if *seen == 0 {
-            *seen = 1;
-            taken.insert(result.chunk_id);
-            chosen.push(result.clone());
-        }
+        let Some(indices) = groups.get(key) else {
+            continue;
+        };
+        let Some(&best_idx) = indices
+            .iter()
+            .max_by(|&&left, &&right| cmp_file_chunks(query, &results[left], &results[right]))
+        else {
+            continue;
+        };
+        taken.insert(results[best_idx].chunk_id);
+        chosen.push(results[best_idx].clone());
     }
     if max_per_file > 1 && chosen.len() < limit {
-        for result in results {
+        let mut extras: HashMap<String, usize> = HashMap::new();
+        for result in &results {
             if chosen.len() >= limit {
                 break;
             }
             if taken.contains(&result.chunk_id) {
                 continue;
             }
-            let seen = per_item.entry(result.content_item_id).or_insert(0);
-            if *seen > 0 && *seen < max_per_file {
-                *seen += 1;
-                chosen.push(result);
+            let extras = extras.entry(file_key(result)).or_insert(0);
+            if *extras + 1 < max_per_file {
+                *extras += 1;
+                taken.insert(result.chunk_id);
+                chosen.push(result.clone());
             }
         }
     }
@@ -1009,11 +1110,148 @@ mod tests {
                 })
             })
             .collect();
-        let capped = cap_per_file(results, 2, 4);
+        let capped = cap_per_file(results, 2, 4, "unique files");
         let unique: std::collections::HashSet<_> =
             capped.iter().map(|r| r.content_item_id).collect();
         assert_eq!(unique.len(), 3);
         assert_eq!(capped.len(), 4);
+    }
+
+    #[test]
+    fn cap_per_file_uses_best_chunk_as_file_row() {
+        let item = Uuid::from_u128(10);
+        let header = HybridSearchResult {
+            chunk_id: Uuid::from_u128(1),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text:
+                "path: github://zone/services/email.rs kind: file_header\n\nidentifiers: send_email"
+                    .into(),
+            item_uri: "github://zone/services/email.rs@main".into(),
+            item_title: "email.rs".into(),
+            score: 3.0,
+            fusion_score: 3.0,
+            keyword_rank: Some(1),
+            semantic_rank: None,
+            keyword_score: Some(0.4),
+            semantic_score: None,
+        };
+        let body = HybridSearchResult {
+            chunk_id: Uuid::from_u128(2),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text: r#"return Err("Email service not configured");"#.into(),
+            item_uri: "github://zone/services/email.rs@main".into(),
+            item_title: "email.rs".into(),
+            score: 1.0,
+            fusion_score: 1.0,
+            keyword_rank: Some(2),
+            semantic_rank: None,
+            keyword_score: Some(0.2),
+            semantic_score: None,
+        };
+        let capped = cap_per_file(
+            vec![header, body],
+            2,
+            2,
+            "What error is returned when SMTP is not configured?",
+        );
+        assert!(
+            capped[0]
+                .chunk_text
+                .contains("Email service not configured"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_identifier_mention_over_same_file_neighbor() {
+        let item = Uuid::from_u128(11);
+        let neighbor = HybridSearchResult {
+            chunk_id: Uuid::from_u128(1),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text: "pub async fn list_chats(state: AppState) -> Result<Vec<Chat>>".into(),
+            item_uri: "github://zone/routes/chats.rs@main".into(),
+            item_title: "chats.rs".into(),
+            score: 4.0,
+            fusion_score: 4.0,
+            keyword_rank: Some(1),
+            semantic_rank: None,
+            keyword_score: Some(0.5),
+            semantic_score: None,
+        };
+        let mention = HybridSearchResult {
+            chunk_id: Uuid::from_u128(2),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text: "get(search_messages) // GET /api/chats/search".into(),
+            item_uri: "github://zone/routes/chats.rs@main".into(),
+            item_title: "chats.rs".into(),
+            score: 1.1,
+            fusion_score: 1.1,
+            keyword_rank: Some(2),
+            semantic_rank: None,
+            keyword_score: Some(0.2),
+            semantic_score: None,
+        };
+        let capped = cap_per_file(
+            vec![neighbor, mention],
+            2,
+            2,
+            "Where is search_messages used by GET /api/chats/search?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("search_messages"),
+            "kept {}",
+            capped[0].chunk_text
+        );
+    }
+
+    #[test]
+    fn cap_per_file_prefers_question_coverage_over_bare_definition() {
+        let item = Uuid::from_u128(12);
+        let definition = HybridSearchResult {
+            chunk_id: Uuid::from_u128(1),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text: "pub async fn run_command(cmd: &str) -> Result<Output> { spawn(cmd) }"
+                .into(),
+            item_uri: "github://zone/tools/command.rs@main".into(),
+            item_title: "command.rs".into(),
+            score: 3.5,
+            fusion_score: 3.5,
+            keyword_rank: Some(1),
+            semantic_rank: None,
+            keyword_score: Some(0.5),
+            semantic_score: None,
+        };
+        let body = HybridSearchResult {
+            chunk_id: Uuid::from_u128(2),
+            content_item_id: item,
+            source_id: Uuid::nil(),
+            chunk_text: "fn trim_middle(stdout: &str) { /* oversized stdout */ }".into(),
+            item_uri: "github://zone/tools/command.rs@main".into(),
+            item_title: "command.rs".into(),
+            score: 1.0,
+            fusion_score: 1.0,
+            keyword_rank: Some(2),
+            semantic_rank: None,
+            keyword_score: Some(0.2),
+            semantic_score: None,
+        };
+        let capped = cap_per_file(
+            vec![definition, body],
+            2,
+            2,
+            "How does run_command trim oversized stdout?",
+        );
+        assert!(
+            capped[0].chunk_text.contains("trim_middle"),
+            "kept {}",
+            capped[0].chunk_text
+        );
     }
 
     #[test]
