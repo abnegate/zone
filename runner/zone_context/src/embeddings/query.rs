@@ -287,6 +287,85 @@ pub fn nl_content_tokens(query: &str) -> Vec<String> {
     tokens
 }
 
+/// Filename tokens worth fetching even when first-stage missed the file.
+pub fn path_uri_tokens(query: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut tokens = Vec::new();
+    let mut push = |token: String| {
+        if token.len() < 8
+            || !token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !seen.insert(token.clone())
+        {
+            return;
+        }
+        tokens.push(token);
+    };
+    for token in nl_content_tokens(query) {
+        if !keep_nl_singleton(&token) || is_generic_path_token(&token) {
+            continue;
+        }
+        if token.ends_with('s') && !token.ends_with("ss") && token.len() >= 9 {
+            push(token[..token.len() - 1].to_string());
+        }
+        push(token);
+    }
+    tokens
+}
+
+pub fn path_uri_patterns(query: &str) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for token in path_uri_tokens(query) {
+        patterns.push(format!("%/{token}.%"));
+        patterns.push(format!("%/{token}@%"));
+        if patterns.len() >= 8 {
+            break;
+        }
+    }
+    patterns
+}
+
+fn is_generic_path_token(token: &str) -> bool {
+    matches!(
+        token,
+        "knowledge"
+            | "embedding"
+            | "embeddings"
+            | "authorized"
+            | "authorizing"
+            | "configured"
+            | "constructed"
+            | "implemented"
+            | "incremental"
+            | "signature"
+            | "semantic"
+            | "encoder"
+            | "interval"
+            | "refresh"
+            | "worker"
+            | "process"
+            | "subject"
+            | "message"
+            | "content"
+            | "context"
+            | "schema"
+            | "unchanged"
+            | "oversized"
+            | "returned"
+            | "columns"
+            | "created"
+            | "generate"
+            | "validate"
+            | "dimension"
+            | "hybrid"
+            | "vector"
+            | "adapter"
+            | "webhook"
+            | "limiter"
+    )
+}
+
 /// Adjacent content words from the original question, including `not`.
 /// Used to prefer the chunk that literally answers ("not configured").
 pub fn nl_question_phrases(query: &str) -> Vec<String> {
@@ -686,6 +765,34 @@ mod tests {
             derive.keyword.contains("derive_key"),
             "keyword {}",
             derive.keyword
+        );
+
+        let artifact = "How are generated chat artifacts authorized before serving?";
+        assert!(
+            path_uri_tokens(artifact)
+                .iter()
+                .any(|token| token == "artifact" || token == "artifacts"),
+            "path tokens {:?}",
+            path_uri_tokens(artifact)
+        );
+        let patterns = path_uri_patterns(artifact);
+        assert!(
+            patterns.iter().any(|pattern| {
+                let uri = "github://zone/routes/artifacts.rs@main";
+                let uri_l = uri.to_ascii_lowercase();
+                let needle = pattern.trim_start_matches('%').trim_end_matches('%');
+                uri_l.contains(needle)
+            }),
+            "patterns {patterns:?}"
+        );
+        assert!(
+            path_uri_tokens("How often does the knowledge refresh worker wake up?").is_empty(),
+            "knowledge is too generic to path-expand"
+        );
+        assert!(
+            path_uri_tokens("Which columns does 001_initial_schema create on the embeddings table?")
+                .is_empty(),
+            "embeddings is too generic to path-expand"
         );
 
         let ident = rewrite_query("What does should_skip_blob do when a file SHA is unchanged?");

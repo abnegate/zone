@@ -936,5 +936,29 @@ mod tests {
                 "fn name(&self) -> &str {\n        \"run_command\"\n    }",
             )],
         ));
+        let execute = concat!(
+            "symbol: RunCommandTool.execute\nkind: Method\nParent: RunCommandTool\n",
+            "async fn execute(&self, params: Value, context: &ToolContext) {\n",
+            "    cmd.stdout(Stdio::piped());\n",
+            "}\n",
+        );
+        assert!(
+            !first_stage_answered(
+                "How does run_command trim oversized stdout?",
+                [(
+                    "github://abnegate/zone/runner/zone_core/src/tools/command.rs@main",
+                    execute,
+                )],
+            ),
+            "execute is not a run_command definition"
+        );
+        assert!(
+            !answers_as_definition(
+                "How does run_command trim oversized stdout?",
+                "github://abnegate/zone/runner/zone_core/src/tools/command.rs@main",
+                execute,
+            ),
+            "execute should not win the file row as a definition"
+        );
     }
 }
