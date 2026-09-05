@@ -74,6 +74,8 @@ services:
     image: pgvector/pgvector:${DOCKER_VERSION_POSTGRES:-pg16}@${DOCKER_DIGEST_POSTGRES:-sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b}
     container_name: postgres
     restart: unless-stopped
+    # 2GB keeps a quantized HNSW graph in memory well past the default 64MB spill (~13k tuples).
+    command: postgres -c maintenance_work_mem=2GB
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}

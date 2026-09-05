@@ -3,7 +3,7 @@
 
 services:
   postgres:
-    command: postgres -c max_connections=255
+    command: postgres -c max_connections=255 -c maintenance_work_mem=2GB
     networks:
       - internal
       - edge
