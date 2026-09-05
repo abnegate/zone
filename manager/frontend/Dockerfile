@@ -7,7 +7,6 @@ WORKDIR /workspace
 
 COPY --chown=bun:bun package.json bun.lock ./
 COPY --chown=bun:bun packages/ui/package.json packages/ui/package.json
-COPY --chown=bun:bun installer/frontend/package.json installer/frontend/package.json
 COPY --chown=bun:bun manager/frontend/package.json manager/frontend/package.json
 RUN bun install --frozen-lockfile
 

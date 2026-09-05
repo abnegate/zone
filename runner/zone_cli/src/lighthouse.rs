@@ -1,6 +1,6 @@
 //! Lighthouse performance auditing for Zone frontends
 //!
-//! Runs Lighthouse CI audits on manager and installer frontends,
+//! Runs Lighthouse CI audits on the manager frontend,
 //! reporting scores for Performance, Accessibility, Best Practices, and SEO.
 
 use anyhow::{Context, Result, bail};
@@ -11,28 +11,24 @@ use std::process::Command;
 #[derive(Debug, Clone, Copy)]
 pub enum Frontend {
     Manager,
-    Installer,
 }
 
 impl Frontend {
     fn name(&self) -> &'static str {
         match self {
             Frontend::Manager => "manager",
-            Frontend::Installer => "installer",
         }
     }
 
     fn path(&self) -> &'static str {
         match self {
             Frontend::Manager => "manager/frontend",
-            Frontend::Installer => "installer/frontend",
         }
     }
 
     fn build_dir(&self) -> &'static str {
         match self {
             Frontend::Manager => "dist",
-            Frontend::Installer => "build",
         }
     }
 }
@@ -154,7 +150,7 @@ pub fn run_all(project_root: &Path, verbose: bool) -> Result<()> {
 
     let mut errors = Vec::new();
 
-    for frontend in [Frontend::Manager, Frontend::Installer] {
+    for frontend in [Frontend::Manager] {
         if let Err(e) = run_lighthouse(project_root, frontend, verbose) {
             errors.push(format!("{}: {}", frontend.name(), e));
         }

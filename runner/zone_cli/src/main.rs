@@ -97,7 +97,7 @@ enum Commands {
 
     /// Run Lighthouse performance audits on frontends
     Lighthouse {
-        /// Target frontend: manager, installer, or all (default: all)
+        /// Target frontend: manager or all (default: all)
         #[arg(short, long, default_value = "all")]
         target: String,
 
@@ -229,15 +229,10 @@ async fn main() -> anyhow::Result<()> {
                     lighthouse::Frontend::Manager,
                     cli.verbose,
                 ),
-                "installer" => lighthouse::run_lighthouse(
-                    &project_root,
-                    lighthouse::Frontend::Installer,
-                    cli.verbose,
-                ),
                 "all" => lighthouse::run_all(&project_root, cli.verbose),
                 _ => {
                     eprintln!(
-                        "{} Invalid target: {}. Use 'manager', 'installer', or 'all'",
+                        "{} Invalid target: {}. Use 'manager' or 'all'",
                         style("✗").red(),
                         target
                     );

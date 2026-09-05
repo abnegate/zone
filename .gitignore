@@ -10,9 +10,6 @@ k8s/secrets.yaml
 ollama_data/
 openwebui_data/
 
-# Installer build artifacts
-installer/build/
-
 # Basic auth credentials
 auth/users.htpasswd
 

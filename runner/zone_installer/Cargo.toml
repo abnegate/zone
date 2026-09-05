@@ -1,6 +1,6 @@
 [package]
 name = "zone_installer"
-description = "Zone web installer - configuration wizard backend"
+description = "Zone desktop and mobile client HTTP shell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,10 +10,6 @@ rust-version.workspace = true
 [lib]
 name = "zone_installer"
 path = "src/lib.rs"
-
-[[bin]]
-name = "zone-installer"
-path = "src/main.rs"
 
 [dependencies]
 tokio = { workspace = true }

@@ -1,5 +1,0 @@
-@config "../../tailwind.config.ts";
-@source "../**/*.{ts,tsx}";
-@source "../../../../packages/ui/src/**/*.{ts,tsx}";
-
-@import "@zone/ui/styles/globals.css";

@@ -658,29 +658,6 @@ services:
       - internal
       - edge
 
-  # Utilities (installer profile)
-  installer:
-    build:
-      context: .
-      dockerfile: installer/Dockerfile
-    container_name: zone-installer
-    restart: "no"
-    user: root
-    profiles:
-      - installer
-    volumes:
-      - .:/project:ro
-      - ${PWD:-.}:${PWD:-.}:ro
-      - ./.env.example:/project/.env.example:ro
-      - ./.env:/project/.env
-      - ./auth:/project/auth
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - ZONE_HOST_PROJECT_DIR=${PWD:-.}
-    working_dir: /project
-    ports:
-      - "127.0.0.1:8000:8000"
-
 networks:
   edge:
     name: zone_edge

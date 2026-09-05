@@ -6,7 +6,6 @@
 **/node_modules
 
 # Build outputs (will be built in container)
-installer/frontend/build
 manager/frontend/build
 packages/ui/dist
 

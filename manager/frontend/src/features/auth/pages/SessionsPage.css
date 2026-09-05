@@ -91,6 +91,8 @@
 .sessions-actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--ui-space-3);
   padding-top: var(--ui-space-6);
   border-top: 1px solid var(--color-border);
 }

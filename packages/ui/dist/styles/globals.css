@@ -254,6 +254,14 @@
     animation: ui-spin 0.8s linear infinite;
   }
 
+  /* Adjacent buttons. Tailwind gap utilities in this package are not scanned. */
+  .ui-btn-group {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--ui-space-3);
+  }
+
   @keyframes ui-spin {
     to {
       transform: rotate(360deg);
@@ -1037,6 +1045,13 @@
     padding: var(--ui-space-4) var(--ui-panel-padding);
     border-top: 1px solid var(--ui-border);
     background: var(--ui-bg-surface);
+  }
+
+  .ui-wizard-actions {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--ui-space-3);
   }
 
   .ui-section-header {

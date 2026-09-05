@@ -138,7 +138,7 @@ jobs:
         working-directory: runner
         run: |
           cargo build --release --locked --target ${{ matrix.target }} \
-            --package zone_cli --package zone_installer
+            --package zone_cli
       - name: Build desktop (Linux)
         if: matrix.kind == 'linux'
         working-directory: runner
@@ -162,7 +162,7 @@ jobs:
         run: |
           chmod +x .github/scripts/package-tauri.sh .github/scripts/package-deb.sh
           rust_dir="runner/target/${{ matrix.target }}/release"
-          strip "$rust_dir/zone" "$rust_dir/zone-installer" || true
+          strip "$rust_dir/zone" || true
           mkdir -p dist
           if [[ "${{ matrix.kind }}" == "macos" ]]; then
             .github/scripts/package-tauri.sh \
@@ -181,7 +181,6 @@ jobs:
             cp -R manager/frontend/build/. "dist/$name/share/manager/"
             tar -C dist -czf "dist/${name}.tar.gz" "$name"
             cp "$rust_dir/zone" "dist/zone-${{ matrix.target }}"
-            cp "$rust_dir/zone-installer" "dist/zone-installer-${{ matrix.target }}"
             cp "$rust_dir/zone-desktop" "dist/zone-desktop-${{ matrix.target }}"
             rm -rf "dist/$name"
           fi
@@ -194,7 +193,6 @@ jobs:
             unzip -l "dist/Zone-${{ needs.prepare-release.outputs.version }}-darwin-${{ matrix.app_arch }}.zip" | grep -q 'Contents/Resources/manager/index.html'
           else
             ./dist/zone-${{ matrix.target }} --help
-            test -x "./dist/zone-installer-${{ matrix.target }}"
             test -x "./dist/zone-desktop-${{ matrix.target }}"
           fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -240,7 +238,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          find . -type f \( -name 'Zone-*.zip' -o -name 'zone-*.tar.gz' -o -name '*.deb' -o -name 'zone-*' -o -name 'zone-installer-*' \) \
+          find . -type f \( -name 'Zone-*.zip' -o -name 'zone-*.tar.gz' -o -name '*.deb' -o -name 'zone-*' \) \
             ! -name 'SHA256SUMS' \
             -exec sha256sum {} + | tee SHA256SUMS
       - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2

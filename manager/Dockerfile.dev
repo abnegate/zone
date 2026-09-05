@@ -36,7 +36,7 @@ RUN mkdir -p runner/tool_runner/src runner/zone_runner/src runner/zone_core/src 
     echo "fn main() {}" > runner/zone_server/src/lib.rs && \
     echo "fn main() {}" > runner/zone_server/src/main.rs && \
     echo "fn main() {}" > runner/zone_cli/src/main.rs && \
-    echo "fn main() {}" > runner/zone_installer/src/main.rs && \
+    echo "fn main() {}" > runner/zone_installer/src/lib.rs && \
     echo "fn main() {}" > runner/zone_desktop/src/lib.rs && \
     echo "fn main() {}" > runner/zone_desktop/src/main.rs
 

@@ -482,7 +482,7 @@ const Wizard = forwardRef<HTMLDivElement, WizardProps>(
                 {cancelLabel}
               </Button>
             </div>
-            <div className="flex items-center gap-[var(--ui-space-3)]">
+            <div className="ui-wizard-actions">
               {!isFirstStep && (
                 <Button variant="secondary" onClick={handlePrevious} disabled={loading}>
                   {previousLabel}

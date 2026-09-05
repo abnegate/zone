@@ -1,4 +1,4 @@
-//! Resolve bundled installer and manager frontend directories.
+//! Resolve bundled manager frontend directories.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -9,21 +9,16 @@ pub const PROXY_TARGET_ENV: &str = "ZONE_PROXY_TARGET";
 pub const CONFIG_PATH_ENV: &str = "ZONE_CONFIG_PATH";
 
 const DEFAULT_BIND: &str = "0.0.0.0:8000";
-const DEFAULT_INSTALLER_DIR: &str = "frontend/build";
-const DOCKER_INSTALLER_DIR: &str = "/app/frontend/build";
-const DEBIAN_INSTALLER_DIR: &str = "/usr/share/zone/installer";
 const DEBIAN_MANAGER_DIR: &str = "/usr/share/zone/manager";
 const DEFAULT_PROXY_TARGET: &str = "http://manager.localhost";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontendKind {
-    Installer,
     Manager,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
-    Install,
     Console,
     Setup,
 }
@@ -34,8 +29,8 @@ pub fn app_mode() -> AppMode {
         .to_ascii_lowercase()
         .as_str()
     {
-        "console" | "manager" | "ui" => AppMode::Console,
-        _ => AppMode::Install,
+        "setup" => AppMode::Setup,
+        _ => AppMode::Console,
     }
 }
 
@@ -182,13 +177,6 @@ pub fn resolve_frontend_dir_from(
         return dir;
     }
 
-    if kind == FrontendKind::Installer {
-        let docker = Path::new(DOCKER_INSTALLER_DIR);
-        if docker.join("index.html").exists() {
-            return docker.to_path_buf();
-        }
-    }
-
     if let Some(exe) = exe
         && let Some(parent) = exe.parent()
     {
@@ -199,26 +187,16 @@ pub fn resolve_frontend_dir_from(
         }
     }
 
-    let system = match kind {
-        FrontendKind::Installer => PathBuf::from(DEBIAN_INSTALLER_DIR),
-        FrontendKind::Manager => PathBuf::from(DEBIAN_MANAGER_DIR),
-    };
+    let system = PathBuf::from(DEBIAN_MANAGER_DIR);
     if system.join("index.html").exists() {
         return system;
     }
 
-    match kind {
-        FrontendKind::Installer => PathBuf::from(DEFAULT_INSTALLER_DIR),
-        FrontendKind::Manager => PathBuf::from("manager/frontend/build"),
-    }
+    PathBuf::from("manager/frontend/build")
 }
 
 fn bundled_candidates(exe_dir: &Path, kind: FrontendKind) -> Vec<PathBuf> {
     match kind {
-        FrontendKind::Installer => vec![
-            exe_dir.join("../Resources/installer"),
-            exe_dir.join("frontend/build"),
-        ],
         FrontendKind::Manager => vec![
             exe_dir.join("../Resources/manager"),
             exe_dir.join("manager/frontend/build"),
@@ -262,22 +240,8 @@ mod tests {
     #[test]
     fn env_dir_wins() {
         let dir = PathBuf::from("/tmp/zone-frontend-override");
-        let resolved = resolve_frontend_dir_from(FrontendKind::Installer, Some(dir.clone()), None);
+        let resolved = resolve_frontend_dir_from(FrontendKind::Manager, Some(dir.clone()), None);
         assert_eq!(resolved, dir);
-    }
-
-    #[test]
-    fn finds_app_bundle_installer() {
-        let root = tempfile::tempdir().unwrap();
-        let macos = root.path().join("Zone.app/Contents/MacOS");
-        let installer = root.path().join("Zone.app/Contents/Resources/installer");
-        fs::create_dir_all(&macos).unwrap();
-        write_index(&installer);
-        let exe = macos.join("zone-installer");
-        fs::write(&exe, []).unwrap();
-
-        let resolved = resolve_frontend_dir_from(FrontendKind::Installer, None, Some(exe));
-        assert_eq!(resolved, installer.canonicalize().unwrap());
     }
 
     #[test]
@@ -287,7 +251,7 @@ mod tests {
         let manager = root.path().join("Zone.app/Contents/Resources/manager");
         fs::create_dir_all(&macos).unwrap();
         write_index(&manager);
-        let exe = macos.join("zone-installer");
+        let exe = macos.join("zone-desktop");
         fs::write(&exe, []).unwrap();
 
         let resolved = resolve_frontend_dir_from(FrontendKind::Manager, None, Some(exe));
@@ -297,11 +261,11 @@ mod tests {
     #[test]
     fn defaults_when_missing() {
         let resolved = resolve_frontend_dir_from(
-            FrontendKind::Installer,
+            FrontendKind::Manager,
             None,
-            Some(PathBuf::from("/tmp/does-not-exist/zone-installer")),
+            Some(PathBuf::from("/tmp/does-not-exist/zone-desktop")),
         );
-        assert_eq!(resolved, PathBuf::from(DEFAULT_INSTALLER_DIR));
+        assert_eq!(resolved, PathBuf::from("manager/frontend/build"));
     }
 
     #[test]

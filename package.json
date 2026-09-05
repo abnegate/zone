@@ -4,14 +4,11 @@
   "packageManager": "bun@1.4.0",
   "workspaces": [
     "packages/*",
-    "installer/frontend",
     "manager/frontend"
   ],
   "scripts": {
     "dev": "bun run --filter '*' dev",
-    "dev:installer": "bun run --filter zone-installer dev",
     "dev:manager": "bun run --filter zone dev",
-    "start:installer": "bun run --filter zone-installer start",
     "start:manager": "bun run --filter zone start",
     "build": "bun run --filter '*' build",
     "build:ui": "bun run --filter @zone/ui build",

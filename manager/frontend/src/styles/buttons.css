@@ -183,7 +183,9 @@
 
 .btn-group {
   display: inline-flex;
-  gap: var(--ui-space-2);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-3);
 }
 
 .btn-group--connected {

@@ -193,7 +193,7 @@ For local development, use self-signed certificates or accept HTTP connections.
 ## Container Security
 
 ### Non-Root Users
-Custom containers (Manager, Installer) should run as non-root users. The Dockerfiles have been updated to include:
+Custom containers (Manager) should run as non-root users. The Dockerfiles have been updated to include:
 ```dockerfile
 USER nonroot:nonroot
 ```

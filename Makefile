@@ -7,7 +7,7 @@
 	shell-postgres shell-valkey db-shell db-migrate \
 	test-server test-console test-console-coverage test-e2e test-e2e-ui \
 	lint-console format-console check-console \
-	list-models stats prune version env urls install \
+	list-models stats prune version env urls \
 	sqlx-prepare \
 	build-runner test-runner setup-runner-coverage test-runner-coverage \
 	test-runner-coverage-html test-runner-coverage-json test-runner-coverage-text \
@@ -31,17 +31,6 @@ DOCKER_COMPOSE := $(shell which docker-compose 2>/dev/null || echo "docker compo
 COMPOSE_DEV := $(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml
 
 ##@ Setup & Configuration
-
-install: ## Start web-based installer (recommended for first-time setup)
-	@echo "$(BLUE)Starting web installer...$(NC)"
-	@echo "$(GREEN)Building installer container...$(NC)"
-	@$(DOCKER_COMPOSE) --profile installer build installer
-	@$(DOCKER_COMPOSE) --profile installer up installer
-	@echo ""
-	@echo "$(GREEN)Web installer started!$(NC)"
-	@echo "$(BLUE)Open your browser to: http://localhost:8000$(NC)"
-	@echo ""
-	@echo "Press Ctrl+C when done to stop the installer"
 
 setup: ## Run interactive CLI setup script
 	@echo "$(BLUE)Running setup script...$(NC)"
@@ -143,7 +132,7 @@ up-all: ## Start all services with VPN and monitoring
 
 down: ## Stop all services
 	@echo "$(YELLOW)Stopping services...$(NC)"
-	$(COMPOSE_DEV) --profile vpn --profile monitoring --profile installer \
+	$(COMPOSE_DEV) --profile vpn --profile monitoring \
 		--profile bundled-comfyui --profile comfyui-model-setup down
 
 restart: ## Restart all services
@@ -271,7 +260,7 @@ db-reset: ## DANGER: Reset database (requires confirmation)
 
 clean: ## Stop services and remove containers (keeps volumes)
 	@echo "$(YELLOW)Cleaning up containers...$(NC)"
-	$(COMPOSE_DEV) --profile vpn --profile monitoring --profile installer down --remove-orphans
+	$(COMPOSE_DEV) --profile vpn --profile monitoring down --remove-orphans
 	@echo "$(GREEN)Cleanup complete (volumes preserved)$(NC)"
 
 clean-volumes: ## DANGER: Remove all data volumes (requires confirmation)
@@ -279,7 +268,7 @@ clean-volumes: ## DANGER: Remove all data volumes (requires confirmation)
 	@read -p "Are you sure? Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" = "yes" ]; then \
 		echo "$(RED)Removing volumes...$(NC)"; \
-		$(COMPOSE_DEV) --profile vpn --profile monitoring --profile installer down -v; \
+		$(COMPOSE_DEV) --profile vpn --profile monitoring down -v; \
 		echo "$(RED)All data deleted!$(NC)"; \
 	else \
 		echo "$(GREEN)Cancelled.$(NC)"; \
@@ -339,10 +328,6 @@ dev: ## Start with Docker hot reload (Vite HMR + cargo-watch)
 dev-console: ## Start console frontend in development mode
 	@echo "$(BLUE)Starting console frontend dev server...$(NC)"
 	cd manager/frontend && bun start
-
-dev-installer: ## Start installer frontend in development mode
-	@echo "$(BLUE)Starting installer frontend dev server...$(NC)"
-	cd installer/frontend && bun start
 
 rebuild: ## Rebuild and restart all services
 	@echo "$(BLUE)Rebuilding services...$(NC)"

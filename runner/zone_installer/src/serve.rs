@@ -1,4 +1,4 @@
-//! HTTP routers for install, console, and desktop modes.
+//! HTTP routers for console and desktop modes.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -12,17 +12,14 @@ use axum::{
     routing::{any, get, post},
 };
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
 
 use crate::frontend::AppMode;
-use crate::install;
 use crate::proxy;
 use crate::setup;
 
 #[derive(Clone)]
 pub struct AppState {
     pub frontend_dir: PathBuf,
-    pub installer_dir: PathBuf,
     pub manager_dir: PathBuf,
     pub mode: Arc<RwLock<AppMode>>,
     pub proxy_target: Arc<RwLock<String>>,
@@ -37,7 +34,6 @@ impl AppState {
         proxy_target: String,
     ) -> Result<Self, reqwest::Error> {
         Ok(Self {
-            installer_dir: frontend_dir.clone(),
             manager_dir: frontend_dir.clone(),
             frontend_dir,
             mode: Arc::new(RwLock::new(mode)),
@@ -51,7 +47,6 @@ impl AppState {
         Ok(Self {
             frontend_dir: manager_dir.clone(),
             manager_dir,
-            installer_dir: PathBuf::new(),
             mode: Arc::new(RwLock::new(AppMode::Console)),
             proxy_target: Arc::new(RwLock::new(proxy_target)),
             config_path: crate::frontend::config_file(),
@@ -91,30 +86,18 @@ impl AppState {
     }
 
     pub fn active_frontend(&self) -> PathBuf {
-        match self.mode() {
-            AppMode::Install => self.installer_dir.clone(),
-            AppMode::Console | AppMode::Setup => self.manager_dir.clone(),
-        }
+        self.manager_dir.clone()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServeKind {
-    InstallOnly,
     ConsoleOnly,
     Desktop,
 }
 
 pub fn router(kind: ServeKind, state: AppState) -> Router {
     match kind {
-        ServeKind::InstallOnly => {
-            let assets = state.frontend_dir.join("assets");
-            Router::new()
-                .route("/", get(serve_index))
-                .route("/api/install", post(install::handle_install))
-                .nest_service("/assets", ServeDir::new(assets))
-                .with_state(state)
-        }
         ServeKind::ConsoleOnly => Router::new()
             .route("/api/{*rest}", any(proxy::proxy_http))
             .route("/ws", get(proxy::proxy_ws))
@@ -131,10 +114,6 @@ pub fn router(kind: ServeKind, state: AppState) -> Router {
             .fallback(serve_spa)
             .with_state(state),
     }
-}
-
-async fn serve_index(State(state): State<AppState>) -> impl IntoResponse {
-    serve_under_root(&state.active_frontend(), "index.html").await
 }
 
 async fn serve_spa(State(state): State<AppState>, uri: Uri) -> Response {

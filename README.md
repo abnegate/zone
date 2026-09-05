@@ -71,25 +71,11 @@ Access the services:
 
 Choose your preferred installation method:
 
-#### Option 1: Web Installer (Recommended)
-
-Beautiful web-based wizard built with Rust.
+#### Option 1: Quick Start
 
 ```bash
 git clone <repository-url>
 cd zone
-make install
-```
-
-Open browser to `http://localhost:8000` and follow the 7-step wizard:
-- Generate secure secrets with one click
-- Choose models based on your hardware
-- Configure VPN (optional)
-- Click "Install Now" and watch live progress
-
-#### Option 2: Quick Start
-
-```bash
 ollama serve
 cp .env.example .env
 mkdir -p auth && htpasswd -cB auth/users.htpasswd admin
@@ -98,7 +84,7 @@ make up
 
 Uses insecure defaults (fine for development). Host Ollama is the engine.
 
-#### Option 3: CLI Setup Script
+#### Option 2: CLI Setup Script
 
 ```bash
 ./scripts/setup.sh
@@ -154,7 +140,6 @@ docker compose --profile bundled-ollama up -d
 |---------|----------|-------------|
 | `vpn` | Gluetun, SearXNG | VPN-protected web search |
 | `monitoring` | Prometheus, Grafana | Metrics and dashboards |
-| `installer` | Web Installer | One-time setup wizard |
 
 ## Configuration
 
@@ -218,7 +203,6 @@ Access Grafana at `https://grafana.localhost`.
 make help              # Show all available commands
 
 # Setup
-make install           # Run web installer
 make setup             # Run interactive setup
 make setup-auth        # Generate basic auth
 make validate          # Validate configuration
@@ -422,7 +406,6 @@ zone/
 │       ├── src/components/  # UI components
 │       ├── src/pages/       # Page components
 │       └── src/context/     # React context
-├── installer/               # Web-based setup wizard (Rust + React)
 ├── litellm/                 # LLM proxy configuration
 ├── ollama/                  # Model pulling scripts
 ├── searxng/                 # Search engine config

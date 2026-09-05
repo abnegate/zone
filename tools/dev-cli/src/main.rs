@@ -88,13 +88,13 @@ enum Commands {
     },
     /// Run Lighthouse performance audits on frontends
     Lighthouse {
-        /// Target frontend: installer, manager, or all
+        /// Target frontend: manager or all
         #[arg(long, short, value_enum, default_value = "all")]
         target: LighthouseTarget,
     },
     /// Run E2E tests (Playwright)
     E2e {
-        /// Only run on specific projects (installer-frontend, manager-frontend)
+        /// Only run on specific projects (manager-frontend)
         #[arg(long, short, value_enum)]
         project: Option<Vec<Project>>,
         /// Run in headed mode (show browser)
@@ -153,18 +153,14 @@ enum DbCommands {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum LighthouseTarget {
-    /// Installer frontend
-    Installer,
     /// Manager frontend
     Manager,
-    /// Both frontends
+    /// All frontends
     All,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 enum Project {
-    /// Installer frontend (React/TypeScript)
-    InstallerFrontend,
     /// Manager frontend (React/TypeScript)
     ManagerFrontend,
     /// Runner (Rust - tool_runner, zone_core, zone_cli)
@@ -176,7 +172,6 @@ enum Project {
 impl Project {
     fn all() -> Vec<Project> {
         vec![
-            Project::InstallerFrontend,
             Project::ManagerFrontend,
             Project::Runner,
             Project::Server,
@@ -185,7 +180,6 @@ impl Project {
 
     fn display_name(&self) -> &'static str {
         match self {
-            Project::InstallerFrontend => "Installer Frontend",
             Project::ManagerFrontend => "Manager Frontend",
             Project::Runner => "Runner",
             Project::Server => "Server",
@@ -194,7 +188,6 @@ impl Project {
 
     fn relative_path(&self) -> &'static str {
         match self {
-            Project::InstallerFrontend => "installer/frontend",
             Project::ManagerFrontend => "manager/frontend",
             Project::Runner => "runner",
             Project::Server => "runner",
@@ -444,11 +437,11 @@ fn find_project_root(start_dir: Option<PathBuf>) -> Result<PathBuf> {
 
     loop {
         // Look for markers that indicate project root
-        let installer_path = current.join("installer");
         let manager_path = current.join("manager");
         let runner_path = current.join("runner");
+        let package_path = current.join("package.json");
 
-        if installer_path.exists() && manager_path.exists() && runner_path.exists() {
+        if manager_path.exists() && runner_path.exists() && package_path.exists() {
             return Ok(current.to_path_buf());
         }
 
@@ -471,7 +464,7 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
         let working_dir = root.join(project.relative_path());
 
         match project {
-            Project::InstallerFrontend | Project::ManagerFrontend => {
+            Project::ManagerFrontend => {
                 // Check if biome is available
                 let biome_config = working_dir.join("biome.json");
                 if biome_config.exists() {
@@ -544,7 +537,7 @@ fn create_lint_tasks(root: &PathBuf, projects: &[Project], fix: bool) -> Vec<Tas
         let working_dir = root.join(project.relative_path());
 
         match project {
-            Project::InstallerFrontend | Project::ManagerFrontend => {
+            Project::ManagerFrontend => {
                 // Check for biome
                 let biome_config = working_dir.join("biome.json");
                 if biome_config.exists() {
@@ -618,7 +611,7 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
         let working_dir = root.join(project.relative_path());
 
         match project {
-            Project::InstallerFrontend | Project::ManagerFrontend => {
+            Project::ManagerFrontend => {
                 // Run bun test directly from the frontend directory
                 tasks.push(TaskConfig {
                     project: *project,
@@ -697,7 +690,7 @@ fn create_e2e_tasks(
         let project_dir = root.join(project.relative_path());
 
         match project {
-            Project::InstallerFrontend | Project::ManagerFrontend => {
+            Project::ManagerFrontend => {
                 // Check if playwright config exists
                 let playwright_config = project_dir.join("playwright.config.ts");
                 if !playwright_config.exists() {
@@ -741,7 +734,7 @@ fn create_audit_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
         let working_dir = root.join(project.relative_path());
 
         match project {
-            Project::InstallerFrontend | Project::ManagerFrontend => {
+            Project::ManagerFrontend => {
                 // bun audit for JavaScript/TypeScript
                 tasks.push(TaskConfig {
                     project: *project,
@@ -778,7 +771,7 @@ fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig
         let working_dir = root.join(project.relative_path());
 
         match project {
-            Project::InstallerFrontend | Project::ManagerFrontend => {
+            Project::ManagerFrontend => {
                 // Run bun test with coverage
                 tasks.push(TaskConfig {
                     project: *project,
@@ -815,9 +808,7 @@ fn create_lighthouse_tasks(root: &PathBuf, target: LighthouseTarget) -> Vec<Task
     let mut tasks = Vec::new();
 
     let targets = match target {
-        LighthouseTarget::Installer => vec![Project::InstallerFrontend],
-        LighthouseTarget::Manager => vec![Project::ManagerFrontend],
-        LighthouseTarget::All => vec![Project::InstallerFrontend, Project::ManagerFrontend],
+        LighthouseTarget::Manager | LighthouseTarget::All => vec![Project::ManagerFrontend],
     };
 
     for project in targets {
@@ -1811,15 +1802,6 @@ async fn main() -> Result<()> {
             all_tasks.extend(create_e2e_tasks(&root, &projects, false, false));
             // Only run lighthouse for frontend projects
             let lighthouse_target = match project {
-                Some(ps)
-                    if ps.contains(&Project::InstallerFrontend)
-                        && ps.contains(&Project::ManagerFrontend) =>
-                {
-                    Some(LighthouseTarget::All)
-                }
-                Some(ps) if ps.contains(&Project::InstallerFrontend) => {
-                    Some(LighthouseTarget::Installer)
-                }
                 Some(ps) if ps.contains(&Project::ManagerFrontend) => {
                     Some(LighthouseTarget::Manager)
                 }
