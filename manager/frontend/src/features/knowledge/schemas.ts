@@ -67,15 +67,55 @@ export type KnowledgeResponse = z.infer<typeof KnowledgeResponseSchema>;
 
 export const SearchModeSchema = z.enum(['hybrid', 'semantic', 'keyword']);
 
-export const SearchResultSchema = z.object({
+const ApiSearchResultSchema = z.object({
+  chunk_id: z.string().min(1),
+  content_item_id: z.string().min(1).optional(),
+  source_id: z.string().min(1),
+  similarity: z.number(),
+  rrf_score: z.number().optional().nullable(),
+  semantic_score: z.number().optional().nullable(),
+  keyword_score: z.number().optional().nullable(),
+  title: z.string(),
+  uri: z.string(),
+  snippet: z.string(),
+});
+
+const UiSearchResultSchema = z.object({
   id: z.string().min(1),
   source_id: z.string().min(1),
   source_name: z.string(),
   content: z.string(),
   snippet: z.string(),
   relevance_score: z.number().min(0).max(1),
-  metadata: z.record(z.string(), z.unknown()),
+  metadata: z.record(z.string(), z.unknown()).optional().default({}),
 });
+
+function displayRelevance(similarity: number, semantic: number | null | undefined): number {
+  if (typeof semantic === 'number') return semantic;
+  if (similarity >= 0 && similarity <= 1) return similarity;
+  return 0;
+}
+
+export const SearchResultSchema = z.union([
+  ApiSearchResultSchema.transform((hit) => ({
+    id: hit.chunk_id,
+    source_id: hit.source_id,
+    source_name: hit.title,
+    content: hit.snippet,
+    snippet: hit.snippet,
+    relevance_score: displayRelevance(hit.similarity, hit.semantic_score),
+    metadata: {
+      type: 'file',
+      path: hit.uri,
+      uri: hit.uri,
+      content_item_id: hit.content_item_id,
+      rrf_score: hit.rrf_score ?? undefined,
+      semantic_score: hit.semantic_score ?? undefined,
+      keyword_score: hit.keyword_score ?? undefined,
+    },
+  })),
+  UiSearchResultSchema,
+]);
 
 export const SearchOptionsSchema = z.object({
   query: z.string().min(1, 'Search query is required'),
@@ -84,10 +124,18 @@ export const SearchOptionsSchema = z.object({
   limit: z.number().min(1).max(100).optional(),
 });
 
-export const SearchResponseSchema = z.object({
-  results: z.array(SearchResultSchema),
-  total: z.number().min(0),
-});
+export const SearchResponseSchema = z
+  .object({
+    results: z.array(SearchResultSchema),
+    query: z.string().optional(),
+    total_results: z.number().min(0).optional(),
+    total: z.number().min(0).optional(),
+    search_time_ms: z.number().optional(),
+  })
+  .transform((response) => ({
+    results: response.results,
+    total: response.total ?? response.total_results ?? response.results.length,
+  }));
 
 export const GatherContextRequestSchema = z.object({
   source_ids: z.array(z.string().min(1)).min(1, 'At least one source is required'),

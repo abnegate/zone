@@ -51,7 +51,7 @@ impl Default for HybridSearchConfig {
             semantic_weight: 0.7, // Favor semantic by default
             rrf_k: 60.0,          // Standard RRF constant
             min_keyword_score: 0.0,
-            min_semantic_score: 0.5,
+            min_semantic_score: 0.35,
         }
     }
 }
@@ -76,9 +76,6 @@ pub struct HybridSearchResult {
     /// Semantic similarity score
     pub semantic_score: Option<f32>,
 }
-
-/// Maximum query length for full-text search (500 chars)
-const MAX_QUERY_LEN: usize = 500;
 
 /// Internal result from keyword search
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -146,10 +143,12 @@ pub async fn hybrid_search(
     // Fetch more results than needed for better RRF combining
     let fetch_limit = (limit * 2).max(20);
 
-    // 1. Perform keyword search
+    let rewritten = crate::embeddings::rewrite_query(query);
+
+    // 1. Perform keyword search against identifiers when present
     let keyword_results = keyword_search(
         pool,
-        query,
+        &rewritten.keyword,
         fetch_limit,
         workspace_id,
         source_ids,
@@ -178,29 +177,6 @@ pub async fn hybrid_search(
     Ok(combined.into_iter().take(limit).collect())
 }
 
-/// Sanitize search query for PostgreSQL websearch_to_tsquery
-///
-/// Prevents SQL injection and limits query length.
-fn sanitize_search_query(query: &str) -> String {
-    // Truncate to max length at a character boundary
-    let truncated = if query.len() > MAX_QUERY_LEN {
-        query
-            .char_indices()
-            .take_while(|(i, _)| *i < MAX_QUERY_LEN)
-            .last()
-            .map(|(i, c)| &query[..i + c.len_utf8()])
-            .unwrap_or("")
-    } else {
-        query
-    };
-
-    // Filter to safe characters: alphanumeric, whitespace, hyphens, quotes
-    truncated
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '-' || *c == '"')
-        .collect()
-}
-
 /// Keyword search using PostgreSQL full-text search
 ///
 /// Uses `websearch_to_tsquery` which supports Google-like syntax:
@@ -216,7 +192,7 @@ async fn keyword_search(
     min_score: f32,
 ) -> sqlx::Result<Vec<KeywordResult>> {
     // Sanitize query to prevent injection and limit length
-    let sanitized_query = sanitize_search_query(query);
+    let sanitized_query = crate::embeddings::sanitize_search_query(query);
 
     sqlx::query_as(
         r#"
@@ -426,7 +402,16 @@ pub async fn keyword_only_search(
     let workspace_id = filters.as_ref().and_then(|f| f.workspace_id);
     let source_ids = filters.as_ref().and_then(|f| f.source_ids.as_deref());
 
-    let results = keyword_search(pool, query, limit, workspace_id, source_ids, min_score).await?;
+    let keyword = crate::embeddings::rewrite_query(query).keyword;
+    let results = keyword_search(
+        pool,
+        &keyword,
+        limit,
+        workspace_id,
+        source_ids,
+        min_score,
+    )
+    .await?;
 
     Ok(results
         .into_iter()
@@ -500,7 +485,7 @@ mod tests {
         assert_eq!(config.semantic_weight, 0.7);
         assert_eq!(config.rrf_k, 60.0);
         assert_eq!(config.min_keyword_score, 0.0);
-        assert_eq!(config.min_semantic_score, 0.5);
+        assert_eq!(config.min_semantic_score, 0.35);
     }
 
     #[test]

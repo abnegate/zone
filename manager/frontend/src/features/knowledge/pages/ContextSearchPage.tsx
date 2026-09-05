@@ -196,6 +196,17 @@ export default function ContextSearchPage() {
     return 'Partial match';
   };
 
+  const resultScoreLabel = (result: { relevance_score: number; metadata: Record<string, unknown> }) => {
+    const semantic = result.metadata.semantic_score;
+    if (typeof semantic === 'number') {
+      return `${Math.round(semantic * 100)}% semantic`;
+    }
+    if (typeof result.metadata.keyword_score === 'number') {
+      return 'Keyword match';
+    }
+    return getRelevanceLabel(result.relevance_score);
+  };
+
   return (
     <div className="page page--workspace context-search-page">
       <header className="context-search-header">
@@ -307,7 +318,7 @@ export default function ContextSearchPage() {
                               : 'secondary'
                         }
                       >
-                        {getRelevanceLabel(result.relevance_score)}
+                        {resultScoreLabel(result)}
                       </Badge>
                     </div>
 
@@ -317,13 +328,12 @@ export default function ContextSearchPage() {
                       dangerouslySetInnerHTML={{ __html: highlightText(result.snippet) }}
                     />
 
-                    {result.metadata.type === 'file' &&
-                      typeof result.metadata.path === 'string' && (
-                        <div className="result-meta">
-                          <FileIcon />
-                          <span className="result-path">{result.metadata.path}</span>
-                        </div>
-                      )}
+                    {typeof result.metadata.path === 'string' && result.metadata.path && (
+                      <div className="result-meta">
+                        <FileIcon />
+                        <span className="result-path">{result.metadata.path}</span>
+                      </div>
+                    )}
 
                     <div className="relevance-indicator">
                       <div

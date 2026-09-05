@@ -786,7 +786,13 @@ pub async fn search_messages(
     };
 
     // Generate query embedding
-    let query_embedding = match embedding_service.embed(&params.query).await {
+    let query_embedding = match embedding_service
+        .embed(&zone_context::embed_query_text(
+            embedding_service.model(),
+            &params.query,
+        ))
+        .await
+    {
         Ok(emb) => emb,
         Err(e) => {
             tracing::error!("Failed to generate query embedding: {}", e);

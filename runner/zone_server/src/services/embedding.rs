@@ -170,6 +170,9 @@ mod tests {
         // Then: Should use default model
         assert!(result.is_ok());
         let service = result.unwrap();
-        assert_eq!(service.model(), "nomic-embed-text"); // Default
+        assert_eq!(
+            service.model(),
+            zone_context::embeddings::providers::DEFAULT_OLLAMA_EMBEDDING_MODEL
+        );
     }
 }

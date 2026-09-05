@@ -118,11 +118,11 @@ async fn test_pgvector_store_and_search() {
     store.store_content_chunks(&[chunk]).await.unwrap();
 
     // Create and store embedding
-    let embedding = create_test_embedding(chunk_id, item_id, source_id, 1536);
+    let embedding = create_test_embedding(chunk_id, item_id, source_id, 1024);
     store.store(&embedding).await.unwrap();
 
     // Search with the same vector (should return high similarity)
-    let query = vec![1.0 / (1536_f32).sqrt(); 1536];
+    let query = vec![1.0 / (1024_f32).sqrt(); 1024];
     let results = store
         .search(
             &query,
@@ -184,15 +184,15 @@ async fn test_pgvector_search_with_filters() {
     store.store_content_chunks(&[chunk1, chunk2]).await.unwrap();
 
     // Create embeddings with slightly different vectors
-    let embedding1 = create_test_embedding(chunk_id_1, item_id_1, source_id_1, 1536);
-    let mut vector2 = vec![1.0 / (1536_f32).sqrt(); 1536];
+    let embedding1 = create_test_embedding(chunk_id_1, item_id_1, source_id_1, 1024);
+    let mut vector2 = vec![1.0 / (1024_f32).sqrt(); 1024];
     vector2[0] = -vector2[0]; // Make it slightly different
     let embedding2 = Embedding::new(chunk_id_2, item_id_2, source_id_2, vector2, "test-model");
 
     store.store_batch(&[embedding1, embedding2]).await.unwrap();
 
     // Search with source filter
-    let query = vec![1.0 / (1536_f32).sqrt(); 1536];
+    let query = vec![1.0 / (1024_f32).sqrt(); 1024];
     let filters = SearchFilters {
         source_ids: Some(vec![source_id_1]),
         workspace_id: None,
@@ -270,7 +270,7 @@ async fn test_pgvector_delete_operations() {
             .await
             .unwrap();
 
-        let embedding = create_test_embedding(chunk_id, item_id, source_id, 1536);
+        let embedding = create_test_embedding(chunk_id, item_id, source_id, 1024);
         embeddings.push(embedding.clone());
 
         items.push(item);
@@ -281,7 +281,7 @@ async fn test_pgvector_delete_operations() {
     store.store_batch(&embeddings).await.unwrap();
 
     // Verify all are stored
-    let query = vec![1.0 / (1536_f32).sqrt(); 1536];
+    let query = vec![1.0 / (1024_f32).sqrt(); 1024];
     let results = store
         .search(
             &query,
@@ -418,11 +418,11 @@ async fn test_pgvector_upsert_behavior() {
     store.store_content_chunks(&[chunk]).await.unwrap();
 
     // Store initial embedding
-    let embedding1 = create_test_embedding(chunk_id, item_id, source_id, 1536);
+    let embedding1 = create_test_embedding(chunk_id, item_id, source_id, 1024);
     store.store(&embedding1).await.unwrap();
 
     // Store updated embedding with same chunk_id (should upsert)
-    let mut vector2 = vec![1.0 / (1536_f32).sqrt(); 1536];
+    let mut vector2 = vec![1.0 / (1024_f32).sqrt(); 1024];
     vector2[0] = -vector2[0];
     let embedding2 = Embedding::new(
         chunk_id,
@@ -484,7 +484,7 @@ async fn test_pgvector_batch_operations() {
         let chunk_id = chunk.id;
         store.store_content_chunks(&[chunk]).await.unwrap();
 
-        let embedding = create_test_embedding(chunk_id, item_id, source_id, 1536);
+        let embedding = create_test_embedding(chunk_id, item_id, source_id, 1024);
         embeddings.push(embedding);
     }
 
@@ -492,7 +492,7 @@ async fn test_pgvector_batch_operations() {
     store.store_batch(&embeddings).await.unwrap();
 
     // Verify all were stored
-    let query = vec![1.0 / (1536_f32).sqrt(); 1536];
+    let query = vec![1.0 / (1024_f32).sqrt(); 1024];
     let filters = SearchFilters {
         source_ids: Some(vec![source_id]),
         workspace_id: None,

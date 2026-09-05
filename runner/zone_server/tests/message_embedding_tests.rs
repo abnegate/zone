@@ -313,8 +313,8 @@ async fn test_search_messages_endpoint_returns_results() {
 
     // Manually create embeddings for these messages (since we don't have real embedding service)
     if state.embedding_service().is_some() {
-        let embedding1 = vec![0.1; 1536]; // Mock embedding
-        let embedding2 = vec![0.2; 1536];
+        let embedding1 = vec![0.1; 1024]; // Mock embedding
+        let embedding2 = vec![0.2; 1024];
 
         message_embeddings::store_message_embedding(
             state.db(),
@@ -368,8 +368,8 @@ async fn test_search_with_chat_id_filter() {
 
     // Store embeddings
     if state.embedding_service().is_some() {
-        let embedding1 = vec![0.1; 1536];
-        let embedding2 = vec![0.2; 1536];
+        let embedding1 = vec![0.1; 1024];
+        let embedding2 = vec![0.2; 1024];
 
         message_embeddings::store_message_embedding(
             state.db(),
@@ -431,7 +431,7 @@ async fn test_search_with_threshold_filter() {
     let msg_id = create_test_message(&client, &token, chat_id, "Test message").await;
 
     if state.embedding_service().is_some() {
-        let embedding = vec![0.1; 1536];
+        let embedding = vec![0.1; 1024];
         message_embeddings::store_message_embedding(
             state.db(),
             msg_id,
@@ -477,7 +477,7 @@ async fn test_search_respects_limit_parameter() {
         let msg_id = create_test_message(&client, &token, chat_id, &format!("Message {}", i)).await;
 
         if state.embedding_service().is_some() {
-            let embedding = vec![0.1; 1536];
+            let embedding = vec![0.1; 1024];
             message_embeddings::store_message_embedding(
                 state.db(),
                 msg_id,
@@ -587,7 +587,7 @@ async fn test_chat_specific_search_endpoint() {
     let msg_id = create_test_message(&client, &token, chat_id, "Test message").await;
 
     if state.embedding_service().is_some() {
-        let embedding = vec![0.1; 1536];
+        let embedding = vec![0.1; 1024];
         message_embeddings::store_message_embedding(
             state.db(),
             msg_id,

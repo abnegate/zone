@@ -362,6 +362,24 @@ fn render(lines: Vec<String>, empty_message: &str) -> ToolResult {
     ToolResult::success(truncate(&lines.join("\n"), MAX_TOOL_OUTPUT_CHARS))
 }
 
+fn match_label(
+    semantic: Option<f32>,
+    keyword: Option<f32>,
+    rrf: Option<f32>,
+    fallback: f32,
+) -> String {
+    if let Some(score) = semantic {
+        return format!("{:.0}% semantic", score * 100.0);
+    }
+    if let Some(score) = keyword {
+        return format!("{:.2} keyword", score);
+    }
+    if rrf.is_some() {
+        return format!("{:.3} rrf", fallback);
+    }
+    format!("{:.0}%", fallback * 100.0)
+}
+
 // Knowledge base search
 
 struct SearchKnowledgeTool(WorkspaceScope);
@@ -432,7 +450,10 @@ impl SearchKnowledgeTool {
         let mut lines = Vec::new();
 
         if let Some(embedding_service) = ctx.state.embedding_service() {
-            match embedding_service.embed(query).await {
+            match embedding_service
+                .embed(&zone_context::embed_query_text(embedding_service.model(), query))
+                .await
+            {
                 Ok(query_embedding) => {
                     match knowledge::search_knowledge_entries(
                         ctx.state.db(),
@@ -486,8 +507,8 @@ impl SearchKnowledgeTool {
 
         lines.extend(results.iter().map(|r| {
             format!(
-                "[{:.0}% match] {} ({}) [document_id: {}]\n{}",
-                r.similarity * 100.0,
+                "[{}] {} ({}) [document_id: {}]\n{}",
+                match_label(r.semantic_score, r.keyword_score, r.rrf_score, r.similarity),
                 r.item_title,
                 r.item_uri,
                 r.content_item_id,
@@ -568,7 +589,10 @@ impl SearchChatHistoryTool {
             return ToolResult::error("Message search is not available on this server.");
         };
 
-        let embedding = match embedding_service.embed(query).await {
+        let embedding = match embedding_service
+            .embed(&zone_context::embed_query_text(embedding_service.model(), query))
+            .await
+        {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("search_chat_history embedding failed: {}", e);

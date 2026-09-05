@@ -13,7 +13,7 @@ mod ollama;
 #[cfg(feature = "local-embeddings")]
 mod local;
 
-pub use ollama::OllamaProvider;
+pub use ollama::{DEFAULT_OLLAMA_EMBEDDING_MODEL, OllamaProvider};
 
 #[cfg(feature = "local-embeddings")]
 pub use local::LocalEmbeddingProvider;
@@ -72,10 +72,10 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             provider: EmbeddingProviderType::SelfHosted,
-            model: "nomic-embed-text".to_string(),
+            model: DEFAULT_OLLAMA_EMBEDDING_MODEL.to_string(),
             batch_size: 32,
             max_tokens: 8192,
-            dimension: 768,
+            dimension: 1024,
         }
     }
 }
@@ -165,9 +165,9 @@ mod tests {
     fn test_embedding_config_default() {
         let config = EmbeddingConfig::default();
         assert_eq!(config.provider, EmbeddingProviderType::SelfHosted);
-        assert_eq!(config.model, "nomic-embed-text");
+        assert_eq!(config.model, DEFAULT_OLLAMA_EMBEDDING_MODEL);
         assert_eq!(config.batch_size, 32);
-        assert_eq!(config.dimension, 768);
+        assert_eq!(config.dimension, 1024);
     }
 
     #[test]

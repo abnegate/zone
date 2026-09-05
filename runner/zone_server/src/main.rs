@@ -98,7 +98,9 @@ async fn main() {
             bedrock_use_iam_role: false,
             model_fast: None,
             model_reasoning: None,
-            model_embedding: Some("nomic-embed-text".to_string()),
+            model_embedding: Some(
+                zone_context::embeddings::providers::DEFAULT_OLLAMA_EMBEDDING_MODEL.to_string(),
+            ),
             model_image: None,
             model_video: None,
         };

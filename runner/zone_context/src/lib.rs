@@ -57,8 +57,9 @@ pub use adapters::{AdapterRegistry, ProgressCallback, SourceAdapter, TextAdapter
 
 // Embedding types
 pub use embeddings::{
-    Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult, VectorStore,
-    hybrid_search, keyword_only_search, semantic_only_search,
+    Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult, RewrittenQuery,
+    VectorStore, embed_query_text, hybrid_search, keyword_only_search, rewrite_query,
+    semantic_only_search,
 };
 
 // Heuristics types

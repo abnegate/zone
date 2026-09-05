@@ -12,8 +12,8 @@ use crate::error::{ContextError, Result};
 
 use super::{Embedding, SearchFilters, SearchResult, VectorStore};
 
-/// Vector dimension hardcoded to match database schema vector(1536)
-pub const VECTOR_DIMENSION: usize = 1536;
+/// Vector dimension hardcoded to match database schema vector(1024)
+pub const VECTOR_DIMENSION: usize = 1024;
 
 /// Pad shorter embedding models (e.g. nomic 768) to the schema width.
 /// Cosine similarity is preserved when query and document use the same padding.
@@ -48,7 +48,7 @@ pub struct PgVectorStore {
 impl PgVectorStore {
     /// Create a new PgVectorStore with the given pool
     ///
-    /// Note: The dimension is hardcoded to 1536 to match the database schema.
+    /// Note: The dimension is hardcoded to 1024 to match the database schema.
     /// If you need a different dimension, you must update the database schema.
     ///
     /// # Arguments
@@ -57,7 +57,7 @@ impl PgVectorStore {
         Self { pool }
     }
 
-    /// Get the configured dimension (always 1536)
+    /// Get the configured dimension (always 1024)
     pub fn dimension(&self) -> usize {
         VECTOR_DIMENSION
     }
@@ -689,7 +689,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(ContextError::EmbeddingDimensionMismatch {
-                expected: 1536,
+                expected: VECTOR_DIMENSION,
                 actual: 3072
             })
         ));
@@ -714,7 +714,7 @@ mod tests {
 
         let store = PgVectorStore::new(pool);
         assert_eq!(store.dimension(), VECTOR_DIMENSION);
-        assert_eq!(store.dimension(), 1536);
+        assert_eq!(store.dimension(), 1024);
     }
 
     #[test]

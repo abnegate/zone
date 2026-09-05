@@ -190,13 +190,13 @@ async fn test_ollama_from_settings_with_default_model() {
     let settings = AiSettings {
         provider: "self_hosted".to_string(),
         litellm_host: Some("http://localhost:11434".to_string()),
-        model_embedding: None, // Should default to nomic-embed-text
+        model_embedding: None, // Should default to qwen3-embedding:0.6b
         ..Default::default()
     };
 
     let provider = OllamaProvider::from_settings(&settings).unwrap();
-    assert_eq!(provider.model(), "nomic-embed-text");
-    assert_eq!(provider.dimension(), 768);
+    assert_eq!(provider.model(), "qwen3-embedding:0.6b");
+    assert_eq!(provider.dimension(), 1024);
 }
 
 #[tokio::test]

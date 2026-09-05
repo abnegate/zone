@@ -28,7 +28,7 @@ fn aligned_vector_literal(embedding: &[f32]) -> Result<String, sqlx::Error> {
 /// * `pool` - Database connection pool
 /// * `message_id` - ID of the message
 /// * `chat_id` - ID of the chat containing the message
-/// * `embedding` - The embedding vector (padded to 1536 if the model is narrower)
+/// * `embedding` - The embedding vector (padded to 1024 if the model is narrower)
 /// * `model` - Model identifier used to generate the embedding
 ///
 /// # Note
