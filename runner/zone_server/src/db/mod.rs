@@ -7,6 +7,7 @@ pub mod actions;
 pub mod ai_settings;
 pub mod audit;
 pub mod chats;
+pub mod context;
 pub mod context_gatherings;
 pub mod email_verification;
 pub mod gathering_events;

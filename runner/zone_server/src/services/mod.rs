@@ -4,6 +4,7 @@
 
 pub mod artifacts;
 pub mod character;
+pub mod chat;
 pub mod comfy_recipe;
 pub mod comfyui;
 pub mod completion_tokens;

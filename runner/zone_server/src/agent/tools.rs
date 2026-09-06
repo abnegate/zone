@@ -140,6 +140,9 @@ impl ChatTools {
         let mut workspace = Vec::new();
 
         if let Some(scope) = &scope {
+            registry.register(Arc::new(crate::services::chat::evidence::EvidenceTool(
+                scope.clone(),
+            )));
             registry.register(Arc::new(SearchKnowledgeTool(scope.clone())));
             registry.register(Arc::new(SearchChatHistoryTool(scope.clone())));
             registry.register(Arc::new(ListSourcesTool(scope.clone())));

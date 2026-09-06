@@ -1,0 +1,707 @@
+//! Fenced, transactional conversation persistence. No transaction spans model inference.
+
+use chrono::{DateTime, NaiveDateTime, Utc};
+use serde_json::Value;
+use sqlx::{PgConnection, PgPool, Row};
+use std::collections::HashSet;
+use std::time::Duration;
+use thiserror::Error;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use uuid::Uuid;
+use zone_core::llm::{Message, Role};
+
+use crate::db::chats::MessageRow;
+use crate::services::chat::history::{
+    self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary,
+};
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("This chat already has an active response")]
+    Busy,
+    #[error("Chat generation ownership expired or changed; the response was stopped")]
+    LeaseLost,
+    #[error("Conversation checkpoint changed; retry from current history")]
+    Conflict,
+    #[error("Conversation integrity error: {0}")]
+    Integrity(String),
+    #[error("Conversation evidence was not found in this chat")]
+    NotFound,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Clone)]
+pub struct Lease {
+    pub chat_id: Uuid,
+    pub owner: Uuid,
+    pub fence: i64,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// An independently scheduled renewal, unaffected by blocked websocket sends or tools.
+/// Dropping the guard stops renewal; callers release explicitly after durable completion.
+pub struct Guard {
+    lease: Lease,
+    lost: watch::Receiver<bool>,
+    task: JoinHandle<()>,
+}
+
+impl Guard {
+    pub fn lease(&self) -> &Lease {
+        &self.lease
+    }
+    pub fn is_lost(&self) -> bool {
+        *self.lost.borrow()
+    }
+    pub async fn lost(&mut self) {
+        if self.is_lost() {
+            return;
+        }
+        let _ = self.lost.wait_for(|lost| *lost).await;
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Clone)]
+pub struct Store {
+    pool: PgPool,
+    chat_id: Uuid,
+    workspace_id: Option<Uuid>,
+}
+
+impl Store {
+    /// The scope must come from an authorized chat, never from model tool arguments.
+    pub fn new(pool: PgPool, chat_id: Uuid, workspace_id: Option<Uuid>) -> Self {
+        Self {
+            pool,
+            chat_id,
+            workspace_id,
+        }
+    }
+
+    pub async fn acquire(&self, owner: Uuid, lifetime: Duration) -> Result<Lease, Error> {
+        let milliseconds = milliseconds(lifetime)?;
+        let row = sqlx::query("INSERT INTO chat_leases (chat_id, owner, fence, expires_at)
+            SELECT id, $3, 1, clock_timestamp() + $4 * interval '1 millisecond'
+            FROM chats WHERE id = $1 AND workspace_id IS NOT DISTINCT FROM $2
+            ON CONFLICT (chat_id) DO UPDATE SET owner = EXCLUDED.owner,
+            fence = chat_leases.fence + 1, expires_at = clock_timestamp() + $4 * interval '1 millisecond'
+            WHERE chat_leases.expires_at <= clock_timestamp()
+            RETURNING owner, fence, expires_at")
+            .bind(self.chat_id).bind(self.workspace_id).bind(owner).bind(milliseconds)
+            .fetch_optional(&self.pool).await?;
+        match row {
+            Some(row) => Ok(Lease {
+                chat_id: self.chat_id,
+                owner: row.get("owner"),
+                fence: row.get("fence"),
+                expires_at: row.get("expires_at"),
+            }),
+            None => {
+                self.scope(&mut *self.pool.acquire().await?).await?;
+                Err(Error::Busy)
+            }
+        }
+    }
+
+    pub async fn renew(&self, lease: &Lease, lifetime: Duration) -> Result<Lease, Error> {
+        self.identity(lease)?;
+        let row = sqlx::query("UPDATE chat_leases l SET expires_at = clock_timestamp() + $5 * interval '1 millisecond'
+            FROM chats c WHERE l.chat_id = $1 AND l.owner = $2 AND l.fence = $3
+            AND l.expires_at > clock_timestamp() AND c.id = l.chat_id AND c.workspace_id IS NOT DISTINCT FROM $4
+            RETURNING l.expires_at")
+            .bind(self.chat_id).bind(lease.owner).bind(lease.fence).bind(self.workspace_id).bind(milliseconds(lifetime)?)
+            .fetch_optional(&self.pool).await?.ok_or(Error::LeaseLost)?;
+        Ok(Lease {
+            expires_at: row.get("expires_at"),
+            ..lease.clone()
+        })
+    }
+
+    pub fn keep_alive(&self, lease: Lease, lifetime: Duration) -> Result<Guard, Error> {
+        self.identity(&lease)?;
+        milliseconds(lifetime)?;
+        let store = self.clone();
+        let renewal = lease.clone();
+        let (sender, lost) = watch::channel(false);
+        let period = lifetime / 3;
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(period).await;
+                // A blocked connection pool or database must wake cancellation before expiry.
+                match tokio::time::timeout(period, store.renew(&renewal, lifetime)).await {
+                    Ok(Ok(_)) => (),
+                    _ => {
+                        let _ = sender.send(true);
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Guard { lease, lost, task })
+    }
+
+    pub async fn assert_current(&self, lease: &Lease) -> Result<(), Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn release(&self, lease: &Lease) -> Result<bool, Error> {
+        self.identity(lease)?;
+        // Retain the row so the fencing token is never reset by release/reacquire.
+        Ok(sqlx::query(
+            "UPDATE chat_leases l SET expires_at = clock_timestamp() FROM chats c
+            WHERE l.chat_id = $1 AND l.owner = $2 AND l.fence = $3
+            AND c.id = l.chat_id AND c.workspace_id IS NOT DISTINCT FROM $4",
+        )
+        .bind(self.chat_id)
+        .bind(lease.owner)
+        .bind(lease.fence)
+        .bind(self.workspace_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Save the trigger and parent turn atomically, before any external operation starts.
+    pub async fn begin(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        user_message_id: Uuid,
+        content: &str,
+        metadata: Option<Value>,
+        message: ReplayMessage,
+    ) -> Result<MessageRow, Error> {
+        if message.role != Role::User
+            || message.content.as_deref() != Some(content)
+            || message.tool_calls.is_some()
+            || message.tool_call_id.is_some()
+        {
+            return Err(Error::Integrity("Invalid triggering user message".into()));
+        }
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.materialize(&mut transaction).await?;
+        self.recover_in(&mut transaction).await?;
+        sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+            .bind(self.chat_id)
+            .execute(&mut *transaction)
+            .await?;
+        let title_claimed = sqlx::query("UPDATE chats SET title_message_id = $2 WHERE id = $1 AND automatic_title
+            AND title_message_id IS NULL AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = $1 AND role = 'user')")
+            .bind(self.chat_id).bind(user_message_id).execute(&mut *transaction).await?.rows_affected() == 1;
+        let row = self
+            .visible(
+                &mut transaction,
+                user_message_id,
+                "user",
+                content,
+                metadata,
+                title_claimed,
+            )
+            .await?;
+        sqlx::query(
+            "INSERT INTO chat_turns (id, chat_id, user_message_id, fence) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(turn_id)
+        .bind(self.chat_id)
+        .bind(user_message_id)
+        .bind(lease.fence)
+        .execute(&mut *transaction)
+        .await?;
+        self.insert(
+            &mut transaction,
+            Some(turn_id),
+            &user_message_id.to_string(),
+            &message,
+            true,
+            false,
+        )
+        .await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(row)
+    }
+
+    pub async fn append(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        entries: &[NewEntry],
+    ) -> Result<(), Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.turn(&mut transaction, lease, turn_id).await?;
+        for entry in entries {
+            self.append_in(&mut transaction, turn_id, entry).await?;
+        }
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn consumed(&self, lease: &Lease, ids: &[String]) -> Result<(), Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        let unique: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let count = sqlx::query(
+            "UPDATE chat_entries SET consumed = TRUE WHERE chat_id = $1 AND id = ANY($2)",
+        )
+        .bind(self.chat_id)
+        .bind(ids)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if count as usize != unique.len() {
+            return Err(Error::Integrity(
+                "Cannot mark missing evidence consumed".into(),
+            ));
+        }
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn complete(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        content: &str,
+        metadata: Option<Value>,
+    ) -> Result<MessageRow, Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.turn(&mut transaction, lease, turn_id).await?;
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chat_calls WHERE chat_id = $1 AND turn_id = $2 AND result_id IS NULL)")
+            .bind(self.chat_id).bind(turn_id).fetch_one(&mut *transaction).await?;
+        if pending {
+            return Err(Error::Integrity(
+                "Cannot complete a turn with pending tool outcomes".into(),
+            ));
+        }
+        let row = self
+            .visible(
+                &mut transaction,
+                turn_id,
+                "assistant",
+                content,
+                metadata,
+                false,
+            )
+            .await?;
+        sqlx::query("UPDATE chat_turns SET status = 'completed', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
+            .bind(self.chat_id).bind(turn_id).execute(&mut *transaction).await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(row)
+    }
+
+    pub async fn interrupt(&self, lease: &Lease, turn_id: Uuid) -> Result<(), Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.turn(&mut transaction, lease, turn_id).await?;
+        self.interrupt_in(&mut transaction, turn_id).await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn recover(&self, lease: &Lease) -> Result<usize, Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        let count = self.recover_in(&mut transaction).await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(count)
+    }
+
+    pub async fn load(&self) -> Result<History, Error> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        self.scope(&mut transaction).await?;
+        let history = self.load_in(&mut transaction).await?;
+        if let Some(summary) = &history.summary {
+            history::validate(&history, summary).map_err(Error::Integrity)?;
+        }
+        transaction.commit().await?;
+        Ok(history)
+    }
+
+    pub async fn checkpoint(
+        &self,
+        lease: &Lease,
+        expected: Option<&Summary>,
+        proposed: &Summary,
+    ) -> Result<(), Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.materialize(&mut transaction).await?;
+        let history = self.load_in(&mut transaction).await?;
+        if history.summary.as_ref() != expected {
+            return Err(Error::Conflict);
+        }
+        history::validate(&history, proposed).map_err(Error::Integrity)?;
+        let previous = expected.map_or(0, |summary| summary.revision);
+        if proposed.revision
+            != previous
+                .checked_add(1)
+                .ok_or_else(|| Error::Integrity("Checkpoint revision overflow".into()))?
+        {
+            return Err(Error::Conflict);
+        }
+        if let Some(expected) = expected {
+            let selected: HashSet<&str> = proposed.entries.iter().map(String::as_str).collect();
+            if expected
+                .entries
+                .iter()
+                .any(|id| !selected.contains(id.as_str()))
+                || expected.entries == proposed.entries
+            {
+                return Err(Error::Integrity(
+                    "Checkpoint must retain prior coverage and add new evidence".into(),
+                ));
+            }
+        }
+        let revision = i64::try_from(proposed.revision)
+            .map_err(|_| Error::Integrity("Checkpoint revision overflow".into()))?;
+        sqlx::query("INSERT INTO chat_checkpoints (chat_id, revision, content, entries, fingerprint) VALUES ($1,$2,$3,$4,$5)
+            ON CONFLICT (chat_id) DO UPDATE SET revision = EXCLUDED.revision, content = EXCLUDED.content,
+            entries = EXCLUDED.entries, fingerprint = EXCLUDED.fingerprint, updated_at = clock_timestamp()")
+            .bind(self.chat_id).bind(revision).bind(&proposed.content).bind(serde_json::to_value(&proposed.entries)?).bind(&proposed.fingerprint)
+            .execute(&mut *transaction).await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Unicode scalar offsets, with bounds derived from actual persisted content length.
+    pub async fn evidence(&self, id: &str, offset: u64, limit: u64) -> Result<Evidence, Error> {
+        if self.workspace_id.is_none() {
+            return Err(Error::NotFound);
+        }
+        let row = sqlx::query("SELECT e.message FROM chat_entries e JOIN chats c ON c.id = e.chat_id
+            WHERE e.chat_id = $1 AND e.id = $2 AND c.workspace_id IS NOT DISTINCT FROM $3 AND e.message->>'role' = 'tool'")
+            .bind(self.chat_id).bind(id).bind(self.workspace_id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
+        let message: ReplayMessage = serde_json::from_value(row.get("message"))?;
+        let content = message.content.unwrap_or_default();
+        let total = content.chars().count() as u64;
+        if limit == 0 || offset > total {
+            return Err(Error::Integrity(
+                "Evidence page offset or length is invalid".into(),
+            ));
+        }
+        let count = limit.min(total - offset);
+        let page: String = content
+            .chars()
+            .skip(offset as usize)
+            .take(count as usize)
+            .collect();
+        let end = offset + count;
+        Ok(Evidence {
+            id: id.to_string(),
+            content: page,
+            offset,
+            next: (end < total).then_some(end),
+            total,
+        })
+    }
+
+    fn identity(&self, lease: &Lease) -> Result<(), Error> {
+        if self.chat_id != lease.chat_id {
+            Err(Error::LeaseLost)
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn scope(&self, connection: &mut PgConnection) -> Result<(), Error> {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chats WHERE id = $1 AND workspace_id IS NOT DISTINCT FROM $2)")
+            .bind(self.chat_id).bind(self.workspace_id).fetch_one(connection).await?;
+        if exists { Ok(()) } else { Err(Error::NotFound) }
+    }
+
+    async fn lock(&self, connection: &mut PgConnection, lease: &Lease) -> Result<(), Error> {
+        self.identity(lease)?;
+        let current = sqlx::query("SELECT l.fence FROM chat_leases l JOIN chats c ON c.id = l.chat_id
+            WHERE l.chat_id = $1 AND l.owner = $2 AND l.fence = $3 AND l.expires_at > clock_timestamp()
+            AND c.workspace_id IS NOT DISTINCT FROM $4 FOR UPDATE OF l")
+            .bind(self.chat_id).bind(lease.owner).bind(lease.fence).bind(self.workspace_id).fetch_optional(connection).await?;
+        current.ok_or(Error::LeaseLost)?;
+        Ok(())
+    }
+
+    async fn turn(
+        &self,
+        connection: &mut PgConnection,
+        lease: &Lease,
+        turn_id: Uuid,
+    ) -> Result<(), Error> {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM chat_turns WHERE chat_id = $1 AND id = $2 AND fence = $3 AND status = 'running')")
+            .bind(self.chat_id).bind(turn_id).bind(lease.fence).fetch_one(connection).await?;
+        if exists {
+            Ok(())
+        } else {
+            Err(Error::LeaseLost)
+        }
+    }
+
+    async fn insert(
+        &self,
+        connection: &mut PgConnection,
+        turn: Option<Uuid>,
+        id: &str,
+        message: &ReplayMessage,
+        consumed: bool,
+        legacy: bool,
+    ) -> Result<(), Error> {
+        if id.is_empty() || message.version != history::VERSION {
+            return Err(Error::Integrity(
+                "Invalid canonical entry version or identity".into(),
+            ));
+        }
+        sqlx::query("INSERT INTO chat_entries (chat_id,id,turn_id,message,consumed,legacy) VALUES ($1,$2,$3,$4,$5,$6)")
+            .bind(self.chat_id).bind(id).bind(turn).bind(serde_json::to_value(message)?).bind(consumed).bind(legacy).execute(connection).await?;
+        Ok(())
+    }
+
+    async fn append_in(
+        &self,
+        connection: &mut PgConnection,
+        turn_id: Uuid,
+        entry: &NewEntry,
+    ) -> Result<(), Error> {
+        let message = &entry.message;
+        if !matches!(message.role, Role::Assistant | Role::Tool) {
+            return Err(Error::Integrity(
+                "Only assistant envelopes and tool outcomes can be appended to a turn".into(),
+            ));
+        }
+        let mutations: HashSet<&str> = entry.mutations.iter().map(String::as_str).collect();
+        let calls: HashSet<&str> = message
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(|call| call.id.as_str())
+            .collect();
+        if !mutations.is_subset(&calls)
+            || message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls.is_empty())
+        {
+            return Err(Error::Integrity(
+                "Invalid tool envelope mutation identities".into(),
+            ));
+        }
+        if (message.role == Role::Tool
+            && (message.tool_calls.is_some() || message.tool_call_id.is_none()))
+            || (message.role == Role::Assistant && message.tool_call_id.is_some())
+        {
+            return Err(Error::Integrity(
+                "Invalid tool envelope or result role".into(),
+            ));
+        }
+        self.insert(connection, Some(turn_id), &entry.id, message, false, false)
+            .await?;
+        for call in message.tool_calls.iter().flatten() {
+            if call.id.is_empty() {
+                return Err(Error::Integrity("Tool call has no identity".into()));
+            }
+            sqlx::query("INSERT INTO chat_calls (chat_id,id,turn_id,envelope_id,mutating) VALUES ($1,$2,$3,$4,$5)")
+                .bind(self.chat_id).bind(&call.id).bind(turn_id).bind(&entry.id).bind(mutations.contains(call.id.as_str())).execute(&mut *connection).await?;
+        }
+        if let Some(id) = &message.tool_call_id {
+            let updated = sqlx::query("UPDATE chat_calls SET result_id = $4 WHERE chat_id = $1 AND id = $2 AND turn_id = $3 AND result_id IS NULL")
+                .bind(self.chat_id).bind(id).bind(turn_id).bind(&entry.id).execute(connection).await?.rows_affected();
+            if updated != 1 {
+                return Err(Error::Integrity(
+                    "Tool result is orphaned, duplicated or belongs to another turn".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn recover_in(&self, connection: &mut PgConnection) -> Result<usize, Error> {
+        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM chat_turns WHERE chat_id = $1 AND status = 'running' ORDER BY created_at, id")
+            .bind(self.chat_id).fetch_all(&mut *connection).await?;
+        for id in &ids {
+            self.interrupt_in(connection, *id).await?;
+        }
+        Ok(ids.len())
+    }
+
+    async fn interrupt_in(
+        &self,
+        connection: &mut PgConnection,
+        turn_id: Uuid,
+    ) -> Result<(), Error> {
+        let pending = sqlx::query("SELECT id, mutating FROM chat_calls WHERE chat_id = $1 AND turn_id = $2 AND result_id IS NULL ORDER BY envelope_id, id")
+            .bind(self.chat_id).bind(turn_id).fetch_all(&mut *connection).await?;
+        for row in pending {
+            let call: String = row.get("id");
+            let content = if row.get::<bool, _>("mutating") {
+                "Error: execution was interrupted. Outcome unknown: this operation may have changed external state. Inspect the resulting state before taking further action; do not automatically repeat this mutation."
+            } else {
+                "Error: execution was interrupted before a result was durably recorded. No result is available."
+            };
+            self.append_in(
+                connection,
+                turn_id,
+                &NewEntry {
+                    id: Uuid::new_v4().to_string(),
+                    message: ReplayMessage::from(&Message::tool_result(call, content)),
+                    mutations: Vec::new(),
+                },
+            )
+            .await?;
+        }
+        sqlx::query("UPDATE chat_turns SET status = 'interrupted', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
+            .bind(self.chat_id).bind(turn_id).execute(connection).await?;
+        Ok(())
+    }
+
+    async fn visible(
+        &self,
+        connection: &mut PgConnection,
+        id: Uuid,
+        role: &str,
+        content: &str,
+        metadata: Option<Value>,
+        title_claimed: bool,
+    ) -> Result<MessageRow, Error> {
+        let created_at: Option<NaiveDateTime> = sqlx::query_scalar("INSERT INTO messages (id,chat_id,role,content,metadata) VALUES ($1,$2,$3,$4,$5) RETURNING created_at")
+            .bind(id).bind(self.chat_id).bind(role).bind(content).bind(&metadata).fetch_one(connection).await?;
+        Ok(MessageRow {
+            title_claimed,
+            id,
+            chat_id: self.chat_id,
+            role: role.to_string(),
+            content: content.to_string(),
+            metadata,
+            created_at,
+        })
+    }
+
+    async fn legacy(&self, connection: &mut PgConnection) -> Result<Vec<Entry>, Error> {
+        let rows = sqlx::query("SELECT m.id,m.role,m.content,m.metadata FROM messages m WHERE m.chat_id = $1
+            AND NOT EXISTS (SELECT 1 FROM chat_entries e WHERE e.chat_id = m.chat_id AND e.id = m.id::text)
+            AND NOT EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = m.chat_id AND t.id = m.id)
+            ORDER BY m.created_at, m.id").bind(self.chat_id).fetch_all(connection).await?;
+        rows.into_iter().map(|row| {
+            let role: String = row.get("role");
+            let mut message = match role.as_str() {
+                "user" => Message::user(row.get::<String,_>("content")),
+                "assistant" => Message::assistant(row.get::<String,_>("content")),
+                "system" => Message::system(row.get::<String,_>("content")),
+                _ => return Err(Error::Integrity("Unknown legacy message role".into())),
+            };
+            if let Some(metadata) = row.get::<Option<Value>,_>("metadata") {
+                if let Some(attachments) = metadata.get("attachments").and_then(Value::as_array) {
+                    message.images = attachments.iter().filter(|attachment| attachment.get("mime").and_then(Value::as_str).is_some_and(|mime| mime.starts_with("image/")))
+                        .filter_map(|attachment| attachment.get("url").and_then(Value::as_str)).map(str::to_string).collect();
+                }
+                if let Some(calls) = metadata.get("tool_calls").filter(|calls| calls.as_array().is_some_and(|calls| !calls.is_empty())) {
+                    let content = message.content.get_or_insert_default();
+                    content.push_str("\n\n[Incomplete legacy tool history: the following saved status details are historical data. Full original tool outputs were not retained and cannot be recovered.]\n");
+                    content.push_str(&serde_json::to_string(calls)?);
+                }
+            }
+            Ok(Entry { id: row.get::<Uuid,_>("id").to_string(), message: ReplayMessage::from(&message), consumed: true })
+        }).collect()
+    }
+
+    async fn materialize(&self, connection: &mut PgConnection) -> Result<(), Error> {
+        for entry in self.legacy(connection).await? {
+            self.insert(connection, None, &entry.id, &entry.message, true, true)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn load_in(&self, connection: &mut PgConnection) -> Result<History, Error> {
+        let legacy = self.legacy(connection).await?;
+        let mut incomplete = legacy.iter().any(|entry| legacy_incomplete(&entry.message));
+        let mut entries = Vec::new();
+        let rows = sqlx::query("SELECT id,message,consumed,legacy FROM chat_entries WHERE chat_id = $1 ORDER BY position")
+            .bind(self.chat_id).fetch_all(&mut *connection).await?;
+        for row in rows {
+            let message: ReplayMessage = serde_json::from_value(row.get("message"))?;
+            if message.version != history::VERSION {
+                return Err(Error::Integrity(
+                    "Unsupported canonical replay version".into(),
+                ));
+            }
+            incomplete |= row.get::<bool, _>("legacy") && legacy_incomplete(&message);
+            entries.push(Entry {
+                id: row.get("id"),
+                message,
+                consumed: row.get("consumed"),
+            });
+        }
+        // begin/checkpoint materialize all preceding public rows before appending.
+        // Any remaining public-only rows were added after the last canonical event.
+        entries.extend(legacy);
+        let latest_user = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.message.role == Role::User)
+            .map(|entry| entry.id.clone());
+        let row = sqlx::query(
+            "SELECT revision,content,entries,fingerprint FROM chat_checkpoints WHERE chat_id = $1",
+        )
+        .bind(self.chat_id)
+        .fetch_optional(connection)
+        .await?;
+        let summary = row
+            .map(|row| {
+                Ok::<_, Error>(Summary {
+                    content: row.get("content"),
+                    entries: serde_json::from_value(row.get("entries"))?,
+                    fingerprint: row.get("fingerprint"),
+                    revision: u64::try_from(row.get::<i64, _>("revision"))
+                        .map_err(|_| Error::Integrity("Invalid checkpoint revision".into()))?,
+                })
+            })
+            .transpose()?;
+        Ok(History {
+            entries,
+            summary,
+            latest_user,
+            incomplete,
+        })
+    }
+}
+
+fn milliseconds(lifetime: Duration) -> Result<i64, Error> {
+    let value = i64::try_from(lifetime.as_millis())
+        .map_err(|_| Error::Integrity("Lease lifetime exceeds database duration range".into()))?;
+    if value < 3 {
+        return Err(Error::Integrity(
+            "Lease lifetime requires at least three millisecond scheduling intervals".into(),
+        ));
+    }
+    Ok(value)
+}
+
+fn legacy_incomplete(message: &ReplayMessage) -> bool {
+    message
+        .content
+        .as_deref()
+        .is_some_and(|content| content.contains("[Incomplete legacy tool history:"))
+}
