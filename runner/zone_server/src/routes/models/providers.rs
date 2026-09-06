@@ -303,75 +303,110 @@ async fn fetch_ollama_manifest_size(name: &str, client: &Client) -> Option<u64> 
     (total > 0).then_some(total)
 }
 
-/// Parse Ollama library HTML to extract model information
+fn is_ollama_site_segment(segment: &str) -> bool {
+    matches!(
+        segment.to_ascii_lowercase().as_str(),
+        "search"
+            | "docs"
+            | "signin"
+            | "sign-in"
+            | "login"
+            | "signup"
+            | "sign-up"
+            | "download"
+            | "pricing"
+            | "blog"
+            | "public"
+            | "tags"
+            | "rss"
+            | "privacy"
+            | "terms"
+            | "about"
+    )
+}
+
+/// Official cards are `/library/{name}`; community cards are `/{owner}/{model}`.
+fn ollama_catalog_entry(href: &str) -> Option<(String, String)> {
+    let path = href.split(['?', '#']).next().unwrap_or(href);
+    let path = path.strip_prefix('/').unwrap_or(path);
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    match segments.as_slice() {
+        ["library", name] => Some((
+            (*name).to_string(),
+            format!("https://ollama.com/library/{name}"),
+        )),
+        [owner, name] if !is_ollama_site_segment(owner) && *owner != "library" => Some((
+            format!("{owner}/{name}"),
+            format!("https://ollama.com/{owner}/{name}"),
+        )),
+        _ => None,
+    }
+}
+
 fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
     let document = Html::parse_document(html);
     let mut models = Vec::new();
 
-    // Ollama uses <a> elements with href="/library/modelname" for model cards
     let card_selector =
-        Selector::parse("a[href^='/library/']").expect("Static selector should always parse");
+        Selector::parse("a[href^='/']").expect("Static selector should always parse");
     let paragraph_selector = Selector::parse("p").expect("Static selector should always parse");
     let span_selector = Selector::parse("span").expect("Static selector should always parse");
 
     for element in document.select(&card_selector) {
-        if let Some(href) = element.value().attr("href") {
-            // Extract model name from href like "/library/llama3.2"
-            let name = href.strip_prefix("/library/").unwrap_or(href).to_string();
+        let Some((name, url)) = element.value().attr("href").and_then(ollama_catalog_entry) else {
+            continue;
+        };
 
-            if name.is_empty() || name.contains('/') {
-                continue;
-            }
+        let text = collapse_whitespace(&element.text().collect::<Vec<_>>().join(" "));
+        let description = element
+            .select(&paragraph_selector)
+            .map(|p| collapse_whitespace(&p.text().collect::<String>()))
+            .find(|t| !t.is_empty() && !is_ollama_stat_line(t));
+        let capability_tags = element
+            .select(&span_selector)
+            .map(|s| collapse_whitespace(&s.text().collect::<String>()))
+            .filter(|t| is_capability_tag(t))
+            .collect::<Vec<_>>();
+        let chip_sizes = element
+            .select(&span_selector)
+            .map(|s| collapse_whitespace(&s.text().collect::<String>()))
+            .filter(|t| is_param_size_chip(t))
+            .collect::<Vec<_>>();
 
-            let text = collapse_whitespace(&element.text().collect::<Vec<_>>().join(" "));
-            let description = element
-                .select(&paragraph_selector)
-                .map(|p| collapse_whitespace(&p.text().collect::<String>()))
-                .find(|t| !t.is_empty() && !is_ollama_stat_line(t));
-            let capability_tags = element
-                .select(&span_selector)
-                .map(|s| collapse_whitespace(&s.text().collect::<String>()))
-                .filter(|t| is_capability_tag(t))
-                .collect::<Vec<_>>();
-            let chip_sizes = element
-                .select(&span_selector)
-                .map(|s| collapse_whitespace(&s.text().collect::<String>()))
-                .filter(|t| is_param_size_chip(t))
-                .collect::<Vec<_>>();
+        let size_labels = collect_param_size_labels(&text, chip_sizes);
+        let param_size = format_param_sizes(size_labels.clone())
+            .or_else(|| description.as_deref().and_then(extract_param_size));
+        let sizes = ollama_size_variants(&name, &size_labels);
+        let family = extract_model_family(&name);
+        let use_cases = nonempty_vec(infer_use_cases(&[
+            description.as_deref().unwrap_or(""),
+            &capability_tags.join(" "),
+            &name,
+        ]));
+        let capabilities = declared_capabilities(capability_tags.iter().map(String::as_str));
+        let tags = nonempty_vec(capability_tags);
+        let downloads = extract_pulls(&text);
 
-            let size_labels = collect_param_size_labels(&text, chip_sizes);
-            let param_size = format_param_sizes(size_labels.clone())
-                .or_else(|| description.as_deref().and_then(extract_param_size));
-            let sizes = ollama_size_variants(&name, &size_labels);
-            let family = extract_model_family(&name);
-            let use_cases = nonempty_vec(infer_use_cases(&[
-                description.as_deref().unwrap_or(""),
-                &capability_tags.join(" "),
-                &name,
-            ]));
-            let capabilities = declared_capabilities(capability_tags.iter().map(String::as_str));
-            let tags = nonempty_vec(capability_tags);
-            let downloads = extract_pulls(&text);
-            let url = Some(format!("https://ollama.com/library/{}", name));
-
-            models.push(ModelResponse {
-                name,
-                description,
-                url,
-                downloads,
-                tags,
-                use_cases,
-                capabilities,
-                sizes,
-                details: Some(ModelDetails {
-                    format: Some("gguf".to_string()),
-                    family,
-                    parameter_size: param_size,
-                    ..Default::default()
-                }),
+        models.push(ModelResponse {
+            name,
+            description,
+            url: Some(url),
+            downloads,
+            tags,
+            use_cases,
+            capabilities,
+            sizes,
+            details: Some(ModelDetails {
+                format: Some("gguf".to_string()),
+                family,
+                parameter_size: param_size,
                 ..Default::default()
-            });
-        }
+            }),
+            ..Default::default()
+        });
     }
 
     // Keep Ollama's ranking. Alphabetical sort buried current official
@@ -762,13 +797,12 @@ fn huggingface_medium_tag(medium: ModelMediumFilter) -> Option<&'static str> {
     }
 }
 
-async fn fetch_huggingface_page(
+fn huggingface_search_url(
     catalog_url: &str,
-    client: &Client,
     opts: &BrowseQuery<'_>,
     cursor: Option<&str>,
     limit: usize,
-) -> Result<(Vec<ModelResponse>, Option<String>), ProviderError> {
+) -> String {
     let (sort_field, direction) = huggingface_sort_params(opts.sort);
     let mut url =
         format!("{catalog_url}?filter=gguf&sort={sort_field}&direction={direction}&limit={limit}");
@@ -789,23 +823,30 @@ async fn fetch_huggingface_page(
     }
 
     if let Some(c) = cursor {
-        url.push_str(&format!("&cursor={}", c));
+        url.push_str(&format!("&cursor={c}"));
     }
 
-    if let Some(q) = opts.query
-        && !q.is_empty()
-    {
-        url.push_str(&format!("&search={}", urlencoding::encode(q)));
-    }
-
-    if let Some(family) = opts.family {
-        url.push_str(&format!("&filter={}", urlencoding::encode(family)));
+    let query = opts.query.map(str::trim).filter(|value| !value.is_empty());
+    let search = query.or_else(|| opts.family.map(str::trim).filter(|value| !value.is_empty()));
+    if let Some(search) = search {
+        url.push_str(&format!("&search={}", urlencoding::encode(search)));
     }
 
     if let Some(tag) = huggingface_medium_tag(opts.medium) {
         url.push_str(&format!("&filter={}", urlencoding::encode(tag)));
     }
 
+    url
+}
+
+async fn fetch_huggingface_page(
+    catalog_url: &str,
+    client: &Client,
+    opts: &BrowseQuery<'_>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<ModelResponse>, Option<String>), ProviderError> {
+    let url = huggingface_search_url(catalog_url, opts, cursor, limit);
     let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
@@ -1735,21 +1776,22 @@ fn sort_models(models: &mut [ModelResponse], sort: ModelSort) {
             models.sort_by_key(|model| std::cmp::Reverse(model.name.to_lowercase()))
         }
         ModelSort::DownloadsAsc => models.sort_by(|a, b| cmp_optional(a.downloads, b.downloads)),
-        ModelSort::DownloadsDesc => models.sort_by(|a, b| cmp_optional(b.downloads, a.downloads)),
+        ModelSort::DownloadsDesc => {
+            models.sort_by(|a, b| cmp_optional_desc(a.downloads, b.downloads))
+        }
         ModelSort::SizeAsc => models.sort_by(|a, b| cmp_optional(a.size, b.size)),
-        ModelSort::SizeDesc => models.sort_by(|a, b| cmp_optional(b.size, a.size)),
+        ModelSort::SizeDesc => models.sort_by(|a, b| cmp_optional_desc(a.size, b.size)),
         ModelSort::ParamsAsc => {
             models.sort_by(|a, b| cmp_optional(param_billions(a), param_billions(b)))
         }
         ModelSort::ParamsDesc => {
-            models.sort_by(|a, b| cmp_optional(param_billions(b), param_billions(a)))
+            models.sort_by(|a, b| cmp_optional_desc(param_billions(a), param_billions(b)))
         }
         ModelSort::UpdatedAsc => {
             models.sort_by(|a, b| cmp_optional(a.modified_at.as_deref(), b.modified_at.as_deref()))
         }
-        ModelSort::UpdatedDesc => {
-            models.sort_by(|a, b| cmp_optional(b.modified_at.as_deref(), a.modified_at.as_deref()))
-        }
+        ModelSort::UpdatedDesc => models
+            .sort_by(|a, b| cmp_optional_desc(a.modified_at.as_deref(), b.modified_at.as_deref())),
     }
 }
 
@@ -1767,6 +1809,14 @@ fn cmp_optional<T: PartialOrd>(left: Option<T>, right: Option<T>) -> std::cmp::O
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn cmp_optional_desc<T: PartialOrd>(left: Option<T>, right: Option<T>) -> std::cmp::Ordering {
+    if left.is_some() && right.is_some() {
+        cmp_optional(left, right).reverse()
+    } else {
+        cmp_optional(left, right)
     }
 }
 
@@ -2538,7 +2588,7 @@ mod tests {
         );
         assert_eq!(
             desc.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
-            vec!["unknown", "popular", "niche"]
+            vec!["popular", "niche", "unknown"]
         );
 
         let asc = refine_models(
@@ -2552,6 +2602,32 @@ mod tests {
     }
 
     #[test]
+    fn test_refine_models_sorts_unknown_sizes_last() {
+        let huge = test_model("huge", Some(9_000), None, None, None);
+        let small = test_model("small", Some(10), None, None, None);
+        let unknown = test_model("unknown", None, None, None, None);
+        let models = vec![unknown, small, huge];
+
+        let desc = refine_models(
+            models.clone(),
+            &browse_opts(ModelSort::SizeDesc, None, ModelSizeFilter::All),
+        );
+        assert_eq!(
+            desc.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["huge", "small", "unknown"]
+        );
+
+        let asc = refine_models(
+            models,
+            &browse_opts(ModelSort::SizeAsc, None, ModelSizeFilter::All),
+        );
+        assert_eq!(
+            asc.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["small", "huge", "unknown"]
+        );
+    }
+
+    #[test]
     fn test_paginate_models() {
         let models: Vec<_> = (0..5)
             .map(|i| test_model(&format!("m{}", i), None, None, None, None))
@@ -2561,6 +2637,46 @@ mod tests {
         assert_eq!(page.models.len(), 2);
         assert_eq!(page.models[0].name, "m2");
         assert_eq!(page.next_cursor, Some("offset:4".to_string()));
+    }
+
+    #[test]
+    fn test_huggingface_search_url_does_not_filter_by_family_tag() {
+        let family_only = huggingface_search_url(
+            "https://huggingface.co/api/models",
+            &BrowseQuery {
+                query: None,
+                cursor: None,
+                limit: 20,
+                sort: ModelSort::Relevance,
+                family: Some("qwen"),
+                size: ModelSizeFilter::All,
+                medium: ModelMediumFilter::All,
+            },
+            None,
+            20,
+        );
+        assert!(family_only.contains("filter=gguf"));
+        assert!(!family_only.contains("filter=qwen"));
+        assert!(family_only.contains("search=qwen"));
+
+        let with_query = huggingface_search_url(
+            "https://huggingface.co/api/models",
+            &BrowseQuery {
+                query: Some("coder"),
+                cursor: None,
+                limit: 20,
+                sort: ModelSort::Relevance,
+                family: Some("qwen"),
+                size: ModelSizeFilter::All,
+                medium: ModelMediumFilter::All,
+            },
+            None,
+            20,
+        );
+        assert!(with_query.contains("filter=gguf"));
+        assert!(!with_query.contains("filter=qwen"));
+        assert!(with_query.contains("search=coder"));
+        assert!(!with_query.contains("search=qwen"));
     }
 
     #[test]
@@ -3010,6 +3126,34 @@ mod tests {
         assert_eq!(
             models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
             vec!["qwen3.8", "qwen3.5", "qwen2.5", "codeqwen"]
+        );
+    }
+
+    #[test]
+    fn parse_ollama_library_html_keeps_namespaced_models() {
+        let html = r#"
+            <a href="/search">Search</a>
+            <a href="/docs">Docs</a>
+            <a href="/signin">Sign in</a>
+            <a href="/download">Download</a>
+            <a href="/pricing">Pricing</a>
+            <a href="/library">Library</a>
+            <a href="/library/qwen3.8"><p>Qwen3.8</p></a>
+            <a href="/someone/custom"><p>Custom</p></a>
+            <a href="/blog">Blog</a>
+        "#;
+        let models = parse_ollama_library_html(html);
+        assert_eq!(
+            models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["qwen3.8", "someone/custom"]
+        );
+        assert_eq!(
+            models[0].url.as_deref(),
+            Some("https://ollama.com/library/qwen3.8")
+        );
+        assert_eq!(
+            models[1].url.as_deref(),
+            Some("https://ollama.com/someone/custom")
         );
     }
 
