@@ -371,7 +371,7 @@ async fn cancellation_records_an_unknown_mutation_outcome_and_followup_never_ree
         vec![tool(
             "delayed",
             "run_command",
-            json!({"command":"sleep","args":["5"],"timeout_secs":10}),
+            json!({"command":"python3","args":["-c","__import__('time').sleep(5)"],"timeout_secs":10}),
         )],
     ));
     harness.script.push(answer("Continued safely"));
@@ -400,7 +400,10 @@ async fn cancellation_records_an_unknown_mutation_outcome_and_followup_never_ree
         }
     }
     let frames = finish(&mut socket).await;
-    assert!(frames.iter().any(|frame| frame["type"] == "cancelled"));
+    assert!(
+        frames.iter().any(|frame| frame["type"] == "cancelled"),
+        "active command must acknowledge cancellation: {frames:?}"
+    );
     send(
         &mut socket,
         json!({"type":"send","content":"Continue without rerunning uncertain effects"}),
@@ -430,7 +433,11 @@ async fn cancellation_records_an_unknown_mutation_outcome_and_followup_never_ree
 
 fn finalized(frames: &[Value]) -> bool {
     frames.iter().any(|frame| {
-        frame["type"] == "status" && frame.to_string().to_ascii_lowercase().contains("finaliz")
+        frame["type"] == "status"
+            && frame["message"].as_str().is_some_and(|message| {
+                let message = message.to_ascii_lowercase();
+                message.contains("finaliz") || message.contains("without progress")
+            })
     })
 }
 
@@ -479,7 +486,10 @@ async fn alternating_and_reordered_unchanged_reads_finalize_without_exhausting_t
             finalized(&frames),
             "expected explicit no-progress finalization: {frames:?}"
         );
-        assert!(ordinary(&harness.requests().await).len() <= 5);
+        let requests = harness.requests().await;
+        let requests = ordinary(&requests);
+        assert!(requests.len() <= 5);
+        assert!(requests.last().unwrap().get("tools").is_none());
     }
 }
 
