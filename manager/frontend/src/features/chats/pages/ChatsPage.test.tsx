@@ -312,7 +312,7 @@ describe('ChatsPage', () => {
       await screen.findByRole('heading', { name: 'New name' });
       expect(mockUpdateChat).toHaveBeenCalledWith('chat-1', { title: 'New name' });
       expect(screen.getAllByText('New name')).toHaveLength(2);
-      expect(screen.getByText('Still writing')).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByText('Still writing')).toBeInTheDocument());
     });
 
     it('keeps failed input, rejects blank names, and cancels without an update', async () => {

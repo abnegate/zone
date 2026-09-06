@@ -118,6 +118,7 @@ export interface Chat {
 
 export interface ChatWithMessages extends Chat {
   messages: Message[];
+  context?: ContextUsage | null;
 }
 
 export interface CreateChatRequest {
@@ -163,4 +164,33 @@ export interface ChatSearchOptions {
 export interface ChatSearchResponse {
   results: ChatSearchResult[];
   total: number;
+}
+
+export type ContextStatus = 'ready' | 'compacting' | 'compacted' | 'unavailable' | 'blocked';
+export type ContextSource = 'runtime' | 'configured' | 'provider' | 'unknown';
+export interface ContextBreakdown {
+  instructions: number;
+  conversation: number;
+  tools: number;
+  results: number;
+  summary: number;
+  attachments: number | null;
+  overhead: number;
+}
+export interface ContextUsage {
+  model: string;
+  used: number;
+  limit: number | null;
+  reserved: number;
+  threshold: number | null;
+  remaining: number | null;
+  estimated: boolean;
+  incomplete: boolean;
+  source: ContextSource;
+  status: ContextStatus;
+  breakdown: ContextBreakdown;
+  revision: number;
+  compacted_messages: number;
+  updated_at: string;
+  reason?: string | null;
 }

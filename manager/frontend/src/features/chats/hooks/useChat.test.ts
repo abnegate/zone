@@ -2,9 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode, StrictMode } from 'react';
-import type { ChatWithMessages, Message } from '../types';
+import type { ChatWithMessages, ContextUsage, Message } from '../types';
 
 const mockGetChat = mock();
+const mockPreviewContext = mock();
 const mockSendMessage = mock();
 const mockDeleteMessage = mock();
 const mockUpdateChat = mock();
@@ -36,6 +37,7 @@ let lastSocket: FakeSocket | null = null;
 mock.module('../../../api/chats', () => ({
   chatsApi: {
     getChat: mockGetChat,
+    previewContext: mockPreviewContext,
     sendMessage: mockSendMessage,
     deleteMessage: mockDeleteMessage,
     updateChat: mockUpdateChat,
@@ -1039,5 +1041,201 @@ describe('useChat', () => {
       expect(result.current.chat?.id).toBe('2');
     });
     expect(result.current.chat?.id).not.toBe('1');
+  });
+});
+
+const usage: ContextUsage = {
+  model: 'gpt-4',
+  used: 100,
+  limit: 1000,
+  reserved: 100,
+  threshold: 800,
+  remaining: 700,
+  estimated: true,
+  incomplete: false,
+  source: 'configured',
+  status: 'ready',
+  revision: 0,
+  compacted_messages: 0,
+  updated_at: '2026-09-06T00:00:00Z',
+  breakdown: {
+    instructions: 20,
+    conversation: 60,
+    tools: 0,
+    results: 0,
+    summary: 0,
+    attachments: 0,
+    overhead: 20,
+  },
+};
+const contextChat: ChatWithMessages = {
+  id: 'context',
+  title: 'Context',
+  model_name: 'gpt-4',
+  created_at: '',
+  updated_at: '',
+  archived: false,
+  agent_enabled: false,
+  messages: [],
+  context: usage,
+};
+
+describe('context freshness', () => {
+  beforeEach(() => {
+    mockGetChat.mockResolvedValue(contextChat);
+    mockPreviewContext.mockReset();
+  });
+  it('restores context and previews the draft', async () => {
+    mockPreviewContext.mockResolvedValue({ ...usage, used: 120 });
+    const { result, unmount } = renderHook(() =>
+      useChat('context', undefined, { content: 'draft' })
+    );
+    await waitFor(() => expect(result.current.context?.used).toBe(100));
+    await waitFor(() => expect(result.current.context?.used).toBe(120));
+    expect(mockPreviewContext.mock.calls[0][1]).toEqual({ content: 'draft' });
+    unmount();
+  });
+  it('does not replace live usage with an older HTTP preview at the same revision', async () => {
+    let resolve!: (value: ContextUsage) => void;
+    mockPreviewContext.mockImplementation(
+      () =>
+        new Promise<ContextUsage>((done) => {
+          resolve = done;
+        })
+    );
+    const { result, unmount } = renderHook(() =>
+      useChat('context', undefined, { content: 'draft' })
+    );
+    await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'generation', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'context',
+        message_id: 'generation',
+        usage: { ...usage, used: 200 },
+      });
+    });
+    await act(async () => resolve({ ...usage, used: 150 }));
+    expect(result.current.context?.used).toBe(200);
+    unmount();
+  });
+  it('rejects wrong chat, old generation and post-terminal context frames', async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'current', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'wrong',
+        message_id: 'current',
+        usage: { ...usage, used: 900 },
+      });
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'context',
+        message_id: 'old',
+        usage: { ...usage, used: 900 },
+      });
+    });
+    expect(result.current.context?.used).toBe(100);
+    act(() => {
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'context',
+        message_id: 'current',
+        usage: { ...usage, used: 200 },
+      });
+      lastSocket?.emit({ type: 'message_end', message_id: 'current', content: 'Done' });
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'context',
+        message_id: 'current',
+        usage: { ...usage, used: 900 },
+      });
+    });
+    expect(result.current.context?.used).toBe(200);
+    unmount();
+  });
+  it('ignores wrong-model live usage and invalidates capacity when the model changes', async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.context?.limit).toBe(1000));
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'generation', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'context',
+        message_id: 'generation',
+        usage: { ...usage, model: 'wrong-model', used: 900 },
+      });
+    });
+    expect(result.current.context?.used).toBe(100);
+    mockGetChat.mockResolvedValue({ ...contextChat, model_name: 'new-model' });
+    await act(async () => result.current.refresh());
+    expect(result.current.context).toBeNull();
+    unmount();
+  });
+  it('rejects an old chat preview even when the server ignores abort', async () => {
+    let resolve!: (value: ContextUsage) => void;
+    mockPreviewContext.mockImplementationOnce(
+      () =>
+        new Promise<ContextUsage>((done) => {
+          resolve = done;
+        })
+    );
+    const { result, rerender, unmount } = renderHook(
+      ({ id }) => useChat(id, undefined, { content: 'draft' }),
+      { initialProps: { id: 'context' } }
+    );
+    await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
+    mockGetChat.mockResolvedValue({ ...contextChat, id: 'other', context: null });
+    mockPreviewContext.mockResolvedValue({ ...usage, used: 300 });
+    rerender({ id: 'other' });
+    await waitFor(() => expect(result.current.chat?.id).toBe('other'));
+    await act(async () => resolve({ ...usage, used: 900 }));
+    expect(result.current.context?.used).not.toBe(900);
+    unmount();
+  });
+  it('rejects malformed preview values and invalidates attachment changes', async () => {
+    mockPreviewContext.mockResolvedValue({ ...usage, used: -100 });
+    const { result, rerender, unmount } = renderHook(
+      ({ url }) =>
+        useChat('context', undefined, {
+          content: '',
+          metadata: { attachments: [{ name: 'image', mime: 'image/png', url }] },
+        }),
+      { initialProps: { url: '/first.png' } }
+    );
+    await waitFor(() => expect(result.current.contextError).toContain('unavailable'));
+    mockPreviewContext.mockResolvedValue(usage);
+    rerender({ url: '/second.png' });
+    await waitFor(() => expect(result.current.context?.used).toBe(100));
+    expect(mockPreviewContext.mock.calls.at(-1)?.[1].metadata.attachments[0].url).toBe(
+      '/second.png'
+    );
+    unmount();
+  });
+  it('aborts obsolete drafts, ignores their late result, and reports preview failure', async () => {
+    let resolve!: (value: ContextUsage) => void;
+    mockPreviewContext.mockImplementationOnce(
+      () =>
+        new Promise<ContextUsage>((done) => {
+          resolve = done;
+        })
+    );
+    mockPreviewContext.mockRejectedValueOnce(new Error('offline'));
+    const { result, rerender, unmount } = renderHook(
+      ({ content }) => useChat('context', undefined, { content }),
+      { initialProps: { content: 'old' } }
+    );
+    await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
+    const signal = mockPreviewContext.mock.calls[0][2] as AbortSignal;
+    rerender({ content: 'new' });
+    expect(signal.aborted).toBe(true);
+    await act(async () => resolve({ ...usage, used: 900 }));
+    expect(result.current.context?.used).not.toBe(900);
+    await waitFor(() => expect(result.current.contextError).toContain('unavailable'));
+    expect(result.current.context).toBeNull();
+    unmount();
   });
 });
