@@ -796,9 +796,14 @@ fn unique_identifiers(calls: &mut [LlmToolCall], identifiers: &mut BTreeSet<Stri
 /// the id and name once then streams argument fragments, while some
 /// OpenAI-compatible proxies repeat the whole name every delta. Both shapes,
 /// and calls that arrive with no id at all, have to survive this.
+///
+/// A second complete tool name on the same index is a parallel call, not a
+/// fragment of the first. Concatenating those names (`search_knowledge` +
+/// `list_documents`) made an unknown tool and glued two JSON objects into
+/// arguments, which LiteLLM then rejected on the next round.
 #[derive(Debug, Default)]
 struct ToolCallAccumulator {
-    calls: BTreeMap<u32, PartialToolCall>,
+    calls: BTreeMap<u32, Vec<PartialToolCall>>,
 }
 
 #[derive(Debug, Default)]
@@ -815,7 +820,21 @@ impl ToolCallAccumulator {
 
     fn merge(&mut self, deltas: &[StreamToolCall]) {
         for delta in deltas {
-            let entry = self.calls.entry(delta.index).or_default();
+            let bucket = self.calls.entry(delta.index).or_default();
+            if bucket.is_empty() {
+                bucket.push(PartialToolCall::default());
+            }
+            if let Some(name) = delta
+                .function
+                .as_ref()
+                .and_then(|function| function.name.as_deref())
+                && bucket
+                    .last()
+                    .is_some_and(|current| distinct_tool_names(&current.name, name))
+            {
+                bucket.push(PartialToolCall::default());
+            }
+            let entry = bucket.last_mut().expect("index bucket has a call");
 
             if let Some(id) = &delta.id
                 && !id.is_empty()
@@ -835,37 +854,81 @@ impl ToolCallAccumulator {
         }
     }
 
-    /// Complete calls in the order the model emitted them. Entries with no name
-    /// are dropped: there is nothing to dispatch on.
+    /// Complete calls in provider-index order. Entries with no name are dropped:
+    /// there is nothing to dispatch on.
     fn finish(self) -> Vec<LlmToolCall> {
         self.calls
             .into_iter()
-            .filter(|(_, call)| !call.name.is_empty())
-            .map(|(index, call)| LlmToolCall {
-                id: call.id.unwrap_or_else(|| format!("call_{}", index)),
-                call_type: "function".to_string(),
-                function: zone_core::llm::FunctionCall {
-                    name: call.name,
-                    arguments: call.arguments,
-                },
+            .flat_map(|(index, bucket)| {
+                bucket
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, call)| !call.name.is_empty())
+                    .map(move |(offset, call)| LlmToolCall {
+                        id: call.id.unwrap_or_else(|| {
+                            if offset == 0 {
+                                format!("call_{}", index)
+                            } else {
+                                format!("call_{index}_{offset}")
+                            }
+                        }),
+                        call_type: "function".to_string(),
+                        function: zone_core::llm::FunctionCall {
+                            name: call.name,
+                            arguments: zone_core::llm::wire_arguments(&call.arguments),
+                        },
+                    })
             })
             .collect()
     }
 }
 
 /// Fold a name fragment into the accumulated name, tolerating providers that
-/// send it once, in pieces, or in full on every delta.
+/// send it once, in pieces, or in full on every delta. Distinct complete names
+/// are not concatenated here; the accumulator starts a new call instead.
 fn merge_name(current: &mut String, fragment: &str) {
     if fragment.is_empty() || current == fragment {
         return;
     }
-    if current.is_empty() {
+    if current.is_empty() || fragment.starts_with(current.as_str()) {
+        current.clear();
         current.push_str(fragment);
-    } else if fragment.starts_with(current.as_str()) {
-        *current = fragment.to_string();
-    } else {
+    } else if !current.starts_with(fragment) {
         current.push_str(fragment);
     }
+}
+
+fn distinct_tool_names(current: &str, fragment: &str) -> bool {
+    if current.is_empty() || fragment.is_empty() || current == fragment {
+        return false;
+    }
+    if fragment.starts_with(current) || current.starts_with(fragment) {
+        return false;
+    }
+    if current.ends_with(['_', '-']) || fragment.starts_with(['_', '-']) {
+        return false;
+    }
+    complete_ident(current) && complete_ident(fragment)
+}
+
+fn complete_ident(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_lowercase() {
+        return false;
+    }
+    let last = bytes[bytes.len() - 1];
+    if last == b'_' || last == b'-' {
+        return false;
+    }
+    let mut separator = false;
+    for &byte in bytes {
+        match byte {
+            b'a'..=b'z' | b'0'..=b'9' => {}
+            b'_' | b'-' => separator = true,
+            _ => return false,
+        }
+    }
+    separator
 }
 
 #[cfg(test)]
@@ -972,6 +1035,72 @@ mod tests {
         acc.merge(&[delta(0, Some("c1"), None, Some("{}"))]);
 
         assert!(acc.finish().is_empty());
+    }
+
+    #[test]
+    fn does_not_merge_distinct_names_on_the_same_index() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.merge(&[delta(
+            0,
+            Some("call_1"),
+            Some("search_knowledge"),
+            Some(r#"{"query":"documents reminders console"}"#),
+        )]);
+        acc.merge(&[delta(
+            0,
+            None,
+            Some("list_documents"),
+            Some(r#"{"query":"documents"}"#),
+        )]);
+
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].function.name, "search_knowledge");
+        assert_eq!(
+            calls[0].function.arguments,
+            r#"{"query":"documents reminders console"}"#
+        );
+        assert_eq!(calls[1].function.name, "list_documents");
+        assert_eq!(calls[1].function.arguments, r#"{"query":"documents"}"#);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments)
+                .ok()
+                .is_some_and(|value| value.is_object())
+        );
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&calls[1].function.arguments)
+                .ok()
+                .is_some_and(|value| value.is_object())
+        );
+    }
+
+    #[test]
+    fn ignores_a_shorter_prefix_repeat_of_the_same_name() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.merge(&[delta(0, Some("c1"), Some("list_tasks"), Some("{"))]);
+        acc.merge(&[delta(0, None, Some("list_"), Some("}"))]);
+
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "list_tasks");
+        assert_eq!(calls[0].function.arguments, "{}");
+    }
+
+    #[test]
+    fn keeps_a_single_concatenated_name_intact() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.merge(&[delta(
+            0,
+            Some("c1"),
+            Some("search_knowledgelist_documents"),
+            Some(r#"{"query":"documents"}{"limit":5}"#),
+        )]);
+
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "search_knowledgelist_documents");
+        assert_eq!(calls[0].function.arguments, r#"{"query":"documents"}"#);
     }
 
     #[test]
