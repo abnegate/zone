@@ -95,9 +95,8 @@ pub struct LlmClient {
     config: LlmConfig,
     stop: Vec<String>,
     ollama: Option<(String, u64)>,
-    /// Alias that should receive `reasoning_effort` because the deployment
-    /// advertised thinking support. Summarization clones the client and clears this.
-    reasoning: Option<String>,
+    /// Alias and resolved effort. Summarization clones the client and clears this.
+    reasoning: Option<(String, crate::llm::Effort)>,
 }
 
 impl LlmClient {
@@ -135,8 +134,8 @@ impl LlmClient {
 
     /// Enable thinking for this alias. LiteLLM 1.99.1 maps `reasoning_effort`
     /// to Ollama `think`, Anthropic extended thinking, and OpenAI o-series.
-    pub fn with_reasoning(mut self, model: impl Into<String>) -> Self {
-        self.reasoning = Some(model.into());
+    pub fn with_reasoning(mut self, model: impl Into<String>, effort: crate::llm::Effort) -> Self {
+        self.reasoning = Some((model.into(), effort));
         self
     }
 
@@ -153,8 +152,10 @@ impl LlmClient {
         {
             body["num_ctx"] = (*limit).into();
         }
-        if self.reasoning.as_deref() == Some(request.model) {
-            body["reasoning_effort"] = reasoning_effort(request.max_tokens).into();
+        if let Some((model, effort)) = &self.reasoning
+            && model == request.model
+        {
+            body["reasoning_effort"] = effort.as_str().into();
         }
         if request.stream == Some(true) {
             body["stream_options"] = serde_json::json!({ "include_usage": true });
@@ -358,17 +359,10 @@ impl LlmClient {
     }
 }
 
-fn reasoning_effort(reserved: Option<u32>) -> &'static str {
-    match reserved.unwrap_or(0) {
-        0..=2047 => "low",
-        2048..=8191 => "medium",
-        _ => "high",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::Effort;
     use crate::llm::types::{ChatRequest, Message};
 
     #[test]
@@ -610,9 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_is_model_bound_and_scaled_to_output_budget() {
+    fn reasoning_effort_is_model_bound_and_uses_the_resolved_level() {
         let messages = [Message::user("Hi")];
-        let client = LlmClient::new(LlmConfig::default()).with_reasoning("thinker");
+        let client = LlmClient::new(LlmConfig::default()).with_reasoning("thinker", Effort::High);
         let enabled = client
             .request(ChatRequest {
                 model: "thinker",
@@ -625,7 +619,7 @@ mod tests {
                 stop: None,
             })
             .unwrap();
-        assert_eq!(enabled["reasoning_effort"], "medium");
+        assert_eq!(enabled["reasoning_effort"], "high");
         let other = client
             .request(ChatRequest {
                 model: "other",
@@ -653,8 +647,5 @@ mod tests {
             })
             .unwrap();
         assert!(compact.get("reasoning_effort").is_none());
-        assert_eq!(reasoning_effort(Some(1024)), "low");
-        assert_eq!(reasoning_effort(Some(2048)), "medium");
-        assert_eq!(reasoning_effort(Some(8192)), "high");
     }
 }

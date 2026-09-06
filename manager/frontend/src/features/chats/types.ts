@@ -116,7 +116,24 @@ export interface Chat {
    * Older servers omit this; treat those chats as requiring approval.
    */
   auto_approve?: boolean;
+  /** Whether the installed model advertised thinking / extended reasoning. */
+  reasoning?: boolean | null;
+  /**
+   * How much a thinking-capable model should think. Auto inspects the next
+   * request. Older servers omit this; treat those chats as Auto.
+   */
+  reasoning_effort?: ReasoningEffort;
 }
+
+export type ReasoningEffort = 'auto' | 'off' | 'low' | 'medium' | 'high';
+
+export const REASONING_EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'off', label: 'Off' },
+];
 
 export interface ChatWithMessages extends Chat {
   messages: Message[];
@@ -131,6 +148,7 @@ export interface CreateChatRequest {
   automatic_title?: boolean;
   agent_enabled?: boolean;
   auto_approve?: boolean;
+  reasoning_effort?: ReasoningEffort;
   character?: ChatCharacter;
 }
 
@@ -138,6 +156,7 @@ export interface UpdateChatRequest {
   title?: string;
   agent_enabled?: boolean;
   auto_approve?: boolean;
+  reasoning_effort?: ReasoningEffort;
   character?: ChatCharacter | null;
   clear_character?: boolean;
 }

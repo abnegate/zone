@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   chatShowsAgent,
   chatShowsCharacter,
+  chatShowsReasoning,
   findInstalledModel,
   sameModelName,
 } from './modelOptions';
@@ -27,6 +28,17 @@ describe('chatShowsAgent', () => {
     expect(chatShowsAgent({ agent_enabled: false, tools: true })).toBe(true);
     expect(chatShowsAgent({ agent_enabled: false }, { tools: false })).toBe(false);
     expect(chatShowsAgent({ agent_enabled: false })).toBe(false);
+  });
+});
+
+describe('chatShowsReasoning', () => {
+  it('shows the control when the engine advertised thinking', () => {
+    expect(chatShowsReasoning({}, { capabilities: ['completion', 'reasoning'] })).toBe(true);
+    expect(chatShowsReasoning({ reasoning: true })).toBe(true);
+    expect(chatShowsReasoning({}, { reasoning: true })).toBe(true);
+    expect(chatShowsReasoning({}, { capabilities: ['completion'] })).toBe(false);
+    expect(chatShowsReasoning({ reasoning: false })).toBe(false);
+    expect(chatShowsReasoning({})).toBe(false);
   });
 });
 

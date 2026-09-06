@@ -17,13 +17,14 @@ import {
 } from '../components';
 import { ContextUsage } from '../components/ContextUsage';
 import { useChat, useChatSearch, useChats } from '../hooks';
-import type { ChatSearchResult } from '../types';
+import { type ChatSearchResult, REASONING_EFFORT_OPTIONS, type ReasoningEffort } from '../types';
 import {
   type Attachment,
   attachmentMetadata,
   buildMessageWithAttachments,
   chatShowsAgent,
   chatShowsCharacter,
+  chatShowsReasoning,
   findInstalledModel,
   formatBytes,
   formatDate,
@@ -51,6 +52,7 @@ export default function ChatsPage() {
   const [newChatModel, setNewChatModel] = useState('');
   const [newChatAgent, setNewChatAgent] = useState(false);
   const [newChatAutoApprove, setNewChatAutoApprove] = useState(false);
+  const [newChatReasoning, setNewChatReasoning] = useState<ReasoningEffort>('auto');
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -107,6 +109,7 @@ export default function ChatsPage() {
     approveTool,
     setAgentEnabled: setAgentEnabledFn,
     setAutoApprove: setAutoApproveFn,
+    setReasoningEffort: setReasoningEffortFn,
     setCharacter: setCharacterFn,
     clearCharacter: clearCharacterFn,
     updateTitle,
@@ -133,8 +136,10 @@ export default function ChatsPage() {
     : undefined;
   const showAgent = displayedChat ? chatShowsAgent(displayedChat, installedForChat) : false;
   const showCharacter = displayedChat ? chatShowsCharacter(displayedChat, installedForChat) : false;
+  const showReasoning = displayedChat ? chatShowsReasoning(displayedChat, installedForChat) : false;
   const selectedNewModel = findInstalledModel(models, newChatModel);
   const showNewChatAgent = selectedNewModel?.tools === true;
+  const showNewChatReasoning = selectedNewModel ? chatShowsReasoning({}, selectedNewModel) : false;
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -195,11 +200,14 @@ export default function ChatsPage() {
         model_name: newChatModel,
         agent_enabled: newChatAgent,
         auto_approve: newChatAgent && newChatAutoApprove,
+        reasoning_effort:
+          showNewChatReasoning && newChatReasoning !== 'auto' ? newChatReasoning : undefined,
       });
       setShowNewChatModal(false);
       setNewChatModel('');
       setNewChatAgent(false);
       setNewChatAutoApprove(false);
+      setNewChatReasoning('auto');
       selectChat(chat.id);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to create chat');
@@ -223,6 +231,16 @@ export default function ChatsPage() {
       await setAutoApproveFn(!displayedChat.auto_approve);
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to change auto-approve');
+    }
+  };
+
+  const handleReasoningEffort = async (effort: ReasoningEffort) => {
+    if (!isAuthenticated || !displayedChat) return;
+    setOperationError(null);
+    try {
+      await setReasoningEffortFn(effort);
+    } catch (err) {
+      setOperationError(err instanceof Error ? err.message : 'Failed to change reasoning');
     }
   };
 
@@ -711,6 +729,26 @@ export default function ChatsPage() {
                 <span className="chat-model">{displayedChat.model_name}</span>
               </div>
               <div className="chat-header-actions">
+                {showReasoning && (
+                  <label className="reasoning-effort">
+                    <span>Reasoning</span>
+                    <select
+                      aria-label="Reasoning effort"
+                      data-testid="reasoning-effort"
+                      value={displayedChat.reasoning_effort ?? 'auto'}
+                      title="How much the model thinks before answering. Auto matches the request."
+                      onChange={(event) => {
+                        void handleReasoningEffort(event.target.value as ReasoningEffort);
+                      }}
+                    >
+                      {REASONING_EFFORT_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
                 {displayedChat.agent_enabled && (
                   <button
                     type="button"
@@ -1060,9 +1098,13 @@ export default function ChatsPage() {
             onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
               const name = e.target.value;
               setNewChatModel(name);
-              if (findInstalledModel(models, name)?.tools !== true) {
+              const installed = findInstalledModel(models, name);
+              if (installed?.tools !== true) {
                 setNewChatAgent(false);
                 setNewChatAutoApprove(false);
+              }
+              if (!chatShowsReasoning({}, installed)) {
+                setNewChatReasoning('auto');
               }
             }}
             placeholder="Choose a model..."
@@ -1088,6 +1130,17 @@ export default function ChatsPage() {
               helpText="Skip the confirmation prompt for write_file, apply_patch, run_command and run_shell. You can change this later on the chat."
               checked={newChatAutoApprove}
               onCheckedChange={setNewChatAutoApprove}
+            />
+          )}
+          {showNewChatReasoning && (
+            <Select
+              label="Reasoning"
+              value={newChatReasoning}
+              onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                setNewChatReasoning(event.target.value as ReasoningEffort);
+              }}
+              helpText="Auto chooses low, medium, or high from the request. Off skips thinking."
+              options={REASONING_EFFORT_OPTIONS}
             />
           )}
           <div className="modal-actions">

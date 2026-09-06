@@ -344,6 +344,27 @@
   color: var(--ui-accent);
 }
 
+.reasoning-effort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-1);
+  padding: 0 var(--ui-space-2) 0 var(--ui-space-3);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-full, 9999px);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+  min-height: var(--ui-control-height-sm);
+}
+
+.reasoning-effort select {
+  border: none;
+  background: transparent;
+  color: var(--ui-text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
 .messages-container {
   flex: 1;
   overflow-y: auto;

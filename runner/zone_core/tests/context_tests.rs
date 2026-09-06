@@ -735,7 +735,7 @@ async fn reasoning_is_enabled_on_ordinary_requests_and_stripped_from_summaries()
     let client = provider
         .client
         .clone()
-        .with_reasoning("test")
+        .with_reasoning("test", zone_core::llm::Effort::Medium)
         .with_ollama_context("test", 5_000);
     let history = active_history();
     let prepared = context::prepare(&client, "test", &history, None, &policy(5_000), None)

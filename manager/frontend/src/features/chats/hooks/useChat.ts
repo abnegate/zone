@@ -10,6 +10,7 @@ import type {
   Message,
   MessageMetadata,
   MessageRole,
+  ReasoningEffort,
   SendMessageRequest,
   ToolCallRecord,
   UpdateChatRequest,
@@ -848,6 +849,9 @@ export function useChat(
   const setAutoApprove = (enabled: boolean): Promise<void> =>
     updateAgentSettings({ auto_approve: enabled });
 
+  const setReasoningEffort = (effort: ReasoningEffort): Promise<void> =>
+    updateAgentSettings({ reasoning_effort: effort });
+
   const setCharacter = (character: ChatCharacter): Promise<void> =>
     updateAgentSettings({ character });
 
@@ -881,6 +885,7 @@ export function useChat(
     approveTool,
     setAgentEnabled,
     setAutoApprove,
+    setReasoningEffort,
     setCharacter,
     clearCharacter,
     deleteMessage,

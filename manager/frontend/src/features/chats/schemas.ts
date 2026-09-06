@@ -95,6 +95,8 @@ export const ChatSchema = z.object({
   // Servers predating agentic chat omit this; treat those chats as plain.
   agent_enabled: z.boolean().default(false),
   auto_approve: z.boolean().default(false),
+  reasoning: z.boolean().nullish(),
+  reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).default('auto'),
   character: ChatCharacterSchema.nullish(),
   tools: z.boolean().nullish(),
   needs_character: z.boolean().nullish(),
@@ -142,6 +144,7 @@ export const CreateChatRequestSchema = z.object({
   first_message: z.string().optional(),
   agent_enabled: z.boolean().optional(),
   auto_approve: z.boolean().optional(),
+  reasoning_effort: z.enum(['auto', 'off', 'low', 'medium', 'high']).optional(),
 });
 
 export const SendMessageRequestSchema = z.object({

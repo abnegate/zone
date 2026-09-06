@@ -118,10 +118,13 @@ pub struct ChatResponse {
     archived: bool,
     agent_enabled: bool,
     auto_approve: bool,
+    reasoning_effort: zone_core::llm::ReasoningEffort,
     #[serde(skip_serializing_if = "Option::is_none")]
     character: Option<ChatCharacter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     needs_character: Option<bool>,
     #[serde(flatten)]
@@ -138,8 +141,10 @@ impl From<chats::ChatRow> for ChatResponse {
             archived: row.archived.unwrap_or(false),
             agent_enabled: row.agent_enabled,
             auto_approve: row.auto_approve,
+            reasoning_effort: row.reasoning_effort,
             character: row.character,
             tools: None,
+            reasoning: None,
             needs_character: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
@@ -149,6 +154,7 @@ impl From<chats::ChatRow> for ChatResponse {
 impl ChatResponse {
     fn with_profile(mut self, profile: crate::services::model::ModelProfile) -> Self {
         self.tools = profile.tools;
+        self.reasoning = profile.reasoning;
         self.needs_character = Some(profile.needs_character);
         self
     }
@@ -311,6 +317,8 @@ pub struct CreateChatRequest {
     #[serde(default)]
     auto_approve: bool,
     #[serde(default)]
+    reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
+    #[serde(default)]
     character: Option<ChatCharacter>,
 }
 
@@ -320,6 +328,7 @@ pub struct UpdateChatRequest {
     title: Option<String>,
     agent_enabled: Option<bool>,
     auto_approve: Option<bool>,
+    reasoning_effort: Option<zone_core::llm::ReasoningEffort>,
     #[serde(default)]
     character: Option<ChatCharacter>,
     #[serde(default)]
@@ -391,6 +400,7 @@ pub async fn create(
         (req.agent_enabled, true),
         req.automatic_title,
         req.auto_approve,
+        req.reasoning_effort.unwrap_or_default(),
     )
     .await
     {
@@ -471,6 +481,7 @@ pub async fn update(
         req.agent_enabled,
         None,
         req.auto_approve,
+        req.reasoning_effort,
     )
     .await
     {

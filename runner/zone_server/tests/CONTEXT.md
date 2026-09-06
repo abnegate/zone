@@ -1,6 +1,6 @@
 # Conversation context tests
 
-Run against a disposable PostgreSQL database with migrations 001 through 014 applied. `TEST_DATABASE_URL` is the existing CI setting. Optionally set `ZONE_CONTEXT_TEST_DATABASE_URL` to override it for these tests. Neither the store nor runtime acceptance fixture falls back to the application `DATABASE_URL`. Missing explicit test configuration fails clearly and never skips tests. SQLx compilation may additionally require `DATABASE_URL` pointing at the same disposable database.
+Run against a disposable PostgreSQL database with migrations 001 through 015 applied. `TEST_DATABASE_URL` is the existing CI setting. Optionally set `ZONE_CONTEXT_TEST_DATABASE_URL` to override it for these tests. Neither the store nor runtime acceptance fixture falls back to the application `DATABASE_URL`. Missing explicit test configuration fails clearly and never skips tests. SQLx compilation may additionally require `DATABASE_URL` pointing at the same disposable database.
 
 ```sh
 TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:49755/zone_context_test \

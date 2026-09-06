@@ -375,8 +375,20 @@ pub async fn build(
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&chat.model_name, limit);
     }
-    if capacity.reasoning {
-        llm = llm.with_reasoning(&chat.model_name);
+    let prompt = pending
+        .map(|(content, _)| content)
+        .or_else(|| {
+            entries.iter().rev().find_map(|entry| {
+                (entry.message.role == Role::User)
+                    .then_some(entry.message.content.as_deref())
+                    .flatten()
+            })
+        })
+        .unwrap_or("");
+    if capacity.reasoning
+        && let Some(effort) = chat.reasoning_effort.resolve(prompt)
+    {
+        llm = llm.with_reasoning(&chat.model_name, effort);
     }
     let mut context = RunContext {
         entries,

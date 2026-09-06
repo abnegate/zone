@@ -376,11 +376,13 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&model, limit);
     }
-    if capacity.reasoning {
-        llm = llm.with_reasoning(&model);
+    let prompt = format!("# Task: {}\n\n{}", task.title, task.description);
+    if capacity.reasoning
+        && let Some(effort) = zone_core::llm::ReasoningEffort::Auto.resolve(&prompt)
+    {
+        llm = llm.with_reasoning(&model, effort);
     }
     let callback = DatabaseTaskCallback::new(state.db().clone(), run_id);
-    let prompt = format!("# Task: {}\n\n{}", task.title, task.description);
     let messages = vec![LlmMessage::system(system_prompt), LlmMessage::user(prompt)];
 
     let mut context = RunContext::from_messages(messages);

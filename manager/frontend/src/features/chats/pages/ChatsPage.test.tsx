@@ -1774,6 +1774,39 @@ describe('ChatsPage', () => {
     );
   });
 
+  it('lets the reader pick reasoning effort when the model can think', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      reasoning: true,
+      reasoning_effort: 'auto',
+    });
+    mockClient.updateChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      reasoning: true,
+      reasoning_effort: 'high',
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByTestId('reasoning-effort')).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId('reasoning-effort'), { target: { value: 'high' } });
+    await waitFor(() => {
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { reasoning_effort: 'high' });
+    });
+  });
+
+  it('hides reasoning effort when the model cannot think', async () => {
+    mockClient.getChat.mockResolvedValueOnce({
+      ...mockChatWithMessages,
+      reasoning: false,
+    });
+    renderChatsPage();
+    await waitFor(() => expect(screen.getByText('Chat 1')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Chat 1'));
+    await waitFor(() => expect(screen.getByText('Hi there!')).toBeInTheDocument());
+    expect(screen.queryByTestId('reasoning-effort')).not.toBeInTheDocument();
+  });
+
   it('shows auto-approve only while agent mode is on', async () => {
     mockClient.getChat.mockResolvedValueOnce({
       ...mockChatWithMessages,
