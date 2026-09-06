@@ -663,3 +663,118 @@ async fn deleting_a_user_turn_removes_its_tool_evidence_from_future_replay() {
     assert!(!request.to_string().contains("User message to delete"));
     assert_eq!(pairs(request), 0);
 }
+
+#[tokio::test]
+async fn sustained_tool_history_uses_bounded_semantic_references_in_actual_text_inference() {
+    let harness = Harness::new(Some(4096), false, vec![answer("Continued successfully")]).await;
+    let references = common::context::seed_evidence(&harness, 1024).await;
+    let checkpoint = harness.history().await.summary.unwrap();
+    successful(&harness.turn("Continue using the retained evidence").await);
+    let requests = harness.requests().await;
+    assert_eq!(
+        requests.len(),
+        1,
+        "unchanged checkpoint requires no recursive summary"
+    );
+    assert_eq!(requests[0]["max_tokens"], 1024);
+    assert_eq!(requests[0]["num_ctx"], 4096);
+    let prompt = requests[0]["messages"].to_string();
+    assert!(prompt.contains(&references[0]));
+    assert!(!prompt.contains(references.last().unwrap()));
+    assert!(!prompt.contains("PRIVATE_RAW_BODY"));
+    assert!(prompt.contains("paged catalog"));
+    assert_eq!(harness.history().await.summary, Some(checkpoint));
+    assert_eq!(
+        harness
+            .history()
+            .await
+            .entries
+            .iter()
+            .filter(|entry| entry.message.role == zone_core::llm::Role::Tool)
+            .count(),
+        1024
+    );
+}
+
+#[tokio::test]
+async fn evidence_catalog_pages_a_stable_snapshot_through_actual_tools_without_cross_chat_data() {
+    let harness = Harness::new(Some(100_000), true, vec![]).await;
+    let expected = common::context::seed_evidence(&harness, 3).await;
+    let foreign = Harness::new(Some(100_000), true, vec![]).await;
+    let forbidden = common::context::seed_evidence(&foreign, 1).await;
+    let script = harness.script.clone();
+    let pages = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let observed = pages.clone();
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            if body["stream"] != true {
+                return script.respond(request);
+            }
+            let last = body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "tool");
+            let Some(last) = last else {
+                return calls(
+                    "Discover historical evidence",
+                    vec![tool("page-0", "read_chat_evidence", json!({"limit":97}))],
+                );
+            };
+            let page: Value = serde_json::from_str(last["content"].as_str().unwrap())
+                .unwrap_or_else(|_| panic!("catalog must return a page: {last}"));
+            let mut pages = observed.lock().unwrap();
+            pages.push(page.clone());
+            if let Some(offset) = page["next"].as_u64() {
+                calls(
+                    "Continue catalog snapshot",
+                    vec![tool(
+                        &format!("page-{}", pages.len()),
+                        "read_chat_evidence",
+                        json!({"id":page["id"],"offset":offset,"limit":97}),
+                    )],
+                )
+            } else {
+                answer("Catalog inspected")
+            }
+        })
+        .with_priority(1)
+        .mount(&harness.provider)
+        .await;
+    successful(
+        &harness
+            .turn("Discover the original evidence references")
+            .await,
+    );
+    let pages = pages.lock().unwrap();
+    assert!(pages.len() > 1);
+    let snapshot = pages[0]["id"].as_str().unwrap();
+    assert!(snapshot.starts_with("catalog:"));
+    let total = pages[0]["total"].as_u64().unwrap();
+    let mut content = String::new();
+    for page in pages.iter() {
+        assert_eq!(page["id"], snapshot);
+        assert_eq!(page["total"], total);
+        assert_eq!(page["offset"], content.chars().count() as u64);
+        let fragment = page["content"].as_str().unwrap();
+        assert!(fragment.chars().count() <= 97);
+        content.push_str(fragment);
+    }
+    assert_eq!(content.chars().count() as u64, total);
+    assert!(pages.last().unwrap()["next"].is_null());
+    let rows: Vec<Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows.len(), expected.len());
+    for (row, expected) in rows.iter().zip(expected) {
+        assert_eq!(row["id"], expected);
+        assert_eq!(row["name"], "read_file");
+        assert_eq!(row["outcome"], "recorded");
+    }
+    assert!(!content.contains("PRIVATE_RAW_BODY"));
+    assert!(!content.contains(&forbidden[0]));
+}

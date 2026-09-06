@@ -390,10 +390,23 @@ async fn parallel_socket_generations_serialize_before_persistence_and_allow_imme
         false,
         vec![
             answer("First complete").set_delay(Duration::from_secs(2)),
+            answer("Queued complete"),
             answer("Followup complete"),
         ],
     )
     .await;
+    let received = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = received.clone();
+    let script = harness.script.clone();
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/chat/completions"))
+        .respond_with(move |request: &wiremock::Request| {
+            signal.notify_one();
+            script.respond(request)
+        })
+        .with_priority(1)
+        .mount(&harness.provider)
+        .await;
     let mut first = harness.connect().await;
     let mut second = harness.connect().await;
     send(
@@ -401,24 +414,24 @@ async fn parallel_socket_generations_serialize_before_persistence_and_allow_imme
         json!({"type":"send","content":"Accepted first user"}),
     )
     .await;
-    harness.until_requests(1).await;
+    tokio::time::timeout(Duration::from_secs(5), received.notified())
+        .await
+        .expect("first inference started");
     send(
         &mut second,
-        json!({"type":"send","content":"Rejected racing user"}),
+        json!({"type":"send","content":"Queued second user"}),
     )
     .await;
-    let rejected = finish(&mut second).await;
-    assert!(rejected.iter().any(|frame| frame["type"] == "error"));
     assert!(
         !harness
             .history()
             .await
             .entries
             .iter()
-            .any(|entry| { entry.message.content.as_deref() == Some("Rejected racing user") })
+            .any(|entry| { entry.message.content.as_deref() == Some("Queued second user") })
     );
-    assert_eq!(ordinary(&harness.requests().await).len(), 1);
     successful(&finish(&mut first).await);
+    successful(&finish(&mut second).await);
     send(
         &mut first,
         json!({"type":"send","content":"Accepted immediate followup"}),
@@ -427,9 +440,23 @@ async fn parallel_socket_generations_serialize_before_persistence_and_allow_imme
     successful(&finish(&mut first).await);
     let requests = harness.requests().await;
     let requests = ordinary(&requests);
-    assert_eq!(requests.len(), 2);
-    assert!(!requests[1].to_string().contains("Rejected racing user"));
-    assert!(requests[1].to_string().contains("Accepted first user"));
+    assert_eq!(requests.len(), 3);
+    let messages = requests[1]["messages"].as_array().unwrap();
+    let completed = messages
+        .iter()
+        .position(|message| {
+            message["role"] == "assistant" && message["content"] == "First complete"
+        })
+        .unwrap();
+    let queued = messages
+        .iter()
+        .position(|message| message["role"] == "user" && message["content"] == "Queued second user")
+        .unwrap();
+    assert!(
+        completed < queued,
+        "queued user must follow the first committed response"
+    );
+    assert!(requests[2].to_string().contains("Queued complete"));
 }
 
 #[tokio::test]

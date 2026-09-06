@@ -433,3 +433,73 @@ pub fn pairs(request: &Value) -> usize {
     );
     count
 }
+
+pub async fn seed_evidence(harness: &Harness, count: usize) -> Vec<String> {
+    use zone_core::llm::{FunctionCall, Message, ToolCall};
+    use zone_server::services::chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
+
+    let store = harness.store();
+    let lease = store
+        .acquire(Uuid::new_v4(), Duration::from_secs(30))
+        .await
+        .unwrap();
+    let turn = Uuid::new_v4();
+    store
+        .begin(
+            &lease,
+            turn,
+            Uuid::new_v4(),
+            "Earlier historical request",
+            None,
+            ReplayMessage::from(&Message::user("Earlier historical request")),
+        )
+        .await
+        .unwrap();
+    let calls: Vec<_> = (0..count)
+        .map(|index| ToolCall {
+            id: format!("historical-{index}"),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "read_file".into(),
+                arguments: json!({"path":format!("evidence-{index}")}).to_string(),
+            },
+        })
+        .collect();
+    let mut entries = vec![NewEntry {
+        id: Uuid::new_v4().to_string(),
+        message: ReplayMessage::from(&Message::assistant_with_tools(calls)),
+        mutations: Vec::new(),
+    }];
+    let mut references = Vec::new();
+    for index in 0..count {
+        let id = format!("evidence-{}-🙂", Uuid::new_v4());
+        references.push(id.clone());
+        entries.push(NewEntry {
+            id,
+            message: ReplayMessage::from(&Message::tool_result(
+                format!("historical-{index}"),
+                format!("PRIVATE_RAW_BODY_{index} résumé🙂"),
+            )),
+            mutations: Vec::new(),
+        });
+    }
+    store.append(&lease, turn, &entries).await.unwrap();
+    let covered: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
+    store.consumed(&lease, &covered).await.unwrap();
+    let history = store.load().await.unwrap();
+    let mut state: Value = serde_json::from_str(&state()).unwrap();
+    state["evidence"] = json!([format!("Relevant source: {}", references[0])]);
+    let summary = Summary {
+        content: state.to_string(),
+        fingerprint: fingerprint(&history.entries, &covered).unwrap(),
+        entries: covered,
+        revision: 1,
+    };
+    store.checkpoint(&lease, None, &summary).await.unwrap();
+    store
+        .complete(&lease, turn, "Earlier tools completed", None)
+        .await
+        .unwrap();
+    store.release(&lease).await.unwrap();
+    references
+}
