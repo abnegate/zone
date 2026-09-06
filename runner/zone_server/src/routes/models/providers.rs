@@ -374,9 +374,10 @@ fn parse_ollama_library_html(html: &str) -> Vec<ModelResponse> {
         }
     }
 
-    // Deduplicate by name
-    models.sort_by(|a, b| a.name.cmp(&b.name));
-    models.dedup_by(|a, b| a.name == b.name);
+    // Keep Ollama's ranking. Alphabetical sort buried current official
+    // models (qwen3.8 last among "qwen*") behind older names like codeqwen.
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|model| seen.insert(model.name.clone()));
 
     // If parsing failed, return popular models as fallback
     if models.is_empty() {
@@ -2994,6 +2995,22 @@ mod tests {
         let models = parse_ollama_library_html(html);
         // Should return popular models as fallback
         assert!(!models.is_empty());
+    }
+
+    #[test]
+    fn parse_ollama_library_html_preserves_catalog_order() {
+        let html = r#"
+            <a href="/library/qwen3.8"><p>Qwen3.8</p></a>
+            <a href="/library/qwen3.5"><p>Qwen 3.5</p></a>
+            <a href="/library/qwen2.5"><p>Qwen 2.5</p></a>
+            <a href="/library/codeqwen"><p>CodeQwen</p></a>
+            <a href="/library/qwen3.8"><p>duplicate</p></a>
+        "#;
+        let models = parse_ollama_library_html(html);
+        assert_eq!(
+            models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["qwen3.8", "qwen3.5", "qwen2.5", "codeqwen"]
+        );
     }
 
     #[test]

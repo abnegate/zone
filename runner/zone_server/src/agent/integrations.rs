@@ -15,6 +15,7 @@ use crate::db::{sources, workspace_members};
 
 const ORIGIN: &str = "https://api.github.com/";
 const PAGE_SIZE: usize = 100;
+const FILE_PAGE_CHARS: u64 = 8_000;
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -55,6 +56,10 @@ struct Arguments {
     reference: Option<String>,
     path: Option<String>,
     page: Option<u32>,
+    #[serde(default)]
+    offset: Option<u64>,
+    #[serde(default)]
+    limit: Option<u64>,
     state: Option<String>,
     title: Option<String>,
     head: Option<String>,
@@ -97,7 +102,7 @@ impl Tool for Integration {
                 "Read live GitHub issues (excluding pull requests) from a connected workspace source. Return full issue bodies and a next page when more provider records exist."
             }
             Operation::File => {
-                "Read the complete UTF-8 content of a specific repository file from a connected GitHub source at an immutable commit, with a source URL. Does not read host files. GitHub files over 100 MB are unsupported."
+                "Read UTF-8 content of a specific repository file from a connected GitHub source at an immutable commit, with a source URL. Returns a character page that fits the context budget; follow next to continue. Does not read host files. GitHub files over 100 MB are unsupported."
             }
             Operation::CreatePull => {
                 "Open a pull request on a connected GitHub source. Requires write access. Only do this when the user asked to open a PR."
@@ -122,6 +127,8 @@ impl Tool for Integration {
         let mut required = vec!["source_id"];
         if matches!(self.operation, Operation::File) {
             properties["path"] = json!({"type": "string", "description": "Exact repository-relative file path, within the configured source path."});
+            properties["offset"] = json!({"type": "integer", "minimum": 0, "description": "Unicode character offset into the file, default 0."});
+            properties["limit"] = json!({"type": "integer", "minimum": 1, "description": "Number of characters to return, default 8000, capped at 8000 so the page fits the remaining context budget. Follow next to continue."});
             required.push("path");
         }
         if matches!(self.operation, Operation::CreatePull) {
@@ -162,6 +169,9 @@ impl Integration {
             .map_err(|_| "Invalid integration arguments.".to_string())?;
         if arguments.page == Some(0) {
             return Err("page must be positive.".to_string());
+        }
+        if arguments.limit == Some(0) {
+            return Err("limit must be positive.".to_string());
         }
         let write = matches!(self.operation, Operation::CreatePull | Operation::Comment);
         let allowed = if write {
@@ -458,8 +468,13 @@ impl Github {
             Operation::Build => self.build(&sha).await?,
             Operation::Deployments => self.deployments(&sha, arguments.page.unwrap_or(1)).await?,
             Operation::File => {
-                self.file(&sha, arguments.path.as_deref().ok_or("path is required.")?)
-                    .await?
+                self.file(
+                    &sha,
+                    arguments.path.as_deref().ok_or("path is required.")?,
+                    arguments.offset.unwrap_or(0),
+                    arguments.limit.unwrap_or(FILE_PAGE_CHARS),
+                )
+                .await?
             }
             Operation::Issues | Operation::CreatePull | Operation::Comment => unreachable!(),
         };
@@ -624,7 +639,7 @@ impl Github {
         Ok(json!({"deployments": deployments, "next_page": next_page(records.len(), page)?}))
     }
 
-    async fn file(&self, sha: &str, path: &str) -> Result<Value, String> {
+    async fn file(&self, sha: &str, path: &str, offset: u64, limit: u64) -> Result<Value, String> {
         validate_path(path, self.configuration.path.as_deref())?;
         let mut tree = sha.to_string();
         let mut metadata = Value::Null;
@@ -671,11 +686,28 @@ impl Github {
         }
         let content =
             std::str::from_utf8(&bytes).map_err(|_| "The file is not UTF-8 text.".to_string())?;
+        let (page, total, next) = text_page(content, offset, limit)?;
         Ok(
-            json!({"path": path, "content": content, "bytes": bytes.len(), "blob_sha": blob,
+            json!({"path": path, "content": page, "bytes": bytes.len(), "blob_sha": blob,
+            "offset": offset, "next": next, "total": total, "complete": next.is_none(),
             "url": format!("https://github.com/{}/{}/blob/{}/{}", self.configuration.owner, self.configuration.repo, sha, path.split('/').map(|part| urlencoding::encode(part).into_owned()).collect::<Vec<_>>().join("/"))}),
         )
     }
+}
+
+fn text_page(content: &str, offset: u64, limit: u64) -> Result<(String, u64, Option<u64>), String> {
+    let total = content.chars().count() as u64;
+    if limit == 0 || offset > total {
+        return Err("File page offset or length is invalid.".into());
+    }
+    let count = limit.min(FILE_PAGE_CHARS).min(total.saturating_sub(offset));
+    let page: String = content
+        .chars()
+        .skip(offset as usize)
+        .take(count as usize)
+        .collect();
+    let end = offset + count;
+    Ok((page, total, (end < total).then_some(end)))
 }
 
 fn segment(value: &str) -> bool {
@@ -868,6 +900,8 @@ mod tests {
                     reference: None,
                     path: None,
                     page: None,
+                    offset: None,
+                    limit: None,
                     state: None,
                     title: None,
                     head: None,
@@ -1043,8 +1077,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn text_page_caps_and_continues_by_character() {
+        let content = "α".repeat(10);
+        let (page, total, next) = text_page(&content, 0, 4).unwrap();
+        assert_eq!(page, "αααα");
+        assert_eq!(total, 10);
+        assert_eq!(next, Some(4));
+        let (rest, _, next) = text_page(&content, 4, FILE_PAGE_CHARS).unwrap();
+        assert_eq!(rest, "α".repeat(6));
+        assert_eq!(next, None);
+        assert!(text_page(&content, 0, 0).is_err());
+        assert!(text_page(&content, 11, 1).is_err());
+    }
+
     #[tokio::test]
     async fn file_is_complete_and_symlinks_are_rejected() {
+        let server = MockServer::start().await;
+        let content = "Short file 🦀\n";
+        mock(&server, &format!("git/trees/{COMMIT}"), json!({"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":content.len()}]})).await;
+        Mock::given(path(format!("/repos/owner/repository/git/blobs/{BLOB}")))
+            .and(header("Accept", "application/vnd.github.raw+json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(content))
+            .mount(&server)
+            .await;
+        let result = github(&server)
+            .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
+            .await
+            .unwrap();
+        assert_eq!(result["content"], content);
+        assert_eq!(result["blob_sha"], BLOB);
+        assert_eq!(result["complete"], true);
+        assert_eq!(result["next"], Value::Null);
+        server.reset().await;
+        mock(&server, &format!("git/trees/{COMMIT}"), json!({"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"120000","sha":BLOB,"size":9}]})).await;
+        assert!(
+            github(&server)
+                .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
+                .await
+                .unwrap_err()
+                .contains("symlinks")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn large_file_returns_a_budgeted_page_instead_of_the_whole_blob() {
         let server = MockServer::start().await;
         let content = "Long document 🦀\n".repeat(2000);
         mock(&server, &format!("git/trees/{COMMIT}"), json!({"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":content.len()}]})).await;
@@ -1053,19 +1131,30 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(content.clone()))
             .mount(&server)
             .await;
-        let result = github(&server).file(COMMIT, "README.md").await.unwrap();
-        assert_eq!(result["content"], content);
-        assert_eq!(result["blob_sha"], BLOB);
-        server.reset().await;
-        mock(&server, &format!("git/trees/{COMMIT}"), json!({"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"120000","sha":BLOB,"size":9}]})).await;
-        assert!(
-            github(&server)
-                .file(COMMIT, "README.md")
-                .await
-                .unwrap_err()
-                .contains("symlinks")
+        let result = github(&server)
+            .file(COMMIT, "README.md", 0, u64::MAX)
+            .await
+            .unwrap();
+        let page = result["content"].as_str().unwrap();
+        assert_eq!(page.chars().count() as u64, FILE_PAGE_CHARS);
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["next"], FILE_PAGE_CHARS);
+        assert_eq!(result["offset"], 0);
+        assert_eq!(result["total"], content.chars().count() as u64);
+        assert!(page.chars().count() < content.chars().count());
+        let continued = github(&server)
+            .file(COMMIT, "README.md", FILE_PAGE_CHARS, FILE_PAGE_CHARS)
+            .await
+            .unwrap();
+        assert_eq!(continued["offset"], FILE_PAGE_CHARS);
+        assert_eq!(
+            continued["content"].as_str().unwrap(),
+            &content
+                .chars()
+                .skip(FILE_PAGE_CHARS as usize)
+                .take(FILE_PAGE_CHARS as usize)
+                .collect::<String>()
         );
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1106,6 +1195,8 @@ mod tests {
                     reference: None,
                     path: None,
                     page: Some(1),
+                    offset: None,
+                    limit: None,
                     state: Some("all".into()),
                     title: None,
                     head: None,
@@ -1143,6 +1234,8 @@ mod tests {
                     reference: None,
                     path: None,
                     page: None,
+                    offset: None,
+                    limit: None,
                     state: None,
                     title: Some("Fix".into()),
                     head: Some("feature".into()),
@@ -1182,6 +1275,8 @@ mod tests {
                     reference: None,
                     path: None,
                     page: None,
+                    offset: None,
+                    limit: None,
                     state: None,
                     title: None,
                     head: None,
@@ -1207,6 +1302,8 @@ mod tests {
             reference: None,
             path: None,
             page: None,
+            offset: None,
+            limit: None,
             state: None,
             title: title.map(str::to_string),
             head: head.map(str::to_string),

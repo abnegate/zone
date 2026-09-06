@@ -395,6 +395,49 @@ async fn fresh_seven_results_and_long_suffix_reach_actual_provider_unchanged() {
 }
 
 #[tokio::test]
+async fn unconsumed_overflow_skips_summarizer_even_when_older_history_is_eligible() {
+    let provider = provider(|_| panic!("provider must not be called"), false).await;
+    let history = vec![
+        entry("old-user", Message::user("prior question"), false, true),
+        entry(
+            "old-assistant",
+            Message::assistant("prior answer"),
+            false,
+            true,
+        ),
+        entry(
+            "call",
+            Message::assistant_with_tools(vec![call("a")]),
+            false,
+            false,
+        ),
+        entry(
+            "result",
+            Message::tool_result("a", "r".repeat(20_000)),
+            false,
+            false,
+        ),
+        entry("current", Message::user("Continue"), true, false),
+    ];
+    match context::prepare(
+        &provider.client,
+        "test",
+        &history,
+        None,
+        &policy(5_000),
+        None,
+    )
+    .await
+    {
+        Err(ContextError::Capacity { reason, .. }) => {
+            assert!(reason.contains("cannot be compacted"));
+            assert!(!reason.contains("Summary could not free enough"));
+        }
+        other => panic!("expected uncompactable remainder, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn indivisible_fresh_result_and_latest_user_overflow_do_not_call_summarizer() {
     let provider = provider(|_| panic!("provider must not be called"), false).await;
     for history in [

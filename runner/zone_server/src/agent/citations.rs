@@ -228,9 +228,14 @@ fn file_citation(value: &Value, observed_at: &str) -> Citation {
         revision: nonempty(sha).or_else(|| nonempty(blob)),
         observed_at: observed(value, observed_at),
         complete: value
-            .get("content")
-            .and_then(Value::as_str)
-            .is_some_and(|content| !content.is_empty()),
+            .get("complete")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                value
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| !content.is_empty())
+            }),
         outcome: CitationOutcome::Observed,
         note: None,
     }
@@ -581,6 +586,21 @@ mod tests {
         assert_eq!(file.revision.as_deref(), Some(SHA));
         assert!(file.complete);
         assert!(!file.passing());
+
+        let paged = citations(
+            "read_repository_file",
+            json!({
+                "path": "providers.rs",
+                "sha": SHA,
+                "content": "partial",
+                "complete": false,
+                "next": 8000,
+                "url": format!("https://github.com/owner/repository/blob/{SHA}/providers.rs"),
+                "observed_at": OBSERVED
+            }),
+        )
+        .remove(0);
+        assert!(!paged.complete);
     }
 
     #[test]
