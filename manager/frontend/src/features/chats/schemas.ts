@@ -1,9 +1,5 @@
 import { z } from 'zod';
 
-// =============================================================================
-// Chat Schemas
-// =============================================================================
-
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
 
 export const MessageAttachmentSchema = z.object({
@@ -103,8 +99,39 @@ export const ChatSchema = z.object({
   needs_character: z.boolean().nullish(),
 });
 
+const tokenCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+export const ContextUsageSchema = z
+  .object({
+    model: z.string(),
+    used: tokenCount,
+    limit: tokenCount.nullable(),
+    reserved: tokenCount,
+    threshold: tokenCount.nullable(),
+    remaining: tokenCount.nullable(),
+    estimated: z.boolean(),
+    incomplete: z.boolean(),
+    source: z.enum(['runtime', 'configured', 'provider', 'unknown']),
+    status: z.enum(['ready', 'compacting', 'compacted', 'unavailable', 'blocked']),
+    breakdown: z.object({
+      instructions: tokenCount,
+      conversation: tokenCount,
+      tools: tokenCount,
+      results: tokenCount,
+      summary: tokenCount,
+      attachments: tokenCount.nullable(),
+      overhead: tokenCount,
+    }),
+    revision: tokenCount,
+    compacted_messages: tokenCount,
+    updated_at: z.string(),
+    reason: z.string().nullish(),
+  })
+  .refine((usage) => usage.breakdown.attachments !== null || usage.incomplete);
+export const ContextResponseSchema = z.object({ context: ContextUsageSchema });
+
 export const ChatWithMessagesSchema = ChatSchema.extend({
   messages: z.array(MessageSchema),
+  context: ContextUsageSchema.nullish().catch(null),
 });
 
 export const CreateChatRequestSchema = z.object({
@@ -143,10 +170,6 @@ export const MessageResponseSchema = z.object({
   error: z.string().optional(),
   message: MessageSchema,
 });
-
-// =============================================================================
-// Chat Search Schemas
-// =============================================================================
 
 export const ChatSearchResultSchema = z.object({
   message_id: z.string(),

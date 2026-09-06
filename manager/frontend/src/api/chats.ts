@@ -2,6 +2,7 @@ import {
   ChatResponseSchema,
   ChatSearchResponseSchema,
   ChatsResponseSchema,
+  ContextResponseSchema,
   MessageResponseSchema,
   MessagesResponseSchema,
 } from '../features/chats/schemas';
@@ -10,6 +11,7 @@ import type {
   ChatSearchOptions,
   ChatSearchResponse,
   ChatWithMessages,
+  ContextUsage,
   CreateChatRequest,
   Message,
   SendMessageRequest,
@@ -34,6 +36,22 @@ class ChatsApi {
       headers.Authorization = `Bearer ${token}`;
     }
     return headers;
+  }
+
+  async previewContext(
+    id: string,
+    request: SendMessageRequest,
+    signal: AbortSignal
+  ): Promise<ContextUsage> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(id)}/context`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify(request),
+      signal,
+    });
+    if (!response.ok)
+      throw new Error('Context preview is unavailable. Sending is still available.');
+    return parse(ContextResponseSchema, await response.json()).context;
   }
 
   async getChats(workspaceId: string, archived?: boolean): Promise<Chat[]> {

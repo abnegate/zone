@@ -82,12 +82,19 @@ impl Default for LlmConfig {
     }
 }
 
+/// Per-request output reservation. Must match the context budget calculation.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestOptions {
+    pub reserved: u32,
+}
+
 /// LLM client for making chat completion requests
 #[derive(Debug, Clone)]
 pub struct LlmClient {
     client: Client,
     config: LlmConfig,
     stop: Vec<String>,
+    ollama: Option<(String, u64)>,
 }
 
 impl LlmClient {
@@ -97,6 +104,7 @@ impl LlmClient {
             client: HTTP.clone(),
             config,
             stop: Vec::new(),
+            ollama: None,
         }
     }
 
@@ -105,6 +113,33 @@ impl LlmClient {
     pub fn with_stop(mut self, stop: Vec<String>) -> Self {
         self.stop = stop;
         self
+    }
+
+    /// Derive a client with a task-specific sampling temperature.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.config.temperature = temperature;
+        self
+    }
+
+    /// Set a verified Ollama route's context capacity. The alias guard prevents
+    /// forwarding provider-specific options after changing models. LiteLLM
+    /// accepts num_ctx as a top-level non-OpenAI option (verified 1.99.1).
+    pub fn with_ollama_context(mut self, model: impl Into<String>, limit: u64) -> Self {
+        self.ollama = Some((model.into(), limit));
+        self
+    }
+
+    fn request(&self, request: ChatRequest<'_>) -> Result<serde_json::Value, LlmError> {
+        let mut body = serde_json::to_value(&request)?;
+        if let Some((model, limit)) = &self.ollama
+            && model == request.model
+        {
+            body["num_ctx"] = (*limit).into();
+        }
+        if request.stream == Some(true) {
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
+        }
+        Ok(body)
     }
 
     /// Make a chat completion request
@@ -124,13 +159,31 @@ impl LlmClient {
         messages: &[Message],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<ChatResponse, LlmError> {
+        self.chat_with_options(
+            model,
+            messages,
+            tools,
+            RequestOptions {
+                reserved: self.config.max_tokens,
+            },
+        )
+        .await
+    }
+
+    pub async fn chat_with_options(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        options: RequestOptions,
+    ) -> Result<ChatResponse, LlmError> {
         let request = ChatRequest {
             model,
             messages,
             tools,
             tool_choice: None,
             temperature: Some(self.config.temperature),
-            max_tokens: Some(self.config.max_tokens),
+            max_tokens: Some(options.reserved),
             stream: Some(false),
             stop: (!self.stop.is_empty()).then_some(self.stop.as_slice()),
         };
@@ -142,7 +195,7 @@ impl LlmClient {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
-            .json(&request)
+            .json(&self.request(request)?)
             .send()
             .await?;
 
@@ -178,13 +231,32 @@ impl LlmClient {
         tools: Option<&[ToolDefinition]>,
     ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>> + use<>, LlmError>
     {
+        self.chat_stream_with_options(
+            model,
+            messages,
+            tools,
+            RequestOptions {
+                reserved: self.config.max_tokens,
+            },
+        )
+        .await
+    }
+
+    pub async fn chat_stream_with_options(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: Option<&[ToolDefinition]>,
+        options: RequestOptions,
+    ) -> Result<impl futures::Stream<Item = Result<ChatStreamChunk, LlmError>> + use<>, LlmError>
+    {
         let request = ChatRequest {
             model,
             messages,
             tools,
             tool_choice: None,
             temperature: Some(self.config.temperature),
-            max_tokens: Some(self.config.max_tokens),
+            max_tokens: Some(options.reserved),
             stream: Some(true),
             stop: (!self.stop.is_empty()).then_some(self.stop.as_slice()),
         };
@@ -196,7 +268,7 @@ impl LlmClient {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
-            .json(&request)
+            .json(&self.request(request)?)
             .send()
             .await?;
 

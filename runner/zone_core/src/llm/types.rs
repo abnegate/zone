@@ -318,6 +318,8 @@ pub struct ChatStreamChunk {
     pub model: Option<String>,
     #[serde(default)]
     pub choices: Vec<StreamChoice>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 /// Streaming choice delta

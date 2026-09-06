@@ -1,0 +1,25 @@
+{
+  "model": "qwen3.8:27b",
+  "used": 3064,
+  "limit": 32768,
+  "reserved": 4096,
+  "threshold": 22938,
+  "remaining": 19874,
+  "estimated": true,
+  "incomplete": false,
+  "source": "configured",
+  "status": "ready",
+  "breakdown": {
+    "instructions": 800,
+    "conversation": 1200,
+    "tools": 600,
+    "results": 400,
+    "summary": 0,
+    "attachments": 0,
+    "overhead": 64
+  },
+  "revision": 0,
+  "compacted_messages": 0,
+  "updated_at": "2026-09-06T00:00:00Z",
+  "reason": null
+}

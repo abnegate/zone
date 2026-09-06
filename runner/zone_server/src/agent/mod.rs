@@ -24,7 +24,9 @@ pub mod web;
 pub use approval::{ApprovalGate, ApprovalPolicy};
 pub use citations::{Citation, CitationKind, CitationOutcome};
 pub use receipts::{ActionReceipt, ActionTarget};
-pub use runner::{AgentEvent, AgentRun, LoopBudget, MAX_ITERATIONS, MAX_TOOL_CALLS, run};
+pub use runner::{
+    AgentEvent, AgentRun, LoopBudget, MAX_ITERATIONS, MAX_TOOL_CALLS, run, run_with_context,
+};
 pub use tools::{ChatTools, ToolProfile, WorkspaceScope};
 
 use serde::{Deserialize, Serialize};

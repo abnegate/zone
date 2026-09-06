@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod context;
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -58,7 +60,25 @@ pub fn test_config() -> Config {
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),
+        chat: Default::default(),
     }
+}
+
+/// Require an explicitly selected disposable database for canonical chat tests.
+/// CI already supplies TEST_DATABASE_URL; the context-specific override is optional.
+pub fn context_database_url() -> String {
+    select_context_database(
+        std::env::var("ZONE_CONTEXT_TEST_DATABASE_URL").ok(),
+        std::env::var("TEST_DATABASE_URL").ok(),
+    ).expect("Set TEST_DATABASE_URL or ZONE_CONTEXT_TEST_DATABASE_URL to an isolated migrated test database")
+}
+
+pub fn select_context_database(
+    explicit: Option<String>,
+    configured: Option<String>,
+) -> Result<String, &'static str> {
+    explicit.or(configured).filter(|address| !address.trim().is_empty())
+        .ok_or("Set TEST_DATABASE_URL or ZONE_CONTEXT_TEST_DATABASE_URL to an isolated migrated test database")
 }
 
 /// Create a database pool for testing
@@ -309,6 +329,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),
+        chat: Default::default(),
     }
 }
 

@@ -1,7 +1,7 @@
 //! Task execution worker
 //!
 //! Executes agentic tasks in the background using the same streaming agent
-//! loop as chat, with a larger budget and a sandboxed tool context.
+//! loop as chat, with a task budget and a sandboxed tool context.
 
 use futures::StreamExt;
 use sqlx::PgPool;
@@ -15,6 +15,10 @@ use zone_core::tools::ToolResult;
 
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget};
 use crate::db::tasks;
+use crate::services::chat::{
+    capacity::Resolver,
+    session::{self, RunContext},
+};
 use crate::state::AppState;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
 
@@ -349,18 +353,37 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     let max_tokens = default_max_tokens();
     let model = task.model_name.clone().unwrap_or_else(default_model);
 
-    let llm = LlmClient::new(LlmConfig {
+    let capacity = Resolver::with_context(
+        &state.config().litellm_host,
+        &state.config().litellm_key,
+        &state.config().ollama_host,
+        Some(state.config().chat.context),
+    )
+    .resolve(&model)
+    .await;
+    let settings = session::Settings {
+        output: max_tokens,
+        ..state.config().chat.clone()
+    };
+    let policy = session::policy(&settings, &capacity);
+    let mut llm = LlmClient::new(LlmConfig {
         base_url: state.config().litellm_host.clone(),
         api_key: state.config().litellm_key.clone(),
         default_model: model.clone(),
         temperature,
-        max_tokens,
+        max_tokens: policy.reserved,
     });
+    if let Some(limit) = capacity.ollama {
+        llm = llm.with_ollama_context(&model, limit);
+    }
     let callback = DatabaseTaskCallback::new(state.db().clone(), run_id);
     let prompt = format!("# Task: {}\n\n{}", task.title, task.description);
     let messages = vec![LlmMessage::system(system_prompt), LlmMessage::user(prompt)];
 
-    let agent_future = run_task_loop(llm, model, tools, messages, &callback);
+    let mut context = RunContext::from_messages(messages);
+    context.policy = policy;
+    context.reason = capacity.reason;
+    let agent_future = run_task_loop(llm, model, tools, context, &callback);
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(TASK_TIMEOUT_SECS),
         agent_future,
@@ -480,20 +503,24 @@ async fn run_task_loop(
     llm: LlmClient,
     model: String,
     tools: ChatTools,
-    messages: Vec<LlmMessage>,
+    context: RunContext,
     callback: &DatabaseTaskCallback,
 ) -> Result<TaskOutcome, String> {
     callback.on_phase_change(AgentPhase::Thinking, None);
     let mut summary = String::new();
     let mut tool_calls = 0usize;
-    let mut events = std::pin::pin!(agent::run(AgentRun {
-        llm,
-        model,
-        tools,
-        messages,
-        budget: LoopBudget::task(),
-        approval: ApprovalPolicy::Auto,
-    }));
+    let mut events = std::pin::pin!(agent::run_with_context(
+        AgentRun {
+            llm,
+            model,
+            tools,
+            messages: Vec::new(),
+            budget: LoopBudget::task(),
+            approval: ApprovalPolicy::Auto,
+        },
+        context,
+        true
+    ));
     while let Some(event) = events.next().await {
         match event {
             AgentEvent::Chunk(text) => summary.push_str(&text),
@@ -518,7 +545,30 @@ async fn run_task_loop(
                 callback.on_tool_result(&name, &result);
                 callback.on_phase_change(AgentPhase::Observing, None);
             }
-            AgentEvent::Image(_) | AgentEvent::ToolApprovalRequired { .. } => {}
+            AgentEvent::Canonical(entry) => {
+                tasks::add_task_run_log(&callback.pool,callback.run_id,"acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":entry.message,"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
+            }
+            AgentEvent::Checkpoint { summary, .. } => {
+                tasks::add_task_run_log(
+                    &callback.pool,
+                    callback.run_id,
+                    "thinking",
+                    "agent",
+                    "info",
+                    "Conversation checkpoint",
+                    Some(serde_json::to_value(summary).map_err(|error| error.to_string())?),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            AgentEvent::Finalizing(reason) => {
+                callback.on_phase_change(AgentPhase::Responding, Some(&reason));
+            }
+            AgentEvent::Consumed(_)
+            | AgentEvent::Context(_)
+            | AgentEvent::Usage(_)
+            | AgentEvent::Image(_)
+            | AgentEvent::ToolApprovalRequired { .. } => {}
             AgentEvent::Failed(error) => return Err(error),
         }
     }

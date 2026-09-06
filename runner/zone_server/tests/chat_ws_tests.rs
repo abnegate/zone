@@ -10,6 +10,7 @@
 
 mod common;
 
+use base64::Engine;
 use common::{
     TestClient, create_test_pool, create_test_router, create_test_state, init_tracing, test_config,
     test_email, test_password,
@@ -159,6 +160,7 @@ async fn automatic_title_rest_and_websocket_summarize_only_first_message() {
         let requests = provider.received_requests().await.unwrap();
         let request = requests
             .iter()
+            .filter(|request| request.url.path() == "/chat/completions")
             .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap())
             .find(|body| body["stream"] == false)
             .unwrap();
@@ -456,6 +458,7 @@ async fn web_search_turn(
         .await
         .unwrap()
         .into_iter()
+        .filter(|request| request.url.path() == "/chat/completions")
         .map(|request| serde_json::from_slice(&request.body).unwrap())
         .collect();
     assert_eq!(requests.len(), if unsupported_tools { 2 } else { 1 });
@@ -678,7 +681,30 @@ async fn web_search_evidence_survives_unsupported_tool_fallback() {
     assert!(requests[1]["tools"].is_null());
     let original = requests[0]["messages"].as_array().unwrap();
     let messages = requests[1]["messages"].as_array().unwrap();
-    assert_eq!(&messages[..original.len()], original);
+    let finalizer = messages
+        .iter()
+        .position(|message| {
+            message["role"] == "system"
+                && message["content"].as_str().is_some_and(|content| {
+                    content.starts_with("The model does not support callable tools.")
+                })
+        })
+        .expect("fallback must explain why tool execution ended");
+    assert_eq!(messages.len(), original.len() + 1);
+    assert_eq!(
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != finalizer)
+            .map(|(_, message)| message)
+            .collect::<Vec<_>>(),
+        original.iter().collect::<Vec<_>>(),
+        "fallback must preserve every original message and its relative order"
+    );
+    web_instructions(&requests[1], true);
+    let finalizer = messages[finalizer]["content"].as_str().unwrap();
+    assert!(finalizer.contains("supplied search evidence"));
+    assert!(finalizer.contains("Do not call more tools"));
     let instructions = messages
         .iter()
         .filter(|message| {
@@ -690,12 +716,7 @@ async fn web_search_evidence_survives_unsupported_tool_fallback() {
         .map(|message| message["content"].as_str().unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-    for evidence in [
-        WEATHER_TITLE,
-        WEATHER_URL,
-        WEATHER_SNIPPET,
-        "Previously supplied context, including any server-provided web search results, remains available",
-    ] {
+    for evidence in [WEATHER_TITLE, WEATHER_URL, WEATHER_SNIPPET] {
         assert!(
             instructions.contains(evidence),
             "fallback discarded web availability: {instructions}"
@@ -1744,7 +1765,30 @@ async fn test_protected_artifact_urls_are_not_forwarded_to_litellm() {
 
     let client = TestClient::with_db().await;
     let (token, chat_id) = seed_chat(&client).await;
-    let protected = "/api/artifacts/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003/image.png";
+    let chat = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let workspace = chat["chat"]["workspace_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let root = std::env::temp_dir().join(format!("zone-replay-image-{}", uuid::Uuid::new_v4()));
+    let image = red_png_data_url();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.split_once(',').unwrap().1)
+        .unwrap();
+    let protected = zone_server::services::artifacts::ArtifactStore::new(root.clone())
+        .persist(
+            workspace,
+            chat_id.parse().unwrap(),
+            uuid::Uuid::new_v4(),
+            "png",
+            &bytes,
+        )
+        .await
+        .unwrap();
     client
         .post_json_auth(
             &format!("/api/chats/{chat_id}/messages"),
@@ -1759,11 +1803,13 @@ async fn test_protected_artifact_urls_are_not_forwarded_to_litellm() {
             }),
             &token,
         )
-        .await;
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
 
     let mut config = test_config();
     config.litellm_host = litellm.uri();
     config.comfyui.enabled = true;
+    config.comfyui.artifact_root = root.clone();
     let addr = spawn_server_with_config(config).await;
     let (mut socket, _) = connect_async(format!("ws://{addr}/ws/chats/{chat_id}"))
         .await
@@ -1785,7 +1831,11 @@ async fn test_protected_artifact_urls_are_not_forwarded_to_litellm() {
 
     while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
         match frame["type"].as_str() {
-            Some("message_end") | Some("error") => break,
+            Some("message_end") => {
+                assert!(frame["error"].is_null(), "{frame}");
+                break;
+            }
+            Some("error") => panic!("owned historical image must hydrate: {frame}"),
             _ => {}
         }
     }
@@ -1804,10 +1854,57 @@ async fn test_protected_artifact_urls_are_not_forwarded_to_litellm() {
             "protected artifact URLs must not be forwarded to LiteLLM: {body}"
         );
         assert!(
-            !body.contains(protected),
+            !body.contains(&protected),
             "the exact protected URL must stay out of later-turn model context"
         );
     }
+    let inference = litellm
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path() == "/chat/completions")
+        .unwrap();
+    assert!(String::from_utf8_lossy(&inference.body).contains(&image));
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    assert!(
+        reloaded.to_string().contains(&protected),
+        "canonical artifact reference must stay intact"
+    );
+    tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn foreign_artifact_reference_fails_closed_without_losing_canonical_history() {
+    let harness = common::context::Harness::new(Some(32768), false, vec![]).await;
+    let protected = "/api/artifacts/00000000-0000-0000-0000-000000000001/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000003/image.png";
+    harness.client.post_json_auth(
+        &format!("/api/chats/{}/messages", harness.chat),
+        &json!({"role":"assistant","content":"Historical image", "metadata":{"attachments":[{"name":"image.png","mime":"image/png","url":protected}]}}),
+        &harness.token,
+    ).await.assert_status(axum::http::StatusCode::CREATED);
+    let frames = harness.turn("Describe the historical image").await;
+    assert!(frames.iter().any(|frame| {
+        frame["type"] == "error"
+            && frame["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("does not belong to this chat"))
+    }));
+    assert!(
+        harness.requests().await.is_empty(),
+        "foreign image must never reach inference"
+    );
+    assert!(
+        harness.history().await.entries.iter().any(|entry| entry
+            .message
+            .images
+            .iter()
+            .any(|image| image == protected)),
+        "rejected context must remain intact for correction"
+    );
 }
 
 type ChatSocket =
@@ -2008,8 +2105,8 @@ async fn test_image_cancel_during_classification_prevents_submission_and_allows_
         .expect("cancelled acknowledgement");
     assert_eq!(cancelled["type"], "cancelled");
     assert!(
-        cancelled["message_id"].is_string(),
-        "only the owning request may acknowledge cancellation: {cancelled}"
+        cancelled["message_id"].is_null(),
+        "preparation cancellation must not invent an unstarted assistant id: {cancelled}"
     );
     assert!(
         comfy.received_requests().await.unwrap().is_empty(),
@@ -2081,7 +2178,7 @@ async fn test_image_immediate_cancel_has_one_terminal_and_never_submits() {
         .await
         .unwrap();
     assert_eq!(terminal["type"], "cancelled");
-    assert!(terminal["message_id"].is_string());
+    assert!(terminal["message_id"].is_null());
     assert!(
         next_frame(&mut socket, Duration::from_millis(300))
             .await
@@ -2144,7 +2241,7 @@ async fn test_image_cancel_after_queue_waits_for_cleanup_and_stops_progress() {
         .await
         .unwrap();
     assert_eq!(terminal["type"], "cancelled");
-    assert!(terminal["message_id"].is_string());
+    assert!(terminal["message_id"].is_null());
     assert!(
         started.elapsed() >= Duration::from_millis(180),
         "acknowledgement must wait for prompt cleanup"
@@ -2257,9 +2354,16 @@ async fn test_chat_cancel_preserves_partial_reply_before_one_terminal() {
         .send(WsMessage::Text(json!({"type":"cancel"}).to_string().into()))
         .await
         .unwrap();
-    let cancelled = next_frame(&mut socket, Duration::from_secs(3))
-        .await
-        .unwrap();
+    let cancelled = loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(3))
+            .await
+            .unwrap();
+        if frame["type"] == "context" {
+            assert_eq!(frame["message_id"], assistant);
+            continue;
+        }
+        break frame;
+    };
     assert_eq!(cancelled["type"], "cancelled");
     assert_eq!(cancelled["message_id"], assistant);
     let reloaded = client
@@ -2325,7 +2429,12 @@ async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
         match frame["type"].as_str() {
             Some("message_start") => assistant = frame["message_id"].clone(),
             Some("message_end") => {
-                assert_eq!(frame["error"], "Stream error");
+                assert!(
+                    frame["error"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Stream error:")
+                );
                 break frame;
             }
             Some("cancelled" | "error") => {
@@ -2412,7 +2521,7 @@ async fn test_image_cancel_during_user_insert_preserves_acknowledgement_parity()
         .await
         .unwrap();
     assert_eq!(cancelled["type"], "cancelled");
-    assert!(cancelled["message_id"].is_string());
+    assert!(cancelled["message_id"].is_null());
     let reloaded = client
         .get_auth(&format!("/api/chats/{chat_id}"), &token)
         .await

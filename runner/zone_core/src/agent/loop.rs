@@ -1,10 +1,12 @@
 //! ReAct agent loop implementation
 
 use futures::future::join_all;
+use std::collections::HashSet;
 use std::time::Instant;
 use thiserror::Error;
 
-use crate::llm::{LlmClient, LlmError, Message, ToolCall};
+use crate::context::{self, ContextError, ContextSource, Entry, Policy};
+use crate::llm::{LlmClient, LlmError, Message, RequestOptions, Role, ToolCall};
 use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 
 use super::state::{AgentConfig, AgentPhase, AgentState, AgentStep, ToolCallResult};
@@ -14,6 +16,8 @@ use super::state::{AgentConfig, AgentPhase, AgentState, AgentStep, ToolCallResul
 pub enum AgentError {
     #[error("LLM error: {0}")]
     Llm(#[from] LlmError),
+    #[error("Context error: {0}")]
+    Context(#[from] ContextError),
     #[error("Tool error: {0}")]
     Tool(String),
     #[error("Max iterations exceeded")]
@@ -53,6 +57,7 @@ pub struct Agent {
     tools: ToolRegistry,
     config: AgentConfig,
     context: ToolContext,
+    policy: Policy,
 }
 
 impl Agent {
@@ -66,9 +71,20 @@ impl Agent {
         Self {
             llm,
             tools,
+            policy: Policy {
+                limit: None,
+                reserved: config.max_tokens,
+                source: ContextSource::Unknown,
+            },
             config,
             context,
         }
+    }
+
+    /// Use a verified/configured effective capacity without guessing from the model name.
+    pub fn with_context_policy(mut self, policy: Policy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Run the agent with a user prompt
@@ -99,6 +115,7 @@ impl Agent {
     ) -> Result<(), AgentError> {
         state.add_message(Message::user(user_message));
         state.phase = AgentPhase::Thinking;
+        state.iteration = 0;
         state.finished = false;
         state.final_response = None;
         state.error = None;
@@ -129,16 +146,47 @@ impl Agent {
 
             let mut step = AgentStep::new(AgentPhase::Thinking);
 
-            super::compact_tool_history(&mut state.messages, super::KEEP_RECENT_TOOL_RESULTS);
-
+            let latest = state
+                .messages
+                .iter()
+                .rposition(|message| message.role == Role::User);
+            let entries: Vec<_> = state
+                .messages
+                .iter()
+                .enumerate()
+                .map(|(index, message)| Entry {
+                    id: format!("{}:{index}", state.id),
+                    message: message.clone(),
+                    preserve: message.role == Role::System || Some(index) == latest,
+                    consumed: index < state.consumed,
+                })
+                .collect();
+            let prepared = context::prepare(
+                &self.llm,
+                &self.llm.config().default_model,
+                &entries,
+                Some(&tool_definitions),
+                &self.policy,
+                state.summary.as_ref(),
+            )
+            .await?;
             let response = self
                 .llm
-                .chat(&state.messages, Some(&tool_definitions))
+                .chat_with_options(
+                    &self.llm.config().default_model,
+                    &prepared.messages,
+                    Some(&tool_definitions),
+                    RequestOptions {
+                        reserved: self.policy.reserved,
+                    },
+                )
                 .await?;
+            state.summary = prepared.summary;
+            state.consumed = state.messages.len();
 
             // Update token usage
             if let Some(usage) = &response.usage {
-                state.tokens_used += usage.total_tokens;
+                state.tokens_used = state.tokens_used.saturating_add(usage.total_tokens);
             }
 
             let choice = response
@@ -146,7 +194,27 @@ impl Agent {
                 .first()
                 .ok_or_else(|| AgentError::Tool("No response from LLM".to_string()))?;
 
-            let message = &choice.message;
+            let mut message = choice.message.clone();
+            let mut identifiers: HashSet<_> = state
+                .messages
+                .iter()
+                .filter_map(|message| message.tool_calls.as_ref())
+                .flatten()
+                .map(|call| call.id.clone())
+                .collect();
+            if let Some(calls) = message.tool_calls.as_mut() {
+                for call in calls {
+                    if call.id.is_empty() || !identifiers.insert(call.id.clone()) {
+                        loop {
+                            let id = format!("zone_{}", uuid::Uuid::new_v4().simple());
+                            if identifiers.insert(id.clone()) {
+                                call.id = id;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
 
             // Check if the model wants to use tools
             if let Some(tool_calls) = &message.tool_calls
@@ -157,7 +225,7 @@ impl Agent {
                 callback.on_phase_change(AgentPhase::Acting, None);
 
                 // Add assistant message with tool calls
-                state.add_message(Message::assistant_with_tools(tool_calls.clone()));
+                state.add_message(message.clone());
 
                 let mut tool_results = Vec::with_capacity(tool_calls.len());
                 let mut rest = tool_calls.as_slice();
@@ -236,7 +304,7 @@ impl Agent {
 
             // No tool calls - check if this is a final response
             if let Some(content) = &message.content {
-                state.add_message(Message::assistant(content));
+                state.add_message(message.clone());
                 step.message = Some(message.clone());
                 step = step.complete();
                 state.add_step(step);

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
+import { ContextUsageSchema } from '../schemas';
 import type {
   ActionReceipt,
   ChatCharacter,
   ChatWithMessages,
   Citation,
+  ContextUsage,
   Message,
   MessageMetadata,
   MessageRole,
@@ -18,6 +20,7 @@ import { mergeCitations } from '../utils/citations';
 // /ws/chats/:id. Posting to /api/chats/:id/messages only stores the user's
 // message, so sending over the socket is what produces a reply.
 type ServerMessage =
+  | { type: 'context'; chat_id: string; message_id: string | null; usage: ContextUsage }
   | { type: 'title_updated'; chat_id: string; title: string }
   | { type: 'init'; chat_id: string; status: string }
   | {
@@ -81,13 +84,22 @@ type ServerMessage =
 
 export function useChat(
   chatId: string | null,
-  onTitleUpdated?: (id: string, title: string) => void
+  onTitleUpdated?: (id: string, title: string) => void,
+  draft?: SendMessageRequest
 ) {
   const [chat, setChat] = useState<ChatWithMessages | null>(null);
   const [loading, setLoading] = useState(Boolean(chatId));
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [context, setContext] = useState<ContextUsage | null>(null);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [contextRefresh, setContextRefresh] = useState(0);
+  const contextEpoch = useRef(0);
+  const contextModel = useRef<string | null>(null);
+  contextModel.current = chat?.id === chatId ? chat.model_name : null;
+  const previewSequence = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
@@ -118,6 +130,7 @@ export function useChat(
     async (opts?: { silent?: boolean }) => {
       const requestId = ++requestIdRef.current;
       const currentRevision = revision.current;
+      const epoch = contextEpoch.current;
       if (!chatId) {
         setChat(null);
         setLoading(false);
@@ -136,6 +149,11 @@ export function useChat(
         const updated =
           title && title.revision > currentRevision ? { ...data, title: title.title } : data;
         setChat(updated);
+        if (epoch === contextEpoch.current) {
+          setContext(
+            data.context ? (ContextUsageSchema.safeParse(data.context).data ?? null) : null
+          );
+        }
         // Only the selected chat has a socket, so returning to a conversation
         // must also reconcile any title generated while it was unselected.
         titleCallback.current?.(updated.id, updated.title);
@@ -155,8 +173,74 @@ export function useChat(
     // Drop the previous conversation as soon as the selection changes so the
     // UI never keeps rendering chat A under chat B's selection.
     setChat(null);
+    contextEpoch.current += 1;
+    previewSequence.current += 1;
+    setContext(null);
+    setContextError(null);
     fetchChat();
   }, [fetchChat]);
+
+  const draftKey = draft === undefined ? null : JSON.stringify(draft);
+  const settingsKey = chat
+    ? JSON.stringify([
+        chat.model_name,
+        chat.agent_enabled,
+        chat.character,
+        chat.auto_approve,
+        chat.messages.length,
+      ])
+    : null;
+  const identity = `${chatId}:${settingsKey}:${draftKey}:${contextRefresh}`;
+  const previewIdentity = useRef(identity);
+  previewIdentity.current = identity;
+  useEffect(() => {
+    const sequence = ++previewSequence.current;
+    if (!chatId || chat?.id !== chatId || draftKey === null || settingsKey === null || streaming) {
+      setPreviewing(false);
+      return;
+    }
+    const controller = new AbortController();
+    const epoch = contextEpoch.current;
+    setPreviewing(true);
+    setContextError(null);
+    const timer = setTimeout(async () => {
+      try {
+        const usage = await chatsApi.previewContext(
+          chatId,
+          JSON.parse(draftKey),
+          controller.signal
+        );
+        if (
+          controller.signal.aborted ||
+          sequence !== previewSequence.current ||
+          epoch !== contextEpoch.current ||
+          identity !== previewIdentity.current
+        )
+          return;
+        const parsed = ContextUsageSchema.safeParse(usage);
+        if (!parsed.success || parsed.data.model !== chat.model_name)
+          throw new Error('Invalid context preview');
+        setContext(parsed.data);
+      } catch {
+        if (
+          controller.signal.aborted ||
+          sequence !== previewSequence.current ||
+          epoch !== contextEpoch.current ||
+          identity !== previewIdentity.current
+        )
+          return;
+        setContext(null);
+        setContextError('Context preview unavailable. Your messages are unchanged.');
+      } finally {
+        if (!controller.signal.aborted && sequence === previewSequence.current)
+          setPreviewing(false);
+      }
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [chatId, chat?.id, chat?.model_name, draftKey, settingsKey, streaming, identity]);
 
   const upsertMessage = useCallback(
     (id: string, role: MessageRole, content: string, metadata?: MessageMetadata | null) => {
@@ -336,6 +420,8 @@ export function useChat(
     const socket = chatsApi.createChatWebSocket(chatId);
     socketRef.current = socket;
     let assistantId: string | null = null;
+    let generationSeen = false;
+    const completed = new Set<string>();
     let assistantContent = '';
     let assistantMetadata: MessageMetadata | undefined;
     let chunkFrame = 0;
@@ -367,6 +453,30 @@ export function useChat(
           : window.setTimeout(flushChunks, 16);
     };
 
+    const discardEmptyAssistant = (identifier: string | null): void => {
+      if (!identifier) return;
+      flushChunksNow();
+      setChat((previous) =>
+        previous
+          ? {
+              ...previous,
+              messages: previous.messages.filter(
+                (message) =>
+                  message.id !== identifier ||
+                  message.role !== 'assistant' ||
+                  message.content.trim().length > 0 ||
+                  Boolean(
+                    message.metadata?.attachments?.length ||
+                      message.metadata?.tool_calls?.length ||
+                      message.metadata?.citations?.length ||
+                      message.metadata?.action_receipts?.length
+                  )
+              ),
+            }
+          : previous
+      );
+    };
+
     socket.onopen = () => {
       const token = chatsApi.chatAccessToken();
       if (token) {
@@ -388,6 +498,22 @@ export function useChat(
       }
 
       switch (payload.type) {
+        case 'context': {
+          if (payload.chat_id !== chatId) break;
+          if (
+            payload.message_id === null
+              ? generationSeen || activeGenerationRef.current
+              : payload.message_id !== assistantId
+          )
+            break;
+          const parsed = ContextUsageSchema.safeParse(payload.usage);
+          if (!parsed.success || parsed.data.model !== contextModel.current) break;
+          contextEpoch.current += 1;
+          setContext(parsed.data);
+          setContextError(null);
+          setPreviewing(false);
+          break;
+        }
         case 'title_updated':
           if (payload.chat_id === chatId && !renamed.current.has(payload.chat_id)) {
             applyTitle(payload.chat_id, payload.title);
@@ -405,6 +531,11 @@ export function useChat(
           setStatus(payload.message);
           break;
         case 'message_start':
+          if (completed.has(payload.message_id) || assistantId === payload.message_id) break;
+          activeGenerationRef.current = true;
+          setStreaming(true);
+          generationSeen = true;
+          contextEpoch.current += 1;
           setStatus(null);
           assistantId = payload.message_id;
           assistantContent = '';
@@ -464,6 +595,13 @@ export function useChat(
           }
           break;
         case 'message_end':
+          if (
+            completed.has(payload.message_id) ||
+            (assistantId !== null && payload.message_id !== assistantId)
+          )
+            break;
+          completed.add(payload.message_id);
+          contextEpoch.current += 1;
           setStatus(null);
           setError(payload.error ?? null);
           upsertMessage(
@@ -479,6 +617,17 @@ export function useChat(
           setStreaming(false);
           break;
         case 'cancelled': {
+          if (
+            payload.message_id === null
+              ? assistantId !== null
+              : completed.has(payload.message_id) ||
+                (assistantId !== null && payload.message_id !== assistantId)
+          )
+            break;
+          if (payload.message_id !== null) completed.add(payload.message_id);
+          discardEmptyAssistant(assistantId ?? payload.message_id);
+          assistantId = null;
+          contextEpoch.current += 1;
           const pendingId = pendingUserIdRef.current;
           pendingUserIdRef.current = null;
           if (pendingId) {
@@ -495,6 +644,10 @@ export function useChat(
           break;
         }
         case 'error':
+          discardEmptyAssistant(assistantId);
+          if (assistantId !== null) completed.add(assistantId);
+          assistantId = null;
+          contextEpoch.current += 1;
           setStatus(null);
           setError(payload.message);
           activeGenerationRef.current = false;
@@ -505,7 +658,29 @@ export function useChat(
       }
     };
 
+    const invalidateContext = (): void => {
+      discardEmptyAssistant(assistantId);
+      if (assistantId !== null) completed.add(assistantId);
+      const interrupted = activeGenerationRef.current;
+      setContext((previous) =>
+        previous
+          ? {
+              ...previous,
+              status: 'unavailable',
+              incomplete: true,
+              reason: interrupted
+                ? 'Connection interrupted during generation. Usage is the last observation until a fresh preview is available.'
+                : 'Connection closed. Usage is the last observation until a fresh preview is available.',
+            }
+          : null
+      );
+      setContextRefresh((value) => value + 1);
+    };
+
     socket.onerror = () => {
+      invalidateContext();
+      assistantId = null;
+      contextEpoch.current += 1;
       setError('Chat connection failed');
       setStatus(null);
       activeGenerationRef.current = false;
@@ -513,6 +688,9 @@ export function useChat(
     };
 
     socket.onclose = () => {
+      invalidateContext();
+      assistantId = null;
+      contextEpoch.current += 1;
       setStatus(null);
       activeGenerationRef.current = false;
       setStreaming(false);
@@ -580,6 +758,7 @@ export function useChat(
     const pendingId = `pending-${crypto.randomUUID()}`;
     pendingUserIdRef.current = pendingId;
     activeGenerationRef.current = true;
+    contextEpoch.current += 1;
     upsertMessage(pendingId, 'user', request.content, request.metadata);
     setStreaming(true);
     try {
@@ -680,6 +859,9 @@ export function useChat(
 
   return {
     chat,
+    context: context?.model === chat?.model_name ? context : null,
+    contextError,
+    previewing,
     loading,
     error,
     streaming,

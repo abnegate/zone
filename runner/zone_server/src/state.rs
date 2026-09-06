@@ -247,6 +247,10 @@ impl AppState {
         self.inner.mcp.get_or_init(McpHub::connect_from_env).await
     }
 
+    pub fn existing_mcp(&self) -> Option<&McpHub> {
+        self.inner.mcp.get()
+    }
+
     /// Install an empty hub so tests never spawn MCP children.
     pub fn disable_mcp(&self) {
         let _ = self.inner.mcp.set(McpHub::new());
@@ -291,6 +295,7 @@ pub(crate) fn test_config() -> Config {
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),
+        chat: Default::default(),
     }
 }
 
@@ -322,6 +327,7 @@ mod tests {
             comfyui: Default::default(),
             source_index: Default::default(),
             monitoring: Default::default(),
+            chat: Default::default(),
         }
     }
 

@@ -293,9 +293,7 @@ pub fn path_uri_tokens(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut push = |token: String| {
         if token.len() < 8
-            || !token
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             || !seen.insert(token.clone())
         {
             return;
@@ -463,7 +461,11 @@ fn keep_nl_pair_token(token: &str) -> bool {
 }
 
 fn allow_pair_side(token: &str) -> bool {
-    token.len() >= 4 || matches!(token, "key" | "cors" | "aes" | "gcm" | "jwt" | "mcp" | "sql")
+    token.len() >= 4
+        || matches!(
+            token,
+            "key" | "cors" | "aes" | "gcm" | "jwt" | "mcp" | "sql"
+        )
 }
 
 fn is_phrase_skip(token: &str) -> bool {
@@ -790,14 +792,20 @@ mod tests {
             "knowledge is too generic to path-expand"
         );
         assert!(
-            path_uri_tokens("Which columns does 001_initial_schema create on the embeddings table?")
-                .is_empty(),
+            path_uri_tokens(
+                "Which columns does 001_initial_schema create on the embeddings table?"
+            )
+            .is_empty(),
             "embeddings is too generic to path-expand"
         );
         let live = rewrite_query(
             "Why must retain_content_uris use live_uris after an incremental gather?",
         );
-        assert!(live.identifiers.iter().any(|id| id == "retain_content_uris"));
+        assert!(
+            live.identifiers
+                .iter()
+                .any(|id| id == "retain_content_uris")
+        );
         assert!(live.identifiers.iter().any(|id| id == "live_uris"));
 
         let ident = rewrite_query("What does should_skip_blob do when a file SHA is unchanged?");

@@ -54,6 +54,7 @@ async fn setup_test_state() -> AppState {
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),
+        chat: Default::default(),
     };
 
     AppState::new(config, pool.inner().clone(), None)

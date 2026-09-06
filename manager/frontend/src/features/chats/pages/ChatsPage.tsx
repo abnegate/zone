@@ -14,6 +14,7 @@ import {
   MessageContent,
   ToolTrace,
 } from '../components';
+import { ContextUsage } from '../components/ContextUsage';
 import { useChat, useChatSearch, useChats } from '../hooks';
 import type { ChatSearchResult } from '../types';
 import {
@@ -94,6 +95,9 @@ export default function ChatsPage() {
 
   const {
     chat: activeChat,
+    context,
+    contextError,
+    previewing,
     error: chatError,
     streaming,
     status: chatStatus,
@@ -105,7 +109,10 @@ export default function ChatsPage() {
     setCharacter: setCharacterFn,
     clearCharacter: clearCharacterFn,
     updateTitle,
-  } = useChat(selectedChatId, updateListTitle);
+  } = useChat(selectedChatId, updateListTitle, {
+    content: messageInput,
+    metadata: attachmentMetadata(attachments.filter(isSendable)),
+  });
 
   const {
     results: searchResults,
@@ -930,6 +937,7 @@ export default function ChatsPage() {
                 </p>
               ) : null}
 
+              <ContextUsage usage={context ?? null} error={contextError} previewing={previewing} />
               <div className="message-form-row">
                 <input
                   ref={fileInputRef}
@@ -1132,9 +1140,9 @@ export default function ChatsPage() {
       >
         <form className="ui-form" onSubmit={handleSaveCharacter}>
           <p className="help-text">
-            Custom models can use this card as the persona instead of Zone&apos;s assistant
-            prompt. Drop a JSON or PNG card, or paste the system prompt. Turn Agent off unless you
-            also want tools.
+            Custom models can use this card as the persona instead of Zone&apos;s assistant prompt.
+            Drop a JSON or PNG card, or paste the system prompt. Turn Agent off unless you also want
+            tools.
           </p>
           {displayedChat?.character?.description ? (
             <p className="help-text">{displayedChat.character.description}</p>
