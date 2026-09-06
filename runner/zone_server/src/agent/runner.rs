@@ -419,10 +419,7 @@ pub fn run_with_context(
                             name: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
                         };
-                        match &approval {
-                            ApprovalPolicy::Required(gate) => !gate.await_decision(&call.id).await,
-                            ApprovalPolicy::Auto => false,
-                        }
+                        !approval.await_decision(&call.id).await
                     } else {
                         false
                     };

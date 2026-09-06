@@ -829,18 +829,41 @@ export function useChat(
       throw new Error('No chat selected');
     }
     const updated = await chatsApi.updateChat(chatId, settings);
-    setChat((prev) =>
-      prev && prev.id === updated.id
-        ? {
-            ...prev,
-            ...updated,
-            messages:
-              'messages' in updated && Array.isArray(updated.messages)
-                ? updated.messages
-                : prev.messages,
-          }
-        : prev
-    );
+    setChat((prev) => {
+      if (!prev || prev.id !== updated.id) {
+        return prev;
+      }
+      const messages =
+        settings.auto_approve === true
+          ? prev.messages.map((message) => {
+              const calls = message.metadata?.tool_calls;
+              if (!calls?.some((call) => call.approval === 'pending')) {
+                return message;
+              }
+              return {
+                ...message,
+                metadata: {
+                  ...message.metadata,
+                  tool_calls: calls.map((call) =>
+                    call.approval === 'pending'
+                      ? {
+                          ...call,
+                          approval: 'approved' as const,
+                          detail: 'Approved. Running…',
+                          pending: true,
+                        }
+                      : call
+                  ),
+                },
+              };
+            })
+          : prev.messages;
+      return {
+        ...prev,
+        ...updated,
+        messages,
+      };
+    });
   };
 
   const setAgentEnabled = (enabled: boolean): Promise<void> =>

@@ -521,7 +521,7 @@ async fn run_task_loop(
             tools,
             messages: Vec::new(),
             budget: LoopBudget::task(),
-            approval: ApprovalPolicy::Auto,
+            approval: ApprovalPolicy::auto(),
         },
         context,
         true

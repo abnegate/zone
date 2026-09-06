@@ -50,7 +50,7 @@ async fn exercise_messages(
     rounds: Vec<(u16, Vec<Value>)>,
     messages: Vec<Message>,
 ) -> (Vec<AgentEvent>, Vec<Value>) {
-    exercise_approved(rounds, messages, ApprovalPolicy::Auto).await
+    exercise_approved(rounds, messages, ApprovalPolicy::auto()).await
 }
 
 async fn exercise_approved(
@@ -570,7 +570,7 @@ async fn denied_writes_do_not_touch_the_file() {
     let (events, _) = exercise_approved(
         vec![(200, text(&write.to_string())), (200, text("Stopped."))],
         vec![Message::user("Overwrite the file.")],
-        ApprovalPolicy::Required(gate),
+        ApprovalPolicy::required(gate),
     )
     .await;
     let kept = std::fs::read_to_string(&path).unwrap();

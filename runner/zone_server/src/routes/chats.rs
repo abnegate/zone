@@ -486,6 +486,9 @@ pub async fn update(
     .await
     {
         Ok(Some(chat)) => {
+            if let Some(auto_approve) = req.auto_approve {
+                crate::agent::ApprovalPolicy::set_chat_auto(id, auto_approve);
+            }
             let chat = if req.clear_character {
                 match apply_character(&state, chat.id, None, true).await {
                     Ok(Some(chat)) => chat,

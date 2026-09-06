@@ -100,8 +100,6 @@ static CHAT_CANCELLATIONS: Lazy<DashMap<(Uuid, Uuid), broadcast::Sender<()>>> =
 static CHAT_GENERATIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
 /// Keep direct image jobs globally bounded for the shared GPU runtime.
 static IMAGE_GENERATIONS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
-/// Approval waiters for the active generation on a chat.
-static CHAT_APPROVALS: Lazy<DashMap<Uuid, crate::agent::ApprovalGate>> = Lazy::new(DashMap::new);
 
 type SharedSender = Arc<Mutex<futures::stream::SplitSink<WebSocket, Message>>>;
 
@@ -198,7 +196,7 @@ struct Generation {
     chat_id: Uuid,
     message_id: Uuid,
     cancel: broadcast::Receiver<()>,
-    approvals: crate::agent::ApprovalGate,
+    approvals: crate::agent::ApprovalPolicy,
     started: bool,
 }
 
@@ -207,12 +205,11 @@ impl Generation {
         let message_id = Uuid::new_v4();
         let (sender, cancel) = broadcast::channel(1);
         CHAT_CANCELLATIONS.insert((chat_id, message_id), sender);
-        let approvals = crate::agent::ApprovalGate::new();
         Self {
             chat_id,
             message_id,
             cancel,
-            approvals,
+            approvals: crate::agent::ApprovalPolicy::required(crate::agent::ApprovalGate::new()),
             started: false,
         }
     }
@@ -238,12 +235,7 @@ impl Generation {
 impl Drop for Generation {
     fn drop(&mut self) {
         CHAT_CANCELLATIONS.remove(&(self.chat_id, self.message_id));
-        if let Some(entry) = CHAT_APPROVALS.get(&self.chat_id)
-            && entry.value().same_as(&self.approvals)
-        {
-            drop(entry);
-            CHAT_APPROVALS.remove(&self.chat_id);
-        }
+        crate::agent::ApprovalPolicy::unregister(self.chat_id, &self.approvals);
         self.approvals.deny_all();
     }
 }
@@ -825,17 +817,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                         let _ = tx.send(());
                                     }
                                 }
-                                if let Some(gate) = CHAT_APPROVALS.get(&chat_id) {
-                                    gate.deny_all();
-                                }
+                                crate::agent::ApprovalPolicy::deny_chat(chat_id);
                             }
                             Ok(ClientMessage::ApproveTool {
                                 tool_call_id,
                                 approved,
                             }) => {
-                                let decided = CHAT_APPROVALS
-                                    .get(&chat_id)
-                                    .is_some_and(|gate| gate.decide(&tool_call_id, approved));
+                                let decided = crate::agent::ApprovalPolicy::decide_chat(
+                                    chat_id,
+                                    &tool_call_id,
+                                    approved,
+                                );
                                 if !decided {
                                     let _ = send_server(
                                         &sender,
@@ -1572,7 +1564,7 @@ async fn handle_send_message(
         .await;
         return;
     }
-    CHAT_APPROVALS.insert(chat_id, request.approvals.clone());
+    crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
     let preparation = tokio::select! {
         biased;
         _ = session.guard.lost() => { let _=session.close().await; let _=send_server(sender,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
@@ -1996,10 +1988,9 @@ async fn handle_chat_generation(
                 tools,
                 messages: Vec::new(),
                 budget,
-                approval: if auto_approve {
-                    agent::ApprovalPolicy::Auto
-                } else {
-                    agent::ApprovalPolicy::Required(generation.approvals.clone())
+                approval: {
+                    generation.approvals.set_auto(auto_approve);
+                    generation.approvals.clone()
                 },
             },
             context,
@@ -2411,13 +2402,14 @@ mod tests {
     #[test]
     fn queued_generation_cannot_replace_the_active_approval_gate() {
         let chat = Uuid::new_v4();
-        let active = crate::agent::ApprovalGate::new();
-        CHAT_APPROVALS.insert(chat, active.clone());
+        let active = crate::agent::ApprovalPolicy::required(crate::agent::ApprovalGate::new());
+        crate::agent::ApprovalPolicy::register(chat, active.clone());
         let queued = Generation::new(chat);
-        assert!(CHAT_APPROVALS.get(&chat).unwrap().same_as(&active));
+        crate::agent::ApprovalPolicy::set_chat_auto(chat, true);
+        assert!(active.is_auto());
         drop(queued);
-        assert!(CHAT_APPROVALS.get(&chat).unwrap().same_as(&active));
-        CHAT_APPROVALS.remove(&chat);
+        assert!(active.is_auto());
+        crate::agent::ApprovalPolicy::unregister(chat, &active);
     }
 
     #[test]

@@ -518,6 +518,49 @@ describe('useChat', () => {
     expect(result.current.chat?.messages).toHaveLength(2);
   });
 
+  it('keeps in-flight tool traces when auto-approve is toggled', async () => {
+    mockGetChat.mockResolvedValue({ ...mockChat, agent_enabled: true });
+    mockUpdateChat.mockResolvedValue({
+      ...mockChat,
+      agent_enabled: true,
+      auto_approve: true,
+      messages: mockMessages,
+    });
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm-live', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_approval_required',
+      message_id: 'm-live',
+      tool_call_id: 'call_write',
+      name: 'write_file',
+      arguments: '{"path":"x.txt"}',
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.approval).toBe(
+        'pending'
+      );
+    });
+
+    await act(async () => {
+      await result.current.setAutoApprove(true);
+    });
+
+    expect(result.current.chat?.auto_approve).toBe(true);
+    expect(result.current.chat?.messages.at(-1)?.id).toBe('m-live');
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]).toMatchObject({
+      id: 'call_write',
+      approval: 'approved',
+      pending: true,
+    });
+  });
+
   it('marks a mutating tool as waiting and sends the decision', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
