@@ -681,7 +681,30 @@ async fn web_search_evidence_survives_unsupported_tool_fallback() {
     assert!(requests[1]["tools"].is_null());
     let original = requests[0]["messages"].as_array().unwrap();
     let messages = requests[1]["messages"].as_array().unwrap();
-    assert_eq!(&messages[..original.len()], original);
+    let finalizer = messages
+        .iter()
+        .position(|message| {
+            message["role"] == "system"
+                && message["content"].as_str().is_some_and(|content| {
+                    content.starts_with("The model does not support callable tools.")
+                })
+        })
+        .expect("fallback must explain why tool execution ended");
+    assert_eq!(messages.len(), original.len() + 1);
+    assert_eq!(
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != finalizer)
+            .map(|(_, message)| message)
+            .collect::<Vec<_>>(),
+        original.iter().collect::<Vec<_>>(),
+        "fallback must preserve every original message and its relative order"
+    );
+    web_instructions(&requests[1], true);
+    let finalizer = messages[finalizer]["content"].as_str().unwrap();
+    assert!(finalizer.contains("supplied search evidence"));
+    assert!(finalizer.contains("Do not call more tools"));
     let instructions = messages
         .iter()
         .filter(|message| {
@@ -693,12 +716,7 @@ async fn web_search_evidence_survives_unsupported_tool_fallback() {
         .map(|message| message["content"].as_str().unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-    for evidence in [
-        WEATHER_TITLE,
-        WEATHER_URL,
-        WEATHER_SNIPPET,
-        "Previously supplied context, including any server-provided web search results, remains available",
-    ] {
+    for evidence in [WEATHER_TITLE, WEATHER_URL, WEATHER_SNIPPET] {
         assert!(
             instructions.contains(evidence),
             "fallback discarded web availability: {instructions}"
