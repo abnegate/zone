@@ -79,10 +79,21 @@ export type ModelSort =
 
 export type ModelSizeFilter = 'all' | 'small' | 'medium' | 'large' | 'xl';
 
+export type ModelMediumFilter =
+  | 'all'
+  | 'text'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'tools'
+  | 'embeddings'
+  | 'reasoning';
+
 export interface BrowseOptions {
   sort?: ModelSort;
   family?: string;
   size?: ModelSizeFilter;
+  medium?: ModelMediumFilter;
 }
 
 export const ALL_SOURCES: ModelSource[] = ['ollama', 'huggingface'];
@@ -119,6 +130,17 @@ export const MODEL_SIZE_FILTERS: Array<{ value: ModelSizeFilter; label: string }
   { value: 'medium', label: '7–13B' },
   { value: 'large', label: '30B+' },
   { value: 'xl', label: '70B+' },
+];
+
+export const MODEL_MEDIUM_FILTERS: Array<{ value: ModelMediumFilter; label: string }> = [
+  { value: 'all', label: 'All mediums' },
+  { value: 'text', label: 'Text' },
+  { value: 'image', label: 'Image' },
+  { value: 'video', label: 'Video' },
+  { value: 'audio', label: 'Audio' },
+  { value: 'tools', label: 'Tools' },
+  { value: 'embeddings', label: 'Embeddings' },
+  { value: 'reasoning', label: 'Reasoning' },
 ];
 
 export interface PullChunk {

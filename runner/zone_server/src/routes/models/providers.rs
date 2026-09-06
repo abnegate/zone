@@ -12,7 +12,7 @@ use crate::config::{DEFAULT_GPT4ALL_MODELS_URL, DEFAULT_HUGGINGFACE_MODELS_URL};
 
 use super::types::{
     BrowseQuery, BrowseResponse, ErrorResponse, HuggingFaceModelInfo, ModelCapability,
-    ModelDetails, ModelResponse, ModelSize, ModelSizeFilter, ModelSort,
+    ModelDetails, ModelMediumFilter, ModelResponse, ModelSize, ModelSizeFilter, ModelSort,
 };
 
 pub const DEFAULT_PAGE_SIZE: usize = 20;
@@ -167,7 +167,7 @@ impl ModelProvider for OllamaLibraryProvider {
 
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
         let offset = parse_cursor_offset(opts.cursor)?;
-        let url = ollama_search_url(opts.query, opts.family);
+        let url = ollama_search_url(opts.query, opts.family, opts.medium);
         let response = self.client.get(&url).send().await?;
 
         if !response.status().is_success() {
@@ -220,7 +220,11 @@ async fn attach_ollama_download_sizes(
         .await
 }
 
-fn ollama_search_url(query: Option<&str>, family: Option<&str>) -> String {
+fn ollama_search_url(
+    query: Option<&str>,
+    family: Option<&str>,
+    medium: ModelMediumFilter,
+) -> String {
     let mut terms = Vec::new();
     if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
         terms.push(query);
@@ -231,13 +235,33 @@ fn ollama_search_url(query: Option<&str>, family: Option<&str>) -> String {
         terms.push(family);
     }
 
-    if terms.is_empty() {
+    let mut url = if terms.is_empty() {
         "https://ollama.com/search".to_string()
     } else {
         format!(
             "https://ollama.com/search?q={}",
             urlencoding::encode(&terms.join(" "))
         )
+    };
+
+    if let Some(category) = ollama_medium_category(medium) {
+        url.push_str(if terms.is_empty() { "?c=" } else { "&c=" });
+        url.push_str(category);
+    }
+
+    url
+}
+
+fn ollama_medium_category(medium: ModelMediumFilter) -> Option<&'static str> {
+    match medium {
+        ModelMediumFilter::Image => Some("vision"),
+        ModelMediumFilter::Tools => Some("tools"),
+        ModelMediumFilter::Embeddings => Some("embedding"),
+        ModelMediumFilter::Reasoning => Some("thinking"),
+        ModelMediumFilter::All
+        | ModelMediumFilter::Text
+        | ModelMediumFilter::Video
+        | ModelMediumFilter::Audio => None,
     }
 }
 
@@ -624,9 +648,9 @@ impl ModelProvider for HuggingFaceProvider {
             });
         }
 
-        // Size filters and name/size/parameter sorts cannot be applied to a
-        // single HuggingFace downloads page. Gather a window first, refine it,
-        // then paginate with an offset cursor.
+        // Size/medium filters and name/size/parameter sorts cannot be applied
+        // to a single HuggingFace downloads page. Gather a window first, refine
+        // it, then paginate with an offset cursor.
         let offset = parse_cursor_offset(opts.cursor).unwrap_or(0);
         let needs_sorted_window = huggingface_uses_local_sort(opts.sort);
         let max_pages = huggingface_window_pages(needs_sorted_window);
@@ -719,7 +743,22 @@ fn huggingface_uses_local_sort(sort: ModelSort) -> bool {
 }
 
 fn huggingface_uses_local_window(opts: &BrowseQuery<'_>) -> bool {
-    opts.size != ModelSizeFilter::All || huggingface_uses_local_sort(opts.sort)
+    opts.size != ModelSizeFilter::All
+        || opts.medium != ModelMediumFilter::All
+        || huggingface_uses_local_sort(opts.sort)
+}
+
+fn huggingface_medium_tag(medium: ModelMediumFilter) -> Option<&'static str> {
+    match medium {
+        ModelMediumFilter::Image => Some("image-text-to-text"),
+        ModelMediumFilter::Video => Some("video-text-to-text"),
+        ModelMediumFilter::Audio => Some("automatic-speech-recognition"),
+        ModelMediumFilter::Embeddings => Some("feature-extraction"),
+        ModelMediumFilter::All
+        | ModelMediumFilter::Text
+        | ModelMediumFilter::Tools
+        | ModelMediumFilter::Reasoning => None,
+    }
 }
 
 async fn fetch_huggingface_page(
@@ -760,6 +799,10 @@ async fn fetch_huggingface_page(
 
     if let Some(family) = opts.family {
         url.push_str(&format!("&filter={}", urlencoding::encode(family)));
+    }
+
+    if let Some(tag) = huggingface_medium_tag(opts.medium) {
+        url.push_str(&format!("&filter={}", urlencoding::encode(tag)));
     }
 
     let response = client.get(&url).send().await?;
@@ -1536,7 +1579,42 @@ fn model_matches_query(model: &ModelResponse, opts: &BrowseQuery<'_>) -> bool {
         return false;
     }
 
-    opts.size == ModelSizeFilter::All || model_matches_size(model, opts.size)
+    if opts.size != ModelSizeFilter::All && !model_matches_size(model, opts.size) {
+        return false;
+    }
+
+    opts.medium == ModelMediumFilter::All || model_matches_medium(model, opts.medium)
+}
+
+fn model_matches_medium(model: &ModelResponse, medium: ModelMediumFilter) -> bool {
+    use ModelCapability::*;
+
+    let wanted: &[ModelCapability] = match medium {
+        ModelMediumFilter::All => return true,
+        ModelMediumFilter::Text => {
+            return match model.capabilities.as_deref() {
+                None | Some([]) => true,
+                Some(capabilities) => capabilities.iter().any(|capability| {
+                    matches!(
+                        capability,
+                        Text | ImageInput | VideoInput | Audio | AudioInput | Tools | Reasoning
+                    )
+                }),
+            };
+        }
+        ModelMediumFilter::Image => &[ImageInput, ImageGeneration],
+        ModelMediumFilter::Video => &[VideoInput, VideoGeneration],
+        ModelMediumFilter::Audio => &[Audio, AudioInput, AudioGeneration],
+        ModelMediumFilter::Tools => &[Tools],
+        ModelMediumFilter::Embeddings => &[Embeddings],
+        ModelMediumFilter::Reasoning => &[Reasoning],
+    };
+
+    model.capabilities.as_deref().is_some_and(|capabilities| {
+        capabilities
+            .iter()
+            .any(|capability| wanted.contains(capability))
+    })
 }
 
 fn paginate_models(models: Vec<ModelResponse>, offset: usize, limit: usize) -> BrowseResponse {
@@ -2210,6 +2288,15 @@ mod tests {
         family: Option<&'a str>,
         size: ModelSizeFilter,
     ) -> BrowseQuery<'a> {
+        browse_opts_with_medium(sort, family, size, ModelMediumFilter::All)
+    }
+
+    fn browse_opts_with_medium<'a>(
+        sort: ModelSort,
+        family: Option<&'a str>,
+        size: ModelSizeFilter,
+        medium: ModelMediumFilter,
+    ) -> BrowseQuery<'a> {
         BrowseQuery {
             query: None,
             cursor: None,
@@ -2217,6 +2304,7 @@ mod tests {
             sort,
             family,
             size,
+            medium,
         }
     }
 
@@ -2255,6 +2343,133 @@ mod tests {
         assert!(model_matches_size(&large, ModelSizeFilter::Large));
         assert!(model_matches_size(&xl, ModelSizeFilter::Xl));
         assert!(!model_matches_size(&unknown, ModelSizeFilter::Small));
+    }
+
+    fn test_model_with_capabilities(
+        name: &str,
+        capabilities: Option<Vec<ModelCapability>>,
+    ) -> ModelResponse {
+        let mut model = test_model(name, None, None, None, None);
+        model.capabilities = capabilities;
+        model
+    }
+
+    #[test]
+    fn test_model_matches_medium() {
+        let undeclared = test_model_with_capabilities("chat", None);
+        let text = test_model_with_capabilities("text", Some(vec![ModelCapability::Text]));
+        let vision = test_model_with_capabilities(
+            "vision",
+            Some(vec![ModelCapability::Text, ModelCapability::ImageInput]),
+        );
+        let image_gen =
+            test_model_with_capabilities("flux", Some(vec![ModelCapability::ImageGeneration]));
+        let video = test_model_with_capabilities(
+            "video",
+            Some(vec![
+                ModelCapability::Text,
+                ModelCapability::VideoGeneration,
+            ]),
+        );
+        let audio =
+            test_model_with_capabilities("whisper", Some(vec![ModelCapability::AudioInput]));
+        let tools = test_model_with_capabilities("agent", Some(vec![ModelCapability::Tools]));
+        let embeddings =
+            test_model_with_capabilities("embed", Some(vec![ModelCapability::Embeddings]));
+        let reasoning =
+            test_model_with_capabilities("think", Some(vec![ModelCapability::Reasoning]));
+
+        assert!(model_matches_medium(&undeclared, ModelMediumFilter::All));
+        assert!(model_matches_medium(&undeclared, ModelMediumFilter::Text));
+        assert!(!model_matches_medium(&undeclared, ModelMediumFilter::Image));
+        assert!(!model_matches_medium(
+            &undeclared,
+            ModelMediumFilter::Embeddings
+        ));
+
+        assert!(model_matches_medium(&text, ModelMediumFilter::Text));
+        assert!(!model_matches_medium(&text, ModelMediumFilter::Image));
+
+        assert!(model_matches_medium(&vision, ModelMediumFilter::Text));
+        assert!(model_matches_medium(&vision, ModelMediumFilter::Image));
+        assert!(!model_matches_medium(&vision, ModelMediumFilter::Video));
+
+        assert!(!model_matches_medium(&image_gen, ModelMediumFilter::Text));
+        assert!(model_matches_medium(&image_gen, ModelMediumFilter::Image));
+
+        assert!(model_matches_medium(&video, ModelMediumFilter::Text));
+        assert!(model_matches_medium(&video, ModelMediumFilter::Video));
+        assert!(!model_matches_medium(&video, ModelMediumFilter::Image));
+
+        assert!(model_matches_medium(&audio, ModelMediumFilter::Text));
+        assert!(model_matches_medium(&audio, ModelMediumFilter::Audio));
+
+        assert!(model_matches_medium(&tools, ModelMediumFilter::Text));
+        assert!(model_matches_medium(&tools, ModelMediumFilter::Tools));
+        assert!(!model_matches_medium(&tools, ModelMediumFilter::Image));
+
+        assert!(!model_matches_medium(&embeddings, ModelMediumFilter::Text));
+        assert!(model_matches_medium(
+            &embeddings,
+            ModelMediumFilter::Embeddings
+        ));
+
+        assert!(model_matches_medium(&reasoning, ModelMediumFilter::Text));
+        assert!(model_matches_medium(
+            &reasoning,
+            ModelMediumFilter::Reasoning
+        ));
+    }
+
+    #[test]
+    fn test_refine_models_filters_by_medium() {
+        let models = vec![
+            test_model_with_capabilities("chat", None),
+            test_model_with_capabilities(
+                "llava",
+                Some(vec![ModelCapability::Text, ModelCapability::ImageInput]),
+            ),
+            test_model_with_capabilities("nomic", Some(vec![ModelCapability::Embeddings])),
+            test_model_with_capabilities("qwen-tools", Some(vec![ModelCapability::Tools])),
+        ];
+
+        let text = refine_models(
+            models.clone(),
+            &browse_opts_with_medium(
+                ModelSort::NameAsc,
+                None,
+                ModelSizeFilter::All,
+                ModelMediumFilter::Text,
+            ),
+        );
+        assert_eq!(
+            text.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["chat", "llava", "qwen-tools"]
+        );
+
+        let image = refine_models(
+            models.clone(),
+            &browse_opts_with_medium(
+                ModelSort::Relevance,
+                None,
+                ModelSizeFilter::All,
+                ModelMediumFilter::Image,
+            ),
+        );
+        assert_eq!(image.len(), 1);
+        assert_eq!(image[0].name, "llava");
+
+        let embeddings = refine_models(
+            models,
+            &browse_opts_with_medium(
+                ModelSort::Relevance,
+                None,
+                ModelSizeFilter::All,
+                ModelMediumFilter::Embeddings,
+            ),
+        );
+        assert_eq!(embeddings.len(), 1);
+        assert_eq!(embeddings[0].name, "nomic");
     }
 
     #[test]
@@ -2398,6 +2613,27 @@ mod tests {
             None,
             ModelSizeFilter::Small
         )));
+        assert!(huggingface_uses_local_window(&browse_opts_with_medium(
+            ModelSort::Relevance,
+            None,
+            ModelSizeFilter::All,
+            ModelMediumFilter::Image
+        )));
+        assert!(!huggingface_uses_local_window(&browse_opts_with_medium(
+            ModelSort::Relevance,
+            None,
+            ModelSizeFilter::All,
+            ModelMediumFilter::All
+        )));
+        assert_eq!(
+            huggingface_medium_tag(ModelMediumFilter::Image),
+            Some("image-text-to-text")
+        );
+        assert_eq!(
+            huggingface_medium_tag(ModelMediumFilter::Embeddings),
+            Some("feature-extraction")
+        );
+        assert_eq!(huggingface_medium_tag(ModelMediumFilter::Text), None);
         assert!(huggingface_uses_local_sort(ModelSort::ParamsDesc));
         assert!(!huggingface_uses_local_sort(ModelSort::UpdatedDesc));
         assert!(!huggingface_uses_local_sort(ModelSort::DownloadsDesc));
@@ -2452,18 +2688,41 @@ mod tests {
 
     #[test]
     fn test_ollama_search_url_includes_family_when_query_is_empty() {
-        assert_eq!(ollama_search_url(None, None), "https://ollama.com/search");
         assert_eq!(
-            ollama_search_url(Some(""), Some("llama")),
+            ollama_search_url(None, None, ModelMediumFilter::All),
+            "https://ollama.com/search"
+        );
+        assert_eq!(
+            ollama_search_url(Some(""), Some("llama"), ModelMediumFilter::All),
             "https://ollama.com/search?q=llama"
         );
         assert_eq!(
-            ollama_search_url(Some("vision"), Some("llama")),
+            ollama_search_url(Some("vision"), Some("llama"), ModelMediumFilter::All),
             "https://ollama.com/search?q=vision%20llama"
         );
         assert_eq!(
-            ollama_search_url(Some("llama"), Some("llama")),
+            ollama_search_url(Some("llama"), Some("llama"), ModelMediumFilter::All),
             "https://ollama.com/search?q=llama"
+        );
+        assert_eq!(
+            ollama_search_url(None, None, ModelMediumFilter::Image),
+            "https://ollama.com/search?c=vision"
+        );
+        assert_eq!(
+            ollama_search_url(Some("llama"), None, ModelMediumFilter::Tools),
+            "https://ollama.com/search?q=llama&c=tools"
+        );
+        assert_eq!(
+            ollama_search_url(None, Some("qwen"), ModelMediumFilter::Embeddings),
+            "https://ollama.com/search?q=qwen&c=embedding"
+        );
+        assert_eq!(
+            ollama_search_url(None, None, ModelMediumFilter::Reasoning),
+            "https://ollama.com/search?c=thinking"
+        );
+        assert_eq!(
+            ollama_search_url(None, None, ModelMediumFilter::Text),
+            "https://ollama.com/search"
         );
     }
 
@@ -2853,6 +3112,7 @@ mod tests {
                 sort: ModelSort::default(),
                 family: None,
                 size: ModelSizeFilter::default(),
+                medium: ModelMediumFilter::default(),
             })
             .await
             .unwrap();
@@ -2888,6 +3148,7 @@ mod tests {
                 sort: ModelSort::default(),
                 family: None,
                 size: ModelSizeFilter::default(),
+                medium: ModelMediumFilter::default(),
             })
             .await
             .unwrap();

@@ -572,7 +572,7 @@ async fn test_list_models_accepts_sort_and_filter_params() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/api/models?source=gpt4all&sort=name_asc&family=llama&size=medium")
+        .uri("/api/models?source=gpt4all&sort=name_asc&family=llama&size=medium&medium=text")
         .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();

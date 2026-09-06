@@ -13,6 +13,7 @@ import type { BrowseModel, InstalledModel, ModelSort } from '../types';
 import {
   MAX_PARALLEL_PULLS,
   MODEL_FAMILY_FILTERS,
+  MODEL_MEDIUM_FILTERS,
   MODEL_SIZE_FILTERS,
   MODEL_SORT_OPTIONS,
 } from '../types';
@@ -434,6 +435,20 @@ export default function ModelsPage() {
               </label>
 
               <div className="browse-filter-groups">
+                <div className="filter-pills" role="group" aria-label="Filter by medium">
+                  {MODEL_MEDIUM_FILTERS.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={`filter-pill ${browse.medium === option.value ? 'active' : ''}`}
+                      aria-pressed={browse.medium === option.value}
+                      onClick={() => browse.setMedium(option.value)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
                 <div className="filter-pills" role="group" aria-label="Filter by family">
                   {MODEL_FAMILY_FILTERS.map((option) => (
                     <button

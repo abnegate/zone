@@ -210,12 +210,14 @@ describe('Client', () => {
         sort: 'name_asc',
         family: 'llama',
         size: 'medium',
+        medium: 'image',
       });
 
       const url = mockFetch.mock.calls[0][0];
       expect(url).toContain('sort=name_asc');
       expect(url).toContain('family=llama');
       expect(url).toContain('size=medium');
+      expect(url).toContain('medium=image');
     });
   });
 

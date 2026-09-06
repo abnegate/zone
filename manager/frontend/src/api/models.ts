@@ -87,6 +87,9 @@ export const modelsApi = {
     if (options.size && options.size !== 'all') {
       params.set('size', options.size);
     }
+    if (options.medium && options.medium !== 'all') {
+      params.set('medium', options.medium);
+    }
     const response = await fetch(`${API_BASE}/api/models?${params}`, {
       headers: client.getHeaders(),
     });

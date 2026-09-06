@@ -152,6 +152,21 @@ pub enum ModelSizeFilter {
     Xl,
 }
 
+/// High-level mediums for browse filtering
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelMediumFilter {
+    #[default]
+    All,
+    Text,
+    Image,
+    Video,
+    Audio,
+    Tools,
+    Embeddings,
+    Reasoning,
+}
+
 /// Query parameters for listing models
 #[derive(Debug, Deserialize)]
 pub struct ListModelsQuery {
@@ -170,6 +185,8 @@ pub struct ListModelsQuery {
     pub family: Option<String>,
     /// Filter by parameter-size bucket
     pub size: Option<ModelSizeFilter>,
+    /// Filter by medium (text, image, video, tools, ...)
+    pub medium: Option<ModelMediumFilter>,
 }
 
 /// Options passed to a model provider search
@@ -181,6 +198,7 @@ pub struct BrowseQuery<'a> {
     pub sort: ModelSort,
     pub family: Option<&'a str>,
     pub size: ModelSizeFilter,
+    pub medium: ModelMediumFilter,
 }
 
 impl ListModelsQuery {
@@ -198,6 +216,7 @@ impl ListModelsQuery {
             sort: self.sort.unwrap_or_default(),
             family,
             size: self.size.unwrap_or_default(),
+            medium: self.medium.unwrap_or_default(),
         }
     }
 }
@@ -217,4 +236,46 @@ pub struct DiskUsage {
     pub total_bytes: u64,
     pub available_bytes: u64,
     pub percent: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browse_query_defaults_blank_filters() {
+        let query = ListModelsQuery {
+            source: Some("ollama".into()),
+            search: Some("qwen".into()),
+            cursor: None,
+            limit: Some(20),
+            sort: Some(ModelSort::NameAsc),
+            family: Some("all".into()),
+            size: None,
+            medium: None,
+        };
+        let browse = query.to_browse_query(20);
+        assert_eq!(browse.query, Some("qwen"));
+        assert_eq!(browse.family, None);
+        assert_eq!(browse.size, ModelSizeFilter::All);
+        assert_eq!(browse.medium, ModelMediumFilter::All);
+    }
+
+    #[test]
+    fn browse_query_passes_medium() {
+        let query = ListModelsQuery {
+            source: Some("huggingface".into()),
+            search: None,
+            cursor: None,
+            limit: None,
+            sort: None,
+            family: Some("llama".into()),
+            size: Some(ModelSizeFilter::Small),
+            medium: Some(ModelMediumFilter::Image),
+        };
+        let browse = query.to_browse_query(20);
+        assert_eq!(browse.family, Some("llama"));
+        assert_eq!(browse.size, ModelSizeFilter::Small);
+        assert_eq!(browse.medium, ModelMediumFilter::Image);
+    }
 }

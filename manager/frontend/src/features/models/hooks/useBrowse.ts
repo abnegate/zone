@@ -5,6 +5,7 @@ import type {
   BrowseModel,
   BrowseOptions,
   BrowseSource,
+  ModelMediumFilter,
   ModelSizeFilter,
   ModelSort,
   ModelSource,
@@ -20,11 +21,17 @@ interface SourceState {
   hasMore: boolean;
 }
 
-function toBrowseOptions(sort: ModelSort, family: string, size: ModelSizeFilter): BrowseOptions {
+function toBrowseOptions(
+  sort: ModelSort,
+  family: string,
+  size: ModelSizeFilter,
+  medium: ModelMediumFilter
+): BrowseOptions {
   return {
     sort,
     family: family !== 'all' ? family : undefined,
     size: size !== 'all' ? size : undefined,
+    medium: medium !== 'all' ? medium : undefined,
   };
 }
 
@@ -39,6 +46,7 @@ export function useBrowse() {
   const [sort, setSortState] = useState<ModelSort>('relevance');
   const [family, setFamilyState] = useState('all');
   const [size, setSizeState] = useState<ModelSizeFilter>('all');
+  const [medium, setMediumState] = useState<ModelMediumFilter>('all');
   const [models, setModels] = useState<BrowseModel[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -197,12 +205,13 @@ export function useBrowse() {
       searchSource: BrowseSource = source,
       searchSort: ModelSort = sort,
       searchFamily: string = family,
-      searchSize: ModelSizeFilter = size
+      searchSize: ModelSizeFilter = size,
+      searchMedium: ModelMediumFilter = medium
     ) => {
       if (!isAuthenticated) return;
 
       const gen = ++searchGenRef.current;
-      const options = toBrowseOptions(searchSort, searchFamily, searchSize);
+      const options = toBrowseOptions(searchSort, searchFamily, searchSize, searchMedium);
       setLoading(true);
       setLoadingMore(false);
       setError(null);
@@ -239,14 +248,14 @@ export function useBrowse() {
         }
       }
     },
-    [isAuthenticated, query, source, sort, family, size, searchAllSources]
+    [isAuthenticated, query, source, sort, family, size, medium, searchAllSources]
   );
 
   const loadMore = useCallback(async () => {
     if (!isAuthenticated || loadingMore || !hasMore) return;
 
     const gen = searchGenRef.current;
-    const options = toBrowseOptions(sort, family, size);
+    const options = toBrowseOptions(sort, family, size, medium);
     setLoadingMore(true);
 
     try {
@@ -290,6 +299,7 @@ export function useBrowse() {
     sort,
     family,
     size,
+    medium,
     loadingMore,
     hasMore,
     loadMoreAllSources,
@@ -300,43 +310,53 @@ export function useBrowse() {
       setSource(newSource);
       setQuery('');
       setModels([]);
-      search('', newSource, sort, family, size);
+      search('', newSource, sort, family, size, medium);
     },
-    [search, sort, family, size]
+    [search, sort, family, size, medium]
   );
 
   const setSort = useCallback(
     (nextSort: ModelSort) => {
       setSortState(nextSort);
-      search(query, source, nextSort, family, size);
+      search(query, source, nextSort, family, size, medium);
     },
-    [search, query, source, family, size]
+    [search, query, source, family, size, medium]
   );
 
   const setFamily = useCallback(
     (nextFamily: string) => {
       setFamilyState(nextFamily);
-      search(query, source, sort, nextFamily, size);
+      search(query, source, sort, nextFamily, size, medium);
     },
-    [search, query, source, sort, size]
+    [search, query, source, sort, size, medium]
   );
 
   const setSize = useCallback(
     (nextSize: ModelSizeFilter) => {
       setSizeState(nextSize);
-      search(query, source, sort, family, nextSize);
+      search(query, source, sort, family, nextSize, medium);
     },
-    [search, query, source, sort, family]
+    [search, query, source, sort, family, medium]
+  );
+
+  const setMedium = useCallback(
+    (nextMedium: ModelMediumFilter) => {
+      setMediumState(nextMedium);
+      search(query, source, sort, family, size, nextMedium);
+    },
+    [search, query, source, sort, family, size]
   );
 
   const clearFilters = useCallback(() => {
     setSortState('relevance');
     setFamilyState('all');
     setSizeState('all');
-    search(query, source, 'relevance', 'all', 'all');
+    setMediumState('all');
+    search(query, source, 'relevance', 'all', 'all', 'all');
   }, [search, query, source]);
 
-  const hasActiveFilters = sort !== 'relevance' || family !== 'all' || size !== 'all';
+  const hasActiveFilters =
+    sort !== 'relevance' || family !== 'all' || size !== 'all' || medium !== 'all';
 
   return {
     source,
@@ -348,6 +368,8 @@ export function useBrowse() {
     setFamily,
     size,
     setSize,
+    medium,
+    setMedium,
     hasActiveFilters,
     clearFilters,
     models,

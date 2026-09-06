@@ -126,6 +126,8 @@ const defaultBrowseHook = {
   setFamily: mock(),
   size: 'all' as const,
   setSize: mock(),
+  medium: 'all' as const,
+  setMedium: mock(),
   hasActiveFilters: false,
   clearFilters: mock(),
   models: [],
@@ -587,8 +589,12 @@ describe('ModelsPage', () => {
       await waitFor(() => {
         expect(screen.getByLabelText('Sort models')).toBeInTheDocument();
       });
+      expect(screen.getByRole('group', { name: 'Filter by medium' })).toBeInTheDocument();
       expect(screen.getByRole('group', { name: 'Filter by family' })).toBeInTheDocument();
       expect(screen.getByRole('group', { name: 'Filter by size' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'All mediums' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Image' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Tools' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Llama' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: '≤3B' })).toBeInTheDocument();
       expect(screen.getByRole('option', { name: 'Most downloads' })).toBeInTheDocument();
@@ -619,13 +625,15 @@ describe('ModelsPage', () => {
       expect(setSortMock).toHaveBeenCalledWith('downloads_desc');
     });
 
-    it('filters by family and size pills', async () => {
+    it('filters by family, size, and medium pills', async () => {
       const setFamilyMock = mock();
       const setSizeMock = mock();
+      const setMediumMock = mock();
       mockUseBrowse.mockReturnValue({
         ...defaultBrowseHook,
         setFamily: setFamilyMock,
         setSize: setSizeMock,
+        setMedium: setMediumMock,
       });
 
       renderModelsPage();
@@ -641,9 +649,11 @@ describe('ModelsPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Qwen' }));
       fireEvent.click(screen.getByRole('button', { name: '7–13B' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Video' }));
 
       expect(setFamilyMock).toHaveBeenCalledWith('qwen');
       expect(setSizeMock).toHaveBeenCalledWith('medium');
+      expect(setMediumMock).toHaveBeenCalledWith('video');
     });
 
     it('shows clear filters when filters are active', async () => {
@@ -1166,8 +1176,9 @@ describe('ModelsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('A general-purpose local chat model.')).toBeInTheDocument();
         expect(screen.getByText('Capabilities')).toBeInTheDocument();
-        expect(screen.getByText('Text')).toBeInTheDocument();
-        expect(screen.getByText('Tools')).toBeInTheDocument();
+        const capabilities = screen.getByRole('group', { name: 'Model capabilities' });
+        expect(within(capabilities).getByText('Text')).toBeInTheDocument();
+        expect(within(capabilities).getByText('Tools')).toBeInTheDocument();
         expect(screen.getByText('Parameters')).toBeInTheDocument();
         expect(screen.getByText('128K')).toBeInTheDocument();
       });

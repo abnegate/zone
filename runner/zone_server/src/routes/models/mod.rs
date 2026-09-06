@@ -11,7 +11,7 @@ pub use providers::{
 };
 pub use types::{
     BrowseQuery, BrowseResponse, DiskUsage, ErrorResponse, ListModelsQuery, ModelDetails,
-    ModelResponse, ModelSizeFilter, ModelSort,
+    ModelMediumFilter, ModelResponse, ModelSizeFilter, ModelSort,
 };
 
 use axum::{

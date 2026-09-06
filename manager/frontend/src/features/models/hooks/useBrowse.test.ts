@@ -48,6 +48,7 @@ describe('useBrowse', () => {
     expect(result.current.sort).toBe('relevance');
     expect(result.current.family).toBe('all');
     expect(result.current.size).toBe('all');
+    expect(result.current.medium).toBe('all');
     expect(result.current.hasActiveFilters).toBe(false);
     expect(result.current.models).toEqual([]);
     expect(result.current.loading).toBe(false);
@@ -86,6 +87,7 @@ describe('useBrowse', () => {
       sort: 'relevance',
       family: undefined,
       size: undefined,
+      medium: undefined,
     });
   });
 
@@ -186,6 +188,7 @@ describe('useBrowse', () => {
       sort: 'relevance',
       family: undefined,
       size: undefined,
+      medium: undefined,
     });
   });
 
@@ -254,6 +257,7 @@ describe('useBrowse', () => {
       sort: 'relevance',
       family: undefined,
       size: undefined,
+      medium: undefined,
     });
   });
 
@@ -382,6 +386,7 @@ describe('useBrowse', () => {
       sort: 'name_asc',
       family: undefined,
       size: undefined,
+      medium: undefined,
     });
 
     mockBrowseModels.mockClear();
@@ -400,6 +405,7 @@ describe('useBrowse', () => {
       sort: 'name_asc',
       family: 'llama',
       size: undefined,
+      medium: undefined,
     });
 
     mockBrowseModels.mockClear();
@@ -417,6 +423,25 @@ describe('useBrowse', () => {
       sort: 'name_asc',
       family: 'llama',
       size: 'medium',
+      medium: undefined,
+    });
+
+    mockBrowseModels.mockClear();
+    mockBrowseModels.mockResolvedValue({ models: [{ name: 'llava' }], next_cursor: null });
+
+    await act(async () => {
+      result.current.setMedium('image');
+    });
+
+    await waitFor(() => {
+      expect(result.current.medium).toBe('image');
+    });
+
+    expect(mockBrowseModels).toHaveBeenCalledWith('ollama', '', null, 20, {
+      sort: 'name_asc',
+      family: 'llama',
+      size: 'medium',
+      medium: 'image',
     });
   });
 
@@ -432,6 +457,7 @@ describe('useBrowse', () => {
     await act(async () => {
       result.current.setFamily('qwen');
       result.current.setSize('small');
+      result.current.setMedium('tools');
     });
 
     await waitFor(() => {
@@ -449,6 +475,7 @@ describe('useBrowse', () => {
       expect(result.current.sort).toBe('relevance');
       expect(result.current.family).toBe('all');
       expect(result.current.size).toBe('all');
+      expect(result.current.medium).toBe('all');
       expect(result.current.hasActiveFilters).toBe(false);
     });
 
@@ -456,6 +483,7 @@ describe('useBrowse', () => {
       sort: 'relevance',
       family: undefined,
       size: undefined,
+      medium: undefined,
     });
   });
 
