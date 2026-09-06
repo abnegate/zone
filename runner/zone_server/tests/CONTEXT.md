@@ -5,7 +5,7 @@ Run against a disposable PostgreSQL database with migrations 001 through 014 app
 ```sh
 TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:49755/zone_context_test \
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:49755/zone_context_test \
-cargo test -p zone_server --test chat_context_tests --test chat_replay_tests --test chat_context_store_tests --no-default-features --features zone_context/test-utils
+cargo test -p zone_server --test chat_context_tests --test chat_replay_tests --test chat_context_store_tests --test chat_lifecycle_tests --no-default-features --features zone_context/test-utils
 ```
 
 The fixtures serve the real router on an ephemeral local port, authenticate through its public API, and replace inference and model metadata with deterministic Wiremock responses. They disable MCP startup and external web/image services. Tool mutations are confined to per-test temporary directories. Tests retain rows only in the disposable database; remove the database when finished.

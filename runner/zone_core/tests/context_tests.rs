@@ -627,6 +627,74 @@ fn tools_and_message_framing_match_projection_estimates_and_threshold_is_saturat
 }
 
 #[tokio::test]
+async fn summaries_clear_character_stops_without_changing_ordinary_generation() {
+    let provider = provider(
+        |request| {
+            let mut content = structured();
+            if let Some(end) = request["stop"].as_array().and_then(|stops| {
+                stops
+                    .iter()
+                    .filter_map(|stop| content.find(stop.as_str().unwrap()))
+                    .min()
+            }) {
+                content.truncate(end);
+            }
+            response(content)
+        },
+        false,
+    )
+    .await;
+    let stops = vec!["}".into(), "<|end|>".into()];
+    let client = provider
+        .client
+        .clone()
+        .with_stop(stops.clone())
+        .with_temperature(0.7)
+        .with_ollama_context("test", 5_000);
+    let history = active_history();
+    let settings = policy(5_000);
+    let prepared = context::prepare(&client, "test", &history, None, &settings, None)
+        .await
+        .expect("character stops must not truncate structured summaries");
+    let summary = prepared.summary.as_ref().unwrap();
+    assert_eq!(summary.revision, 1);
+    assert_eq!(summary.coverage.entries, ["calls-a", "result-a"]);
+    assert_eq!(prepared.usage.status, ContextStatus::Compacted);
+    assert_eq!(prepared.usage.limit, settings.limit);
+    assert_eq!(prepared.usage.reserved, settings.reserved);
+    assert!(prepared.usage.used <= settings.threshold().unwrap());
+
+    let ordinary = client
+        .chat_with_options(
+            "test",
+            &prepared.messages,
+            None,
+            RequestOptions {
+                reserved: settings.reserved,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ordinary.choices[0].message.content.as_deref(),
+        structured().strip_suffix('}')
+    );
+    let requests = provider.requests.lock().await;
+    let (ordinary, summaries) = requests.split_last().unwrap();
+    assert!(summaries.len() > 1, "exercise every summary chunk");
+    for summary in summaries {
+        assert!(summary.get("stop").is_none());
+        assert_eq!(summary["temperature"], 0.0);
+    }
+    assert_eq!(ordinary["stop"], json!(stops));
+    assert_eq!(ordinary["temperature"].as_f64().unwrap() as f32, 0.7);
+    for request in requests.iter() {
+        assert_eq!(request["num_ctx"], 5_000);
+        assert_eq!(request["max_tokens"], settings.reserved);
+    }
+}
+
+#[tokio::test]
 async fn runtime_context_is_model_bound_and_identical_on_summary_and_ordinary_requests() {
     let provider = provider(|_| response(structured()), false).await;
     let client = provider.client.clone().with_ollama_context("test", 5_000);

@@ -962,6 +962,55 @@ async fn resolve_generation_source(
     .await
 }
 
+fn generation_deadline(
+    timeout: Duration,
+) -> Result<tokio::time::Instant, Box<dyn std::error::Error + Send + Sync>> {
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "Chat generation deadline is not representable".into())
+}
+
+async fn watch_lease(
+    store: &crate::db::context::Store,
+    lease: &crate::db::context::Lease,
+) -> crate::db::context::Error {
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        if let Err(error) = store.assert_current(lease).await {
+            return error;
+        }
+    }
+}
+
+async fn wait_media(
+    generation: &mut Generation,
+    session: &mut Session,
+    sender: &SharedSender,
+) -> Result<Option<tokio::sync::SemaphorePermit<'static>>, Box<dyn std::error::Error + Send + Sync>>
+{
+    tokio::select! {
+        biased;
+        _ = session.guard.lost() => Err("Chat generation ownership was lost".into()),
+        error = watch_lease(&session.store, &session.lease) => Err(error.into()),
+        _ = generation.cancel.recv() => {
+            session.close().await?;
+            let _ = send_server(
+                sender,
+                ServerMessage::Cancelled {
+                    message_id: Some(generation.message_id),
+                },
+            )
+            .await;
+            Ok(None)
+        }
+        permit = IMAGE_GENERATIONS.acquire() => {
+            Ok(Some(permit.expect("image semaphore is never closed")))
+        }
+    }
+}
+
 async fn handle_image_generation(
     state: &AppState,
     sender: &SharedSender,
@@ -1035,17 +1084,8 @@ async fn handle_image_generation(
     } else {
         prompt.to_string()
     };
-    let _generation_permit = tokio::select! {
-        biased;
-        _ = generation.cancel.recv() => {
-            session.close().await?;
-            let _ = send_server(
-                sender,
-                ServerMessage::Cancelled { message_id: Some(assistant_message_id) },
-            ).await;
-            return Ok(());
-        }
-        permit = IMAGE_GENERATIONS.acquire() => permit.expect("image semaphore is never closed"),
+    let Some(_generation_permit) = wait_media(generation, session, sender).await? else {
+        return Ok(());
     };
 
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
@@ -1061,7 +1101,10 @@ async fn handle_image_generation(
     session.store.assert_current(&session.lease).await?;
     let result = tokio::select! {
         biased;
-        _ = session.guard.lost() => Err(ComfyUiError::Cancelled),
+        _ = session.guard.lost() => {
+            progress_task.abort();
+            return Err("Chat generation ownership was lost".into());
+        }
         result = client
         .generate(
             &generation_prompt,
@@ -1284,17 +1327,8 @@ async fn handle_video_generation(
         },
     )
     .await;
-    let _generation_permit = tokio::select! {
-        biased;
-        _ = generation.cancel.recv() => {
-            session.close().await?;
-            let _ = send_server(
-                sender,
-                ServerMessage::Cancelled { message_id: Some(assistant_message_id) },
-            ).await;
-            return Ok(());
-        }
-        permit = IMAGE_GENERATIONS.acquire() => permit.expect("image semaphore is never closed"),
+    let Some(_generation_permit) = wait_media(generation, session, sender).await? else {
+        return Ok(());
     };
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let progress_sender = sender.clone();
@@ -1309,7 +1343,10 @@ async fn handle_video_generation(
     session.store.assert_current(&session.lease).await?;
     let result = tokio::select! {
         biased;
-        _ = session.guard.lost() => Err(ComfyUiError::Cancelled),
+        _ = session.guard.lost() => {
+            progress_task.abort();
+            return Err("Chat generation ownership was lost".into());
+        }
         result = client
         .generate_video(prompt, source.as_ref(), &mut generation.cancel, progress_tx)
         => result,
@@ -1518,6 +1555,17 @@ async fn handle_send_message(
             return;
         }
     };
+    if generation_deadline(state.config().chat.timeout).is_err() {
+        let _ = session.close().await;
+        let _ = send_server(
+            sender,
+            ServerMessage::Error {
+                message: "Chat generation deadline is not representable".into(),
+            },
+        )
+        .await;
+        return;
+    }
     CHAT_APPROVALS.insert(chat_id, request.approvals.clone());
     let preparation = tokio::select! {
         biased;
@@ -1880,13 +1928,13 @@ async fn handle_chat_generation(
     let definitions = agentic.then(|| tools.definitions().to_vec());
     let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
+    let stream_deadline = generation_deadline(timeout)?;
     if generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(sender).await;
         return Ok(());
     }
 
-    // Send message start with the ID we'll use throughout
     let start_msg = ServerMessage::MessageStart {
         message_id: assistant_message_id,
         role: "assistant".to_string(),
@@ -1927,9 +1975,6 @@ async fn handle_chat_generation(
     let mut citations: Vec<Citation> = Vec::new();
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
 
-    // MAJOR-4: Add overall stream timeout
-    let stream_deadline = tokio::time::Instant::now() + timeout;
-
     loop {
         if client_gone {
             cancelled = true;
@@ -1945,7 +1990,6 @@ async fn handle_chat_generation(
                 break;
             }
 
-            // MAJOR-4: Timeout for entire stream
             _ = tokio::time::sleep_until(stream_deadline) => {
                 tracing::warn!("LLM stream timeout for chat {}, message {}", chat_id, assistant_message_id);
                 failure = Some("Response generation timed out".to_string());

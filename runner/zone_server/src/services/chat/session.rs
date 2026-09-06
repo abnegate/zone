@@ -3,7 +3,7 @@
 use base64::Engine;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
 use zone_core::llm::{LlmClient, LlmConfig, Message, Role};
@@ -19,6 +19,14 @@ use crate::state::AppState;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 const SEARCH: &str = "supplement:search";
+
+fn parse_timeout(seconds: u64) -> Result<Duration, String> {
+    let timeout = Duration::from_secs(seconds);
+    Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "ZONE_CHAT_TIMEOUT_SECONDS exceeds a representable deadline".to_string())?;
+    Ok(timeout)
+}
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -56,7 +64,7 @@ impl Settings {
         }
         Ok(Self {
             context: value("ZONE_CHAT_CONTEXT_TOKENS", 32768)?,
-            timeout: Duration::from_secs(value("ZONE_CHAT_TIMEOUT_SECONDS", 1800)?),
+            timeout: parse_timeout(value("ZONE_CHAT_TIMEOUT_SECONDS", 1800)?)?,
             rounds: usize::try_from(value("ZONE_CHAT_ROUNDS", 64)?)
                 .map_err(|_| "ZONE_CHAT_ROUNDS exceeds platform range")?,
             calls: usize::try_from(value("ZONE_CHAT_CALLS", 256)?)
@@ -538,5 +546,21 @@ mod tests {
         };
         assert_eq!(settings.reserved(Some(4096)), 512);
         assert_eq!(settings.budget(), LoopBudget::chat());
+    }
+
+    #[test]
+    fn unrepresentable_timeout_is_rejected() {
+        assert_eq!(parse_timeout(1).unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            parse_timeout(31_536_000).unwrap(),
+            Duration::from_secs(31_536_000)
+        );
+        if Instant::now()
+            .checked_add(Duration::from_secs(u64::MAX))
+            .is_none()
+        {
+            let error = parse_timeout(u64::MAX).expect_err("overflowing deadline");
+            assert!(error.contains("ZONE_CHAT_TIMEOUT_SECONDS"), "{error}");
+        }
     }
 }
