@@ -620,7 +620,7 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
 async fn catalog_pages_all_references_without_exposing_result_bodies_or_other_chats() {
     let (pool, store, chat, workspace) = fixture().await;
     let lease = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
-    let (turn, _) = begin(&store, &lease).await;
+    let (turn, user) = begin(&store, &lease).await;
     for index in 0..40 {
         let call = format!("call-{index}");
         store
@@ -645,9 +645,31 @@ async fn catalog_pages_all_references_without_exposing_result_bodies_or_other_ch
     }
     let mut content = String::new();
     let mut offset = 0;
+    let mut cursor = None::<String>;
     loop {
-        let page = store.catalog(offset, 7).await.unwrap();
-        assert_eq!(page.id, "catalog");
+        let page = match &cursor {
+            Some(id) => store.evidence(id, offset, 7).await.unwrap(),
+            None => store.catalog(offset, 7).await.unwrap(),
+        };
+        if cursor.is_none() {
+            store
+                .append(
+                    &lease,
+                    turn,
+                    &[
+                        envelope("later-envelope", "later-call", false),
+                        result(
+                            "later-result",
+                            "later-call",
+                            "A result appended during pagination",
+                        ),
+                    ],
+                )
+                .await
+                .unwrap();
+            cursor = Some(page.id.clone());
+        }
+        assert!(page.id.starts_with("catalog:"));
         assert!(page.content.chars().count() <= 7);
         content.push_str(&page.content);
         match page.next {
@@ -668,6 +690,16 @@ async fn catalog_pages_all_references_without_exposing_result_bodies_or_other_ch
     assert_eq!(rows[0]["name"], "read_file");
     assert_eq!(rows[0]["outcome"], "error");
     assert_eq!(rows[39]["id"], "資料-39");
+    assert_eq!(
+        store
+            .catalog(0, u64::MAX)
+            .await
+            .unwrap()
+            .content
+            .lines()
+            .count(),
+        41
+    );
     assert!(
         Store::new(pool.clone(), chat, Some(Uuid::new_v4()))
             .catalog(0, 100)
@@ -687,6 +719,14 @@ async fn catalog_pages_all_references_without_exposing_result_bodies_or_other_ch
             .is_err()
     );
     assert!(store.catalog(0, 0).await.is_err());
+    store.delete_message(&lease, user).await.unwrap();
+    assert!(
+        store
+            .evidence(cursor.as_ref().unwrap(), 0, 100)
+            .await
+            .is_err(),
+        "Deletion invalidates the snapshot rather than shifting pages"
+    );
     store.release(&lease).await.unwrap();
     sqlx::query("DELETE FROM chats WHERE id=$1")
         .bind(chat)

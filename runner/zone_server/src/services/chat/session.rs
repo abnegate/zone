@@ -312,7 +312,18 @@ pub async fn build(
     if mode == Mode::Preview && !agentic && chat.character.is_none() {
         let knowledge: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM knowledge_entries WHERE workspace_id=$1 AND is_active=TRUE)")
             .bind(workspace).fetch_one(state.db()).await.map_err(|error|error.to_string())?;
-        if knowledge || state.context_service().is_some() {
+        let sources = if state.context_service().is_some() {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM content_items WHERE workspace_id=$1)",
+            )
+            .bind(workspace)
+            .fetch_one(state.db())
+            .await
+            .map_err(|error| error.to_string())?
+        } else {
+            false
+        };
+        if knowledge || sources {
             incomplete = true;
             reason = Some(
                 "Workspace retrieval results will be counted when retrieval completes.".into(),

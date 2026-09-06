@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool, Row};
 use std::collections::HashSet;
 use std::time::Duration;
@@ -565,6 +566,17 @@ impl Store {
 
     /// Unicode scalar offsets, with bounds derived from actual persisted content length.
     pub async fn evidence(&self, id: &str, offset: u64, limit: u64) -> Result<Evidence, Error> {
+        if let Some(cursor) = id.strip_prefix("catalog:") {
+            let (position, fingerprint) = cursor.split_once(':').ok_or(Error::NotFound)?;
+            let position = position
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value >= 0)
+                .ok_or(Error::NotFound)?;
+            return self
+                .catalog_at(Some((position, fingerprint)), offset, limit)
+                .await;
+        }
         if self.workspace_id.is_none() {
             return Err(Error::NotFound);
         }
@@ -576,9 +588,18 @@ impl Store {
         Self::page(id, &content, offset, limit)
     }
 
-    /// The catalog has an immutable NDJSON prefix as evidence is appended. It exposes
-    /// references and reported state, never full results or entries from another chat.
+    /// Open a bounded catalog snapshot. Continuations use its returned id, so evidence
+    /// reader results cannot make their own pagination grow indefinitely.
     pub async fn catalog(&self, offset: u64, limit: u64) -> Result<Evidence, Error> {
+        self.catalog_at(None, offset, limit).await
+    }
+
+    async fn catalog_at(
+        &self,
+        cursor: Option<(i64, &str)>,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Evidence, Error> {
         if self.workspace_id.is_none() {
             return Err(Error::NotFound);
         }
@@ -592,23 +613,38 @@ impl Store {
         if !exists {
             return Err(Error::NotFound);
         }
+        let position=match cursor {
+            Some((position,_))=>position,
+            None=>sqlx::query_scalar::<_,i64>("SELECT COALESCE(max(e.position),0) FROM chat_entries e JOIN chats c ON c.id=e.chat_id WHERE e.chat_id=$1 AND c.workspace_id=$2").bind(self.chat_id).bind(self.workspace_id).fetch_one(&self.pool).await?,
+        };
         let rows=sqlx::query("SELECT e.id, call.value->'function'->>'name' AS name,
             CASE WHEN e.message->>'content' LIKE 'Error: execution was interrupted. Outcome unknown:%' THEN 'unknown'
                  WHEN e.message->>'content' LIKE 'Error:%' THEN 'error' ELSE 'recorded' END AS outcome
             FROM chat_entries e JOIN chats c ON c.id=e.chat_id
             JOIN chat_calls owner ON owner.chat_id=e.chat_id AND owner.result_id=e.id
             JOIN chat_entries envelope ON envelope.chat_id=owner.chat_id AND envelope.id=owner.envelope_id
-            CROSS JOIN LATERAL jsonb_array_elements(envelope.message->'tool_calls') call(value)
-            WHERE e.chat_id=$1 AND c.workspace_id=$2 AND call.value->>'id'=owner.id
+            CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(envelope.message->'tool_calls')='array' THEN envelope.message->'tool_calls' ELSE '[]'::jsonb END) call(value)
+            WHERE e.chat_id=$1 AND c.workspace_id=$2 AND e.position<=$3 AND call.value->>'id'=owner.id
             ORDER BY e.position")
-            .bind(self.chat_id).bind(self.workspace_id).fetch_all(&self.pool).await?;
+            .bind(self.chat_id).bind(self.workspace_id).bind(position).fetch_all(&self.pool).await?;
         let mut content = String::new();
         for row in rows {
             let item = serde_json::json!({"id":row.get::<String,_>("id"),"name":row.get::<Option<String>,_>("name"),"outcome":row.get::<String,_>("outcome")});
             content.push_str(&serde_json::to_string(&item)?);
             content.push('\n');
         }
-        Self::page("catalog", &content, offset, limit)
+        let fingerprint = hex::encode(Sha256::digest(content.as_bytes()));
+        if cursor.is_some_and(|(_, expected)| expected != fingerprint) {
+            return Err(Error::Integrity(
+                "Evidence catalog changed after a deletion; restart with id omitted".into(),
+            ));
+        }
+        Self::page(
+            &format!("catalog:{position}:{fingerprint}"),
+            &content,
+            offset,
+            limit,
+        )
     }
 
     fn page(id: &str, content: &str, offset: u64, limit: u64) -> Result<Evidence, Error> {

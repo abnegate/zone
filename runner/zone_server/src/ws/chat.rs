@@ -208,7 +208,6 @@ impl Generation {
         let (sender, cancel) = broadcast::channel(1);
         CHAT_CANCELLATIONS.insert((chat_id, message_id), sender);
         let approvals = crate::agent::ApprovalGate::new();
-        CHAT_APPROVALS.insert(chat_id, approvals.clone());
         Self {
             chat_id,
             message_id,
@@ -1519,9 +1518,10 @@ async fn handle_send_message(
             return;
         }
     };
+    CHAT_APPROVALS.insert(chat_id, request.approvals.clone());
     let preparation = tokio::select! {
         biased;
-        _ = session.guard.lost() => { let _=send_server(sender,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
+        _ = session.guard.lost() => { let _=session.close().await; let _=send_server(sender,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
         _ = request.cancel.recv() => {
             let _=session.close().await;
                         request.cancelled(sender).await;
@@ -2315,6 +2315,18 @@ async fn handle_chat_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_generation_cannot_replace_the_active_approval_gate() {
+        let chat = Uuid::new_v4();
+        let active = crate::agent::ApprovalGate::new();
+        CHAT_APPROVALS.insert(chat, active.clone());
+        let queued = Generation::new(chat);
+        assert!(CHAT_APPROVALS.get(&chat).unwrap().same_as(&active));
+        drop(queued);
+        assert!(CHAT_APPROVALS.get(&chat).unwrap().same_as(&active));
+        CHAT_APPROVALS.remove(&chat);
+    }
 
     #[test]
     fn test_client_message_auth_deserialize() {
