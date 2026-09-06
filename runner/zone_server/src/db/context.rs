@@ -17,6 +17,8 @@ use crate::services::chat::history::{
     self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary,
 };
 
+const PAGE_CHARS: u64 = 8_000;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("This chat already has an active response")]
@@ -654,7 +656,7 @@ impl Store {
                 "Evidence page offset or length is invalid".into(),
             ));
         }
-        let count = limit.min(total - offset);
+        let count = limit.min(PAGE_CHARS).min(total - offset);
         let page: String = content
             .chars()
             .skip(offset as usize)
@@ -953,4 +955,24 @@ fn legacy_incomplete(message: &ReplayMessage) -> bool {
         .content
         .as_deref()
         .is_some_and(|content| content.contains("[Incomplete legacy tool history:"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_caps_requested_limit_to_context_budget() {
+        let content = "α".repeat(20_000);
+        let evidence = Store::page("entry", &content, 0, 1_000_000).unwrap();
+        assert_eq!(evidence.content.chars().count() as u64, PAGE_CHARS);
+        assert_eq!(evidence.content, "α".repeat(PAGE_CHARS as usize));
+        assert_eq!(evidence.offset, 0);
+        assert_eq!(evidence.next, Some(PAGE_CHARS));
+        assert_eq!(evidence.total, 20_000);
+        let rest = Store::page("entry", &content, evidence.next.unwrap(), 1_000_000).unwrap();
+        assert_eq!(rest.content.chars().count() as u64, PAGE_CHARS);
+        assert_eq!(rest.offset, PAGE_CHARS);
+        assert_eq!(rest.next, Some(PAGE_CHARS * 2));
+    }
 }
