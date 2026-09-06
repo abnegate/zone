@@ -66,7 +66,7 @@ pub fn estimate(
         }
     }
     if let Some(summary) = summary {
-        let (content, overhead) = message_cost(&super::compact::summary_message(summary, entries));
+        let (content, overhead) = message_cost(&super::compact::summary_message(summary));
         breakdown.summary = content;
         breakdown.overhead = breakdown.overhead.saturating_add(overhead);
     }

@@ -176,7 +176,15 @@ fn active_history() -> Vec<Entry> {
 
 #[tokio::test]
 async fn active_turn_compacts_consumed_pairs_and_reuses_summary_without_recursive_rewriting() {
-    let provider = provider(|_| response(structured()), false).await;
+    let provider = provider(
+        |_| {
+            response(
+                structured().replace("Error: failed command", "result-a: Error: failed command"),
+            )
+        },
+        false,
+    )
+    .await;
     let history = active_history();
     let prepared = context::prepare(
         &provider.client,
@@ -199,7 +207,7 @@ async fn active_turn_compacts_consumed_pairs_and_reuses_summary_without_recursiv
             .content
             .as_ref()
             .unwrap()
-            .contains("Canonical tool evidence references: [\"result-a\"]")
+            .contains("result-a: Error: failed command")
     );
     assert!(
         prepared.messages[1]
@@ -954,5 +962,81 @@ async fn eighty_text_rows_compact_at_4096_without_spending_context_on_unretrieva
             .unwrap()
             .contains("legacy:")
     );
+    context::validate(&history, prepared.summary.as_ref()).unwrap();
+}
+
+#[tokio::test]
+async fn sustained_tool_history_keeps_full_coverage_without_an_unbounded_prompt_catalog() {
+    let provider = provider(|_| response(structured()), false).await;
+    let mut history = vec![entry(
+        "system",
+        Message::system("Continue accurately"),
+        true,
+        true,
+    )];
+    let mut covered = Vec::new();
+    let mut relevant = String::new();
+    for index in 0..2048 {
+        let envelope = uuid::Uuid::new_v4().to_string();
+        let result = uuid::Uuid::new_v4().to_string();
+        let identifier = format!("call-{index}");
+        if index == 0 {
+            relevant.clone_from(&result);
+        }
+        history.push(entry(
+            &envelope,
+            Message::assistant_with_tools(vec![call(&identifier)]),
+            false,
+            true,
+        ));
+        history.push(entry(
+            &result,
+            Message::tool_result(&identifier, "Original durable evidence"),
+            false,
+            true,
+        ));
+        covered.extend([envelope, result]);
+    }
+    history.push(entry(
+        "current",
+        Message::user("Continue the actual request"),
+        true,
+        false,
+    ));
+    let mut state: Value = serde_json::from_str(&structured()).unwrap();
+    state["evidence"] = json!([format!("Relevant tool fact; retrieve source {relevant}")]);
+    let summary = Summary {
+        content: state.to_string(),
+        coverage: context::coverage(&history, &covered).unwrap(),
+        revision: 4,
+    };
+    let prepared = context::prepare(
+        &provider.client,
+        "test",
+        &history,
+        None,
+        &policy(4096),
+        Some(&summary),
+    )
+    .await
+    .unwrap();
+    assert_eq!(prepared.summary.as_ref(), Some(&summary));
+    assert_eq!(prepared.messages.len(), 3);
+    assert!(
+        prepared.messages[1]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains(&relevant)
+    );
+    assert!(
+        !prepared.messages[1]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains(&covered[3])
+    );
+    assert!(prepared.usage.used < policy(4096).threshold().unwrap());
+    assert!(provider.requests.lock().await.is_empty());
     context::validate(&history, prepared.summary.as_ref()).unwrap();
 }
