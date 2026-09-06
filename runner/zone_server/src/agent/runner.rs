@@ -275,8 +275,15 @@ pub fn run_with_context(
                     yield AgentEvent::Reasoning(content.clone());
                 }
                 for block in &choice.delta.thinking_blocks {
-                    if !thinking_blocks.contains(block) {
-                        thinking_blocks.push(block.clone());
+                    if thinking_blocks.contains(block) {
+                        continue;
+                    }
+                    thinking_blocks.push(block.clone());
+                    if let Some(text) = thinking_block_text(block)
+                        && !reasoning.ends_with(&text)
+                    {
+                        reasoning.push_str(&text);
+                        yield AgentEvent::Reasoning(text);
                     }
                 }
                 for image in &choice.delta.generated_images {
@@ -548,6 +555,20 @@ async fn finish_tool(
         images: result.images,
         output,
     }
+}
+
+fn thinking_block_text(block: &serde_json::Value) -> Option<String> {
+    for key in ["thinking", "text", "content"] {
+        if let Some(text) = block
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text.to_string());
+        }
+    }
+    None
 }
 
 /// True while the buffered assistant text could still become a tool envelope

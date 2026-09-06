@@ -309,6 +309,8 @@ pub enum ServerMessage {
         tool_call_id: String,
         name: String,
         arguments: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     /// A mutating file or shell tool is waiting for the user to confirm.
     ToolApprovalRequired {
@@ -1998,7 +2000,7 @@ async fn handle_chat_generation(
         ));
     let mut full_content = String::new();
     let mut pending_content = String::new();
-    let mut reasoning_content = String::new();
+    let mut round_reasoning = String::new();
     let mut pending_images = Vec::<String>::new();
     let mut generated_images = Vec::new();
     let mut chunk_index = 0;
@@ -2065,7 +2067,7 @@ async fn handle_chat_generation(
                     Some(AgentEvent::Usage(usage)) => {tracing::debug!(prompt_tokens=usage.prompt_tokens,completion_tokens=usage.completion_tokens,"Observed provider usage");}
                     Some(AgentEvent::Finalizing(message)) => { if !send_server(sender,ServerMessage::Status {message}).await {client_gone=true;} }
                     Some(AgentEvent::Reasoning(content)) => {
-                        reasoning_content.push_str(&content);
+                        round_reasoning.push_str(&content);
                         if !client_gone
                             && !send_server(sender, ServerMessage::Reasoning { content }).await
                         {
@@ -2125,6 +2127,10 @@ async fn handle_chat_generation(
                     Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
                         // Recorded before the tool runs so a turn cancelled
                         // mid-call still shows what it was doing.
+                        let reasoning = {
+                            let text = std::mem::take(&mut round_reasoning);
+                            (!text.is_empty()).then_some(text)
+                        };
                         tool_calls.push(ToolCallRecord {
                             id: id.clone(),
                             name: name.clone(),
@@ -2132,6 +2138,7 @@ async fn handle_chat_generation(
                             success: false,
                             detail: "Did not finish".to_string(),
                             duration_ms: 0,
+                            reasoning: reasoning.clone(),
                         });
 
                         let tool_msg = ServerMessage::ToolCall {
@@ -2139,6 +2146,7 @@ async fn handle_chat_generation(
                             tool_call_id: id,
                             name,
                             arguments,
+                            reasoning,
                         };
                         if !client_gone && !send_server(sender, tool_msg).await {
                             client_gone = true;
@@ -2300,7 +2308,7 @@ async fn handle_chat_generation(
         &tool_calls,
         &citations,
         &action_receipts,
-        (!reasoning_content.is_empty()).then_some(reasoning_content.as_str()),
+        (!round_reasoning.is_empty()).then_some(round_reasoning.as_str()),
     );
 
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
@@ -2632,12 +2640,14 @@ mod tests {
             tool_call_id: "call_abc".to_string(),
             name: "search_knowledge".to_string(),
             arguments: r#"{"query":"deploys"}"#.to_string(),
+            reasoning: Some("Need workspace deploy docs.".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"tool_call\""));
         assert!(json.contains("\"tool_call_id\":\"call_abc\""));
         assert!(json.contains("\"name\":\"search_knowledge\""));
         assert!(json.contains("deploys"));
+        assert!(json.contains("Need workspace deploy docs."));
     }
 
     #[test]
@@ -2670,6 +2680,7 @@ mod tests {
             success: true,
             detail: "2 tasks".to_string(),
             duration_ms: 7,
+            reasoning: None,
         }];
         let metadata = serde_json::json!({ "tool_calls": records });
 
@@ -2692,12 +2703,17 @@ mod tests {
             success: true,
             detail: "ok".to_string(),
             duration_ms: 3,
+            reasoning: Some("Inspect the workspace first.".to_string()),
         }];
 
         let merged =
             merge_metadata(images, &records, &[], &[], None).expect("both sides produce metadata");
         assert_eq!(merged["attachments"][0]["name"], "generated-image-1.png");
         assert_eq!(merged["tool_calls"][0]["name"], "run_shell");
+        assert_eq!(
+            merged["tool_calls"][0]["reasoning"],
+            "Inspect the workspace first."
+        );
     }
 
     #[test]

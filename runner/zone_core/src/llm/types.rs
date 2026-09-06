@@ -54,7 +54,7 @@ pub struct Message {
     #[serde(default, rename = "images", deserialize_with = "null_to_default")]
     pub generated_images: Vec<GeneratedImage>,
     /// LiteLLM-normalized thinking text. Required on the next turn for some providers.
-    #[serde(default, alias = "reasoning")]
+    #[serde(default, alias = "reasoning", alias = "thinking")]
     pub reasoning_content: Option<String>,
     /// Anthropic signed thinking blocks. Must be resent with tool results.
     #[serde(default, deserialize_with = "null_to_default")]
@@ -396,7 +396,7 @@ pub struct StreamDelta {
     pub tool_calls: Option<Vec<StreamToolCall>>,
     #[serde(default, rename = "images", deserialize_with = "null_to_default")]
     pub generated_images: Vec<GeneratedImage>,
-    #[serde(default, alias = "reasoning")]
+    #[serde(default, alias = "reasoning", alias = "thinking")]
     pub reasoning_content: Option<String>,
     #[serde(default, deserialize_with = "null_to_default")]
     pub thinking_blocks: Vec<serde_json::Value>,
@@ -1221,6 +1221,24 @@ mod tests {
             Some("step")
         );
         assert_eq!(chunk.choices[0].delta.thinking_blocks.len(), 1);
+    }
+
+    #[test]
+    fn stream_delta_reads_ollama_thinking_alias() {
+        let chunk: ChatStreamChunk = serde_json::from_str(
+            r#"{
+            "choices": [{
+                "index": 0,
+                "delta": {"thinking": "I should inspect the file."},
+                "finish_reason": null
+            }]
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            chunk.choices[0].delta.reasoning_content.as_deref(),
+            Some("I should inspect the file.")
+        );
     }
 
     #[test]

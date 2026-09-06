@@ -40,6 +40,7 @@ type ServerMessage =
       tool_call_id: string;
       name: string;
       arguments: string;
+      reasoning?: string;
     }
   | {
       type: 'tool_approval_required';
@@ -471,7 +472,8 @@ export function useChat(
                     message.metadata?.attachments?.length ||
                       message.metadata?.tool_calls?.length ||
                       message.metadata?.citations?.length ||
-                      message.metadata?.action_receipts?.length
+                      message.metadata?.action_receipts?.length ||
+                      message.metadata?.reasoning?.trim()
                   )
               ),
             }
@@ -559,14 +561,23 @@ export function useChat(
             upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
           }
           break;
-        case 'tool_call':
+        case 'tool_call': {
+          const preceding = payload.reasoning ?? assistantMetadata?.reasoning;
+          if (preceding) {
+            assistantMetadata = { ...assistantMetadata, reasoning: undefined };
+          }
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
             arguments: payload.arguments,
             detail: 'Running…',
             pending: true,
+            reasoning: preceding,
           });
+          if (assistantId === payload.message_id) {
+            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+          }
           break;
+        }
         case 'tool_approval_required':
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,

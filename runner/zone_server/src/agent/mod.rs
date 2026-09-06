@@ -44,6 +44,9 @@ pub struct ToolCallRecord {
     pub success: bool,
     pub detail: String,
     pub duration_ms: u64,
+    /// Model thinking that immediately preceded this call, shown in the trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Instructions prepended to an agentic turn.
@@ -159,11 +162,13 @@ mod tests {
             success: true,
             detail: "3 passages".to_string(),
             duration_ms: 42,
+            reasoning: Some("Search workspace docs first.".into()),
         };
 
         let json = serde_json::to_value(&record).unwrap();
         assert_eq!(json["name"], "search_knowledge");
         assert_eq!(json["success"], true);
+        assert_eq!(json["reasoning"], "Search workspace docs first.");
 
         let parsed: ToolCallRecord = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, record);

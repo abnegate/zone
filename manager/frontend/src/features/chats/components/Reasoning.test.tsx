@@ -10,5 +10,12 @@ describe('Reasoning', () => {
     render(<Reasoning content="The capital is Paris." />);
     expect(screen.getByText('Reasoning')).toBeInTheDocument();
     expect(screen.getByText('The capital is Paris.')).toBeInTheDocument();
+    expect(screen.getByTestId('reasoning')).not.toHaveAttribute('open');
+  });
+
+  it('can start expanded so live thinking is visible', () => {
+    render(<Reasoning content="Inspect the file first." open />);
+    expect(screen.getByText('Inspect the file first.')).toBeInTheDocument();
+    expect(screen.getByTestId('reasoning')).toHaveAttribute('open');
   });
 });

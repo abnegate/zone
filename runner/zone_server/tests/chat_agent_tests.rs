@@ -639,6 +639,56 @@ async fn reasoning_tokens_are_streamed_and_distinct_thinking_blocks_accumulate()
 }
 
 #[tokio::test]
+async fn reasoning_is_emitted_before_and_after_a_tool_round() {
+    let mut first = vec![json!({"reasoning_content": "Need the file."})];
+    first.extend(native(Some("call_0")));
+    let (events, _) = exercise(vec![
+        first,
+        vec![
+            json!({"reasoning_content": "Ask for a path."}),
+            json!({"content": "Please provide a path."}),
+        ],
+    ])
+    .await;
+    let sequence: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Reasoning(content) => Some(content.as_str()),
+            AgentEvent::ToolCallStarted { .. } => Some("tool"),
+            AgentEvent::Chunk(content) => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sequence,
+        [
+            "Need the file.",
+            "tool",
+            "Ask for a path.",
+            "Please provide a path."
+        ]
+    );
+}
+
+#[tokio::test]
+async fn thinking_block_without_reasoning_content_is_streamed() {
+    let block = json!({"type":"thinking","thinking":"Look at the file.","signature":"a"});
+    let (events, _) = exercise(vec![vec![
+        json!({"thinking_blocks":[block]}),
+        json!({"content":"Done."}),
+    ]])
+    .await;
+    let thinking: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Reasoning(content) => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking, "Look at the file.");
+}
+
+#[tokio::test]
 async fn thinking_blocks_are_replayed_on_the_next_tool_turn() {
     let blocks = json!([{
         "type": "thinking",

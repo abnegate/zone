@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ToolCallRecord } from '../types';
+import { Reasoning } from './Reasoning';
 
 /// Tool names are written for the model, so the trace gives the reader a plain
 /// description instead. Unknown names fall through unchanged rather than being
@@ -75,6 +76,7 @@ function ToolTraceRow({
 
   return (
     <li className={`tool-call tool-call--${status}`}>
+      {call.reasoning?.trim() ? <Reasoning content={call.reasoning} open /> : null}
       <button
         type="button"
         className="tool-call-summary"

@@ -836,6 +836,10 @@ export default function ChatsPage() {
                   const images = imageAttachments(message.metadata);
                   const videos = videoAttachments(message.metadata);
                   const toolCalls = message.metadata?.tool_calls ?? [];
+                  const leftoverReasoning = message.metadata?.reasoning;
+                  const toolsHaveReasoning = toolCalls.some((call) =>
+                    Boolean(call.reasoning?.trim())
+                  );
                   const citations = message.metadata?.citations ?? [];
                   const receipts = message.metadata?.action_receipts ?? [];
                   const linked = linkedMessageId === message.id;
@@ -895,12 +899,21 @@ export default function ChatsPage() {
                           ))}
                         </div>
                       )}
-                      {message.metadata?.reasoning ? (
-                        <Reasoning content={message.metadata.reasoning} />
+                      {!toolsHaveReasoning && leftoverReasoning ? (
+                        <Reasoning
+                          content={leftoverReasoning}
+                          open={streaming && message.id === displayedChat.messages.at(-1)?.id}
+                        />
                       ) : null}
                       {toolCalls.length > 0 && (
                         <ToolTrace calls={toolCalls} onDecide={approveTool} />
                       )}
+                      {toolsHaveReasoning && leftoverReasoning ? (
+                        <Reasoning
+                          content={leftoverReasoning}
+                          open={streaming && message.id === displayedChat.messages.at(-1)?.id}
+                        />
+                      ) : null}
                       {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                       {message.content.trim() ? (
                         <div className="message-content">

@@ -15,6 +15,8 @@ export interface ToolCallRecord {
   success: boolean;
   detail: string;
   duration_ms: number;
+  /** Model thinking that immediately preceded this call. */
+  reasoning?: string;
   /** Client-only: set while the tool is still running. Never sent by the server. */
   pending?: boolean;
   /** Client-only: mutating file/shell tools wait here for the user. */

@@ -15,6 +15,7 @@ export const ToolCallRecordSchema = z.object({
   success: z.boolean(),
   detail: z.string(),
   duration_ms: z.number(),
+  reasoning: z.string().optional(),
 });
 
 export const CitationSchema = z.object({

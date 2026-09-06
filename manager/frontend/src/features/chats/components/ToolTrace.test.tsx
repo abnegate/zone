@@ -19,6 +19,15 @@ describe('ToolTrace', () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it('shows the thinking that preceded a tool call', () => {
+    render(
+      <ToolTrace calls={[call({ reasoning: 'I should search workspace docs first.' })]} />
+    );
+
+    expect(screen.getByText('I should search workspace docs first.')).toBeInTheDocument();
+    expect(screen.getByTestId('reasoning')).toHaveAttribute('open');
+  });
+
   it('describes the tool in plain language rather than by its wire name', () => {
     render(<ToolTrace calls={[call()]} />);
 

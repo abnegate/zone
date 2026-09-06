@@ -560,6 +560,81 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('shows thinking interleaved with the tool trace', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            content: 'We deploy on Fridays.',
+            metadata: {
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  name: 'search_knowledge',
+                  arguments: '{"query":"deploys"}',
+                  success: true,
+                  detail: '3 passages',
+                  duration_ms: 128,
+                  reasoning: 'Search the workspace first.',
+                },
+                {
+                  id: 'call_2',
+                  name: 'read_document',
+                  arguments: '{"id":"doc-1"}',
+                  success: true,
+                  detail: '1 document',
+                  duration_ms: 40,
+                  reasoning: 'That hit looks right; read it.',
+                },
+              ],
+              reasoning: 'Fridays are the deploy window.',
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByText('We deploy on Fridays.')).toBeInTheDocument();
+      });
+
+      const firstThought = screen.getByText('Search the workspace first.');
+      const firstTool = screen.getByText('Searched the knowledge base');
+      const secondThought = screen.getByText('That hit looks right; read it.');
+      const secondTool = screen.getByText('Read a workspace document');
+      const leftover = screen.getByText('Fridays are the deploy window.');
+      const answer = screen.getByText('We deploy on Fridays.');
+
+      expect(
+        firstThought.compareDocumentPosition(firstTool) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        firstTool.compareDocumentPosition(secondThought) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        secondThought.compareDocumentPosition(secondTool) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        secondTool.compareDocumentPosition(leftover) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        leftover.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+
+      const blocks = screen.getAllByTestId('reasoning');
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toHaveAttribute('open');
+      expect(blocks[1]).toHaveAttribute('open');
+      expect(blocks[2]).not.toHaveAttribute('open');
+    });
+
     it('shows error when chat loading fails', async () => {
       mockClient.getChat.mockRejectedValueOnce(new Error('Chat not found'));
       renderChatsPage();

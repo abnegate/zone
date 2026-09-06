@@ -295,6 +295,141 @@ describe('useChat', () => {
     expect(running?.pending).toBe(true);
     expect(running?.name).toBe('search_knowledge');
     expect(running?.arguments).toBe('{"query":"deploys"}');
+  });
+
+  it('attaches streamed reasoning to the following tool call', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({ type: 'reasoning', content: 'Search the workspace first.' });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.reasoning).toBe(
+        'Search the workspace first.'
+      );
+    });
+
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'search_knowledge',
+      arguments: '{"query":"deploys"}',
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.reasoning).toBe(
+        'Search the workspace first.'
+      );
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.reasoning).toBeUndefined();
+
+    lastSocket?.emit({ type: 'reasoning', content: 'Now answer from those hits.' });
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm4',
+      content: 'We deploy on Fridays.',
+      metadata: {
+        tool_calls: [
+          {
+            id: 'call_1',
+            name: 'search_knowledge',
+            arguments: '{"query":"deploys"}',
+            success: true,
+            detail: '3 passages',
+            duration_ms: 128,
+            reasoning: 'Search the workspace first.',
+          },
+        ],
+        reasoning: 'Now answer from those hits.',
+      },
+    });
+
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.reasoning).toBe(
+      'Search the workspace first.'
+    );
+    expect(result.current.chat?.messages.at(-1)?.metadata?.reasoning).toBe(
+      'Now answer from those hits.'
+    );
+  });
+
+  it('gives each tool the thinking that preceded it', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({ type: 'reasoning', content: 'Search first.' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'search_knowledge',
+      arguments: '{"query":"deploys"}',
+    });
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'search_knowledge',
+      success: true,
+      detail: '3 passages',
+      duration_ms: 128,
+    });
+    lastSocket?.emit({ type: 'reasoning', content: 'Now read that document.' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm4',
+      tool_call_id: 'call_2',
+      name: 'read_document',
+      arguments: '{"id":"doc-1"}',
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls).toHaveLength(2);
+    });
+    const calls = result.current.chat?.messages.at(-1)?.metadata?.tool_calls;
+    expect(calls?.[0]?.reasoning).toBe('Search first.');
+    expect(calls?.[1]?.reasoning).toBe('Now read that document.');
+    expect(result.current.chat?.messages.at(-1)?.metadata?.reasoning).toBeUndefined();
+  });
+
+  it('keeps tool arguments when the result frame omits them', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'tool_call',
+      message_id: 'm4',
+      tool_call_id: 'call_1',
+      name: 'search_knowledge',
+      arguments: '{"query":"deploys"}',
+    });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls).toHaveLength(1);
+    });
+    const running = result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0];
+    expect(running?.pending).toBe(true);
+    expect(running?.name).toBe('search_knowledge');
+    expect(running?.arguments).toBe('{"query":"deploys"}');
 
     lastSocket?.emit({
       type: 'tool_result',

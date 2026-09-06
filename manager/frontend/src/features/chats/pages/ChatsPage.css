@@ -455,6 +455,10 @@
   font-size: var(--ui-text-sm);
 }
 
+.tool-call > .message-reasoning {
+  margin: var(--ui-space-2) 0;
+}
+
 .message-reasoning summary {
   cursor: pointer;
   font-weight: 500;
