@@ -384,6 +384,55 @@ async fn database_lease_blocks_socket_and_rest_writes_before_a_user_message_is_s
 }
 
 #[tokio::test]
+async fn parallel_socket_generations_serialize_before_persistence_and_allow_immediate_followup() {
+    let harness = Harness::new(
+        Some(32768),
+        false,
+        vec![
+            answer("First complete").set_delay(Duration::from_secs(2)),
+            answer("Followup complete"),
+        ],
+    )
+    .await;
+    let mut first = harness.connect().await;
+    let mut second = harness.connect().await;
+    send(
+        &mut first,
+        json!({"type":"send","content":"Accepted first user"}),
+    )
+    .await;
+    harness.until_requests(1).await;
+    send(
+        &mut second,
+        json!({"type":"send","content":"Rejected racing user"}),
+    )
+    .await;
+    let rejected = finish(&mut second).await;
+    assert!(rejected.iter().any(|frame| frame["type"] == "error"));
+    assert!(
+        !harness
+            .history()
+            .await
+            .entries
+            .iter()
+            .any(|entry| { entry.message.content.as_deref() == Some("Rejected racing user") })
+    );
+    assert_eq!(ordinary(&harness.requests().await).len(), 1);
+    successful(&finish(&mut first).await);
+    send(
+        &mut first,
+        json!({"type":"send","content":"Accepted immediate followup"}),
+    )
+    .await;
+    successful(&finish(&mut first).await);
+    let requests = harness.requests().await;
+    let requests = ordinary(&requests);
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[1].to_string().contains("Rejected racing user"));
+    assert!(requests[1].to_string().contains("Accepted first user"));
+}
+
+#[tokio::test]
 async fn deleting_covered_legacy_message_invalidates_summary_before_next_request() {
     let harness = Harness::new(Some(4096), false, vec![answer("First"), answer("Second")]).await;
     let deleted = harness

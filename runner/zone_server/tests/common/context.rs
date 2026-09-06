@@ -370,7 +370,9 @@ pub fn successful(frames: &[Value]) {
         "generation must complete: {frames:?}"
     );
     assert!(
-        !frames.iter().any(|frame| frame["type"] == "error"),
+        !frames.iter().any(|frame| {
+            frame["type"] == "error" || frame["type"] == "message_end" && !frame["error"].is_null()
+        }),
         "generation error: {frames:?}"
     );
 }
