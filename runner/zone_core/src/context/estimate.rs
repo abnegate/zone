@@ -4,11 +4,11 @@ use crate::llm::{Message, Role, ToolDefinition};
 
 use super::{ContextBreakdown, ContextSource, ContextStatus, ContextUsage, Entry, Policy, Summary};
 
-/// Conservative UTF-8 byte estimate, not a provider tokenizer measurement.
-/// Two bytes per token plus explicit framing and 20% input headroom deliberately
-/// favors early compaction over the common English four-characters heuristic.
+/// UTF-8 byte estimate, not a provider tokenizer measurement.
+/// Four bytes per token matches the common English heuristic; message framing
+/// and Policy::threshold's 20% input headroom remain the conservative slack.
 pub(super) fn tokens(text: &str) -> u64 {
-    u64::try_from(text.len()).unwrap_or(u64::MAX).div_ceil(2)
+    u64::try_from(text.len()).unwrap_or(u64::MAX).div_ceil(4)
 }
 
 pub(super) fn message_cost(message: &Message) -> (u64, u64) {
@@ -115,5 +115,17 @@ pub fn estimate(
         } else {
             None
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tokens;
+
+    #[test]
+    fn four_utf8_bytes_are_one_token() {
+        assert_eq!(tokens(""), 0);
+        assert_eq!(tokens("abcd"), 1);
+        assert_eq!(tokens("abcdefgh"), 2);
     }
 }

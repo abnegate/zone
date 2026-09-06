@@ -153,7 +153,7 @@ fn active_history() -> Vec<Entry> {
                 "a",
                 format!(
                     "Error: old attempt failed\n{}\nPERSISTENT_EVIDENCE",
-                    "data\n".repeat(3_000)
+                    "data\n".repeat(8_000)
                 ),
             ),
             false,
@@ -512,7 +512,7 @@ async fn invalid_summary_never_advances_coverage_or_mutates_history() {
 async fn failed_summary_replays_original_history_only_when_it_still_fits() {
     let provider = provider(|_| response("".into()), false).await;
     let history = vec![
-        entry("old", Message::user("x".repeat(6_400)), false, true),
+        entry("old", Message::user("x".repeat(12_800)), false, true),
         entry("current", Message::user("Current"), true, false),
     ];
     let prepared = context::prepare(
@@ -654,7 +654,7 @@ fn tools_and_message_framing_match_projection_estimates_and_threshold_is_saturat
     assert_eq!(usage.used, projected_usage.used);
     assert_eq!(
         usage.breakdown.tools,
-        (serde_json::to_string(&tools).unwrap().len() as u64).div_ceil(2)
+        (serde_json::to_string(&tools).unwrap().len() as u64).div_ceil(4)
     );
     assert_eq!(usage.used, usage.breakdown.total());
     assert_eq!(
@@ -905,7 +905,7 @@ async fn many_small_messages_are_batched_into_one_summary_request() {
     ));
     let tools = [ToolDefinition::function(
         "read",
-        "tool documentation ".repeat(680),
+        "tool documentation ".repeat(1_500),
         json!({"type":"object"}),
     )];
     let settings = policy(11_000);
