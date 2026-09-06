@@ -196,7 +196,11 @@ struct SingleChatResponse {
 
 /// Load a chat's messages for a single-chat response. A chat whose messages
 /// cannot be read still returns the chat, with an empty list.
-async fn chat_with_messages(state: &AppState, chat: chats::ChatRow) -> ChatWithMessagesResponse {
+async fn chat_with_messages(
+    state: &AppState,
+    auth: &AuthUser,
+    chat: chats::ChatRow,
+) -> ChatWithMessagesResponse {
     let profile =
         crate::services::model::Model::profile(&state.config().ollama_host, &chat.model_name).await;
     let messages = chats::list_messages(state.db(), chat.id)
@@ -206,11 +210,9 @@ async fn chat_with_messages(state: &AppState, chat: chats::ChatRow) -> ChatWithM
         .map(MessageResponse::from)
         .collect();
 
-    let context = match chat.workspace_id {
-        Some(workspace) => {
+    let context = match (chat.workspace_id, auth.0.user_id()) {
+        (Some(_), Ok(actor)) => {
             // No draft or inference; reconstruct a fresh observation for reconnect.
-            let actor = Uuid::nil();
-            let _ = workspace;
             session::build(state, &chat, actor, None, session::Mode::Preview)
                 .await
                 .ok()
@@ -221,7 +223,7 @@ async fn chat_with_messages(state: &AppState, chat: chats::ChatRow) -> ChatWithM
                     )
                 })
         }
-        None => None,
+        _ => None,
     };
     ChatWithMessagesResponse {
         context,
@@ -401,7 +403,7 @@ pub async fn create(
             (
                 StatusCode::CREATED,
                 Json(SingleChatResponse {
-                    chat: chat_with_messages(&state, chat).await,
+                    chat: chat_with_messages(&state, &auth, chat).await,
                 }),
             )
                 .into_response()
@@ -426,7 +428,7 @@ pub async fn get(
     // Get chat and verify access
     match get_chat_with_access(&state, &auth, id).await {
         Ok(chat) => Json(SingleChatResponse {
-            chat: chat_with_messages(&state, chat).await,
+            chat: chat_with_messages(&state, &auth, chat).await,
         })
         .into_response(),
         Err(e) => e.into_response(),
@@ -487,7 +489,7 @@ pub async fn update(
                 }
             };
             Json(SingleChatResponse {
-                chat: chat_with_messages(&state, chat).await,
+                chat: chat_with_messages(&state, &auth, chat).await,
             })
             .into_response()
         }
@@ -572,7 +574,7 @@ pub async fn archive(
 
     match chats::archive_chat(state.db(), id).await {
         Ok(Some(chat)) => Json(SingleChatResponse {
-            chat: chat_with_messages(&state, chat).await,
+            chat: chat_with_messages(&state, &auth, chat).await,
         })
         .into_response(),
         Ok(None) => (
@@ -612,7 +614,7 @@ pub async fn unarchive(
 
     match chats::unarchive_chat(state.db(), id).await {
         Ok(Some(chat)) => Json(SingleChatResponse {
-            chat: chat_with_messages(&state, chat).await,
+            chat: chat_with_messages(&state, &auth, chat).await,
         })
         .into_response(),
         Ok(None) => (
@@ -678,7 +680,7 @@ pub async fn create_message(
         return e.into_response();
     }
 
-    let session = match session::Session::acquire(
+    let mut session = match session::Session::acquire(
         &state,
         id,
         chat.workspace_id.expect("authorized workspace"),
@@ -689,11 +691,14 @@ pub async fn create_message(
         Ok(session) => session,
         Err(error) => return ServerError::Conflict(error.to_string()).into_response(),
     };
-    match session
+    let result = session
         .store
         .create_message(&session.lease, &req.role, &req.content, req.metadata)
-        .await
-    {
+        .await;
+    if let Err(error) = session.close().await {
+        return ServerError::Conflict(error.to_string()).into_response();
+    }
+    match result {
         Ok(msg) => {
             crate::workers::titles::spawn(state.clone(), &msg);
             // Spawn background task to generate and store embedding
@@ -738,7 +743,7 @@ pub async fn delete_message(
         return e.into_response();
     }
 
-    let session = match session::Session::acquire(
+    let mut session = match session::Session::acquire(
         &state,
         chat_id,
         chat.workspace_id.expect("authorized workspace"),
@@ -749,11 +754,14 @@ pub async fn delete_message(
         Ok(session) => session,
         Err(error) => return ServerError::Conflict(error.to_string()).into_response(),
     };
-    match session
+    let result = session
         .store
         .delete_message(&session.lease, message_id)
-        .await
-    {
+        .await;
+    if let Err(error) = session.close().await {
+        return ServerError::Conflict(error.to_string()).into_response();
+    }
+    match result {
         Ok(true) => {
             // Clean up embedding
             if let Err(e) =

@@ -25,6 +25,7 @@ pub struct Settings {
     pub calls: usize,
     pub output: u32,
     pub context: u64,
+    pub timeout: Duration,
 }
 
 impl Default for Settings {
@@ -34,6 +35,7 @@ impl Default for Settings {
             calls: 256,
             output: 4096,
             context: 32768,
+            timeout: Duration::from_secs(1800),
         }
     }
 }
@@ -53,6 +55,7 @@ impl Settings {
         }
         Ok(Self {
             context: value("ZONE_CHAT_CONTEXT_TOKENS", 32768)?,
+            timeout: Duration::from_secs(value("ZONE_CHAT_TIMEOUT_SECONDS", 1800)?),
             rounds: usize::try_from(value("ZONE_CHAT_ROUNDS", 64)?)
                 .map_err(|_| "ZONE_CHAT_ROUNDS exceeds platform range")?,
             calls: usize::try_from(value("ZONE_CHAT_CALLS", 256)?)
@@ -220,6 +223,7 @@ pub struct Preparation {
     pub llm: LlmClient,
     pub stop: Vec<String>,
     pub budget: LoopBudget,
+    pub timeout: Duration,
 }
 
 /// Read-only common builder. It never classifies intent, executes tools, searches, or summarizes.
@@ -259,16 +263,7 @@ pub async fn build(
         tokio::join!(store.load(), resolver.resolve(&chat.model_name), catalog);
     let history = history.map_err(|error| error.to_string())?;
     let agentic = chat.agent_enabled && !tools.is_empty();
-    let policy = Policy {
-        limit: capacity.limit,
-        reserved: settings.reserved(capacity.limit),
-        source: match capacity.source {
-            capacity::Source::Runtime => ContextSource::Runtime,
-            capacity::Source::Configured => ContextSource::Configured,
-            capacity::Source::Provider => ContextSource::Provider,
-            capacity::Source::Unknown => ContextSource::Unknown,
-        },
-    };
+    let policy = policy(settings, &capacity);
     let mut entries = vec![Entry {
         id: "instructions".into(),
         message: Message::system(system_prompt(
@@ -364,7 +359,21 @@ pub async fn build(
         llm,
         stop,
         budget: settings.budget(),
+        timeout: settings.timeout,
     })
+}
+
+pub fn policy(settings: &Settings, capacity: &capacity::Capacity) -> Policy {
+    Policy {
+        limit: capacity.limit,
+        reserved: settings.reserved(capacity.limit),
+        source: match capacity.source {
+            capacity::Source::Runtime => ContextSource::Runtime,
+            capacity::Source::Configured => ContextSource::Configured,
+            capacity::Source::Provider => ContextSource::Provider,
+            capacity::Source::Unknown => ContextSource::Unknown,
+        },
+    }
 }
 
 pub fn system_prompt(chat: &ChatRow, tools: &ChatTools, agentic: bool, capability: &str) -> String {
@@ -424,6 +433,7 @@ pub struct Session {
     pub lease: Lease,
     pub guard: Guard,
     pub turn: Uuid,
+    closed: bool,
 }
 
 impl Session {
@@ -441,12 +451,27 @@ impl Session {
             lease,
             guard,
             turn,
+            closed: false,
         })
+    }
+    /// Release before acknowledging a terminal response so the next request can start.
+    pub async fn close(&mut self) -> Result<(), Error> {
+        if self.closed {
+            return Ok(());
+        }
+        self.store.recover(&self.lease).await?;
+        self.guard.stop().await;
+        self.store.release(&self.lease).await?;
+        self.closed = true;
+        Ok(())
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
         let store = self.store.clone();
         let lease = self.lease.clone();
         // Cancellation during preparation must not hold an idle chat until expiry.

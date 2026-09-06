@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 /// Application runtime allocation, bounded by native capacity for a cold model.
-/// ZONE_CHAT_CONTEXT_TOKENS overrides this allocation; invalid values disable it.
+/// Production callers supply validated typed configuration through `with_context`.
 pub const DEFAULT_CONTEXT: u64 = 32_768;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,12 +81,7 @@ struct Routes {
 
 impl Resolver {
     pub fn new(host: &str, key: &str, ollama: &str) -> Self {
-        let configured = match std::env::var("ZONE_CHAT_CONTEXT_TOKENS") {
-            Ok(value) => value.parse::<u64>().ok().filter(|value| *value > 0),
-            Err(std::env::VarError::NotPresent) => Some(DEFAULT_CONTEXT),
-            Err(_) => None,
-        };
-        Self::with_context(host, key, ollama, configured)
+        Self::with_context(host, key, ollama, Some(DEFAULT_CONTEXT))
     }
 
     pub fn with_context(host: &str, key: &str, ollama: &str, configured: Option<u64>) -> Self {

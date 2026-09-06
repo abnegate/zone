@@ -213,25 +213,41 @@ pub fn run_with_context(
             let envelope=canonical(LlmMessage {role:LlmRole::Assistant,content:replay,name:None,tool_calls:Some(requested.clone()),tool_call_id:None,images,generated_images:Vec::new()},mutations);
             context.append(&envelope);yield AgentEvent::Canonical(envelope);
             let mut progress=false;
-            for call in requested {
-                let signature=signature(&call);
+            let mut requested=std::collections::VecDeque::from(requested);
+            while let Some(call)=requested.pop_front() {
                 if denied_repeat || used>=budget.max_tool_calls {
                     finalizing=true;reason=Some(if denied_repeat {"Repeated failed calls made no progress."}else{"The configured tool-call budget was reached."}.into());
                     let entry=canonical(LlmMessage::tool_result(&call.id,"Not executed: repeated failures or the configured tool budget require a final answer using existing evidence."),Vec::new());
                     context.append(&entry);yield AgentEvent::Canonical(entry);continue;
                 }
-                used+=1;
-                yield AgentEvent::ToolCallStarted {id:call.id.clone(),name:call.function.name.clone(),arguments:call.function.arguments.clone()};
-                let denied=if !approval.is_auto() && requires_approval(&call.function.name) {
+                let mutation=tools.mutating(&call.function.name);
+                let mut batch=vec![call];
+                if !mutation {
+                    while used+batch.len()<budget.max_tool_calls && requested.front().is_some_and(|call|!tools.mutating(&call.function.name)) {
+                        batch.push(requested.pop_front().expect("Read batch front exists"));
+                    }
+                }
+                used+=batch.len();
+                for call in &batch {
+                    yield AgentEvent::ToolCallStarted {id:call.id.clone(),name:call.function.name.clone(),arguments:call.function.arguments.clone()};
+                }
+                let call=&batch[0];
+                let denied=if mutation && !approval.is_auto() && requires_approval(&call.function.name) {
                     yield AgentEvent::ToolApprovalRequired {id:call.id.clone(),name:call.function.name.clone(),arguments:call.function.arguments.clone()};
                     match &approval {ApprovalPolicy::Required(gate)=>!gate.await_decision(&call.id).await,ApprovalPolicy::Auto=>false}
                 } else {false};
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model,definitions));
-                let started=Instant::now();
-                let result=if denied {zone_core::tools::ToolResult::error("The user denied this tool call.")}else{tools.execute(&call.function.name,&call.function.arguments).await};
-                let mutation=tools.mutating(&call.function.name);
-                let finished=finish_tool(&tools,call,result,started.elapsed().as_millis() as u64).await;
+                let completed=futures::future::join_all(batch.into_iter().map(|call| {
+                    let tools=&tools;
+                    async move {
+                        let signature=signature(&call);
+                        let started=Instant::now();
+                        let result=if denied {zone_core::tools::ToolResult::error("The user denied this tool call.")}else{tools.execute(&call.function.name,&call.function.arguments).await};
+                        (signature,finish_tool(tools,call,result,started.elapsed().as_millis() as u64).await)
+                    }
+                })).await;
+                for (signature,finished) in completed {
                 let digest=hex::encode(Sha256::digest(finished.output.as_bytes()));
                 if mutation && finished.success {observations.clear();failures.clear();progress=true;}
                 else if finished.success {
@@ -239,11 +255,12 @@ pub fn run_with_context(
                         failures.clear(); progress=true;
                     }
                 }
-                else {progress|=failures.insert(signature);}
+                else {let novel=failures.insert(signature);progress|=!mutation && novel;}
                 let mut message=LlmMessage::tool_result(&finished.id,&finished.output);message.images=finished.images.clone();
                 let entry=canonical(message,Vec::new());context.append(&entry);yield AgentEvent::Canonical(entry);
                 for url in &finished.images {yield AgentEvent::Image(url.clone());}
                 yield AgentEvent::ToolCallCompleted {id:finished.id,name:finished.name,success:finished.success,detail:finished.detail,duration_ms:finished.duration_ms,citations:finished.citations,receipt:finished.receipt};
+                }
             }
             if !progress && !finalizing {finalizing=true;reason=Some("Repeated tool reads returned unchanged evidence without progress.".into());}
             if used>=budget.max_tool_calls {finalizing=true;reason=Some("The configured tool-call budget was reached.".into());}

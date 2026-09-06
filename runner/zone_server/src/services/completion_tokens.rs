@@ -106,7 +106,9 @@ fn prefix_hold_len(text: &str, stops: &[String]) -> usize {
     for stop in stops {
         let max = stop.len().saturating_sub(1).min(text.len());
         for len in (1..=max).rev() {
-            if stop.starts_with(&text[text.len() - len..]) {
+            if let Some(suffix) = text.get(text.len() - len..)
+                && stop.starts_with(suffix)
+            {
                 hold = hold.max(len);
                 break;
             }
@@ -142,6 +144,17 @@ mod tests {
             FilterStep::Emit("Hi there".to_string())
         );
         assert_eq!(filter.push("_end|>"), FilterStep::Halt(String::new()));
+    }
+
+    #[test]
+    fn unicode_prose_does_not_slice_inside_a_character() {
+        let mut filter = TokenFilter::new(default_stop_strings());
+        assert_eq!(filter.push("你好 🐈"), FilterStep::Emit("你好 🐈".into()));
+        assert_eq!(
+            filter.push("続ける<|im_"),
+            FilterStep::Emit("続ける".into())
+        );
+        assert_eq!(filter.push("end|>"), FilterStep::Halt(String::new()));
     }
 
     #[test]

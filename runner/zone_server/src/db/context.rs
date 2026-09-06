@@ -47,10 +47,16 @@ pub struct Lease {
 pub struct Guard {
     lease: Lease,
     lost: watch::Receiver<bool>,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
 }
 
 impl Guard {
+    pub async fn stop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
     pub fn lease(&self) -> &Lease {
         &self.lease
     }
@@ -67,7 +73,9 @@ impl Guard {
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        self.task.abort();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -147,7 +155,11 @@ impl Store {
                 }
             }
         });
-        Ok(Guard { lease, lost, task })
+        Ok(Guard {
+            lease,
+            lost,
+            task: Some(task),
+        })
     }
 
     pub async fn assert_current(&self, lease: &Lease) -> Result<(), Error> {

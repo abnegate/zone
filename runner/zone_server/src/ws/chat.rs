@@ -85,9 +85,6 @@ const MAX_RESPONSE_LENGTH: usize = 100_000;
 const MAX_GENERATED_IMAGES: usize = 8;
 const MAX_GENERATED_IMAGE_URL_LENGTH: usize = 16 * 1024 * 1024;
 
-/// LLM stream timeout in seconds (5 minutes)
-const LLM_STREAM_TIMEOUT_SECS: u64 = 300;
-
 /// Status constants
 const STATUS_CONNECTED: &str = "connected";
 
@@ -975,6 +972,7 @@ async fn handle_image_generation(
     metadata: Option<&serde_json::Value>,
     image_config: crate::config::ComfyUiConfig,
     generation: &mut Generation,
+    session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::{
         artifacts::ArtifactStore,
@@ -987,6 +985,7 @@ async fn handle_image_generation(
     let client = match ComfyUiClient::new(image_config.clone()) {
         Ok(client) => client,
         Err(error) => {
+            session.close().await?;
             let _ = send_server(
                 sender,
                 ServerMessage::Error {
@@ -1004,6 +1003,7 @@ async fn handle_image_generation(
         {
             Ok(source) => source,
             Err(error) => {
+                session.close().await?;
                 let _ = send_server(
                     sender,
                     ServerMessage::Error {
@@ -1039,6 +1039,7 @@ async fn handle_image_generation(
     let _generation_permit = tokio::select! {
         biased;
         _ = generation.cancel.recv() => {
+            session.close().await?;
             let _ = send_server(
                 sender,
                 ServerMessage::Cancelled { message_id: Some(assistant_message_id) },
@@ -1069,6 +1070,7 @@ async fn handle_image_generation(
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
+        session.close().await?;
         generation.cancelled(sender).await;
         return Ok(());
     }
@@ -1076,10 +1078,11 @@ async fn handle_image_generation(
     let images = match result {
         Ok(images) => images,
         Err(ComfyUiError::Cancelled) => {
+            session.close().await?;
             let _ = send_server(
                 sender,
                 ServerMessage::Cancelled {
-                    message_id: Some(assistant_message_id),
+                    message_id: generation.started.then_some(assistant_message_id),
                 },
             )
             .await;
@@ -1093,6 +1096,7 @@ async fn handle_image_generation(
                     "Image generation failed: ComfyUI did not respond in time. Check the image service and try again.".to_string(),
                 _ => format!("Image generation failed: {error}"),
             };
+            session.close().await?;
             let _ = send_server(sender, ServerMessage::Error { message }).await;
             return Ok(());
         }
@@ -1125,6 +1129,7 @@ async fn handle_image_generation(
                 store
                     .cleanup_owner(workspace_id, chat_id, assistant_message_id)
                     .await;
+                session.close().await?;
                 let _ = send_server(
                     sender,
                     ServerMessage::Error {
@@ -1140,6 +1145,7 @@ async fn handle_image_generation(
         }
     }
     if attachments.is_empty() {
+        session.close().await?;
         let _ = send_server(
             sender,
             ServerMessage::Error {
@@ -1152,20 +1158,25 @@ async fn handle_image_generation(
 
     let content = "Generated image.";
     let metadata = image_metadata(&attachments);
-    if let Err(error) = chats::create_message_with_id(
-        state.db(),
-        assistant_message_id,
-        chat_id,
-        "assistant",
-        content,
-        metadata.clone(),
-    )
-    .await
+    let mut replay = LlmMessage::assistant(content);
+    replay.images = session::images(metadata.as_ref());
+    if let Err(error) = session
+        .store
+        .finish(
+            &session.lease,
+            session.turn,
+            content,
+            metadata.clone(),
+            false,
+            Some(&ReplayMessage::from(&replay)),
+        )
+        .await
     {
         tracing::error!("Failed to persist generated image message: {error}");
         store
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
             .await;
+        session.close().await?;
         let _ = send_server(
             sender,
             ServerMessage::Error {
@@ -1193,6 +1204,7 @@ async fn handle_image_generation(
         )
         .await;
     }
+    session.close().await?;
     let _ = send_server(
         sender,
         ServerMessage::MessageEnd {
@@ -1215,6 +1227,7 @@ async fn handle_video_generation(
     metadata: Option<&serde_json::Value>,
     video_config: crate::config::ComfyUiConfig,
     generation: &mut Generation,
+    session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::{
         artifacts::ArtifactStore,
@@ -1227,6 +1240,7 @@ async fn handle_video_generation(
     let client = match ComfyUiClient::new(video_config.clone()) {
         Ok(client) => client,
         Err(error) => {
+            session.close().await?;
             let _ = send_server(
                 sender,
                 ServerMessage::Error {
@@ -1244,6 +1258,7 @@ async fn handle_video_generation(
         {
             Ok(source) => source,
             Err(error) => {
+                session.close().await?;
                 let _ = send_server(
                     sender,
                     ServerMessage::Error {
@@ -1268,6 +1283,7 @@ async fn handle_video_generation(
     let _generation_permit = tokio::select! {
         biased;
         _ = generation.cancel.recv() => {
+            session.close().await?;
             let _ = send_server(
                 sender,
                 ServerMessage::Cancelled { message_id: Some(assistant_message_id) },
@@ -1292,6 +1308,7 @@ async fn handle_video_generation(
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
+        session.close().await?;
         generation.cancelled(sender).await;
         return Ok(());
     }
@@ -1299,10 +1316,11 @@ async fn handle_video_generation(
     let videos = match result {
         Ok(videos) => videos,
         Err(ComfyUiError::Cancelled) => {
+            session.close().await?;
             let _ = send_server(
                 sender,
                 ServerMessage::Cancelled {
-                    message_id: Some(assistant_message_id),
+                    message_id: generation.started.then_some(assistant_message_id),
                 },
             )
             .await;
@@ -1316,6 +1334,7 @@ async fn handle_video_generation(
                     "Video generation failed: ComfyUI did not respond in time. Check the image service and try again.".to_string(),
                 _ => format!("Video generation failed: {error}"),
             };
+            session.close().await?;
             let _ = send_server(sender, ServerMessage::Error { message }).await;
             return Ok(());
         }
@@ -1347,6 +1366,7 @@ async fn handle_video_generation(
                 store
                     .cleanup_owner(workspace_id, chat_id, assistant_message_id)
                     .await;
+                session.close().await?;
                 let _ = send_server(
                     sender,
                     ServerMessage::Error {
@@ -1362,6 +1382,7 @@ async fn handle_video_generation(
         }
     }
     if attachments.is_empty() {
+        session.close().await?;
         let _ = send_server(
             sender,
             ServerMessage::Error {
@@ -1374,20 +1395,25 @@ async fn handle_video_generation(
 
     let content = "Generated video.";
     let metadata = image_metadata(&attachments);
-    if let Err(error) = chats::create_message_with_id(
-        state.db(),
-        assistant_message_id,
-        chat_id,
-        "assistant",
-        content,
-        metadata.clone(),
-    )
-    .await
+    let mut replay = LlmMessage::assistant(content);
+    replay.images = session::images(metadata.as_ref());
+    if let Err(error) = session
+        .store
+        .finish(
+            &session.lease,
+            session.turn,
+            content,
+            metadata.clone(),
+            false,
+            Some(&ReplayMessage::from(&replay)),
+        )
+        .await
     {
         tracing::error!("Failed to persist generated video message: {error}");
         store
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
             .await;
+        session.close().await?;
         let _ = send_server(
             sender,
             ServerMessage::Error {
@@ -1415,6 +1441,7 @@ async fn handle_video_generation(
         )
         .await;
     }
+    session.close().await?;
     let _ = send_server(
         sender,
         ServerMessage::MessageEnd {
@@ -1486,36 +1513,32 @@ async fn handle_send_message(
         biased;
         _ = session.guard.lost() => { let _=send_server(sender,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
         _ = request.cancel.recv() => {
-            request.cancelled(sender).await;
+            let _=session.close().await;
+                        request.cancelled(sender).await;
             return;
         }
-        result = prepare_message(state, sender, chat_id, workspace_id, content, metadata.as_ref()) => result,
+        result = prepare_message(state, chat_id, workspace_id, content, metadata.as_ref()) => result,
     };
     let result = async {
-        let Some(routing) = preparation? else {
-            return Ok(());
-        };
+        let routing = preparation?;
         if request.is_cancelled() {
-            request.cancelled(sender).await;
+            let _=session.close().await;
+                        request.cancelled(sender).await;
             return Ok(());
         }
         let web_search_requested = state.config().web_search.requested_for(content, metadata.as_ref());
 
         // Once persistence begins, finish the commit and acknowledgement
         // before honouring Stop. Dropping an INSERT future cannot roll it back.
-        if matches!(&routing,Routing::Chat(_)) {
-            let mut message=LlmMessage::user(content);message.images=session::images(metadata.as_ref());
-            let user_message=session.store.begin(&session.lease,session.turn,Uuid::new_v4(),content,metadata.clone(),ReplayMessage::from(&message)).await?;
-            crate::workers::titles::spawn(state.clone(),&user_message);
-            spawn_message_embedding_task(state.clone(),user_message.id,chat_id,content.to_string());
-            let _=send_server(sender,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
-        } else {
-            session.store.assert_current(&session.lease).await?;
-            save_message(state, sender, chat_id, content, metadata.clone()).await?;
-        }
+        let mut message=LlmMessage::user(content);message.images=session::images(metadata.as_ref());
+        let user_message=session.store.begin(&session.lease,session.turn,Uuid::new_v4(),content,metadata.clone(),ReplayMessage::from(&message)).await?;
+        crate::workers::titles::spawn(state.clone(),&user_message);
+        spawn_message_embedding_task(state.clone(),user_message.id,chat_id,content.to_string());
+        let _=send_server(sender,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
 
         if request.is_cancelled() {
-            request.cancelled(sender).await;
+            let _=session.close().await;
+                        request.cancelled(sender).await;
             return Ok(());
         }
         match routing {
@@ -1529,6 +1552,7 @@ async fn handle_send_message(
                     metadata.as_ref(),
                     config,
                     &mut request,
+                    &mut session,
                 )
                 .await
             }
@@ -1542,6 +1566,7 @@ async fn handle_send_message(
                     metadata.as_ref(),
                     config,
                     &mut request,
+                    &mut session,
                 )
                 .await
             }
@@ -1549,6 +1574,7 @@ async fn handle_send_message(
                 let preparation = tokio::select! {
                     biased;
                     _ = request.cancel.recv() => {
+                        let _=session.close().await;
                         request.cancelled(sender).await;
                         return Ok(());
                     }
@@ -1559,10 +1585,9 @@ async fn handle_send_message(
             }
         }
     }.await;
-    if let Err(error) = session.store.recover(&session.lease).await {
+    if let Err(error) = session.close().await {
         tracing::warn!(%error,"Could not close interrupted generation");
     }
-    let _ = session.store.release(&session.lease).await;
     if let Err(error) = result {
         tracing::error!("Error handling send message: {error}");
         let _ = send_server(
@@ -1575,54 +1600,19 @@ async fn handle_send_message(
     }
 }
 
-async fn save_message(
-    state: &AppState,
-    sender: &SharedSender,
-    chat_id: Uuid,
-    content: &str,
-    metadata: Option<serde_json::Value>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Save user message to database
-    let user_message =
-        chats::create_message(state.db(), chat_id, "user", content, metadata).await?;
-    crate::workers::titles::spawn(state.clone(), &user_message);
-
-    // Confirm message saved
-    let saved_msg = ServerMessage::MessageSaved {
-        message_id: user_message.id,
-        role: "user".to_string(),
-        content: content.to_string(),
-        metadata: user_message.metadata.clone(),
-    };
-    if !send_server(sender, saved_msg).await {
-        tracing::debug!("Client disconnected after saving user message");
-    }
-
-    // Spawn background task to generate user message embedding
-    spawn_message_embedding_task(state.clone(), user_message.id, chat_id, content.to_string());
-    Ok(())
-}
-
 async fn prepare_message(
     state: &AppState,
-    sender: &SharedSender,
     chat_id: Uuid,
     workspace_id: Uuid,
     content: &str,
     metadata: Option<&serde_json::Value>,
-) -> Result<Option<Routing>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Routing, Box<dyn std::error::Error + Send + Sync>> {
     // Read the chat fresh rather than trusting the row captured at connect
     // time, so switching model or toggling agent mode takes effect on the next
     // message instead of the next reconnect.
     let chat = match chats::get_chat(state.db(), chat_id).await? {
         Some(chat) => chat,
-        None => {
-            let error_msg = ServerMessage::Error {
-                message: "Chat not found".to_string(),
-            };
-            let _ = send_server(sender, error_msg).await;
-            return Ok(None);
-        }
+        None => return Err("Chat not found".into()),
     };
     if chat.workspace_id != Some(workspace_id) {
         return Err("Chat does not belong to the authenticated workspace".into());
@@ -1653,21 +1643,14 @@ async fn prepare_message(
             .await
             == Some(false)
     {
-        let _ = send_server(
-            sender,
-            ServerMessage::Error {
-                message: crate::services::model::UNSUPPORTED.to_string(),
-            },
-        )
-        .await;
-        return Ok(None);
+        return Err(crate::services::model::UNSUPPORTED.into());
     }
 
-    Ok(Some(match intent {
+    Ok(match intent {
         crate::services::image_intent::GenerationIntent::Video => Routing::Video(image_config),
         crate::services::image_intent::GenerationIntent::Image => Routing::Image(image_config),
         crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
-    }))
+    })
 }
 
 async fn load_web_search(
@@ -1887,6 +1870,7 @@ async fn handle_chat_generation(
         llm: llm_client,
         stop,
         budget,
+        timeout,
     } = preparation;
     let model_name = model.as_str();
     let mut replay = context.clone();
@@ -1894,6 +1878,7 @@ async fn handle_chat_generation(
     let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
     if generation.cancel.try_recv().is_ok() {
+        session.close().await?;
         generation.cancelled(sender).await;
         return Ok(());
     }
@@ -1933,14 +1918,14 @@ async fn handle_chat_generation(
     let mut cancelled = false;
     let mut client_gone = false;
     let mut failure = None;
+    let mut blocked = None;
     let mut response_truncated = false;
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut citations: Vec<Citation> = Vec::new();
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
 
     // MAJOR-4: Add overall stream timeout
-    let stream_deadline =
-        tokio::time::Instant::now() + Duration::from_secs(LLM_STREAM_TIMEOUT_SECS);
+    let stream_deadline = tokio::time::Instant::now() + timeout;
 
     loop {
         if client_gone {
@@ -1968,6 +1953,13 @@ async fn handle_chat_generation(
             event = events.next() => {
                 match event {
                     Some(AgentEvent::Canonical(entry)) => {
+                        if entry.message.role == LlmRole::Assistant {
+                            let leftover=token_filter.finish();
+                            if !leftover.is_empty() {
+                                pending_content.push_str(&leftover);
+                                let _=emit_chunk(sender,&mut full_content,&mut chunk_index,&mut client_gone,leftover,&mut response_truncated).await;
+                            }
+                        }
                         if let Err(error)=session.store.append(&session.lease,session.turn,std::slice::from_ref(&entry)).await {failure=Some(error.to_string());break;}
                         pending_images.retain(|image| !entry.message.images.contains(image) && !entry.message.generated_images.contains(image));
                         replay.append(&entry);
@@ -1983,6 +1975,7 @@ async fn handle_chat_generation(
                         replay.summary=Some(summary);
                     }
                     Some(AgentEvent::Context(usage)) => {
+                        if usage.status==zone_core::context::ContextStatus::Blocked { blocked=Some(usage.clone()); }
                         if let Err(error)=session.store.assert_current(&session.lease).await {failure=Some(error.to_string());break;}
                         if !send_server(sender,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await {client_gone=true;}
                     }
@@ -2170,13 +2163,15 @@ async fn handle_chat_generation(
             .store
             .interrupt(&session.lease, session.turn)
             .await?;
+        session.close().await?;
         if !client_gone {
             let _ = send_server(
                 sender,
                 ServerMessage::Context {
                     chat_id,
                     message_id: Some(assistant_message_id),
-                    usage: replay.usage(model_name, definitions.as_deref()),
+                    usage: blocked
+                        .unwrap_or_else(|| replay.usage(model_name, definitions.as_deref())),
                 },
             )
             .await;
@@ -2257,7 +2252,8 @@ async fn handle_chat_generation(
                             }),
                     );
                 replay.summary = history.summary.map(session::core_summary);
-                let usage = replay.usage(model_name, definitions.as_deref());
+                let usage =
+                    blocked.unwrap_or_else(|| replay.usage(model_name, definitions.as_deref()));
                 let _ = send_server(
                     sender,
                     ServerMessage::Context {
@@ -2268,6 +2264,7 @@ async fn handle_chat_generation(
                 )
                 .await;
             }
+            session.close().await?;
             // Spawn background task to generate assistant message embedding
             if !full_content.trim().is_empty() {
                 spawn_message_embedding_task(state.clone(), msg.id, chat_id, full_content.clone());
@@ -2299,14 +2296,7 @@ async fn handle_chat_generation(
                 msg.content.len()
             );
         }
-        Err(e) => {
-            tracing::error!("Failed to save assistant message: {}", e);
-            let error_msg = ServerMessage::Error {
-                message: "Failed to save response".to_string(),
-            };
-            let _ = send_server(sender, error_msg).await;
-            return Ok(());
-        }
+        Err(error) => return Err(format!("Failed to save response: {error}").into()),
     }
 
     Ok(())
@@ -2749,12 +2739,10 @@ mod tests {
         assert_eq!(MAX_CONNECTIONS_PER_CHAT, 5);
         assert_eq!(MAX_MESSAGES_PER_MINUTE, 20);
         assert_eq!(MAX_MESSAGE_LENGTH, 100_000);
-        assert_eq!(MAX_CONTEXT_MESSAGES, 50);
         assert_eq!(MAX_CONTEXT_RESULTS, 10);
         assert_eq!(MAX_CONTEXT_IN_PROMPT, 5);
         assert_eq!(MAX_RESPONSE_LENGTH, 100_000);
         assert_eq!(MAX_GENERATED_IMAGES, 8);
-        assert_eq!(LLM_STREAM_TIMEOUT_SECS, 300);
         assert_eq!(STATUS_CONNECTED, "connected");
     }
 

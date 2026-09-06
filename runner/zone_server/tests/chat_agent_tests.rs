@@ -451,15 +451,25 @@ async fn unsupported_tools_preserve_prefetched_web_context() {
     assert!(requests[1]["tools"].is_null());
     let original = requests[0]["messages"].as_array().unwrap();
     let fallback = requests[1]["messages"].as_array().unwrap();
-    assert_eq!(&fallback[..original.len()], original);
-    assert_eq!(fallback[original.len() - 1]["role"], "user");
-    assert_eq!(fallback[original.len() - 1]["content"], context);
-    assert!(fallback[original.len()..].iter().any(|message| {
-        message["role"] == "system"
-            && message["content"].as_str().unwrap().contains(
-                "Previously supplied context, including any server-provided web search results, remains available",
-            )
-    }), "fallback must distinguish unsupported callable tools from completed web retrieval: {fallback:?}");
+    for message in original {
+        assert!(
+            fallback.contains(message),
+            "Lost original evidence: {message}"
+        );
+    }
+    assert!(
+        fallback
+            .iter()
+            .any(|message| message["role"] == "user" && message["content"] == context)
+    );
+    assert!(
+        fallback.iter().any(|message| message["role"] == "system"
+            && message["content"]
+                .as_str()
+                .unwrap()
+                .contains("Use supplied search evidence where sufficient")),
+        "Tool fallback must retain completed retrieval"
+    );
 }
 
 #[tokio::test]
@@ -475,7 +485,8 @@ async fn image_only_answers_remain_valid() {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, AgentEvent::Image(_)))
+                .any(|event| matches!(event, AgentEvent::Image(_))),
+            "events: {events:?}"
         );
         assert!(
             !events
