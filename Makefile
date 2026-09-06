@@ -28,13 +28,8 @@ NC := \033[0m
 
 # Docker compose command (try both v1 and v2)
 DOCKER_COMPOSE := $(shell which docker-compose 2>/dev/null || echo "docker compose")
-# ZONE_VPN=1 is written by `make up-vpn` and cleared by `make up`.
-ZONE_VPN_STATE := $(shell awk -F= '/^[[:space:]]*ZONE_VPN=/{val=$$2; gsub(/[[:space:]"]/, "", val); print val}' .env 2>/dev/null | tail -1)
-VPN_COMPOSE_FILE := $(if $(filter 1 true yes on,$(ZONE_VPN_STATE)),-f docker-compose.vpn.yml)
-VPN_PROFILES := $(if $(VPN_COMPOSE_FILE),--profile vpn)
-ZONE_COMPOSE := $(DOCKER_COMPOSE) -f docker-compose.yml $(VPN_COMPOSE_FILE)
-COMPOSE_DEV := $(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml $(VPN_COMPOSE_FILE)
-COMPOSE_VPN := $(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.vpn.yml
+# Maps Compose profiles to overlay files (dev, vpn) and --profile flags.
+COMPOSE := ./scripts/compose.sh
 
 ##@ Setup & Configuration
 
@@ -46,7 +41,7 @@ setup-comfyui-macos: ## Install pinned native ComfyUI on Apple Silicon (model ex
 	@./scripts/setup-comfyui-macos.sh
 
 setup-comfyui-model: ## Explicitly download and checksum-verify FLUX.1 Schnell FP8 (~17.2 GB)
-	@$(ZONE_COMPOSE) $(VPN_PROFILES) --profile comfyui-model-setup run --rm comfyui-model-setup \
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
@@ -54,7 +49,7 @@ setup-comfyui-model: ## Explicitly download and checksum-verify FLUX.1 Schnell F
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
 setup-comfyui-video-model: ## Explicitly download Wan 2.2 TI2V 5B video weights (~16.9 GB)
-	@$(ZONE_COMPOSE) $(VPN_PROFILES) --profile comfyui-model-setup run --rm comfyui-model-setup \
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
@@ -62,7 +57,7 @@ setup-comfyui-video-model: ## Explicitly download Wan 2.2 TI2V 5B video weights 
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
 verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-256
-	@$(ZONE_COMPOSE) $(VPN_PROFILES) --profile comfyui-model-setup run --rm comfyui-model-setup \
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
@@ -70,7 +65,7 @@ verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-25
 		--verify-only
 
 verify-comfyui-video-model: ## Verify the installed Wan 2.2 TI2V 5B size and SHA-256
-	@$(ZONE_COMPOSE) $(VPN_PROFILES) --profile comfyui-model-setup run --rm comfyui-model-setup \
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
@@ -93,11 +88,12 @@ validate: ## Validate configuration
 	@if [ -f .env ] && [ -f auth/users.htpasswd ]; then \
 		echo "$(GREEN)✓ .env file exists$(NC)"; \
 		echo "$(GREEN)✓ auth file exists$(NC)"; \
-		$(DOCKER_COMPOSE) config --quiet && echo "$(GREEN)✓ Docker Compose config is valid$(NC)" || echo "$(RED)✗ Docker Compose config is invalid$(NC)"; \
-		$(COMPOSE_VPN) --profile vpn --profile monitoring --profile bundled-ollama --profile bundled-comfyui --profile comfyui-model-setup config --quiet \
-			&& echo "$(GREEN)✓ VPN Compose overlay is valid$(NC)" || echo "$(RED)✗ VPN Compose overlay is invalid$(NC)"; \
+		$(COMPOSE) --replace-profiles= config --quiet && echo "$(GREEN)✓ Docker Compose config is valid$(NC)" || echo "$(RED)✗ Docker Compose config is invalid$(NC)"; \
+		$(COMPOSE) --replace-profiles=dev,vpn,monitoring,bundled-ollama,bundled-comfyui,comfyui-model-setup config --quiet \
+			&& echo "$(GREEN)✓ Combined Compose profiles are valid$(NC)" || echo "$(RED)✗ Combined Compose profiles are invalid$(NC)"; \
 		sh scripts/test-model-proxy.sh; \
 		sh scripts/test-vpn-compose.sh; \
+		sh scripts/test-compose-profiles.sh; \
 	else \
 		echo "$(RED)✗ Missing .env or auth/users.htpasswd. Run 'make setup' first.$(NC)"; \
 		exit 1; \
@@ -107,61 +103,58 @@ validate: ## Validate configuration
 
 build: ## Build all services
 	@echo "$(BLUE)Building services...$(NC)"
-	$(DOCKER_COMPOSE) build
+	$(COMPOSE) build
 	@echo "$(GREEN)Services built!$(NC)"
 
-up: ## Start all services (without VPN or monitoring)
-	@echo "$(GREEN)Starting services...$(NC)"
-	@sh scripts/configure-model-proxy.sh .env direct
-	MODEL_SEARCH_PROXY_URL= TOOL_RUNNER_PROXY_URL= ZONE_VPN= $(DOCKER_COMPOSE) -f docker-compose.yml up -d
+up: ## Start services. Combine with PROFILES=dev,vpn,monitoring
+ifeq ($(origin PROFILES),command line)
+	@echo "$(GREEN)Starting services ($(PROFILES))...$(NC)"
+	@$(COMPOSE) persist "$(PROFILES)" >/dev/null
+	@$(COMPOSE) --replace-profiles="$(PROFILES)" up -d
+else ifeq ($(origin COMPOSE_PROFILES),environment)
+	@echo "$(GREEN)Starting services ($(COMPOSE_PROFILES))...$(NC)"
+	@$(COMPOSE) persist "$(COMPOSE_PROFILES)" >/dev/null
+	@$(COMPOSE) --replace-profiles="$(COMPOSE_PROFILES)" up -d
+else
+	@echo "$(GREEN)Starting core services...$(NC)"
+	@$(COMPOSE) persist "" >/dev/null
+	@$(COMPOSE) --replace-profiles= up -d
+	@echo "$(YELLOW)Optional profiles off. Combine with: make up PROFILES=dev,vpn,monitoring$(NC)"
+endif
 	@echo "$(GREEN)Services started! Check status with: make ps$(NC)"
-	@echo "$(YELLOW)Note: VPN not enabled. For a full-tunnel VPN launch, use: make up-vpn$(NC)"
 
-up-vpn: ## Start all services with all internet traffic through the VPN
-	@echo "$(GREEN)Starting services with VPN...$(NC)"
-	@sh scripts/configure-model-proxy.sh
-	MODEL_SEARCH_PROXY_URL=http://gluetun:8888 TOOL_RUNNER_PROXY_URL=http://gluetun:8888 ZONE_VPN=1 \
-		$(COMPOSE_VPN) --profile vpn up -d
-	@echo "$(GREEN)Services started with VPN! All stack internet traffic uses the tunnel.$(NC)"
+up-vpn: ## Start with full-tunnel VPN
+	@$(MAKE) up PROFILES=vpn
 
-up-monitoring: ## Start all services with monitoring (Prometheus + Grafana)
-	@echo "$(GREEN)Starting services with monitoring...$(NC)"
-	$(ZONE_COMPOSE) $(VPN_PROFILES) --profile monitoring up -d
-	@echo "$(GREEN)Services started with monitoring! Check status with: make ps$(NC)"
-	@echo "$(BLUE)Grafana: http://grafana.$${DOMAIN_HOST_WEBUI:-localhost}$(NC)"
-	@echo "$(BLUE)Prometheus: http://prometheus.$${DOMAIN_HOST_WEBUI:-localhost}$(NC)"
+up-monitoring: ## Start with Prometheus and Grafana
+	@$(MAKE) up PROFILES=monitoring
 
 up-comfyui: verify-comfyui-model ## Start the bundled NVIDIA ComfyUI runtime
 	@echo "$(GREEN)Starting bundled NVIDIA ComfyUI...$(NC)"
-	$(ZONE_COMPOSE) $(VPN_PROFILES) --profile bundled-comfyui up -d comfyui
+	$(COMPOSE) --profile bundled-comfyui up -d comfyui
 
-up-all: ## Start all services with VPN and monitoring
-	@echo "$(GREEN)Starting all services (VPN + monitoring)...$(NC)"
-	@sh scripts/configure-model-proxy.sh
-	MODEL_SEARCH_PROXY_URL=http://gluetun:8888 TOOL_RUNNER_PROXY_URL=http://gluetun:8888 ZONE_VPN=1 \
-		$(COMPOSE_VPN) --profile vpn --profile monitoring up -d
-	@echo "$(GREEN)All services started! Check status with: make ps$(NC)"
+up-all: ## Start with VPN and monitoring
+	@$(MAKE) up PROFILES=vpn,monitoring
 
 down: ## Stop all services
 	@echo "$(YELLOW)Stopping services...$(NC)"
-	$(COMPOSE_DEV) --profile vpn --profile monitoring \
-		--profile bundled-comfyui --profile comfyui-model-setup down
+	$(COMPOSE) --all-overlays down
 
 restart: ## Restart all services
 	@echo "$(YELLOW)Restarting services...$(NC)"
-	$(ZONE_COMPOSE) $(VPN_PROFILES) restart
+	$(COMPOSE) restart
 
 ps: ## Show service status
-	@$(ZONE_COMPOSE) --profile vpn --profile monitoring ps
+	@$(COMPOSE) --all-overlays ps
 
 logs: ## Show recent logs (non-following)
-	@$(ZONE_COMPOSE) logs --tail=100
+	@$(COMPOSE) logs --tail=100
 
 logs-follow: ## Follow logs from all services
-	@$(ZONE_COMPOSE) logs -f
+	@$(COMPOSE) logs -f
 
 logs-service: ## Follow logs for a specific service (usage: make logs-service SERVICE=ollama)
-	@$(ZONE_COMPOSE) logs -f $(SERVICE)
+	@$(COMPOSE) logs -f $(SERVICE)
 
 ##@ Kind + Tilt (Local Kubernetes)
 
@@ -201,8 +194,8 @@ helm-lint: ## Lint and render Helm charts
 
 health: ## Check health status of all services
 	@echo "$(BLUE)Service Health Status:$(NC)"
-	@$(ZONE_COMPOSE) --profile vpn --profile monitoring ps --format json | jq -r '.[] | "\(.Name): \(.Health)"' 2>/dev/null || \
-	$(ZONE_COMPOSE) --profile vpn --profile monitoring ps | grep -E '(Up|Exited|Restarting)'
+	@$(COMPOSE) --all-overlays ps --format json | jq -r '.[] | "\(.Name): \(.Health)"' 2>/dev/null || \
+	$(COMPOSE) --all-overlays ps | grep -E '(Up|Exited|Restarting)'
 
 check: health ## Alias for health check
 
@@ -272,7 +265,7 @@ db-reset: ## DANGER: Reset database (requires confirmation)
 
 clean: ## Stop services and remove containers (keeps volumes)
 	@echo "$(YELLOW)Cleaning up containers...$(NC)"
-	$(COMPOSE_DEV) --profile vpn --profile monitoring down --remove-orphans
+	$(COMPOSE) --all-overlays down --remove-orphans
 	@echo "$(GREEN)Cleanup complete (volumes preserved)$(NC)"
 
 clean-volumes: ## DANGER: Remove all data volumes (requires confirmation)
@@ -280,7 +273,7 @@ clean-volumes: ## DANGER: Remove all data volumes (requires confirmation)
 	@read -p "Are you sure? Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" = "yes" ]; then \
 		echo "$(RED)Removing volumes...$(NC)"; \
-		$(COMPOSE_DEV) --profile vpn --profile monitoring down -v; \
+		$(COMPOSE) --all-overlays down -v; \
 		echo "$(RED)All data deleted!$(NC)"; \
 	else \
 		echo "$(GREEN)Cancelled.$(NC)"; \
@@ -332,10 +325,17 @@ restore: ## Restore from backup (usage: make restore BACKUP=backups/zone_backup_
 
 ##@ Development
 
-dev: ## Start with Docker hot reload (Vite HMR + cargo-watch)
-	@echo "$(BLUE)Starting development stack with hot reload...$(NC)"
+dev: ## Hot reload. Combine with PROFILES=vpn,monitoring
 	@echo "$(GREEN)Console: http://localhost:3001$(NC)"
-	$(COMPOSE_DEV) up
+ifeq ($(origin PROFILES),command line)
+	@profiles=$$($(COMPOSE) persist --ensure dev "$(PROFILES)"); \
+	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)"; \
+	 $(COMPOSE) --replace-profiles="$$profiles" up --build
+else
+	@profiles=$$($(COMPOSE) persist --ensure dev); \
+	 echo "$(BLUE)Starting development stack ($$profiles)...$(NC)"; \
+	 $(COMPOSE) --replace-profiles="$$profiles" up --build
+endif
 
 dev-console: ## Start console frontend in development mode
 	@echo "$(BLUE)Starting console frontend dev server...$(NC)"
@@ -343,16 +343,16 @@ dev-console: ## Start console frontend in development mode
 
 rebuild: ## Rebuild and restart all services
 	@echo "$(BLUE)Rebuilding services...$(NC)"
-	$(ZONE_COMPOSE) $(VPN_PROFILES) up -d --build --force-recreate
+	$(COMPOSE) up -d --build --force-recreate
 
 rebuild-manager: ## Rebuild only manager and console services
 	@echo "$(BLUE)Rebuilding manager and console...$(NC)"
-	$(ZONE_COMPOSE) $(VPN_PROFILES) up -d --build --force-recreate manager console
+	$(COMPOSE) up -d --build --force-recreate manager console
 
 update: ## Pull latest images and restart
 	@echo "$(BLUE)Updating Docker images...$(NC)"
-	$(ZONE_COMPOSE) $(VPN_PROFILES) pull
-	$(ZONE_COMPOSE) $(VPN_PROFILES) up -d --remove-orphans
+	$(COMPOSE) pull
+	$(COMPOSE) up -d --remove-orphans
 	@echo "$(GREEN)Update complete!$(NC)"
 
 ##@ Shell Access

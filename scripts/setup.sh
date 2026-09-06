@@ -355,7 +355,7 @@ print_next_steps() {
     echo -e ""
     echo -e "  4. Start host Ollama (default engine), then the stack:"
     echo -e "     ${BLUE}ollama serve${NC}"
-    echo -e "     ${BLUE}make up${NC} or ${BLUE}docker compose up -d${NC}"
+    echo -e "     ${BLUE}make up${NC} or ${BLUE}make up PROFILES=dev,vpn,monitoring${NC}"
     echo -e ""
     echo -e "  5. Check logs:"
     echo -e "     ${BLUE}make logs${NC} or ${BLUE}docker compose logs -f${NC}"

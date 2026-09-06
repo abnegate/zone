@@ -1,14 +1,15 @@
-# Full-tunnel overlay used when VPN is on (`make up-vpn`, ZONE_VPN=1).
-# Internet-facing app containers share Gluetun's network namespace so every
-# packet uses the tunnel and Gluetun's kill switch. Traefik, Postgres, Valkey,
-# Prometheus, and the console stay on Docker networks for inbound UI and
-# local service discovery. Gluetun DNS is DoT-only, and Docker forbids
-# extra_hosts on network_mode=service, so VPN-attached apps use the pinned
-# internal addresses. Requires Compose v2.24+
-# (`!reset` / `!override`).
+# Full-tunnel overlay selected by the `vpn` profile (`make up-vpn`,
+# `make up PROFILES=vpn`, ZONE_VPN=1). Internet-facing app containers share
+# Gluetun's network namespace so every packet uses the tunnel and Gluetun's
+# kill switch. Traefik, Postgres, Valkey, Prometheus, and the console stay on
+# Docker networks for inbound UI and local service discovery. Gluetun DNS is
+# DoT-only, and Docker forbids extra_hosts on network_mode=service, so
+# VPN-attached apps use the pinned internal addresses. Requires Compose v2.24+
+# (`!reset` / `!override`). Combinable with `dev` and `monitoring`.
 #
 # Usage:
-#   docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
+#   make up PROFILES=dev,vpn,monitoring
+#   ./scripts/compose.sh --profile vpn up -d
 
 services:
   gluetun:

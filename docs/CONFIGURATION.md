@@ -231,18 +231,27 @@ details, and native macOS / bundled NVIDIA instructions.
 
 ### `ZONE_VPN`
 - **Default**: empty
-- **Description**: Set to `1` by `make up-vpn`. Makefile targets then include
-  `docker-compose.vpn.yml`, which attaches internet-facing services to Gluetun's
-  network namespace so all of their traffic uses the tunnel.
+- **Description**: Set to `1` when the `vpn` Compose profile is active. Kept in
+  sync with `COMPOSE_PROFILES` so internet-facing services attach to Gluetun's
+  network namespace and all of their traffic uses the tunnel.
 - **VPN value**: `1`
 
-`make up-vpn` and `make up-all` save `ZONE_VPN=1` and both proxy URLs in `.env`
-so rebuilds retain full-tunnel routing; `make up` clears them for a direct
-launch. The overlay is the network sandbox. Proxy URLs remain as
-belt-and-suspenders for HTTP clients and Traefik ACME. A configured proxy does
-not silently fall back to a direct connection when unavailable. The runner
-applies its proxy settings after command and MCP environment overlays. Loopback
-and internal service names bypass the proxy.
+### `COMPOSE_PROFILES`
+- **Default**: empty (core services only)
+- **Description**: Comma-separated Compose profiles. Combine any of `dev`,
+  `vpn`, `monitoring`, `bundled-ollama`, `bundled-comfyui`. Overlay files for
+  `dev` and `vpn` are selected automatically.
+- **Example**: `dev,vpn,monitoring`
+
+`make up PROFILES=dev,vpn,monitoring` (or `./scripts/compose.sh --profile dev
+--profile vpn --profile monitoring up`) saves `COMPOSE_PROFILES`, `COMPOSE_FILE`,
+`ZONE_VPN`, and both proxy URLs in `.env` so rebuilds keep the same stack.
+`make up` with no `PROFILES` starts core services only and clears them. The
+VPN overlay is the network sandbox. Proxy URLs remain as belt-and-suspenders
+for HTTP clients and Traefik ACME. A configured proxy does not silently fall
+back to a direct connection when unavailable. The runner applies its proxy
+settings after command and MCP environment overlays. Loopback and internal
+service names bypass the proxy.
 
 ### Manager / zone-server chat
 
@@ -473,6 +482,7 @@ make up-vpn
 
 Need to find a specific config? Quick lookup:
 
+- **Compose**: COMPOSE_PROFILES, ZONE_VPN
 - **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE
 - **Docker Versions**: DOCKER_VERSION_TRAEFIK, DOCKER_VERSION_OLLAMA, DOCKER_VERSION_POSTGRES, DOCKER_VERSION_LITELLM, DOCKER_VERSION_GLUETUN, DOCKER_VERSION_SEARXNG, COMFYUI_COMMIT
 - **Domains**: DOMAIN_HOST_WEBUI

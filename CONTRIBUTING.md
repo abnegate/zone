@@ -73,14 +73,15 @@ Be respectful, professional, and constructive in all interactions. We aim to mai
 
    ```bash
    make dev
-   # or
-   docker compose up
+   # or with VPN and Prometheus/Grafana:
+   make dev PROFILES=vpn,monitoring
    ```
 
 ### Development Tips
 
 - **Expose services locally**: Uncomment port mappings in `docker-compose.override.yml`
 - **Disable VPN**: Use `make up` (not `make up-vpn`) for faster local testing
+- **Combine profiles**: `make up PROFILES=dev,vpn,monitoring`
 - **Use smaller models**: Set `OLLAMA_MODEL_FAST=llama3.2:3b` for faster startup
 - **Enable debug logging**: Add `--debug` flag to LiteLLM command
 
@@ -304,7 +305,8 @@ zone/
 ├── .env.example              # Environment configuration template
 ├── .gitignore                # Git ignore rules
 ├── docker-compose.yml        # Main service definitions
-├── docker-compose.override.yml.example  # Override examples
+├── docker-compose.dev.yml    # Hot-reload overlay (`dev` profile)
+├── docker-compose.vpn.yml    # Full-tunnel overlay (`vpn` profile)
 ├── Makefile                  # Common tasks
 ├── README.md                 # Main documentation
 ├── CONTRIBUTING.md           # This file

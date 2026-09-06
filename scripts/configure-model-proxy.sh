@@ -23,7 +23,7 @@ if [ ! -f "$file" ]; then
 fi
 
 # Keep the selection across Compose rebuilds and Manager recreation.
-# ZONE_VPN=1 also selects docker-compose.vpn.yml (full tunnel).
+# ZONE_VPN=1 is kept in sync with the vpn Compose profile.
 temporary=$(mktemp "${file}.XXXXXX")
 trap 'rm -f "$temporary"' EXIT HUP INT TERM
 awk -v proxy="$proxy" -v vpn="$vpn" '

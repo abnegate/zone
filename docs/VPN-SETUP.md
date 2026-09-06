@@ -10,10 +10,9 @@ The Zone AI stack works perfectly **without VPN**. You only need VPN if you want
 ## Running Without VPN (Default)
 
 ```bash
-sh scripts/configure-model-proxy.sh .env direct
-MODEL_SEARCH_PROXY_URL= TOOL_RUNNER_PROXY_URL= ZONE_VPN= docker compose -f docker-compose.yml up -d
-# or
 make up
+# or
+./scripts/compose.sh --replace-profiles= up -d
 ```
 
 **What works**: Everything except web search
@@ -37,6 +36,8 @@ VPN_OPENVPN_PASSWORD=your_surfshark_password
 
 ```bash
 make up-vpn
+# or combine with hot reload and Prometheus/Grafana:
+make up PROFILES=dev,vpn,monitoring
 ```
 
 The VPN launch writes `ZONE_VPN=1`, `MODEL_SEARCH_PROXY_URL=http://gluetun:8888`,
@@ -54,14 +55,14 @@ Gluetun DoT cannot resolve Docker DNS names, so the overlay points Manager at
 loopback. Traefik stays on the Docker network and keeps `http://gluetun:8888`.
 
 Postgres, Valkey, Prometheus, and the console stay on Docker networks so the
-local UI and databases keep working. Rebuilds preserve `ZONE_VPN=1`, so later
-`make rebuild`, `make up-comfyui`, and model-download targets keep the overlay.
+local UI and databases keep working. Rebuilds preserve `COMPOSE_PROFILES` and
+`ZONE_VPN=1`, so later `make rebuild`, `make up-comfyui`, and model-download
+targets keep the overlay.
 
 For direct Compose usage:
 
 ```bash
-sh scripts/configure-model-proxy.sh .env vpn
-docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn up -d
+./scripts/compose.sh --profile vpn up -d
 ```
 
 The overlay requires Docker Compose v2.24+ (`!reset` / `!override`).
@@ -181,7 +182,7 @@ Manager can still talk to Postgres and Valkey.
 
 ```bash
 # Check if SearXNG is running
-docker compose -f docker-compose.yml -f docker-compose.vpn.yml --profile vpn ps
+./scripts/compose.sh --profile vpn ps
 
 # Check if Gluetun is healthy
 docker inspect gluetun | grep Health
@@ -194,12 +195,9 @@ docker exec gluetun wget -qO- ifconfig.me
 
 ```bash
 # Stop only VPN services
-docker compose --profile vpn down
+./scripts/compose.sh --profile vpn down
 
 # Start without VPN
-sh scripts/configure-model-proxy.sh .env direct
-MODEL_SEARCH_PROXY_URL= TOOL_RUNNER_PROXY_URL= ZONE_VPN= docker compose -f docker-compose.yml up -d
-# or
 make down && make up
 ```
 

@@ -1,5 +1,7 @@
-# Development overrides with hot reload for Rust and Vite
-# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# Development overlay (hot reload for Rust and Vite). Selected by the `dev`
+# profile and combinable with vpn and monitoring:
+#   make up PROFILES=dev,vpn,monitoring
+#   ./scripts/compose.sh --profile dev --profile vpn --profile monitoring up --build
 
 services:
   postgres:

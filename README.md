@@ -102,7 +102,7 @@ To run Ollama inside Docker instead (Linux with NVIDIA GPU passthrough):
 ```bash
 # in .env
 OLLAMA_BASE_URL=http://ollama:11434
-docker compose --profile bundled-ollama up -d
+./scripts/compose.sh --profile bundled-ollama up -d
 ```
 
 ### Post-Installation
@@ -139,8 +139,19 @@ docker compose --profile bundled-ollama up -d
 
 | Profile | Services | Description |
 |---------|----------|-------------|
+| `dev` | Manager + console overlays | Hot reload (`docker-compose.dev.yml`) |
 | `vpn` | Gluetun, SearXNG | Full-tunnel VPN for stack internet traffic |
 | `monitoring` | Prometheus, Grafana | Metrics and dashboards |
+| `bundled-ollama` | Ollama | In-compose engine (Linux NVIDIA / CPU) |
+| `bundled-comfyui` | ComfyUI | Bundled NVIDIA image/video runtime |
+
+Combine any of them in one command. Overlay files for `dev` and `vpn` are selected automatically:
+
+```bash
+make up PROFILES=dev,vpn,monitoring
+# or
+./scripts/compose.sh --profile dev --profile vpn --profile monitoring up -d
+```
 
 ## Configuration
 
@@ -165,6 +176,8 @@ To enable the VPN:
 # Add VPN credentials to .env
 # Saves ZONE_VPN=1, attaches services to Gluetun, and starts the VPN profile
 make up-vpn
+# or combine with other profiles:
+make up PROFILES=dev,vpn,monitoring
 ```
 
 Supported providers: Surfshark, NordVPN, ExpressVPN, ProtonVPN, Mullvad, and more. See [Gluetun Wiki](https://github.com/qdm12/gluetun-wiki).
@@ -182,7 +195,9 @@ The shared `DOMAIN_HOST_WEBUI` base-domain setting remains compatible.
 Enable comprehensive monitoring with Grafana dashboards:
 
 ```bash
-docker compose --profile monitoring up -d
+make up PROFILES=monitoring
+# or
+./scripts/compose.sh --profile monitoring up -d
 ```
 
 Pre-built dashboards for:
@@ -209,16 +224,18 @@ make setup-auth        # Generate basic auth
 make validate          # Validate configuration
 
 # Operations
-make up                # Start all services
+make up                # Start core services
 make down              # Stop all services
 make restart           # Restart all services
 make logs              # Show recent logs
 make logs-follow       # Follow logs
 make ps                # Show service status
 
-# With Profiles
+# With Profiles (combine any: dev,vpn,monitoring)
+make up PROFILES=dev,vpn,monitoring
 make up-vpn            # Start with full-tunnel VPN
-make up-monitoring     # Start with monitoring
+make up-monitoring     # Start with Prometheus + Grafana
+make up-all            # VPN + monitoring
 
 # Health & Monitoring
 make health            # Check service health

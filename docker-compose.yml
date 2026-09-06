@@ -1,3 +1,8 @@
+# Optional profiles: vpn, monitoring, bundled-ollama, bundled-comfyui,
+# comfyui-model-setup. The `dev` profile selects docker-compose.dev.yml.
+# Combine with:
+#   make up PROFILES=dev,vpn,monitoring
+#   ./scripts/compose.sh --profile dev --profile vpn --profile monitoring up
 services:
   traefik:
     image: traefik:${DOCKER_VERSION_TRAEFIK:-v3.7.12}@${DOCKER_DIGEST_TRAEFIK:-sha256:9c2a54d87f76f5c2f5f2682c68394af92fb12c0a2686798d6462a3f84bd78eaf}
