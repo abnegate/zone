@@ -199,6 +199,13 @@ async fn active_turn_compacts_consumed_pairs_and_reuses_summary_without_recursiv
             .content
             .as_ref()
             .unwrap()
+            .contains("Canonical tool evidence references: [\"result-a\"]")
+    );
+    assert!(
+        prepared.messages[1]
+            .content
+            .as_ref()
+            .unwrap()
             .contains("untrusted data")
     );
     assert!(
@@ -897,4 +904,55 @@ async fn fenced_structured_summary_is_validated_with_deterministic_sampling() {
         assert_eq!(request["temperature"], 0.0);
     }
     assert_eq!(provider.client.config().temperature, 0.7);
+}
+
+#[tokio::test]
+async fn eighty_text_rows_compact_at_4096_without_spending_context_on_unretrievable_ids() {
+    let provider = provider(|_| response(structured()), false).await;
+    let mut history = vec![entry(
+        "system",
+        Message::system("Production chat instruction. ".repeat(45)),
+        true,
+        true,
+    )];
+    for index in 0..80 {
+        history.push(entry(
+            &format!("legacy:{}", uuid::Uuid::new_v4()),
+            Message::user(format!(
+                "Historical row {index}: {}",
+                "important detail ".repeat(4)
+            )),
+            false,
+            true,
+        ));
+    }
+    history.push(entry(
+        "current",
+        Message::user("Continue the actual request"),
+        true,
+        false,
+    ));
+    let prepared = context::prepare(
+        &provider.client,
+        "test",
+        &history,
+        None,
+        &policy(4096),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        prepared.summary.as_ref().unwrap().coverage.entries.len(),
+        80
+    );
+    assert!(prepared.usage.used < policy(4096).threshold().unwrap());
+    assert!(
+        !prepared.messages[1]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("legacy:")
+    );
+    context::validate(&history, prepared.summary.as_ref()).unwrap();
 }
