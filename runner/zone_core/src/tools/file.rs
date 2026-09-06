@@ -8,6 +8,11 @@ use std::path::Path;
 
 use super::{Tool, ToolContext, ToolError, ToolResult};
 
+// Prompt budget; matches `read_repository_file` paging in zone_server.
+const FILE_PAGE_CHARS: usize = 8_000;
+const LIST_FILES_CAP: usize = 200;
+const SEARCH_MAX_RESULTS: usize = 100;
+
 /// Read a file's contents
 pub struct ReadFileTool;
 
@@ -18,6 +23,10 @@ struct ReadFileParams {
     start_line: Option<usize>,
     #[serde(default)]
     end_line: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[async_trait]
@@ -27,7 +36,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file. Optionally specify start_line and end_line to read a specific range."
+        "Read the contents of a file. Optionally specify start_line and end_line for a line range, and offset and limit to page by character."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -45,6 +54,14 @@ impl Tool for ReadFileTool {
                 "end_line": {
                     "type": "integer",
                     "description": "End line (1-indexed, optional)"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Unicode character offset to start from (default 0)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum characters to return (default 8000, max 8000)"
                 }
             },
             "required": ["path"]
@@ -83,8 +100,7 @@ impl Tool for ReadFileTool {
         let content = fs::read_to_string(&canonical)
             .map_err(|e| ToolError::Execution(format!("Cannot read file: {}", e)))?;
 
-        // Apply line filtering if specified
-        let output = if params.start_line.is_some() || params.end_line.is_some() {
+        let selected = if params.start_line.is_some() || params.end_line.is_some() {
             let lines: Vec<&str> = content.lines().collect();
             let start = params.start_line.unwrap_or(1).saturating_sub(1);
             let end = params.end_line.unwrap_or(lines.len()).min(lines.len());
@@ -94,7 +110,43 @@ impl Tool for ReadFileTool {
             content
         };
 
-        Ok(ToolResult::success(output))
+        let offset = params.offset.unwrap_or(0);
+        let limit = params.limit.unwrap_or(FILE_PAGE_CHARS);
+        let (page, total, next) = page_text(&selected, offset, limit)?;
+        Ok(ToolResult::success(format_file_page(
+            page, total, offset, next,
+        )))
+    }
+}
+
+fn page_text(
+    content: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<(String, usize, Option<usize>), ToolError> {
+    let total = content.chars().count();
+    if limit == 0 || offset > total {
+        return Err(ToolError::InvalidParams(
+            "File page offset or length is invalid.".into(),
+        ));
+    }
+    let count = limit.min(FILE_PAGE_CHARS).min(total.saturating_sub(offset));
+    let page: String = content.chars().skip(offset).take(count).collect();
+    let end = offset + count;
+    Ok((page, total, (end < total).then_some(end)))
+}
+
+fn format_file_page(page: String, total: usize, offset: usize, next: Option<usize>) -> String {
+    match next {
+        Some(next) => format!("{page}\n[truncated; total={total} offset={offset} next={next}]"),
+        None => page,
+    }
+}
+
+fn push_listing(files: &mut Vec<String>, total: &mut usize, name: String) {
+    *total += 1;
+    if files.len() < LIST_FILES_CAP {
+        files.push(name);
     }
 }
 
@@ -479,6 +531,7 @@ impl Tool for ListFilesTool {
         }
 
         let mut files = Vec::new();
+        let mut total = 0;
 
         fn collect_files(
             dir: &Path,
@@ -486,6 +539,7 @@ impl Tool for ListFilesTool {
             recursive: bool,
             pattern: &Option<String>,
             files: &mut Vec<String>,
+            total: &mut usize,
         ) -> Result<(), ToolError> {
             let entries = fs::read_dir(dir)
                 .map_err(|e| ToolError::Execution(format!("Cannot read directory: {}", e)))?;
@@ -498,14 +552,13 @@ impl Tool for ListFilesTool {
 
                 if path.is_dir() {
                     if recursive {
-                        collect_files(&path, base, recursive, pattern, files)?;
+                        collect_files(&path, base, recursive, pattern, files, total)?;
                     } else {
-                        files.push(format!("{}/", relative.display()));
+                        push_listing(files, total, format!("{}/", relative.display()));
                     }
                 } else {
                     let name = relative.display().to_string();
 
-                    // Simple glob matching
                     let matches = if let Some(pat) = pattern {
                         if let Some(suffix) = pat.strip_prefix('*') {
                             name.ends_with(suffix)
@@ -519,7 +572,7 @@ impl Tool for ListFilesTool {
                     };
 
                     if matches {
-                        files.push(name);
+                        push_listing(files, total, name);
                     }
                 }
             }
@@ -533,6 +586,7 @@ impl Tool for ListFilesTool {
             params.recursive,
             &params.pattern,
             &mut files,
+            &mut total,
         )?;
 
         files.sort();
@@ -540,7 +594,11 @@ impl Tool for ListFilesTool {
         if files.is_empty() {
             Ok(ToolResult::success("No files found"))
         } else {
-            Ok(ToolResult::success(files.join("\n")))
+            let mut output = files.join("\n");
+            if total > files.len() {
+                output.push_str(&format!("\n[truncated; omitted={}]", total - files.len()));
+            }
+            Ok(ToolResult::success(output))
         }
     }
 }
@@ -586,7 +644,7 @@ impl Tool for SearchCodeTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return"
+                    "description": "Maximum number of results to return (default 100, max 100)"
                 }
             },
             "required": ["pattern"]
@@ -602,7 +660,10 @@ impl Tool for SearchCodeTool {
         } else {
             context.cwd.clone()
         };
-        let max_results = params.max_results.unwrap_or(100);
+        let max_results = params
+            .max_results
+            .unwrap_or(SEARCH_MAX_RESULTS)
+            .min(SEARCH_MAX_RESULTS);
 
         if let Some(result) = search_ripgrep(&params, &search_path, max_results).await {
             return Ok(result);
@@ -774,6 +835,9 @@ async fn search_ripgrep(
     if !params.case_sensitive {
         command.arg("-i");
     }
+    if max_results > 0 {
+        command.arg("-m").arg(max_results.to_string());
+    }
     command.arg("--").arg(&params.pattern).arg(search_path);
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::null());
@@ -898,6 +962,83 @@ mod tests {
         assert!(output.contains("Line 3"));
         assert!(!output.contains("Line 1"));
         assert!(!output.contains("Line 4"));
+    }
+
+    #[test]
+    fn page_text_caps_and_continues_by_character() {
+        let content = "α".repeat(10);
+        let (page, total, next) = page_text(&content, 0, 4).unwrap();
+        assert_eq!(page, "αααα");
+        assert_eq!(total, 10);
+        assert_eq!(next, Some(4));
+        let (rest, _, next) = page_text(&content, 4, FILE_PAGE_CHARS).unwrap();
+        assert_eq!(rest, "α".repeat(6));
+        assert_eq!(next, None);
+        assert!(page_text(&content, 0, 0).is_err());
+        assert!(page_text(&content, 11, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn read_file_pages_large_content_and_continues() {
+        let dir = tempdir().unwrap();
+        let total = FILE_PAGE_CHARS + 123;
+        let content = "α".repeat(total);
+        fs::write(dir.path().join("large.txt"), &content).unwrap();
+
+        let tool = ReadFileTool;
+        let context = create_test_context(dir.path());
+
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "large.txt", "limit": 1_000_000}),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let output = result.output.unwrap();
+        let (page, footer) = output.rsplit_once('\n').expect("truncation footer");
+        assert_eq!(page.chars().count(), FILE_PAGE_CHARS);
+        assert_eq!(
+            footer,
+            format!("[truncated; total={total} offset=0 next={FILE_PAGE_CHARS}]")
+        );
+
+        let continued = tool
+            .execute(
+                serde_json::json!({"path": "large.txt", "offset": FILE_PAGE_CHARS}),
+                &context,
+            )
+            .await
+            .unwrap();
+        let rest = continued.output.unwrap();
+        assert!(!rest.contains("[truncated;"));
+        assert_eq!(rest, "α".repeat(123));
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_invalid_page() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("short.txt"), "hello").unwrap();
+        let tool = ReadFileTool;
+        let context = create_test_context(dir.path());
+
+        let limit_zero = tool
+            .execute(
+                serde_json::json!({"path": "short.txt", "limit": 0}),
+                &context,
+            )
+            .await;
+        assert!(limit_zero.unwrap_err().to_string().contains("invalid"));
+
+        let past_end = tool
+            .execute(
+                serde_json::json!({"path": "short.txt", "offset": 6}),
+                &context,
+            )
+            .await;
+        assert!(past_end.unwrap_err().to_string().contains("invalid"));
     }
 
     #[tokio::test]
@@ -1113,6 +1254,35 @@ mod tests {
         assert!(!output.contains("file2.rs"));
     }
 
+    #[tokio::test]
+    async fn list_files_recursive_caps_output() {
+        let dir = tempdir().unwrap();
+        for i in 0..250 {
+            let nested = dir.path().join(format!("n{}/deep", i % 10));
+            fs::create_dir_all(&nested).unwrap();
+            fs::write(nested.join(format!("f{i}.txt")), "").unwrap();
+        }
+
+        let tool = ListFilesTool;
+        let context = create_test_context(dir.path());
+        let result = tool
+            .execute(
+                serde_json::json!({"path": ".", "recursive": true}),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let output = result.output.unwrap();
+        let paths: Vec<&str> = output
+            .lines()
+            .filter(|line| !line.starts_with('['))
+            .collect();
+        assert_eq!(paths.len(), LIST_FILES_CAP);
+        assert!(output.contains("[truncated; omitted=50]"), "{output}");
+    }
+
     #[test]
     fn test_search_code_tool_metadata() {
         let tool = SearchCodeTool;
@@ -1190,6 +1360,29 @@ mod tests {
         let output = result.output.unwrap();
         assert!(output.contains("truncated at 2 results"), "{output}");
         assert_eq!(output.matches("hit ").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_code_ignores_huge_max_results() {
+        let dir = tempdir().unwrap();
+        let mut content = String::new();
+        for i in 0..150 {
+            content.push_str(&format!("hit {i}\n"));
+        }
+        fs::write(dir.path().join("many.rs"), content).unwrap();
+        let tool = SearchCodeTool;
+        let context = create_test_context(dir.path());
+        let result = tool
+            .execute(
+                serde_json::json!({"pattern": "hit", "max_results": 1_000_000}),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        let output = result.output.unwrap();
+        assert!(output.contains("truncated at 100 results"), "{output}");
+        assert_eq!(output.matches("hit ").count(), SEARCH_MAX_RESULTS);
     }
 
     #[tokio::test]
