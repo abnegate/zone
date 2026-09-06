@@ -129,141 +129,354 @@ pub fn run_with_context(
     agentic: bool,
 ) -> impl Stream<Item = AgentEvent> {
     async_stream::stream! {
-        let AgentRun {llm,model,tools,budget,approval,..}=run;
-        let mut used=0usize;
-        let mut identifiers: BTreeSet<String>=context.entries.iter().flat_map(|entry|entry.message.tool_calls.iter().flatten().map(|call|call.id.clone())).collect();
-        let mut observations=BTreeMap::<(String,String),String>::new();
-        let mut failures=BTreeSet::new();
-        let mut finalizing=false;
-        let mut reason=None::<String>;
+        let AgentRun {
+            llm,
+            model,
+            tools,
+            budget,
+            approval,
+            ..
+        } = run;
+        let mut used = 0usize;
+        let mut identifiers: BTreeSet<String> = context
+            .entries
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .message
+                    .tool_calls
+                    .iter()
+                    .flatten()
+                    .map(|call| call.id.clone())
+            })
+            .collect();
+        let mut observations = BTreeMap::<(String, String), String>::new();
+        let mut failures = BTreeSet::new();
+        let mut finalizing = false;
+        let mut reason = None::<String>;
         for iteration in 0..=budget.max_iterations {
-            if agentic && iteration==budget.max_iterations {finalizing=true;reason=Some("The configured model-round budget was reached.".into());}
+            if agentic && iteration == budget.max_iterations {
+                finalizing = true;
+                reason = Some("The configured model-round budget was reached.".into());
+            }
             if finalizing {
-                let reason=reason.take().unwrap_or_else(||"Tool execution has ended for this turn.".into());
+                let reason = reason
+                    .take()
+                    .unwrap_or_else(|| "Tool execution has ended for this turn.".into());
                 yield AgentEvent::Finalizing(reason.clone());
                 context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system(format!("{reason} Answer the user in ordinary text using the evidence already available. Do not call more tools or emit function JSON. Explain any remaining uncertainty.")),preserve:true,consumed:true});
             }
-            let definitions=(agentic && !finalizing).then_some(tools.definitions());
-            let mut usage=context.usage(&model,definitions);
-            if usage.threshold.is_some_and(|threshold|usage.used>threshold) { usage.status=ContextStatus::Compacting; }
+            let definitions = (agentic && !finalizing).then_some(tools.definitions());
+            let mut usage = context.usage(&model, definitions);
+            if usage
+                .threshold
+                .is_some_and(|threshold| usage.used > threshold)
+            {
+                usage.status = ContextStatus::Compacting;
+            }
             yield AgentEvent::Context(usage);
-            let mut prepared=match context::prepare(&llm,&model,&context.entries,definitions,&context.policy,context.summary.as_ref()).await {
-                Ok(prepared)=>prepared,
-                Err(error)=>{
-                    let mut usage=context.usage(&model,definitions);usage.status=ContextStatus::Blocked;usage.reason=Some(error.to_string());
-                    yield AgentEvent::Context(usage);yield AgentEvent::Failed(error.to_string());return;
+            let mut prepared = match context::prepare(
+                &llm,
+                &model,
+                &context.entries,
+                definitions,
+                &context.policy,
+                context.summary.as_ref(),
+            )
+            .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let mut usage = context.usage(&model, definitions);
+                    usage.status = ContextStatus::Blocked;
+                    usage.reason = Some(error.to_string());
+                    yield AgentEvent::Context(usage);
+                    yield AgentEvent::Failed(error.to_string());
+                    return;
                 }
             };
-            if prepared.summary!=context.summary {
-                if let Some(summary)=&prepared.summary { yield AgentEvent::Checkpoint {previous:context.summary.clone(),summary:summary.clone()}; }
-                context.summary=prepared.summary.clone();
+            if prepared.summary != context.summary {
+                if let Some(summary) = &prepared.summary {
+                    yield AgentEvent::Checkpoint {
+                        previous: context.summary.clone(),
+                        summary: summary.clone(),
+                    };
+                }
+                context.summary = prepared.summary.clone();
             }
             context.decorate(&mut prepared.usage);
             yield AgentEvent::Context(prepared.usage);
-            if let Err(error)=context.transport(&mut prepared.messages).await {yield AgentEvent::Failed(error);return;}
-            let stream=match llm.chat_stream_with_options(&model,&prepared.messages,definitions,RequestOptions {reserved:context.policy.reserved}).await {
-                Ok(stream)=>stream,
-                Err(error)=>{
-                    if agentic && !finalizing && error.unsupported_tools() {
-                        finalizing=true;reason=Some("The model does not support callable tools. Use supplied search evidence where sufficient.".into());continue;
-                    }
-                    yield AgentEvent::Failed(format!("Failed to generate response: {error}"));return;
-                }
-            };
-            let consumed=context.consume(); if !consumed.is_empty() { yield AgentEvent::Consumed(consumed); }
-            futures::pin_mut!(stream);
-            let mut text=String::new();let mut streamed=0usize;let mut pending=ToolCallAccumulator::default();let mut images=Vec::new();
-            while let Some(chunk)=stream.next().await {
-                let chunk=match chunk {Ok(chunk)=>chunk,Err(error)=>{yield AgentEvent::Failed(format!("Stream error: {error}"));return;}};
-                if let Some(usage)=chunk.usage {yield AgentEvent::Usage(usage);}
-                let Some(choice)=chunk.choices.first() else {continue;};
-                if let Some(content)=&choice.delta.content {
-                    text.push_str(content);
-                    if (!agentic || pending.is_empty() && !might_be_tool_text(&text)) && streamed<text.len() {
-                        yield AgentEvent::Chunk(text[streamed..].to_string());streamed=text.len();
-                    }
-                }
-                for image in &choice.delta.generated_images {images.push(image.image_url.url.clone());yield AgentEvent::Image(image.image_url.url.clone());}
-                if let Some(deltas)=&choice.delta.tool_calls {pending.merge(deltas);}
-                // A usage-only SSE frame may follow finish_reason; drain through [DONE].
-            }
-            let mut requested=pending.finish();
-            let parsed=if agentic && !text.is_empty() {parse_text_tool_calls(&text,tools.names())} else {TextToolCalls::Prose};
-            let replay=match parsed {
-                TextToolCalls::Calls(calls)=>{if requested.is_empty(){requested=calls;}None},
-                TextToolCalls::Malformed if !requested.is_empty()=>None,
-                TextToolCalls::Malformed if !finalizing=>{
-                    context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system("The last reply contained a malformed tool call; no tools were executed. Emit valid callable-tool arguments or answer in ordinary prose."),preserve:true,consumed:true});continue;
-                }
-                TextToolCalls::Malformed=>{yield AgentEvent::Failed("The model could not finish without malformed tool calls.".into());return;}
-                TextToolCalls::Prose=>(!text.is_empty()).then(||text.clone()),
-            };
-            if !agentic || requested.is_empty() {
-                if text.trim().is_empty() && images.is_empty() {yield AgentEvent::Failed("The model returned an empty response. Try again or choose another model.".into());return;}
-                if streamed<text.len() {yield AgentEvent::Chunk(text[streamed..].into());}
-                let mut message=LlmMessage::assistant(text);message.images=images;
-                let entry=canonical(message,Vec::new());context.append(&entry);let id=entry.id.clone();yield AgentEvent::Canonical(entry);yield AgentEvent::Consumed(vec![id]);
+            if let Err(error) = context.transport(&mut prepared.messages).await {
+                yield AgentEvent::Failed(error);
                 return;
             }
-            if finalizing {yield AgentEvent::Failed("The model could not finish without requesting more tools.".into());return;}
-            unique_identifiers(&mut requested,&mut identifiers);
-            let signatures=requested.iter().map(signature).collect::<Vec<_>>();
-            let denied_repeat=signatures.iter().all(|signature|failures.contains(signature));
-            let mutations=requested.iter().filter(|call|tools.mutating(&call.function.name)).map(|call|call.id.clone()).collect();
-            let envelope=canonical(LlmMessage {role:LlmRole::Assistant,content:replay,name:None,tool_calls:Some(requested.clone()),tool_call_id:None,images,generated_images:Vec::new()},mutations);
-            context.append(&envelope);yield AgentEvent::Canonical(envelope);
-            let mut progress=false;
-            let mut requested=std::collections::VecDeque::from(requested);
-            while let Some(call)=requested.pop_front() {
-                if denied_repeat || used>=budget.max_tool_calls {
-                    finalizing=true;reason=Some(if denied_repeat {"Repeated failed calls made no progress."}else{"The configured tool-call budget was reached."}.into());
-                    let entry=canonical(LlmMessage::tool_result(&call.id,"Not executed: repeated failures or the configured tool budget require a final answer using existing evidence."),Vec::new());
-                    context.append(&entry);yield AgentEvent::Canonical(entry);continue;
+            let stream = match llm
+                .chat_stream_with_options(
+                    &model,
+                    &prepared.messages,
+                    definitions,
+                    RequestOptions {
+                        reserved: context.policy.reserved,
+                    },
+                )
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    if agentic && !finalizing && error.unsupported_tools() {
+                        finalizing = true;
+                        reason=Some("The model does not support callable tools. Use supplied search evidence where sufficient.".into());
+                        continue;
+                    }
+                    yield AgentEvent::Failed(format!("Failed to generate response: {error}"));
+                    return;
                 }
-                let mutation=tools.mutating(&call.function.name);
-                let mut batch=vec![call];
+            };
+            let consumed = context.consume();
+            if !consumed.is_empty() {
+                yield AgentEvent::Consumed(consumed);
+            }
+            futures::pin_mut!(stream);
+            let mut text = String::new();
+            let mut streamed = 0usize;
+            let mut pending = ToolCallAccumulator::default();
+            let mut images = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        yield AgentEvent::Failed(format!("Stream error: {error}"));
+                        return;
+                    }
+                };
+                if let Some(usage) = chunk.usage {
+                    yield AgentEvent::Usage(usage);
+                }
+                let Some(choice) = chunk.choices.first() else {
+                    continue;
+                };
+                if let Some(content) = &choice.delta.content {
+                    text.push_str(content);
+                    if (!agentic || pending.is_empty() && !might_be_tool_text(&text))
+                        && streamed < text.len()
+                    {
+                        yield AgentEvent::Chunk(text[streamed..].to_string());
+                        streamed = text.len();
+                    }
+                }
+                for image in &choice.delta.generated_images {
+                    images.push(image.image_url.url.clone());
+                    yield AgentEvent::Image(image.image_url.url.clone());
+                }
+                if let Some(deltas) = &choice.delta.tool_calls {
+                    pending.merge(deltas);
+                }
+                // A usage-only SSE frame may follow finish_reason; drain through [DONE].
+            }
+            let mut requested = pending.finish();
+            let parsed = if agentic && !text.is_empty() {
+                parse_text_tool_calls(&text, tools.names())
+            } else {
+                TextToolCalls::Prose
+            };
+            let replay = match parsed {
+                TextToolCalls::Calls(calls) => {
+                    if requested.is_empty() {
+                        requested = calls;
+                    }
+                    None
+                }
+                TextToolCalls::Malformed if !requested.is_empty() => None,
+                TextToolCalls::Malformed if !finalizing => {
+                    context.entries.push(Entry {id:Uuid::new_v4().to_string(),message:LlmMessage::system("The last reply contained a malformed tool call; no tools were executed. Emit valid callable-tool arguments or answer in ordinary prose."),preserve:true,consumed:true});
+                    continue;
+                }
+                TextToolCalls::Malformed => {
+                    yield AgentEvent::Failed(
+                        "The model could not finish without malformed tool calls.".into(),
+                    );
+                    return;
+                }
+                TextToolCalls::Prose => (!text.is_empty()).then(|| text.clone()),
+            };
+            if !agentic || requested.is_empty() {
+                if text.trim().is_empty() && images.is_empty() {
+                    yield AgentEvent::Failed(
+                        "The model returned an empty response. Try again or choose another model."
+                            .into(),
+                    );
+                    return;
+                }
+                if streamed < text.len() {
+                    yield AgentEvent::Chunk(text[streamed..].into());
+                }
+                let mut message = LlmMessage::assistant(text);
+                message.images = images;
+                let entry = canonical(message, Vec::new());
+                context.append(&entry);
+                let id = entry.id.clone();
+                yield AgentEvent::Canonical(entry);
+                yield AgentEvent::Consumed(vec![id]);
+                return;
+            }
+            if finalizing {
+                yield AgentEvent::Failed(
+                    "The model could not finish without requesting more tools.".into(),
+                );
+                return;
+            }
+            unique_identifiers(&mut requested, &mut identifiers);
+            let signatures = requested.iter().map(signature).collect::<Vec<_>>();
+            let denied_repeat = signatures
+                .iter()
+                .all(|signature| failures.contains(signature));
+            let mutations = requested
+                .iter()
+                .filter(|call| tools.mutating(&call.function.name))
+                .map(|call| call.id.clone())
+                .collect();
+            let envelope = canonical(
+                LlmMessage {
+                    role: LlmRole::Assistant,
+                    content: replay,
+                    name: None,
+                    tool_calls: Some(requested.clone()),
+                    tool_call_id: None,
+                    images,
+                    generated_images: Vec::new(),
+                },
+                mutations,
+            );
+            context.append(&envelope);
+            yield AgentEvent::Canonical(envelope);
+            let mut progress = false;
+            let mut requested = std::collections::VecDeque::from(requested);
+            while let Some(call) = requested.pop_front() {
+                if denied_repeat || used >= budget.max_tool_calls {
+                    finalizing = true;
+                    reason = Some(
+                        if denied_repeat {
+                            "Repeated failed calls made no progress."
+                        } else {
+                            "The configured tool-call budget was reached."
+                        }
+                        .into(),
+                    );
+                    let entry = canonical(
+                        LlmMessage::tool_result(
+                            &call.id,
+                            "Not executed: repeated failures or the configured tool budget require a final answer using existing evidence.",
+                        ),
+                        Vec::new(),
+                    );
+                    context.append(&entry);
+                    yield AgentEvent::Canonical(entry);
+                    continue;
+                }
+                let mutation = tools.mutating(&call.function.name);
+                let mut batch = vec![call];
                 if !mutation {
-                    while used+batch.len()<budget.max_tool_calls && requested.front().is_some_and(|call|!tools.mutating(&call.function.name)) {
+                    while used + batch.len() < budget.max_tool_calls
+                        && requested
+                            .front()
+                            .is_some_and(|call| !tools.mutating(&call.function.name))
+                    {
                         batch.push(requested.pop_front().expect("Read batch front exists"));
                     }
                 }
-                used+=batch.len();
+                used += batch.len();
                 for call in &batch {
-                    yield AgentEvent::ToolCallStarted {id:call.id.clone(),name:call.function.name.clone(),arguments:call.function.arguments.clone()};
+                    yield AgentEvent::ToolCallStarted {
+                        id: call.id.clone(),
+                        name: call.function.name.clone(),
+                        arguments: call.function.arguments.clone(),
+                    };
                 }
-                let call=&batch[0];
-                let denied=if mutation && !approval.is_auto() && requires_approval(&call.function.name) {
-                    yield AgentEvent::ToolApprovalRequired {id:call.id.clone(),name:call.function.name.clone(),arguments:call.function.arguments.clone()};
-                    match &approval {ApprovalPolicy::Required(gate)=>!gate.await_decision(&call.id).await,ApprovalPolicy::Auto=>false}
-                } else {false};
+                let call = &batch[0];
+                let denied =
+                    if mutation && !approval.is_auto() && requires_approval(&call.function.name) {
+                        yield AgentEvent::ToolApprovalRequired {
+                            id: call.id.clone(),
+                            name: call.function.name.clone(),
+                            arguments: call.function.arguments.clone(),
+                        };
+                        match &approval {
+                            ApprovalPolicy::Required(gate) => !gate.await_decision(&call.id).await,
+                            ApprovalPolicy::Auto => false,
+                        }
+                    } else {
+                        false
+                    };
                 // A fresh acknowledgement boundary after potentially long approval waits.
-                yield AgentEvent::Context(context.usage(&model,definitions));
-                let completed=futures::future::join_all(batch.into_iter().map(|call| {
-                    let tools=&tools;
+                yield AgentEvent::Context(context.usage(&model, definitions));
+                let completed = futures::future::join_all(batch.into_iter().map(|call| {
+                    let tools = &tools;
                     async move {
-                        let signature=signature(&call);
-                        let started=Instant::now();
-                        let result=if denied {zone_core::tools::ToolResult::error("The user denied this tool call.")}else{tools.execute(&call.function.name,&call.function.arguments).await};
-                        (signature,finish_tool(tools,call,result,started.elapsed().as_millis() as u64).await)
+                        let signature = signature(&call);
+                        let started = Instant::now();
+                        let result = if denied {
+                            zone_core::tools::ToolResult::error("The user denied this tool call.")
+                        } else {
+                            tools
+                                .execute(&call.function.name, &call.function.arguments)
+                                .await
+                        };
+                        (
+                            signature,
+                            finish_tool(tools, call, result, started.elapsed().as_millis() as u64)
+                                .await,
+                        )
                     }
-                })).await;
-                for (signature,finished) in completed {
-                let digest=hex::encode(Sha256::digest(finished.output.as_bytes()));
-                if mutation && finished.success {observations.clear();failures.clear();progress=true;}
-                else if finished.success {
-                    if observations.insert(signature.clone(),digest.clone()).as_ref()!=Some(&digest) {
-                        failures.clear(); progress=true;
+                }))
+                .await;
+                for (signature, finished) in completed {
+                    let digest = hex::encode(Sha256::digest(finished.output.as_bytes()));
+                    if mutation && finished.success {
+                        observations.clear();
+                        failures.clear();
+                        progress = true;
+                    } else if finished.success {
+                        if observations
+                            .insert(signature.clone(), digest.clone())
+                            .as_ref()
+                            != Some(&digest)
+                        {
+                            failures.clear();
+                            progress = true;
+                        }
+                    } else {
+                        let novel = failures.insert(signature);
+                        progress |= !mutation && novel;
                     }
-                }
-                else {let novel=failures.insert(signature);progress|=!mutation && novel;}
-                let mut message=LlmMessage::tool_result(&finished.id,&finished.output);message.images=finished.images.clone();
-                let entry=canonical(message,Vec::new());context.append(&entry);yield AgentEvent::Canonical(entry);
-                for url in &finished.images {yield AgentEvent::Image(url.clone());}
-                yield AgentEvent::ToolCallCompleted {id:finished.id,name:finished.name,success:finished.success,detail:finished.detail,duration_ms:finished.duration_ms,citations:finished.citations,receipt:finished.receipt};
+                    let mut message = LlmMessage::tool_result(&finished.id, &finished.output);
+                    message.images = finished.images.clone();
+                    let entry = canonical(message, Vec::new());
+                    context.append(&entry);
+                    yield AgentEvent::Canonical(entry);
+                    for url in &finished.images {
+                        yield AgentEvent::Image(url.clone());
+                    }
+                    yield AgentEvent::ToolCallCompleted {
+                        id: finished.id,
+                        name: finished.name,
+                        success: finished.success,
+                        detail: finished.detail,
+                        duration_ms: finished.duration_ms,
+                        citations: finished.citations,
+                        receipt: finished.receipt,
+                    };
                 }
             }
-            if !progress && !finalizing {finalizing=true;reason=Some("Repeated tool reads returned unchanged evidence without progress.".into());}
-            if used>=budget.max_tool_calls {finalizing=true;reason=Some("The configured tool-call budget was reached.".into());}
+            if !progress && !finalizing {
+                finalizing = true;
+                reason = Some(
+                    "Repeated tool reads returned unchanged evidence without progress.".into(),
+                );
+            }
+            if used >= budget.max_tool_calls {
+                finalizing = true;
+                reason = Some("The configured tool-call budget was reached.".into());
+            }
         }
     }
 }

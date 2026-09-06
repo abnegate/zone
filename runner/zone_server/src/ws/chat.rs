@@ -1059,14 +1059,19 @@ async fn handle_image_generation(
         }
     });
 
-    let result = client
+    session.store.assert_current(&session.lease).await?;
+    let result = tokio::select! {
+        biased;
+        _ = session.guard.lost() => Err(ComfyUiError::Cancelled),
+        result = client
         .generate(
             &generation_prompt,
             source.as_ref(),
             &mut generation.cancel,
             progress_tx,
         )
-        .await;
+        => result,
+    };
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
@@ -1302,9 +1307,14 @@ async fn handle_video_generation(
         }
     });
 
-    let result = client
+    session.store.assert_current(&session.lease).await?;
+    let result = tokio::select! {
+        biased;
+        _ = session.guard.lost() => Err(ComfyUiError::Cancelled),
+        result = client
         .generate_video(prompt, source.as_ref(), &mut generation.cancel, progress_tx)
-        .await;
+        => result,
+    };
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {

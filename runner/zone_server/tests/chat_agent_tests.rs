@@ -586,3 +586,33 @@ async fn denied_writes_do_not_touch_the_file() {
     )));
     assert_eq!(answer(&events), "Stopped.");
 }
+
+#[tokio::test]
+async fn changed_read_evidence_allows_a_previous_failure_to_be_retried() {
+    let read = json!({"name":"read_file","arguments":{"path":concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.toml")}}).to_string();
+    let (events, requests) = exercise(vec![
+        text(&call(None)),
+        text(&read),
+        text(&call(None)),
+        text("A path is still required."),
+    ])
+    .await;
+    assert_eq!(started(&events).len(), 3);
+    assert_eq!(answer(&events), "A path is still required.");
+    assert!(requests.last().unwrap()["tools"].is_array());
+}
+
+#[tokio::test]
+async fn failed_mutations_do_not_create_a_progress_epoch() {
+    let path = std::env::temp_dir().join(format!("zone-missing-{}/file", Uuid::new_v4()));
+    let call=json!({"name":"apply_patch","arguments":{"patch":format!("*** Begin Patch\n*** Update File: {}\n@@\n-old\n+new\n*** End Patch",path.display())}}).to_string();
+    let (events, requests) =
+        exercise(vec![text(&call), text("The file could not be updated.")]).await;
+    assert_eq!(started(&events).len(), 1);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolCallCompleted { success: false, .. }))
+    );
+    assert!(requests.last().unwrap()["tools"].is_null());
+}

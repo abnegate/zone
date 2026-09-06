@@ -573,6 +573,45 @@ impl Store {
             .bind(self.chat_id).bind(id).bind(self.workspace_id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
         let message: ReplayMessage = serde_json::from_value(row.get("message"))?;
         let content = message.content.unwrap_or_default();
+        Self::page(id, &content, offset, limit)
+    }
+
+    /// The catalog has an immutable NDJSON prefix as evidence is appended. It exposes
+    /// references and reported state, never full results or entries from another chat.
+    pub async fn catalog(&self, offset: u64, limit: u64) -> Result<Evidence, Error> {
+        if self.workspace_id.is_none() {
+            return Err(Error::NotFound);
+        }
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM chats WHERE id=$1 AND workspace_id=$2)",
+        )
+        .bind(self.chat_id)
+        .bind(self.workspace_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !exists {
+            return Err(Error::NotFound);
+        }
+        let rows=sqlx::query("SELECT e.id, call.value->'function'->>'name' AS name,
+            CASE WHEN e.message->>'content' LIKE 'Error: execution was interrupted. Outcome unknown:%' THEN 'unknown'
+                 WHEN e.message->>'content' LIKE 'Error:%' THEN 'error' ELSE 'recorded' END AS outcome
+            FROM chat_entries e JOIN chats c ON c.id=e.chat_id
+            JOIN chat_calls owner ON owner.chat_id=e.chat_id AND owner.result_id=e.id
+            JOIN chat_entries envelope ON envelope.chat_id=owner.chat_id AND envelope.id=owner.envelope_id
+            CROSS JOIN LATERAL jsonb_array_elements(envelope.message->'tool_calls') call(value)
+            WHERE e.chat_id=$1 AND c.workspace_id=$2 AND call.value->>'id'=owner.id
+            ORDER BY e.position")
+            .bind(self.chat_id).bind(self.workspace_id).fetch_all(&self.pool).await?;
+        let mut content = String::new();
+        for row in rows {
+            let item = serde_json::json!({"id":row.get::<String,_>("id"),"name":row.get::<Option<String>,_>("name"),"outcome":row.get::<String,_>("outcome")});
+            content.push_str(&serde_json::to_string(&item)?);
+            content.push('\n');
+        }
+        Self::page("catalog", &content, offset, limit)
+    }
+
+    fn page(id: &str, content: &str, offset: u64, limit: u64) -> Result<Evidence, Error> {
         let total = content.chars().count() as u64;
         if limit == 0 || offset > total {
             return Err(Error::Integrity(
@@ -587,7 +626,7 @@ impl Store {
             .collect();
         let end = offset + count;
         Ok(Evidence {
-            id: id.to_string(),
+            id: id.into(),
             content: page,
             offset,
             next: (end < total).then_some(end),

@@ -615,3 +615,82 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn catalog_pages_all_references_without_exposing_result_bodies_or_other_chats() {
+    let (pool, store, chat, workspace) = fixture().await;
+    let lease = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (turn, _) = begin(&store, &lease).await;
+    for index in 0..40 {
+        let call = format!("call-{index}");
+        store
+            .append(
+                &lease,
+                turn,
+                &[
+                    envelope(&format!("envelope-{index}"), &call, false),
+                    result(
+                        &format!("資料-{index}"),
+                        &call,
+                        if index == 0 {
+                            "Error: original sensitive error detail"
+                        } else {
+                            "original sensitive success body"
+                        },
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+    }
+    let mut content = String::new();
+    let mut offset = 0;
+    loop {
+        let page = store.catalog(offset, 7).await.unwrap();
+        assert_eq!(page.id, "catalog");
+        assert!(page.content.chars().count() <= 7);
+        content.push_str(&page.content);
+        match page.next {
+            Some(next) => offset = next,
+            None => {
+                assert_eq!(content.chars().count() as u64, page.total);
+                break;
+            }
+        }
+    }
+    assert!(!content.contains("sensitive"));
+    let rows = content
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 40);
+    assert_eq!(rows[0]["id"], "資料-0");
+    assert_eq!(rows[0]["name"], "read_file");
+    assert_eq!(rows[0]["outcome"], "error");
+    assert_eq!(rows[39]["id"], "資料-39");
+    assert!(
+        Store::new(pool.clone(), chat, Some(Uuid::new_v4()))
+            .catalog(0, 100)
+            .await
+            .is_err()
+    );
+    assert!(
+        Store::new(pool.clone(), Uuid::new_v4(), Some(workspace))
+            .catalog(0, 100)
+            .await
+            .is_err()
+    );
+    assert!(
+        Store::new(pool.clone(), chat, None)
+            .catalog(0, 100)
+            .await
+            .is_err()
+    );
+    assert!(store.catalog(0, 0).await.is_err());
+    store.release(&lease).await.unwrap();
+    sqlx::query("DELETE FROM chats WHERE id=$1")
+        .bind(chat)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
