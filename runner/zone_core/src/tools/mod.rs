@@ -17,6 +17,18 @@ use thiserror::Error;
 
 use crate::llm::ToolDefinition;
 
+/// Last-resort cap on tool text stored in the chat transcript.
+pub const MAX_TOOL_MESSAGE_CHARS: usize = 8_000;
+
+const TOOL_TRUNCATION_MARKER: &str = "\n[truncated]";
+
+pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => format!("{}{TOOL_TRUNCATION_MARKER}", &text[..byte_idx]),
+        None => text.to_string(),
+    }
+}
+
 /// Tool execution error
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -72,14 +84,15 @@ impl ToolResult {
 
     /// Convert to a string for the LLM
     pub fn to_message(&self) -> String {
-        if self.success {
+        let message = if self.success {
             self.output.clone().unwrap_or_default()
         } else {
             format!(
                 "Error: {}",
                 self.error.as_deref().unwrap_or("Unknown error")
             )
-        }
+        };
+        truncate_chars(&message, MAX_TOOL_MESSAGE_CHARS)
     }
 }
 
@@ -329,6 +342,40 @@ mod tests {
         assert!(result.output.is_none());
         assert_eq!(result.error, Some("Something went wrong".to_string()));
         assert_eq!(result.to_message(), "Error: Something went wrong");
+    }
+
+    #[test]
+    fn to_message_caps_huge_success_output() {
+        let result = ToolResult::success("x".repeat(20_000));
+        let message = result.to_message();
+        assert!(message.contains("[truncated]"));
+        assert!(message.starts_with('x'));
+        assert_eq!(
+            message.chars().count(),
+            MAX_TOOL_MESSAGE_CHARS + TOOL_TRUNCATION_MARKER.chars().count()
+        );
+        let prefix = message
+            .strip_suffix(TOOL_TRUNCATION_MARKER)
+            .expect("truncation marker");
+        assert_eq!(prefix.chars().count(), MAX_TOOL_MESSAGE_CHARS);
+        assert!(prefix.chars().all(|ch| ch == 'x'));
+    }
+
+    #[test]
+    fn to_message_caps_huge_error_on_character_boundary() {
+        let result = ToolResult::error("é".repeat(20_000));
+        let message = result.to_message();
+        assert!(message.starts_with("Error: "));
+        assert!(message.contains("[truncated]"));
+        assert_eq!(
+            message.chars().count(),
+            MAX_TOOL_MESSAGE_CHARS + TOOL_TRUNCATION_MARKER.chars().count()
+        );
+        let prefix = message
+            .strip_suffix(TOOL_TRUNCATION_MARKER)
+            .expect("truncation marker");
+        assert!(std::str::from_utf8(prefix.as_bytes()).is_ok());
+        assert_eq!(prefix.chars().count(), MAX_TOOL_MESSAGE_CHARS);
     }
 
     #[test]

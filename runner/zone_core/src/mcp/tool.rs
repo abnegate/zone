@@ -9,7 +9,9 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use super::client::McpSession;
-use crate::tools::{Tool, ToolContext, ToolError, ToolResult};
+use crate::tools::{Tool, ToolContext, ToolError, ToolResult, truncate_chars};
+
+const MAX_MCP_OUTPUT_CHARS: usize = 8_000;
 
 /// One tool advertised by a connected MCP server.
 pub struct McpTool {
@@ -73,12 +75,16 @@ impl Tool for McpTool {
             }
         };
 
-        let output = format_call_result(&result);
-        if result.is_error.unwrap_or(false) {
-            Ok(ToolResult::error(output))
-        } else {
-            Ok(ToolResult::success(output))
-        }
+        Ok(tool_result_from_call(&result))
+    }
+}
+
+fn tool_result_from_call(result: &CallToolResult) -> ToolResult {
+    let output = truncate_chars(&format_call_result(result), MAX_MCP_OUTPUT_CHARS);
+    if result.is_error.unwrap_or(false) {
+        ToolResult::error(output)
+    } else {
+        ToolResult::success(output)
     }
 }
 
@@ -238,5 +244,32 @@ mod tests {
     fn formats_empty_result() {
         let result = CallToolResult::success(vec![]);
         assert_eq!(format_call_result(&result), "(no output)");
+    }
+
+    #[test]
+    fn huge_call_result_is_capped_before_tool_result() {
+        let text = format!("HEAD_MCP{}TAIL_MCP", "m".repeat(20_000));
+        let result = tool_result_from_call(&CallToolResult::success(vec![ContentBlock::text(
+            text.clone(),
+        )]));
+        assert!(result.success);
+        let output = result.output.expect("success output");
+        assert!(output.starts_with("HEAD_MCP"), "{output}");
+        assert!(!output.contains("TAIL_MCP"), "{output}");
+        assert!(output.contains("[truncated]"), "{output}");
+        assert!(output.chars().count() <= MAX_MCP_OUTPUT_CHARS + 32);
+        assert!(output.chars().count() < text.chars().count());
+    }
+
+    #[test]
+    fn huge_error_call_result_is_capped() {
+        let result = tool_result_from_call(&CallToolResult::error(vec![ContentBlock::text(
+            "e".repeat(20_000),
+        )]));
+        assert!(!result.success);
+        let error = result.error.expect("error payload");
+        assert!(error.starts_with('e'));
+        assert!(error.contains("[truncated]"));
+        assert!(error.chars().count() <= MAX_MCP_OUTPUT_CHARS + 32);
     }
 }

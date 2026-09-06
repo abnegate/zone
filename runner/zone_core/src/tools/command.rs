@@ -24,6 +24,25 @@ struct RunCommandParams {
     timeout_secs: Option<u64>,
 }
 
+/// Cap on returned output, so one noisy command cannot fill the context
+/// window. The middle is dropped rather than the tail, because the error a
+/// build is being run for is usually at the end.
+const MAX_SHELL_OUTPUT_CHARS: usize = 16_000;
+
+fn trim_middle(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= MAX_SHELL_OUTPUT_CHARS {
+        return text.to_string();
+    }
+    let half = MAX_SHELL_OUTPUT_CHARS / 2;
+    let head: String = chars[..half].iter().collect();
+    let tail: String = chars[chars.len() - half..].iter().collect();
+    format!(
+        "{head}\n\n[… {} characters trimmed …]\n\n{tail}",
+        chars.len() - MAX_SHELL_OUTPUT_CHARS
+    )
+}
+
 #[async_trait]
 impl Tool for RunCommandTool {
     fn name(&self) -> &str {
@@ -180,17 +199,17 @@ impl Tool for RunCommandTool {
         }
 
         if output.status.success() {
-            Ok(ToolResult::success(result))
+            Ok(ToolResult::success(trim_middle(&result)))
         } else {
             let code = output
                 .status
                 .code()
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            Ok(ToolResult::error(format!(
+            Ok(ToolResult::error(trim_middle(&format!(
                 "Command exited with code {}\n\n{}",
                 code, result
-            )))
+            ))))
         }
     }
 }
@@ -216,25 +235,6 @@ struct RunShellParams {
 
 /// Longest a single shell command may run, whatever it asks for.
 const MAX_SHELL_TIMEOUT_SECS: u64 = 900;
-
-/// Cap on returned output, so one noisy command cannot fill the context
-/// window. The middle is dropped rather than the tail, because the error a
-/// build is being run for is usually at the end.
-const MAX_SHELL_OUTPUT_CHARS: usize = 16_000;
-
-fn trim_middle(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= MAX_SHELL_OUTPUT_CHARS {
-        return text.to_string();
-    }
-    let half = MAX_SHELL_OUTPUT_CHARS / 2;
-    let head: String = chars[..half].iter().collect();
-    let tail: String = chars[chars.len() - half..].iter().collect();
-    format!(
-        "{head}\n\n[… {} characters trimmed …]\n\n{tail}",
-        chars.len() - MAX_SHELL_OUTPUT_CHARS
-    )
-}
 
 #[async_trait]
 impl Tool for RunShellTool {
@@ -669,5 +669,82 @@ mod tests {
         assert_eq!(def.tool_type, "function");
         assert_eq!(def.function.name, "run_command");
         assert!(def.function.description.contains("shell"));
+    }
+
+    #[test]
+    fn trim_middle_keeps_head_and_tail() {
+        let text = format!("HEAD{}TAIL", "x".repeat(40_000));
+        let trimmed = trim_middle(&text);
+        assert!(trimmed.contains("HEAD"), "{trimmed}");
+        assert!(trimmed.contains("TAIL"), "{trimmed}");
+        assert!(trimmed.contains("characters trimmed"), "{trimmed}");
+        assert!(trimmed.chars().count() <= MAX_SHELL_OUTPUT_CHARS + 64);
+        assert!(trimmed.chars().count() < text.chars().count());
+        assert_eq!(trim_middle("hello"), "hello");
+    }
+
+    #[tokio::test]
+    async fn run_command_trims_huge_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("HEAD_MARKER{}TAIL_MARKER", "x".repeat(40_000));
+        std::fs::write(dir.path().join("huge.txt"), &body).unwrap();
+
+        let mut context = create_test_context();
+        context.cwd = dir.path().to_path_buf();
+
+        let result = RunCommandTool
+            .execute(
+                serde_json::json!({"command": "cat", "args": ["huge.txt"]}),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        let output = result.output.unwrap();
+        assert!(output.contains("HEAD_MARKER"), "{output}");
+        assert!(output.contains("TAIL_MARKER"), "{output}");
+        assert!(output.contains("characters trimmed"), "{output}");
+        assert!(output.chars().count() <= MAX_SHELL_OUTPUT_CHARS + 64);
+        assert!(output.chars().count() < body.chars().count());
+    }
+
+    #[tokio::test]
+    async fn run_command_trims_huge_error_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("left.txt"),
+            format!("HEAD_LEFT{}TAIL_LEFT", "x".repeat(40_000)),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("right.txt"),
+            format!("HEAD_RIGHT{}TAIL_RIGHT", "y".repeat(40_000)),
+        )
+        .unwrap();
+
+        let mut context = create_test_context();
+        context.cwd = dir.path().to_path_buf();
+
+        let result = RunCommandTool
+            .execute(
+                serde_json::json!({"command": "diff", "args": ["left.txt", "right.txt"]}),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        let error = result.error.unwrap();
+        assert!(error.contains("characters trimmed"), "{error}");
+        assert!(error.chars().count() <= MAX_SHELL_OUTPUT_CHARS + 64);
+        assert!(
+            error.contains("HEAD_LEFT") || error.contains("Command exited"),
+            "{error}"
+        );
+        assert!(
+            error.contains("TAIL_RIGHT") || error.contains("TAIL_LEFT"),
+            "{error}"
+        );
     }
 }
