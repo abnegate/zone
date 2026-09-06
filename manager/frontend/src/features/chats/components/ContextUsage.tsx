@@ -33,7 +33,7 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
       : usage?.status === 'compacted'
         ? 'Compacted'
         : usage?.status === 'blocked'
-          ? 'Context full'
+          ? 'Needs attention'
           : usage?.status === 'unavailable'
             ? 'Unavailable'
             : usage?.status === 'ready' && usage.threshold !== null && usage.remaining === 0
@@ -98,6 +98,7 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
                     ? 'Token counts are estimates.'
                     : 'Input total measured; category counts may be estimated.'}
               </p>
+              {usage.reason && <p className="context-usage-reason">{usage.reason}</p>}
               <dl className="context-usage-breakdown">
                 {(
                   Object.entries(usage.breakdown) as [keyof Usage['breakdown'], number | null][]
@@ -136,7 +137,6 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
                   ? `${count(usage.compacted_messages)} messages summarized.`
                   : 'No messages summarized yet.'}
               </p>
-              {usage.reason && <p className="context-usage-reason">{usage.reason}</p>}
             </>
           ) : (
             <p>

@@ -23,6 +23,7 @@ export type ChatSocketController = {
   setOnSend: (handler: (payload: ChatSendPayload) => Promise<void> | void) => void;
   setOnCancel: (handler: () => Promise<void> | void) => void;
   emit: (frame: ChatSocketFrame) => Promise<void>;
+  disconnect: () => Promise<void>;
 };
 
 /**
@@ -98,6 +99,21 @@ export async function installChatSocketMock(page: Page): Promise<ChatSocketContr
     },
     setOnCancel(handler) {
       onCancel = handler;
+    },
+    async disconnect() {
+      await page.evaluate(() => {
+        const sockets =
+          (
+            window as Window & {
+              __chatSockets?: Array<{ readyState: number; onclose?: (() => void) | null }>;
+            }
+          ).__chatSockets ?? [];
+        const socket = sockets.filter((candidate) => candidate.readyState === 1).at(-1);
+        if (socket) {
+          socket.readyState = 3;
+          socket.onclose?.();
+        }
+      });
     },
     async emit(frame) {
       await page.evaluate((payload) => {

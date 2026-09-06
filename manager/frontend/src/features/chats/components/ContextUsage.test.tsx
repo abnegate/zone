@@ -59,7 +59,7 @@ describe('ContextUsage', () => {
       <ContextUsage usage={{ ...usage, status: 'blocked', used: 12000 }} />
     );
     expect(screen.getByRole('button').textContent).toContain('120%');
-    expect(screen.getByText('Context full')).toBeTruthy();
+    expect(screen.getByText('Needs attention')).toBeTruthy();
     rerender(<ContextUsage usage={{ ...usage, status: 'compacting' }} />);
     expect(screen.getByText('Compacting…')).toBeTruthy();
     rerender(<ContextUsage usage={{ ...usage, status: 'ready', remaining: 0 }} />);
@@ -79,4 +79,21 @@ describe('ContextUsage', () => {
       }).success
     ).toBe(false);
   });
+});
+
+it('explains paused compaction without claiming a fitting context is full', () => {
+  render(
+    <ContextUsage
+      usage={{
+        ...usage,
+        used: 2400,
+        status: 'blocked',
+        reason: 'The summary could not be prepared. History is unchanged.',
+      }}
+    />
+  );
+  expect(screen.getByRole('button').textContent).toContain('Needs attention');
+  expect(screen.queryByText('Context full')).toBeNull();
+  fireEvent.click(screen.getByRole('button'));
+  expect(screen.getByText('The summary could not be prepared. History is unchanged.')).toBeTruthy();
 });

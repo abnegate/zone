@@ -95,6 +95,7 @@ export function useChat(
   const [context, setContext] = useState<ContextUsage | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const [contextRefresh, setContextRefresh] = useState(0);
   const contextEpoch = useRef(0);
   const contextModel = useRef<string | null>(null);
   contextModel.current = chat?.id === chatId ? chat.model_name : null;
@@ -181,8 +182,17 @@ export function useChat(
 
   const draftKey = draft === undefined ? null : JSON.stringify(draft);
   const settingsKey = chat
-    ? JSON.stringify([chat.model_name, chat.agent_enabled, chat.character, chat.messages.length])
+    ? JSON.stringify([
+        chat.model_name,
+        chat.agent_enabled,
+        chat.character,
+        chat.auto_approve,
+        chat.messages.length,
+      ])
     : null;
+  const identity = `${chatId}:${settingsKey}:${draftKey}:${contextRefresh}`;
+  const previewIdentity = useRef(identity);
+  previewIdentity.current = identity;
   useEffect(() => {
     const sequence = ++previewSequence.current;
     if (!chatId || chat?.id !== chatId || draftKey === null || settingsKey === null || streaming) {
@@ -203,7 +213,8 @@ export function useChat(
         if (
           controller.signal.aborted ||
           sequence !== previewSequence.current ||
-          epoch !== contextEpoch.current
+          epoch !== contextEpoch.current ||
+          identity !== previewIdentity.current
         )
           return;
         const parsed = ContextUsageSchema.safeParse(usage);
@@ -214,7 +225,8 @@ export function useChat(
         if (
           controller.signal.aborted ||
           sequence !== previewSequence.current ||
-          epoch !== contextEpoch.current
+          epoch !== contextEpoch.current ||
+          identity !== previewIdentity.current
         )
           return;
         setContext(null);
@@ -228,7 +240,7 @@ export function useChat(
       clearTimeout(timer);
       controller.abort();
     };
-  }, [chatId, chat?.id, chat?.model_name, draftKey, settingsKey, streaming]);
+  }, [chatId, chat?.id, chat?.model_name, draftKey, settingsKey, streaming, identity]);
 
   const upsertMessage = useCallback(
     (id: string, role: MessageRole, content: string, metadata?: MessageMetadata | null) => {
@@ -409,6 +421,7 @@ export function useChat(
     socketRef.current = socket;
     let assistantId: string | null = null;
     let generationSeen = false;
+    const completed = new Set<string>();
     let assistantContent = '';
     let assistantMetadata: MessageMetadata | undefined;
     let chunkFrame = 0;
@@ -438,6 +451,30 @@ export function useChat(
         typeof requestAnimationFrame === 'function'
           ? requestAnimationFrame(flushChunks)
           : window.setTimeout(flushChunks, 16);
+    };
+
+    const discardEmptyAssistant = (identifier: string | null): void => {
+      if (!identifier) return;
+      flushChunksNow();
+      setChat((previous) =>
+        previous
+          ? {
+              ...previous,
+              messages: previous.messages.filter(
+                (message) =>
+                  message.id !== identifier ||
+                  message.role !== 'assistant' ||
+                  message.content.trim().length > 0 ||
+                  Boolean(
+                    message.metadata?.attachments?.length ||
+                      message.metadata?.tool_calls?.length ||
+                      message.metadata?.citations?.length ||
+                      message.metadata?.action_receipts?.length
+                  )
+              ),
+            }
+          : previous
+      );
     };
 
     socket.onopen = () => {
@@ -494,6 +531,7 @@ export function useChat(
           setStatus(payload.message);
           break;
         case 'message_start':
+          if (completed.has(payload.message_id) || assistantId === payload.message_id) break;
           activeGenerationRef.current = true;
           setStreaming(true);
           generationSeen = true;
@@ -557,6 +595,12 @@ export function useChat(
           }
           break;
         case 'message_end':
+          if (
+            completed.has(payload.message_id) ||
+            (assistantId !== null && payload.message_id !== assistantId)
+          )
+            break;
+          completed.add(payload.message_id);
           contextEpoch.current += 1;
           setStatus(null);
           setError(payload.error ?? null);
@@ -573,6 +617,15 @@ export function useChat(
           setStreaming(false);
           break;
         case 'cancelled': {
+          if (
+            payload.message_id === null
+              ? assistantId !== null
+              : completed.has(payload.message_id) ||
+                (assistantId !== null && payload.message_id !== assistantId)
+          )
+            break;
+          if (payload.message_id !== null) completed.add(payload.message_id);
+          discardEmptyAssistant(assistantId ?? payload.message_id);
           assistantId = null;
           contextEpoch.current += 1;
           const pendingId = pendingUserIdRef.current;
@@ -591,6 +644,8 @@ export function useChat(
           break;
         }
         case 'error':
+          discardEmptyAssistant(assistantId);
+          if (assistantId !== null) completed.add(assistantId);
           assistantId = null;
           contextEpoch.current += 1;
           setStatus(null);
@@ -603,7 +658,27 @@ export function useChat(
       }
     };
 
+    const invalidateContext = (): void => {
+      discardEmptyAssistant(assistantId);
+      if (assistantId !== null) completed.add(assistantId);
+      const interrupted = activeGenerationRef.current;
+      setContext((previous) =>
+        previous
+          ? {
+              ...previous,
+              status: 'unavailable',
+              incomplete: true,
+              reason: interrupted
+                ? 'Connection interrupted during generation. Usage is the last observation until a fresh preview is available.'
+                : 'Connection closed. Usage is the last observation until a fresh preview is available.',
+            }
+          : null
+      );
+      setContextRefresh((value) => value + 1);
+    };
+
     socket.onerror = () => {
+      invalidateContext();
       assistantId = null;
       contextEpoch.current += 1;
       setError('Chat connection failed');
@@ -613,6 +688,7 @@ export function useChat(
     };
 
     socket.onclose = () => {
+      invalidateContext();
       assistantId = null;
       contextEpoch.current += 1;
       setStatus(null);

@@ -1215,6 +1215,134 @@ describe('context freshness', () => {
     );
     unmount();
   });
+  it('does not let stale terminal frames close the current generation', async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'old', role: 'assistant' });
+      lastSocket?.emit({ type: 'message_end', message_id: 'old', content: 'Old response' });
+      lastSocket?.emit({ type: 'message_start', message_id: 'current', role: 'assistant' });
+      lastSocket?.emit({ type: 'message_end', message_id: 'old', content: 'Late response' });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'old' });
+      lastSocket?.emit({ type: 'cancelled', message_id: null });
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'context',
+        message_id: 'current',
+        usage: { ...usage, used: 200 },
+      });
+    });
+    expect(result.current.streaming).toBe(true);
+    expect(result.current.context?.used).toBe(200);
+    expect(
+      result.current.chat?.messages.some((message) => message.content === 'Late response')
+    ).toBe(false);
+    act(() => lastSocket?.emit({ type: 'cancelled', message_id: 'current' }));
+    expect(result.current.streaming).toBe(false);
+    unmount();
+  });
+  it('marks an interrupted generation estimate stale until a fresh preview succeeds', async () => {
+    mockPreviewContext.mockResolvedValue({ ...usage, used: 150 });
+    const { result, unmount } = renderHook(() =>
+      useChat('context', undefined, { content: 'draft' })
+    );
+    await waitFor(() => expect(result.current.context?.used).toBe(150));
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'generation', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'context',
+        message_id: 'generation',
+        usage: { ...usage, status: 'compacting' },
+      });
+      lastSocket?.onclose?.();
+    });
+    expect(result.current.context?.status).toBe('unavailable');
+    expect(result.current.context?.incomplete).toBe(true);
+    expect(result.current.context?.reason).toContain('last observation');
+    await waitFor(() => expect(result.current.context?.status).toBe('ready'));
+    expect(result.current.context?.used).toBe(150);
+    unmount();
+  });
+  it('does not replace an idle live usage update with a pending preview', async () => {
+    let resolve!: (value: ContextUsage) => void;
+    mockPreviewContext.mockImplementation(
+      () =>
+        new Promise<ContextUsage>((done) => {
+          resolve = done;
+        })
+    );
+    const { result, unmount } = renderHook(() =>
+      useChat('context', undefined, { content: 'draft' })
+    );
+    await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
+    act(() =>
+      lastSocket?.emit({
+        type: 'context',
+        chat_id: 'context',
+        message_id: null,
+        usage: { ...usage, used: 200 },
+      })
+    );
+    await act(async () => resolve({ ...usage, used: 150 }));
+    expect(result.current.context?.used).toBe(200);
+    unmount();
+  });
+  it('removes cancelled empty assistant placeholders but preserves tool evidence', async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'empty', role: 'assistant' });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'empty' });
+    });
+    expect(result.current.chat?.messages.find((message) => message.id === 'empty')).toBeUndefined();
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'evidence', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'evidence',
+        tool_call_id: 'tool',
+        name: 'read_file',
+        arguments: '{}',
+      });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'evidence' });
+    });
+    expect(
+      result.current.chat?.messages.find((message) => message.id === 'evidence')?.metadata
+        ?.tool_calls
+    ).toHaveLength(1);
+    unmount();
+  });
+  it('removes disconnected empty placeholders while flushing partial text and preserving images', async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'empty', role: 'assistant' });
+      lastSocket?.onclose?.();
+    });
+    expect(result.current.chat?.messages.find((message) => message.id === 'empty')).toBeUndefined();
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'partial', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Partial answer', index: 0 });
+      lastSocket?.onclose?.();
+    });
+    expect(result.current.chat?.messages.find((message) => message.id === 'partial')?.content).toBe(
+      'Partial answer'
+    );
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'image', role: 'assistant' });
+      lastSocket?.emit({
+        type: 'image',
+        message_id: 'image',
+        attachment: { name: 'image', mime: 'image/png', url: '/image.png' },
+      });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'image' });
+    });
+    expect(
+      result.current.chat?.messages.find((message) => message.id === 'image')?.metadata?.attachments
+    ).toHaveLength(1);
+    unmount();
+  });
   it('aborts obsolete drafts, ignores their late result, and reports preview failure', async () => {
     let resolve!: (value: ContextUsage) => void;
     mockPreviewContext.mockImplementationOnce(
