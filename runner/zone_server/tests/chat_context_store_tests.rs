@@ -14,8 +14,7 @@ use zone_server::services::chat::history::{NewEntry, ReplayMessage, Summary, fin
 const LIFETIME: Duration = Duration::from_secs(30);
 
 async fn fixture() -> (PgPool, Store, Uuid, Uuid) {
-    let address = std::env::var("ZONE_CONTEXT_TEST_DATABASE_URL")
-        .expect("Set ZONE_CONTEXT_TEST_DATABASE_URL to an isolated migrated test database");
+    let address = common::context_database_url();
     let pool = PgPool::connect(&address).await.unwrap();
     let organization = Uuid::new_v4();
     let workspace = Uuid::new_v4();
