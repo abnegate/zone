@@ -533,3 +533,50 @@ async fn later_legacy_public_rows_follow_canonical_history_before_and_after_impo
     assert_eq!(after.entries[2].id, later.id.to_string());
     chats::delete_chat(&pool, chat).await.unwrap();
 }
+
+#[tokio::test]
+async fn filtered_normal_stop_and_interrupted_image_are_canonical() {
+    let (pool, store, chat, _) = fixture().await;
+    let lease = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (turn, _) = begin(&store, &lease).await;
+    let partial = ReplayMessage::from(&Message::assistant("Filtered response"));
+    store
+        .finish(
+            &lease,
+            turn,
+            "Filtered response",
+            None,
+            false,
+            Some(&partial),
+        )
+        .await
+        .unwrap();
+    let history = store.load().await.unwrap();
+    assert_eq!(
+        history.entries.last().unwrap().message.content.as_deref(),
+        Some("Filtered response")
+    );
+    let (turn, _) = begin(&store, &lease).await;
+    let mut image = Message::assistant("");
+    image.images = vec!["https://example.com/output.png".into()];
+    let partial = ReplayMessage::from(&image);
+    store
+        .finish(
+            &lease,
+            turn,
+            "",
+            Some(json!({"attachments":[{"mime":"image/png","url":image.images[0]}]})),
+            true,
+            Some(&partial),
+        )
+        .await
+        .unwrap();
+    let history = store.load().await.unwrap();
+    assert_eq!(history.entries.last().unwrap().message.images, image.images);
+    store.release(&lease).await.unwrap();
+    sqlx::query("DELETE FROM chats WHERE id=$1")
+        .bind(chat)
+        .execute(&pool)
+        .await
+        .unwrap();
+}

@@ -58,6 +58,7 @@ pub fn test_config() -> Config {
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),
+        chat: Default::default(),
     }
 }
 
@@ -309,6 +310,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),
+        chat: Default::default(),
     }
 }
 

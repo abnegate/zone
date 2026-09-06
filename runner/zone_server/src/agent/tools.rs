@@ -117,12 +117,17 @@ impl ChatTools {
     /// Search tools stay registered and degrade to keyword search when
     /// embeddings are unavailable, so the model can still look things up.
     pub async fn build(scope: WorkspaceScope) -> Self {
-        Self::assemble(Some(scope), ToolProfile::Chat, None).await
+        Self::assemble(Some(scope), ToolProfile::Chat, None, true).await
+    }
+
+    /// Preview only the known catalog; never start MCP processes while drafting.
+    pub async fn preview(scope: WorkspaceScope) -> Self {
+        Self::assemble(Some(scope), ToolProfile::Chat, None, false).await
     }
 
     /// Sandboxed file/shell tools plus MCP for a background task run.
     pub async fn for_task(state: &AppState, cwd: std::path::PathBuf) -> Self {
-        let mut assembled = Self::assemble(None, ToolProfile::Task, Some(cwd)).await;
+        let mut assembled = Self::assemble(None, ToolProfile::Task, Some(cwd), false).await;
         let added = assembled.registry.register_mcp(state.mcp_hub().await);
         if added > 0 {
             tracing::info!(tools = added, "Attached MCP tools to task");
@@ -135,6 +140,7 @@ impl ChatTools {
         scope: Option<WorkspaceScope>,
         profile: ToolProfile,
         task_cwd: Option<std::path::PathBuf>,
+        connect: bool,
     ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
@@ -174,7 +180,12 @@ impl ChatTools {
         }
 
         if let Some(scope) = &scope {
-            let added = registry.register_mcp(scope.state.mcp_hub().await);
+            let hub = if connect {
+                Some(scope.state.mcp_hub().await)
+            } else {
+                scope.state.existing_mcp()
+            };
+            let added = hub.map_or(0, |hub| registry.register_mcp(hub));
             if added > 0 {
                 tracing::info!(tools = added, "Attached MCP tools to chat");
             }

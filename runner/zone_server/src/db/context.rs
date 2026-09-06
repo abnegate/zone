@@ -253,6 +253,114 @@ impl Store {
         Ok(())
     }
 
+    pub async fn create_message(
+        &self,
+        lease: &Lease,
+        role: &str,
+        content: &str,
+        metadata: Option<Value>,
+    ) -> Result<MessageRow, Error> {
+        let mut message = match role {
+            "user" => Message::user(content),
+            "assistant" => Message::assistant(content),
+            "system" => Message::system(content),
+            _ => return Err(Error::Integrity("Invalid visible message role".into())),
+        };
+        message.images = crate::services::chat::session::images(metadata.as_ref());
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.materialize(&mut transaction).await?;
+        self.recover_in(&mut transaction).await?;
+        let id = Uuid::new_v4();
+        let title_claimed = if role == "user" {
+            sqlx::query("UPDATE chats SET title_message_id=$2 WHERE id=$1 AND automatic_title AND title_message_id IS NULL AND NOT EXISTS(SELECT 1 FROM messages WHERE chat_id=$1 AND role='user')").bind(self.chat_id).bind(id).execute(&mut *transaction).await?.rows_affected()==1
+        } else {
+            false
+        };
+        let row = self
+            .visible(&mut transaction, id, role, content, metadata, title_claimed)
+            .await?;
+        self.insert(
+            &mut transaction,
+            None,
+            &id.to_string(),
+            &ReplayMessage::from(&message),
+            true,
+            false,
+        )
+        .await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(row)
+    }
+
+    /// Explicit deletion removes private evidence with its visible owner and invalidates
+    /// checkpoints. The remaining visible companion is retained at its original position.
+    pub async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.materialize(&mut transaction).await?;
+        self.recover_in(&mut transaction).await?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id=$1 AND id=$2)")
+                .bind(self.chat_id)
+                .bind(id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if !exists {
+            return Ok(false);
+        }
+        let turn=sqlx::query("SELECT id,user_message_id FROM chat_turns WHERE chat_id=$1 AND (id=$2 OR user_message_id=$2)").bind(self.chat_id).bind(id).fetch_optional(&mut *transaction).await?;
+        if let Some(turn) = turn {
+            let owner: Uuid = turn.get("id");
+            let user: Uuid = turn.get("user_message_id");
+            let companion = if id == user {
+                sqlx::query("SELECT m.content,m.metadata,(SELECT max(position) FROM chat_entries WHERE chat_id=$1 AND turn_id=$2) AS position FROM messages m WHERE m.chat_id=$1 AND m.id=$2").bind(self.chat_id).bind(owner).fetch_optional(&mut *transaction).await?
+            } else {
+                None
+            };
+            if id == owner {
+                sqlx::query("UPDATE chat_entries SET turn_id=NULL WHERE chat_id=$1 AND id=$2")
+                    .bind(self.chat_id)
+                    .bind(user.to_string())
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            sqlx::query("DELETE FROM chat_turns WHERE chat_id=$1 AND id=$2")
+                .bind(self.chat_id)
+                .bind(owner)
+                .execute(&mut *transaction)
+                .await?;
+            if let Some(companion) = companion {
+                let mut message = Message::assistant(companion.get::<String, _>("content"));
+                message.images = crate::services::chat::session::images(
+                    companion.get::<Option<Value>, _>("metadata").as_ref(),
+                );
+                let position: Option<i64> = companion.get("position");
+                if let Some(position) = position {
+                    sqlx::query("INSERT INTO chat_entries(chat_id,id,position,message,consumed) OVERRIDING SYSTEM VALUE VALUES($1,$2,$3,$4,TRUE)").bind(self.chat_id).bind(owner.to_string()).bind(position).bind(serde_json::to_value(ReplayMessage::from(&message))?).execute(&mut *transaction).await?;
+                }
+            }
+        }
+        sqlx::query("DELETE FROM chat_checkpoints WHERE chat_id=$1")
+            .bind(self.chat_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM chat_entries WHERE chat_id=$1 AND id=$2")
+            .bind(self.chat_id)
+            .bind(id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM messages WHERE chat_id=$1 AND id=$2")
+            .bind(self.chat_id)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     pub async fn consumed(&self, lease: &Lease, ids: &[String]) -> Result<(), Error> {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
@@ -304,6 +412,60 @@ impl Store {
             .await?;
         sqlx::query("UPDATE chat_turns SET status = 'completed', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
             .bind(self.chat_id).bind(turn_id).execute(&mut *transaction).await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(row)
+    }
+
+    /// Persist partial visible prose and uncertain outcomes in one fenced transaction.
+    pub async fn finish(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        content: &str,
+        metadata: Option<Value>,
+        interrupted: bool,
+        partial: Option<&ReplayMessage>,
+    ) -> Result<MessageRow, Error> {
+        if !interrupted && partial.is_none() {
+            return self.complete(lease, turn_id, content, metadata).await;
+        }
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.turn(&mut transaction, lease, turn_id).await?;
+        if interrupted {
+            self.interrupt_in(&mut transaction, turn_id).await?;
+        } else {
+            let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chat_calls WHERE chat_id=$1 AND turn_id=$2 AND result_id IS NULL)").bind(self.chat_id).bind(turn_id).fetch_one(&mut *transaction).await?;
+            if pending {
+                return Err(Error::Integrity(
+                    "Cannot complete with pending tool outcomes".into(),
+                ));
+            }
+            sqlx::query("UPDATE chat_turns SET status='completed',completed_at=clock_timestamp() WHERE chat_id=$1 AND id=$2").bind(self.chat_id).bind(turn_id).execute(&mut *transaction).await?;
+        }
+        if let Some(partial) = partial {
+            self.append_in(
+                &mut transaction,
+                turn_id,
+                &NewEntry {
+                    id: Uuid::new_v4().to_string(),
+                    message: partial.clone(),
+                    mutations: Vec::new(),
+                },
+            )
+            .await?;
+        }
+        let row = self
+            .visible(
+                &mut transaction,
+                turn_id,
+                "assistant",
+                content,
+                metadata,
+                false,
+            )
+            .await?;
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
         Ok(row)

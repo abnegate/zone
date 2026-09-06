@@ -3,3 +3,4 @@
 pub mod capacity;
 pub mod evidence;
 pub mod history;
+pub mod session;

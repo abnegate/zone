@@ -14,8 +14,10 @@ use crate::db::{chats, message_embeddings};
 use crate::error::ServerError;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
+use crate::services::chat::session;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
+use zone_core::context::ContextUsage;
 
 use super::common::{ErrorResponse, Timestamps};
 
@@ -184,6 +186,7 @@ struct ChatWithMessagesResponse {
     #[serde(flatten)]
     chat: ChatResponse,
     messages: Vec<MessageResponse>,
+    context: Option<ContextUsage>,
 }
 
 #[derive(Debug, Serialize)]
@@ -203,7 +206,25 @@ async fn chat_with_messages(state: &AppState, chat: chats::ChatRow) -> ChatWithM
         .map(MessageResponse::from)
         .collect();
 
+    let context = match chat.workspace_id {
+        Some(workspace) => {
+            // No draft or inference; reconstruct a fresh observation for reconnect.
+            let actor = Uuid::nil();
+            let _ = workspace;
+            session::build(state, &chat, actor, None, session::Mode::Preview)
+                .await
+                .ok()
+                .map(|prepared| {
+                    prepared.context.usage(
+                        &prepared.model,
+                        prepared.agentic.then_some(prepared.tools.definitions()),
+                    )
+                })
+        }
+        None => None,
+    };
     ChatWithMessagesResponse {
+        context,
         chat: ChatResponse::from(chat).with_profile(profile),
         messages,
     }
@@ -657,7 +678,22 @@ pub async fn create_message(
         return e.into_response();
     }
 
-    match chats::create_message(state.db(), id, &req.role, &req.content, req.metadata).await {
+    let session = match session::Session::acquire(
+        &state,
+        id,
+        chat.workspace_id.expect("authorized workspace"),
+        Uuid::new_v4(),
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(error) => return ServerError::Conflict(error.to_string()).into_response(),
+    };
+    match session
+        .store
+        .create_message(&session.lease, &req.role, &req.content, req.metadata)
+        .await
+    {
         Ok(msg) => {
             crate::workers::titles::spawn(state.clone(), &msg);
             // Spawn background task to generate and store embedding
@@ -702,7 +738,22 @@ pub async fn delete_message(
         return e.into_response();
     }
 
-    match chats::delete_message(state.db(), chat_id, message_id).await {
+    let session = match session::Session::acquire(
+        &state,
+        chat_id,
+        chat.workspace_id.expect("authorized workspace"),
+        Uuid::new_v4(),
+    )
+    .await
+    {
+        Ok(session) => session,
+        Err(error) => return ServerError::Conflict(error.to_string()).into_response(),
+    };
+    match session
+        .store
+        .delete_message(&session.lease, message_id)
+        .await
+    {
         Ok(true) => {
             // Clean up embedding
             if let Err(e) =
@@ -942,4 +993,39 @@ pub async fn search_messages(
         total,
     })
     .into_response()
+}
+
+/// Read-only draft estimation. Shares preparation with send; never saves or summarizes.
+#[derive(Debug, Deserialize)]
+pub struct SendMessageRequest {
+    pub content: String,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+pub async fn context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(request): Json<SendMessageRequest>,
+) -> impl IntoResponse {
+    let chat = match get_chat_with_access(&state, &auth, id).await {
+        Ok(chat) => chat,
+        Err(error) => return error.into_response(),
+    };
+    let workspace = match chat.workspace_id {
+        Some(workspace) => workspace,
+        None => {
+            return ServerError::Forbidden("Chat has no workspace association".into())
+                .into_response();
+        }
+    };
+    let actor = match check_workspace_write_access(&state, &auth, workspace).await {
+        Ok(actor) => actor,
+        Err(error) => return error.into_response(),
+    };
+    match session::build(&state,&chat,actor,Some((&request.content,request.metadata.as_ref())),session::Mode::Preview).await {
+        Ok(prepared)=>Json(serde_json::json!({"context":prepared.context.usage(&prepared.model,prepared.agentic.then_some(prepared.tools.definitions()))})).into_response(),
+        Err(error)=>ServerError::Conflict(error).into_response(),
+    }
 }

@@ -52,6 +52,7 @@ fn test_config() -> Config {
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),
+        chat: Default::default(),
     }
 }
 

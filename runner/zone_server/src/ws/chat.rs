@@ -27,18 +27,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{
-    ChatStreamChunk, LlmClient, LlmConfig, LlmError, Message as LlmMessage, Role as LlmRole,
-};
+use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
 
 use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, ToolCallRecord};
 use crate::auth::validate_token;
 use crate::db::{ai_settings, chats, knowledge, workspace_members, workspaces};
+#[cfg(test)]
 use crate::services::character::ChatCharacter;
-use crate::services::completion_tokens::{FilterStep, TokenFilter, merge_stops};
+use crate::services::chat::{
+    history::ReplayMessage,
+    session::{self, Session},
+};
+use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::searxng::{SearchContext, SearxngClient, sanitize_query};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
+use zone_core::context::ContextUsage;
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -66,9 +70,6 @@ const MAX_MESSAGES_PER_MINUTE: usize = 20;
 
 /// Maximum message content length (100KB)
 const MAX_MESSAGE_LENGTH: usize = 100_000;
-
-/// Maximum context messages to include
-const MAX_CONTEXT_MESSAGES: i64 = 50;
 
 /// Maximum context search results
 const MAX_CONTEXT_RESULTS: usize = 10;
@@ -201,6 +202,7 @@ struct Generation {
     message_id: Uuid,
     cancel: broadcast::Receiver<()>,
     approvals: crate::agent::ApprovalGate,
+    started: bool,
 }
 
 impl Generation {
@@ -215,6 +217,7 @@ impl Generation {
             message_id,
             cancel,
             approvals,
+            started: false,
         }
     }
 
@@ -229,7 +232,7 @@ impl Generation {
         let _ = send_server(
             sender,
             ServerMessage::Cancelled {
-                message_id: Some(self.message_id),
+                message_id: self.started.then_some(self.message_id),
             },
         )
         .await;
@@ -249,14 +252,7 @@ impl Drop for Generation {
     }
 }
 
-struct ChatPreparation {
-    model: String,
-    agentic: bool,
-    auto_approve: bool,
-    tools: agent::ChatTools,
-    messages: Vec<LlmMessage>,
-    stop: Vec<String>,
-}
+type ChatPreparation = session::Preparation;
 
 enum Routing {
     Image(crate::config::ComfyUiConfig),
@@ -310,6 +306,11 @@ pub enum ServerMessage {
     },
     /// Assistant message started
     MessageStart { message_id: Uuid, role: String },
+    Context {
+        chat_id: Uuid,
+        message_id: Option<Uuid>,
+        usage: ContextUsage,
+    },
     /// Content chunk streamed
     Chunk { content: String, index: u32 },
     /// The agent started running a tool
@@ -1427,48 +1428,6 @@ async fn handle_video_generation(
     Ok(())
 }
 
-/// Adapt a plain completion stream to the events the agent emits, so one loop
-/// can consume either shape.
-fn plain_events(
-    stream: impl Stream<Item = Result<ChatStreamChunk, LlmError>>,
-) -> impl Stream<Item = AgentEvent> {
-    async_stream::stream! {
-        futures::pin_mut!(stream);
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = match chunk {
-                Ok(chunk) => chunk,
-                Err(e) => {
-                    // Keep whatever was generated: returning here discarded a
-                    // complete reply whenever the provider sent one chunk the
-                    // envelope could not parse.
-                    tracing::error!("LLM stream error, keeping partial reply: {}", e);
-                    yield AgentEvent::Failed("Stream error".to_string());
-                    return;
-                }
-            };
-
-            let Some(choice) = chunk.choices.first() else {
-                continue;
-            };
-
-            if let Some(content) = &choice.delta.content
-                && !content.is_empty()
-            {
-                yield AgentEvent::Chunk(content.clone());
-            }
-
-            for image in &choice.delta.generated_images {
-                yield AgentEvent::Image(image.image_url.url.clone());
-            }
-
-            if choice.finish_reason.is_some() {
-                return;
-            }
-        }
-    }
-}
-
 /// Handle a send message request
 ///
 /// Chat requires write access (Member role or higher) since it creates messages.
@@ -1509,8 +1468,23 @@ async fn handle_send_message(
         .await;
         return;
     }
+    let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = send_server(
+                sender,
+                ServerMessage::Error {
+                    message: error.to_string(),
+                },
+            )
+            .await;
+            return;
+        }
+    };
     let preparation = tokio::select! {
         biased;
+        _ = session.guard.lost() => { let _=send_server(sender,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
         _ = request.cancel.recv() => {
             request.cancelled(sender).await;
             return;
@@ -1529,7 +1503,16 @@ async fn handle_send_message(
 
         // Once persistence begins, finish the commit and acknowledgement
         // before honouring Stop. Dropping an INSERT future cannot roll it back.
-        save_message(state, sender, chat_id, content, metadata.clone()).await?;
+        if matches!(&routing,Routing::Chat(_)) {
+            let mut message=LlmMessage::user(content);message.images=session::images(metadata.as_ref());
+            let user_message=session.store.begin(&session.lease,session.turn,Uuid::new_v4(),content,metadata.clone(),ReplayMessage::from(&message)).await?;
+            crate::workers::titles::spawn(state.clone(),&user_message);
+            spawn_message_embedding_task(state.clone(),user_message.id,chat_id,content.to_string());
+            let _=send_server(sender,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
+        } else {
+            session.store.assert_current(&session.lease).await?;
+            save_message(state, sender, chat_id, content, metadata.clone()).await?;
+        }
 
         if request.is_cancelled() {
             request.cancelled(sender).await;
@@ -1569,18 +1552,23 @@ async fn handle_send_message(
                         request.cancelled(sender).await;
                         return Ok(());
                     }
-                    result = prepare_chat(state, sender, chat_id, workspace_id, user_id, content, chat, web_search_requested) => result,
+                    _ = session.guard.lost() => { return Err("Chat generation ownership was lost".into()); }
+                    result = prepare_chat(state, sender, chat_id, workspace_id, user_id, content, chat, web_search_requested) => result?,
                 };
-                handle_chat_generation(state, sender, chat_id, preparation, &mut request).await
+                handle_chat_generation(state, sender, chat_id, preparation, &mut request, &mut session).await
             }
         }
     }.await;
+    if let Err(error) = session.store.recover(&session.lease).await {
+        tracing::warn!(%error,"Could not close interrupted generation");
+    }
+    let _ = session.store.release(&session.lease).await;
     if let Err(error) = result {
         tracing::error!("Error handling send message: {error}");
         let _ = send_server(
             sender,
             ServerMessage::Error {
-                message: "Failed to process message".to_string(),
+                message: error.to_string(),
             },
         )
         .await;
@@ -1682,32 +1670,6 @@ async fn prepare_message(
     }))
 }
 
-async fn load_chat_history(state: &AppState, chat_id: Uuid) -> Vec<LlmMessage> {
-    match chats::list_recent_messages(state.db(), chat_id, MAX_CONTEXT_MESSAGES).await {
-        Ok(messages) => messages
-            .into_iter()
-            .map(|msg| LlmMessage {
-                role: match msg.role.as_str() {
-                    "user" => LlmRole::User,
-                    "assistant" => LlmRole::Assistant,
-                    "system" => LlmRole::System,
-                    _ => LlmRole::User,
-                },
-                content: Some(msg.content),
-                name: None,
-                tool_calls: None,
-                tool_call_id: None,
-                images: image_urls_from_metadata(msg.metadata.as_ref()),
-                generated_images: Vec::new(),
-            })
-            .collect(),
-        Err(e) => {
-            tracing::warn!("Failed to fetch message history: {}", e);
-            Vec::new()
-        }
-    }
-}
-
 async fn load_web_search(
     state: &AppState,
     content: &str,
@@ -1746,32 +1708,23 @@ async fn prepare_chat(
     content: &str,
     chat: chats::ChatRow,
     web_search_requested: bool,
-) -> ChatPreparation {
-    let model_name = chat.model_name.as_str();
+) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
     if web_search_requested && !sanitize_query(content).is_empty() {
         let _ = send_server(
             sender,
             ServerMessage::Status {
-                message: "Searching the web...".to_string(),
+                message: "Searching the web...".into(),
             },
         )
         .await;
     }
-
-    let (context_messages, tools, search) = tokio::join!(
-        load_chat_history(state, chat_id),
-        agent::ChatTools::build(agent::WorkspaceScope {
-            state: state.clone(),
-            workspace_id,
-            chat_id,
-            user_id,
-        }),
-        load_web_search(state, content, web_search_requested),
-    );
-    let agentic = chat.agent_enabled && !tools.is_empty();
+    let mut preparation =
+        session::build(state, &chat, user_id, None, session::Mode::Generation).await?;
+    let search = load_web_search(state, content, web_search_requested).await;
+    let agentic = preparation.agentic;
     let character = chat.character.as_ref();
-
-    let mut prompt = chat_system_prompt(character, agentic, &tools, chat.auto_approve);
+    let mut prompt =
+        session::system_prompt(&chat, &preparation.tools, agentic, &search.capability());
     if !agentic && character.is_none() {
         let query_embedding = match state.embedding_service() {
             Some(embedding_service) => {
@@ -1881,33 +1834,20 @@ async fn prepare_chat(
             prompt.push_str(&retrieved_context_block(&context_lines));
         }
     }
-    prompt.push_str("\n\n");
-    prompt.push_str(&search.capability());
-    let mut messages = Vec::with_capacity(context_messages.len() + 2);
-    messages.push(LlmMessage::system(prompt));
-    messages.extend(context_messages);
-    // Official instruct models need current search state after history so a
-    // hoisted system prompt cannot bury it. Character-card models treat that
-    // extra user turn as more story and complete it, so only send it when a
-    // lookup actually ran.
-    if character.is_none() || search.has_lookup_outcome() {
-        messages.push(LlmMessage::user(search.prompt()));
+    preparation.context.entries[0].message = LlmMessage::system(prompt);
+    if search.has_lookup_outcome() {
+        preparation.context.entries.push(zone_core::context::Entry {
+            id: Uuid::new_v4().to_string(),
+            message: LlmMessage::system(search.prompt()),
+            preserve: true,
+            consumed: true,
+        });
     }
-
-    ChatPreparation {
-        model: model_name.to_string(),
-        agentic,
-        auto_approve: chat.auto_approve,
-        tools,
-        messages,
-        stop: merge_stops(
-            character
-                .map(|card| card.stop_sequences.as_slice())
-                .unwrap_or(&[]),
-        ),
-    }
+    let _ = chat_id;
+    Ok(preparation)
 }
 
+#[cfg(test)]
 fn chat_system_prompt(
     character: Option<&ChatCharacter>,
     agentic: bool,
@@ -1936,27 +1876,22 @@ async fn handle_chat_generation(
     chat_id: Uuid,
     preparation: ChatPreparation,
     generation: &mut Generation,
+    session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ChatPreparation {
         model,
         agentic,
         auto_approve,
         tools,
-        messages: context_messages,
+        context,
+        llm: llm_client,
         stop,
+        budget,
     } = preparation;
     let model_name = model.as_str();
-    let mut token_filter = TokenFilter::new(stop.clone());
-    // Create LLM client
-    let llm_config = LlmConfig {
-        base_url: state.config().litellm_host.clone(),
-        api_key: state.config().litellm_key.clone(),
-        default_model: model_name.to_string(),
-        temperature: 0.7,
-        max_tokens: 4096,
-    };
-    let llm_client = LlmClient::new(llm_config).with_stop(stop);
-
+    let mut replay = context.clone();
+    let definitions = agentic.then(|| tools.definitions().to_vec());
+    let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
     if generation.cancel.try_recv().is_ok() {
         generation.cancelled(sender).await;
@@ -1968,46 +1903,31 @@ async fn handle_chat_generation(
         message_id: assistant_message_id,
         role: "assistant".to_string(),
     };
-    let _ = send_server(sender, start_msg).await;
+    if !send_server(sender, start_msg).await {
+        return Ok(());
+    }
+    generation.started = true;
 
-    // Both modes produce the same event stream, so the loop below - and its
-    // cancellation, timeout and truncation handling - is shared.
-    let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send>> = if agentic {
-        Box::pin(agent::run(AgentRun {
-            llm: llm_client,
-            model: model_name.to_string(),
-            tools,
-            messages: context_messages,
-            budget: agent::LoopBudget::chat(),
-            approval: if auto_approve {
-                agent::ApprovalPolicy::Auto
-            } else {
-                agent::ApprovalPolicy::Required(generation.approvals.clone())
+    let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send>> =
+        Box::pin(agent::run_with_context(
+            AgentRun {
+                llm: llm_client,
+                model: model_name.to_string(),
+                tools,
+                messages: Vec::new(),
+                budget,
+                approval: if auto_approve {
+                    agent::ApprovalPolicy::Auto
+                } else {
+                    agent::ApprovalPolicy::Required(generation.approvals.clone())
+                },
             },
-        }))
-    } else {
-        let stream = tokio::select! {
-            biased;
-            _ = generation.cancel.recv() => {
-                generation.cancelled(sender).await;
-                return Ok(());
-            }
-            stream = llm_client.chat_stream_with_model(model_name, &context_messages, None) => stream,
-        };
-        match stream {
-            Ok(stream) => Box::pin(plain_events(stream)),
-            Err(e) => {
-                tracing::error!("Failed to create LLM stream: {}", e);
-                let error_msg = ServerMessage::Error {
-                    message: "Failed to generate response".to_string(),
-                };
-                let _ = send_server(sender, error_msg).await;
-                return Ok(());
-            }
-        }
-    };
-
+            context,
+            agentic,
+        ));
     let mut full_content = String::new();
+    let mut pending_content = String::new();
+    let mut pending_images = Vec::<String>::new();
     let mut generated_images = Vec::new();
     let mut chunk_index = 0;
     let mut cancelled = false;
@@ -2023,8 +1943,13 @@ async fn handle_chat_generation(
         tokio::time::Instant::now() + Duration::from_secs(LLM_STREAM_TIMEOUT_SECS);
 
     loop {
+        if client_gone {
+            cancelled = true;
+            break;
+        }
         tokio::select! {
             biased;
+            _ = session.guard.lost() => { failure=Some("Chat generation ownership was lost".into()); break; }
             // Check for cancellation before polling another event.
             _ = generation.cancel.recv() => {
                 cancelled = true;
@@ -2042,11 +1967,33 @@ async fn handle_chat_generation(
             // Process agent events
             event = events.next() => {
                 match event {
+                    Some(AgentEvent::Canonical(entry)) => {
+                        if let Err(error)=session.store.append(&session.lease,session.turn,std::slice::from_ref(&entry)).await {failure=Some(error.to_string());break;}
+                        pending_images.retain(|image| !entry.message.images.contains(image) && !entry.message.generated_images.contains(image));
+                        replay.append(&entry);
+                        pending_content.clear();
+                    }
+                    Some(AgentEvent::Consumed(ids)) => {
+                        if let Err(error)=session.store.consumed(&session.lease,&ids).await {failure=Some(error.to_string());break;}
+                        for entry in &mut replay.entries {if ids.contains(&entry.id){entry.consumed=true;}}
+                    }
+                    Some(AgentEvent::Checkpoint {previous,summary}) => {
+                        let expected=previous.as_ref().map(session::stored_summary);
+                        if let Err(error)=session.store.checkpoint(&session.lease,expected.as_ref(),&session::stored_summary(&summary)).await {failure=Some(error.to_string());break;}
+                        replay.summary=Some(summary);
+                    }
+                    Some(AgentEvent::Context(usage)) => {
+                        if let Err(error)=session.store.assert_current(&session.lease).await {failure=Some(error.to_string());break;}
+                        if !send_server(sender,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await {client_gone=true;}
+                    }
+                    Some(AgentEvent::Usage(usage)) => {tracing::debug!(prompt_tokens=usage.prompt_tokens,completion_tokens=usage.completion_tokens,"Observed provider usage");}
+                    Some(AgentEvent::Finalizing(message)) => { if !send_server(sender,ServerMessage::Status {message}).await {client_gone=true;} }
                     Some(AgentEvent::Chunk(content)) => {
                         let filtered = match token_filter.push(&content) {
                             FilterStep::Hold => continue,
                             FilterStep::Emit(text) => text,
                             FilterStep::Halt(text) => {
+                                pending_content.push_str(&text);
                                 if !text.is_empty()
                                     && !emit_chunk(
                                         sender,
@@ -2063,6 +2010,7 @@ async fn handle_chat_generation(
                                 break;
                             }
                         };
+                        pending_content.push_str(&filtered);
                         if !emit_chunk(
                             sender,
                             &mut full_content,
@@ -2134,6 +2082,9 @@ async fn handle_chat_generation(
                             continue;
                         };
 
+                        if !replay.entries.iter().any(|entry|entry.message.images.contains(&url) || entry.message.generated_images.iter().any(|image|image.image_url.url==url)) {
+                            pending_images.push(url);
+                        }
                         generated_images.push(attachment.clone());
                         if !client_gone {
                             let image_msg = ServerMessage::Image {
@@ -2195,6 +2146,7 @@ async fn handle_chat_generation(
 
     let leftover = token_filter.finish();
     if !leftover.is_empty() {
+        pending_content.push_str(&leftover);
         let _ = emit_chunk(
             sender,
             &mut full_content,
@@ -2214,7 +2166,20 @@ async fn handle_chat_generation(
         && tool_calls.is_empty()
         && generated_images.is_empty()
     {
+        session
+            .store
+            .interrupt(&session.lease, session.turn)
+            .await?;
         if !client_gone {
+            let _ = send_server(
+                sender,
+                ServerMessage::Context {
+                    chat_id,
+                    message_id: Some(assistant_message_id),
+                    usage: replay.usage(model_name, definitions.as_deref()),
+                },
+            )
+            .await;
             let terminal = match failure {
                 Some(message) => ServerMessage::Error { message },
                 None => ServerMessage::Cancelled {
@@ -2251,17 +2216,58 @@ async fn handle_chat_generation(
         &action_receipts,
     );
 
-    match chats::create_message_with_id(
-        state.db(),
-        assistant_message_id,
-        chat_id,
-        "assistant",
-        &full_content,
-        assistant_metadata.clone(),
-    )
-    .await
+    let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
+        let mut message = LlmMessage::assistant(pending_content);
+        message.images = pending_images;
+        Some(crate::services::chat::history::ReplayMessage::from(
+            &message,
+        ))
+    } else {
+        None
+    };
+    match session
+        .store
+        .finish(
+            &session.lease,
+            session.turn,
+            &full_content,
+            assistant_metadata.clone(),
+            cancelled || failure.is_some() || response_truncated,
+            partial.as_ref(),
+        )
+        .await
     {
         Ok(msg) => {
+            if !client_gone {
+                let history = session.store.load().await?;
+                replay
+                    .entries
+                    .retain(|entry| entry.message.role == LlmRole::System);
+                replay
+                    .entries
+                    .extend(
+                        history
+                            .entries
+                            .into_iter()
+                            .map(|entry| zone_core::context::Entry {
+                                id: entry.id,
+                                message: entry.message.into_message(),
+                                preserve: false,
+                                consumed: entry.consumed,
+                            }),
+                    );
+                replay.summary = history.summary.map(session::core_summary);
+                let usage = replay.usage(model_name, definitions.as_deref());
+                let _ = send_server(
+                    sender,
+                    ServerMessage::Context {
+                        chat_id,
+                        message_id: Some(assistant_message_id),
+                        usage,
+                    },
+                )
+                .await;
+            }
             // Spawn background task to generate assistant message embedding
             if !full_content.trim().is_empty() {
                 spawn_message_embedding_task(state.clone(), msg.id, chat_id, full_content.clone());

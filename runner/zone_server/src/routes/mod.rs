@@ -203,6 +203,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/chats/{id}",
             get(chats::get).put(chats::update).delete(chats::delete),
         )
+        .route("/api/chats/{id}/context", post(chats::context))
         .route("/api/chats/{id}/archive", post(chats::archive))
         .route("/api/chats/{id}/unarchive", post(chats::unarchive))
         .route(

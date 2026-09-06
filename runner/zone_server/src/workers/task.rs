@@ -518,7 +518,30 @@ async fn run_task_loop(
                 callback.on_tool_result(&name, &result);
                 callback.on_phase_change(AgentPhase::Observing, None);
             }
-            AgentEvent::Image(_) | AgentEvent::ToolApprovalRequired { .. } => {}
+            AgentEvent::Canonical(entry) => {
+                tasks::add_task_run_log(&callback.pool,callback.run_id,"acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":entry.message,"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
+            }
+            AgentEvent::Checkpoint { summary, .. } => {
+                tasks::add_task_run_log(
+                    &callback.pool,
+                    callback.run_id,
+                    "thinking",
+                    "agent",
+                    "info",
+                    "Conversation checkpoint",
+                    Some(serde_json::to_value(summary).map_err(|error| error.to_string())?),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            AgentEvent::Finalizing(reason) => {
+                callback.on_phase_change(AgentPhase::Responding, Some(&reason));
+            }
+            AgentEvent::Consumed(_)
+            | AgentEvent::Context(_)
+            | AgentEvent::Usage(_)
+            | AgentEvent::Image(_)
+            | AgentEvent::ToolApprovalRequired { .. } => {}
             AgentEvent::Failed(error) => return Err(error),
         }
     }

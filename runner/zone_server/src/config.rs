@@ -54,6 +54,8 @@ pub struct Config {
     pub source_index: SourceIndexConfig,
     /// Zone Prometheus / Grafana for on-call tools.
     pub monitoring: MonitoringConfig,
+    /// Chat execution and context allocations.
+    pub chat: crate::services::chat::session::Settings,
 }
 
 /// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
@@ -429,6 +431,11 @@ impl Config {
             comfyui: ComfyUiConfig::from_env(),
             source_index: SourceIndexConfig::from_env(),
             monitoring: MonitoringConfig::from_env(),
+            chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
+                ConfigError::Invalid(
+                    "ZONE_CHAT_* settings must be positive integers within the supported range",
+                )
+            })?,
         })
     }
 }
@@ -505,6 +512,7 @@ mod tests {
             comfyui: ComfyUiConfig::default(),
             source_index: SourceIndexConfig::default(),
             monitoring: MonitoringConfig::default(),
+            chat: Default::default(),
         }
     }
 
