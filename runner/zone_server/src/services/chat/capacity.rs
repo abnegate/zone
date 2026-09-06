@@ -1,5 +1,11 @@
 //! Effective limits come from the selected deployment, never model-name guesses.
 //!
+//! Cold Ollama uses the advertised native window from `/api/show`. A loaded
+//! `/api/ps` runtime still wins, and an explicit LiteLLM route `num_ctx` is an
+//! operator request bounded by that native window. `ZONE_CHAT_CONTEXT_TOKENS`
+//! is fallback only when native capacity is unknown — never a ceiling on a
+//! larger advertised window.
+//!
 //! LiteLLM 1.99.1 accepts top-level `num_ctx` and forwards it to Ollama's
 //! `options.num_ctx` (llms/ollama/chat/transformation.py). Ordinary inference
 //! and summarization must both apply the returned setting to this exact alias.
@@ -11,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
-/// Application runtime allocation, bounded by native capacity for a cold model.
+/// Fallback allocation when a deployment has not reported native capacity.
 /// Production callers supply validated typed configuration through `with_context`.
 pub const DEFAULT_CONTEXT: u64 = 32_768;
 
@@ -188,22 +194,49 @@ impl Resolver {
             .and_then(Value::as_u64)
             .filter(|value| *value > 0);
         let advertised = shown.as_ref().and_then(native_limit);
+        let requested = route.litellm_params.num_ctx.filter(|value| *value > 0);
+        let reasoning = shown.as_ref().is_some_and(ollama_thinking);
         if let Some(runtime) = runtime {
             let limit = advertised.map_or(runtime, |advertised| runtime.min(advertised));
-            return Capacity { limit: Some(limit), source: if limit == runtime { Source::Runtime } else { Source::Configured }, ollama: Some(limit),
-                reasoning: shown.as_ref().is_some_and(ollama_thinking),
-                reason: (limit != runtime).then(|| "The loaded context exceeds native capacity; this request uses the supported bound.".into()), identity };
+            return Capacity {
+                limit: Some(limit),
+                source: if limit == runtime {
+                    Source::Runtime
+                } else {
+                    Source::Configured
+                },
+                ollama: Some(limit),
+                reasoning,
+                reason: (limit != runtime).then(|| {
+                    "The loaded context exceeds native capacity; this request uses the supported bound.".into()
+                }),
+                identity,
+            };
         }
-        let Some(advertised) = advertised else {
-            return Capacity::unknown(
-                model,
-                "The cold model has not reported a native capacity that can safely bound its runtime configuration.",
-            );
-        };
-        let configured = route
-            .litellm_params
-            .num_ctx
-            .filter(|value| *value > 0)
+        if let Some(advertised) = advertised {
+            if let Some(requested) = requested {
+                let limit = requested.min(advertised);
+                return Capacity {
+                    limit: Some(limit),
+                    source: Source::Configured,
+                    ollama: Some(limit),
+                    reasoning,
+                    reason: (limit < requested).then(|| {
+                        "The requested context allocation is bounded by the model's reported native capacity.".into()
+                    }),
+                    identity,
+                };
+            }
+            return Capacity {
+                limit: Some(advertised),
+                source: Source::Provider,
+                ollama: Some(advertised),
+                reasoning,
+                reason: None,
+                identity,
+            };
+        }
+        let Some(limit) = requested
             .or_else(|| {
                 shown
                     .as_ref()
@@ -211,17 +244,21 @@ impl Resolver {
                     .and_then(Value::as_str)
                     .and_then(configured_limit)
             })
-            .or(self.configured);
-        let Some(configured) = configured else {
+            .or(self.configured)
+        else {
             return Capacity::unknown(
                 model,
-                "ZONE_CHAT_CONTEXT_TOKENS must be a positive integer.",
+                "The cold model has not reported a native capacity that can safely bound its runtime configuration.",
             );
         };
-        let limit = configured.min(advertised);
-        Capacity { limit: Some(limit), source: Source::Configured, ollama: Some(limit),
-            reasoning: shown.as_ref().is_some_and(ollama_thinking),
-            reason: (limit < configured).then(|| "The requested context allocation is bounded by the model's reported native capacity.".into()), identity }
+        Capacity {
+            limit: Some(limit),
+            source: Source::Configured,
+            ollama: Some(limit),
+            reasoning,
+            reason: None,
+            identity,
+        }
     }
 
     async fn routes(&self, model: &str) -> Option<Vec<Route>> {
@@ -426,7 +463,111 @@ mod tests {
         let capacity = resolver.resolve("alias").await;
         assert_eq!(capacity.limit, Some(16384));
         assert_eq!(capacity.ollama, Some(16384));
+        assert_eq!(capacity.source, Source::Provider);
+    }
+
+    #[tokio::test]
+    async fn cold_model_uses_advertised_native_window_instead_of_default_clamp() {
+        let (_server, resolver) = fixture(
+            json!({"model": "ollama_chat/native:latest"}),
+            json!({"models": []}),
+            json!({"model_info": {"general.architecture": "qwen3", "qwen3.context_length": 262144}}),
+        )
+        .await;
+        let capacity = resolver.resolve("alias").await;
+        assert_eq!(capacity.limit, Some(262144));
+        assert_eq!(capacity.ollama, Some(262144));
+        assert_eq!(capacity.source, Source::Provider);
+    }
+
+    #[tokio::test]
+    async fn explicit_route_num_ctx_is_an_operator_request_bounded_by_native() {
+        let (_server, resolver) = fixture(
+            json!({"model": "ollama_chat/native:latest", "num_ctx": 8192}),
+            json!({"models": []}),
+            json!({"model_info": {"general.architecture": "qwen3", "qwen3.context_length": 65536}}),
+        )
+        .await;
+        let capacity = resolver.resolve("alias").await;
+        assert_eq!(capacity.limit, Some(8192));
+        assert_eq!(capacity.ollama, Some(8192));
         assert_eq!(capacity.source, Source::Configured);
+    }
+
+    #[tokio::test]
+    async fn explicit_route_num_ctx_never_exceeds_native() {
+        let (_server, resolver) = fixture(
+            json!({"model": "ollama_chat/native:latest", "num_ctx": 131072}),
+            json!({"models": []}),
+            json!({"model_info": {"general.architecture": "qwen3", "qwen3.context_length": 65536}}),
+        )
+        .await;
+        let capacity = resolver.resolve("alias").await;
+        assert_eq!(capacity.limit, Some(65536));
+        assert_eq!(capacity.ollama, Some(65536));
+        assert_eq!(capacity.source, Source::Configured);
+        assert!(capacity.reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn show_parameter_num_ctx_does_not_shrink_advertised_native() {
+        let (_server, resolver) = fixture(
+            json!({"model": "ollama_chat/native:latest"}),
+            json!({"models": []}),
+            json!({
+                "parameters": "temperature 0.7\nnum_ctx 4096",
+                "model_info": {"general.architecture": "qwen3", "qwen3.context_length": 262144}
+            }),
+        )
+        .await;
+        let capacity = resolver.resolve("alias").await;
+        assert_eq!(capacity.limit, Some(262144));
+        assert_eq!(capacity.ollama, Some(262144));
+        assert_eq!(capacity.source, Source::Provider);
+    }
+
+    #[tokio::test]
+    async fn unknown_native_capacity_uses_configured_fallback() {
+        let (_server, resolver) = fixture(
+            json!({"model": "ollama_chat/native:latest"}),
+            json!({"models": []}),
+            json!({"parameters": "temperature 0.7"}),
+        )
+        .await;
+        let capacity = resolver.resolve("alias").await;
+        assert_eq!(capacity.limit, Some(DEFAULT_CONTEXT));
+        assert_eq!(capacity.ollama, Some(DEFAULT_CONTEXT));
+        assert_eq!(capacity.source, Source::Configured);
+    }
+
+    #[tokio::test]
+    async fn unknown_native_capacity_without_fallback_stays_unknown() {
+        let server = MockServer::start().await;
+        let mut parameters = json!({"model": "ollama_chat/native:latest"});
+        parameters["api_base"] = json!(server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/model/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"data":[{"model_name":"alias","litellm_params":parameters}]}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/ps"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models":[]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .and(body_json(json!({"model": "native:latest"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        let resolver = Resolver::with_context(&server.uri(), "key", &server.uri(), None);
+        let capacity = resolver.resolve("alias").await;
+        assert_eq!(capacity.limit, None);
+        assert_eq!(capacity.ollama, None);
+        assert_eq!(capacity.source, Source::Unknown);
     }
 
     #[tokio::test]
@@ -513,9 +654,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"model_info":{"general.architecture":"custom","custom.context_length":65536}}))).mount(&server).await;
         let resolver = Resolver::with_context(&server.uri(), "key", &server.uri(), Some(32768));
         let capacity = resolver.resolve("custom:1b").await;
-        assert_eq!(capacity.limit, Some(32768));
-        assert_eq!(capacity.source, Source::Configured);
-        assert_eq!(capacity.ollama, Some(32768));
+        assert_eq!(capacity.limit, Some(65536));
+        assert_eq!(capacity.source, Source::Provider);
+        assert_eq!(capacity.ollama, Some(65536));
         assert!(capacity.identity.contains("ollama_chat/custom:1b"));
         assert_eq!(server.received_requests().await.unwrap().len(), 4);
     }
