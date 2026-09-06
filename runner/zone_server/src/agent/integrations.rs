@@ -10,12 +10,14 @@ use std::time::Duration;
 use uuid::Uuid;
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
-use super::tools::WorkspaceScope;
+use super::tools::{WorkspaceScope, truncate};
 use crate::db::{sources, workspace_members};
 
 const ORIGIN: &str = "https://api.github.com/";
 const PAGE_SIZE: usize = 100;
 const FILE_PAGE_CHARS: u64 = 8_000;
+const ISSUE_BODY_CHARS: usize = 1_500;
+const BUILD_RECORD_CAP: usize = 20;
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -99,7 +101,7 @@ impl Tool for Integration {
                 "Read live GitHub deployments and their latest statuses for a connected source at an immutable commit. Results are paginated; deployment records do not prove the deployed service is healthy."
             }
             Operation::Issues => {
-                "Read live GitHub issues (excluding pull requests) from a connected workspace source. Return full issue bodies and a next page when more provider records exist."
+                "Read live GitHub issues (excluding pull requests) from a connected workspace source. Returns titles, numbers, state, urls and bounded body snippets, plus a next page when more provider records exist."
             }
             Operation::File => {
                 "Read UTF-8 content of a specific repository file from a connected GitHub source at an immutable commit, with a source URL. Returns a character page that fits the context budget; follow next to continue. Does not read host files. GitHub files over 100 MB are unsupported."
@@ -443,23 +445,7 @@ impl Github {
             let issues: Vec<Value> = records
                 .iter()
                 .filter(|row| row.get("pull_request").is_none())
-                .map(|row| {
-                    project(
-                        row,
-                        &[
-                            "number",
-                            "title",
-                            "body",
-                            "state",
-                            "html_url",
-                            "created_at",
-                            "updated_at",
-                            "closed_at",
-                            "labels",
-                            "assignees",
-                        ],
-                    )
-                })
+                .map(issue_record)
                 .collect();
             return Ok(json!({"repository": repository, "issues": issues, "next_page": next}));
         }
@@ -575,11 +561,11 @@ impl Github {
             )
             .collect();
         let state = assessment(&conclusions);
-        Ok(json!({"state": state, "complete": true,
+        Ok(bound_build(json!({"state": state, "complete": true,
             "assessment": "Observed CI only; required branch checks and service health are not evaluated.",
             "workflows": workflows.iter().map(|row| project(row, &["id", "name", "head_sha", "status", "conclusion", "html_url", "updated_at"])).collect::<Vec<_>>(),
             "checks": checks.iter().map(|row| project(row, &["id", "name", "head_sha", "status", "conclusion", "html_url", "details_url", "completed_at"])).collect::<Vec<_>>(),
-            "statuses": statuses.iter().map(|row| project(row, &["context", "state", "description", "target_url", "created_at"])).collect::<Vec<_>>() }))
+            "statuses": statuses.iter().map(|row| project(row, &["context", "state", "description", "target_url", "created_at"])).collect::<Vec<_>>() })))
     }
 
     async fn deployments(&self, sha: &str, page: u32) -> Result<Value, String> {
@@ -817,6 +803,103 @@ fn assessment(conclusions: &[&str]) -> &'static str {
     }
 }
 
+fn issue_record(row: &Value) -> Value {
+    let mut issue = project(
+        row,
+        &[
+            "number",
+            "title",
+            "body",
+            "state",
+            "html_url",
+            "created_at",
+            "updated_at",
+            "closed_at",
+            "labels",
+            "assignees",
+        ],
+    );
+    if let Some(body) = issue
+        .get("body")
+        .and_then(Value::as_str)
+        .map(|body| truncate(body, ISSUE_BODY_CHARS))
+    {
+        issue["body"] = json!(body);
+    }
+    issue
+}
+
+fn bound_build(mut result: Value) -> Value {
+    let budget = FILE_PAGE_CHARS as usize;
+    if json_chars(&result) <= budget {
+        return result;
+    }
+    let workflows = take_array(&result, "workflows");
+    let checks = take_array(&result, "checks");
+    let statuses = take_array(&result, "statuses");
+    let mut cap = BUILD_RECORD_CAP.max(1);
+    loop {
+        apply_record_cap(&mut result, "workflows", &workflows, cap);
+        apply_record_cap(&mut result, "checks", &checks, cap);
+        apply_record_cap(&mut result, "statuses", &statuses, cap);
+        if json_chars(&result) <= budget || cap == 1 {
+            return result;
+        }
+        cap = (cap / 2).max(1);
+    }
+}
+
+fn json_chars(value: &Value) -> usize {
+    value.to_string().chars().count()
+}
+
+fn take_array(value: &Value, key: &str) -> Vec<Value> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn apply_record_cap(result: &mut Value, key: &str, rows: &[Value], cap: usize) {
+    let (capped, omitted) = cap_ci_records(rows, cap);
+    result[key] = Value::Array(capped);
+    let omitted_key = format!("{key}_omitted");
+    if omitted > 0 {
+        result[omitted_key] = json!(omitted);
+    } else if let Some(object) = result.as_object_mut() {
+        object.remove(&omitted_key);
+    }
+}
+
+fn cap_ci_records(rows: &[Value], cap: usize) -> (Vec<Value>, usize) {
+    let total = rows.len();
+    if total <= cap {
+        return (rows.to_vec(), 0);
+    }
+    let mut ranked: Vec<&Value> = rows.iter().collect();
+    ranked.sort_by_key(|row| ci_priority(row));
+    (ranked.into_iter().take(cap).cloned().collect(), total - cap)
+}
+
+fn ci_priority(row: &Value) -> u8 {
+    let token = if row.get("status").is_some() {
+        if row["status"].as_str() == Some("completed") {
+            row["conclusion"].as_str().unwrap_or("unknown")
+        } else {
+            "pending"
+        }
+    } else {
+        row["state"].as_str().unwrap_or("unknown")
+    };
+    match assessment(&[token]) {
+        "failure" => 0,
+        "pending" => 1,
+        "unknown" => 2,
+        _ => 3,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,8 +1040,15 @@ mod tests {
         .await;
         mock(&server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
         let result = github(&server).build(COMMIT).await.unwrap();
+        let checks = result["checks"].as_array().unwrap();
         assert_eq!(result["state"], "failure");
-        assert_eq!(result["checks"].as_array().unwrap().len(), 101);
+        assert!(
+            checks.iter().any(|check| check["conclusion"] == "failure"),
+            "truncated build history must still include the failing check"
+        );
+        assert!(checks.len() < 101);
+        assert_eq!(result["checks_omitted"], 101 - checks.len());
+        assert!(json_chars(&result) <= FILE_PAGE_CHARS as usize);
     }
 
     #[tokio::test]
@@ -1183,8 +1273,9 @@ mod tests {
     #[tokio::test]
     async fn issues_keep_full_body_exclude_pulls_and_report_provider_page() {
         let server = MockServer::start().await;
-        let mut issues = vec![json!({"number":1,"pull_request":{}}); 99];
+        let mut issues = vec![json!({"number":1,"pull_request":{}}); 98];
         let body = "full issue ".repeat(2000);
+        issues.push(json!({"number":99,"title":"Tiny","body":"ok"}));
         issues.push(json!({"number":100,"title":"Bug","body":body}));
         mock(&server, "issues", json!(issues)).await;
         let result = github(&server)
@@ -1207,9 +1298,97 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result["issues"].as_array().unwrap().len(), 1);
-        assert_eq!(result["issues"][0]["body"], body);
+        let listed = result["issues"].as_array().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0]["number"], 99);
+        assert_eq!(listed[0]["title"], "Tiny");
+        assert_eq!(listed[0]["body"], "ok");
+        assert_eq!(listed[1]["number"], 100);
+        assert_eq!(listed[1]["title"], "Bug");
+        let snippet = listed[1]["body"].as_str().unwrap();
+        assert_ne!(snippet, body);
+        assert!(snippet.starts_with("full issue "));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= ISSUE_BODY_CHARS + 1);
         assert_eq!(result["next_page"], 2);
+    }
+
+    #[test]
+    fn issue_body_truncates_long_text_and_keeps_short_text() {
+        let long = issue_record(&json!({
+            "number": 7,
+            "title": "Bug",
+            "body": "x".repeat(2_000),
+            "state": "open",
+            "html_url": "https://github.com/owner/repository/issues/7"
+        }));
+        assert_eq!(long["number"], 7);
+        assert_eq!(long["title"], "Bug");
+        assert_eq!(long["state"], "open");
+        assert_eq!(
+            long["html_url"],
+            "https://github.com/owner/repository/issues/7"
+        );
+        let body = long["body"].as_str().unwrap();
+        assert!(body.ends_with('…'));
+        assert_eq!(body.chars().count(), ISSUE_BODY_CHARS + 1);
+        assert_eq!(
+            issue_record(&json!({"number": 1, "title": "Tiny", "body": "ok"}))["body"],
+            "ok"
+        );
+        assert_eq!(
+            issue_record(&json!({"number": 2, "body": "a".repeat(ISSUE_BODY_CHARS)}))["body"],
+            "a".repeat(ISSUE_BODY_CHARS)
+        );
+    }
+
+    #[test]
+    fn bound_build_keeps_failures_under_the_character_budget() {
+        let mut checks: Vec<Value> = (0..80)
+            .map(|id| {
+                json!({
+                    "id": id,
+                    "name": format!("check-{id}"),
+                    "head_sha": COMMIT,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": format!("https://github.com/owner/repository/runs/{id}")
+                })
+            })
+            .collect();
+        checks.push(json!({
+            "id": 99,
+            "name": "boom",
+            "head_sha": COMMIT,
+            "status": "completed",
+            "conclusion": "failure",
+            "html_url": "https://github.com/owner/repository/runs/99"
+        }));
+        let result = bound_build(json!({
+            "state": "failure",
+            "complete": true,
+            "assessment": "Observed CI only; required branch checks and service health are not evaluated.",
+            "workflows": [],
+            "checks": checks,
+            "statuses": []
+        }));
+        let listed = result["checks"].as_array().unwrap();
+        assert_eq!(result["state"], "failure");
+        assert!(listed.iter().any(|check| check["conclusion"] == "failure"));
+        assert!(listed.len() < 81);
+        assert_eq!(result["checks_omitted"], 81 - listed.len());
+        assert!(json_chars(&result) <= FILE_PAGE_CHARS as usize);
+        let small = bound_build(json!({
+            "state": "success",
+            "complete": true,
+            "assessment": "Observed CI only; required branch checks and service health are not evaluated.",
+            "workflows": [json!({"id": 1, "status": "completed", "conclusion": "success"})],
+            "checks": [],
+            "statuses": []
+        }));
+        assert_eq!(small["workflows"].as_array().unwrap().len(), 1);
+        assert!(small.get("workflows_omitted").is_none());
+        assert!(small.get("checks_omitted").is_none());
     }
 
     #[tokio::test]
