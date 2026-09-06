@@ -222,12 +222,12 @@ details, and native macOS / bundled NVIDIA instructions.
 ### `MODEL_SEARCH_PROXY_URL`
 - **Default**: empty (direct catalog requests)
 - **Description**: Optional HTTP proxy for remote model catalog searches from Manager
-- **VPN value**: `http://gluetun:8888`
+- **VPN value**: `http://gluetun:8888` in `.env` (Traefik). Manager's VPN overlay uses `http://127.0.0.1:8888` because Manager shares Gluetun's network namespace and cannot resolve the `gluetun` Docker DNS name.
 
 ### `TOOL_RUNNER_PROXY_URL`
 - **Default**: empty (existing subprocess environment)
 - **Description**: Optional HTTP proxy for proxy-aware command tools and MCP subprocesses
-- **VPN value**: `http://gluetun:8888`
+- **VPN value**: `http://gluetun:8888` in `.env` (Traefik). Manager's VPN overlay uses `http://127.0.0.1:8888` for the same shared-namespace reason.
 
 ### `ZONE_VPN`
 - **Default**: empty

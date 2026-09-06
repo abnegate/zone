@@ -55,6 +55,13 @@ for name in attached:
 manager_env = vpn["services"]["manager"].get("environment") or {}
 if manager_env.get("LITELLM_HOST") != "http://127.0.0.1:4000":
     raise SystemExit("VPN manager must reach LiteLLM on localhost")
+if manager_env.get("MODEL_SEARCH_PROXY_URL") != "http://127.0.0.1:8888":
+    raise SystemExit(
+        "VPN manager must reach the Gluetun HTTP proxy on localhost "
+        "(gluetun hostname does not resolve in the shared namespace)"
+    )
+if manager_env.get("TOOL_RUNNER_PROXY_URL") != "http://127.0.0.1:8888":
+    raise SystemExit("VPN manager tool proxy must use localhost, not gluetun")
 
 gluetun = vpn["services"]["gluetun"]
 aliases = set()
@@ -115,6 +122,11 @@ for name, address in pinned.items():
         raise SystemExit(f"{name} must pin {address} on the internal network")
 
 gluetun_hosts = extra_hosts_map(gluetun)
+if gluetun_hosts.get("gluetun") != "127.0.0.1":
+    raise SystemExit(
+        "gluetun must extra_hosts gluetun=127.0.0.1 so VPN-attached processes "
+        "can resolve the proxy hostname"
+    )
 for host, address in pinned.items():
     if gluetun_hosts.get(host) != address:
         raise SystemExit(
@@ -138,6 +150,10 @@ if pinned["valkey"] not in manager_env.get("REDIS_URL", ""):
     raise SystemExit("VPN manager REDIS_URL must use the pinned Valkey address")
 if pinned["prometheus"] not in manager_env.get("MONITORING_PROMETHEUS_URL", ""):
     raise SystemExit("VPN manager must scrape Prometheus on the pinned address")
+if manager_env.get("MODEL_SEARCH_PROXY_URL") != "http://127.0.0.1:8888":
+    raise SystemExit("VPN manager MODEL_SEARCH_PROXY_URL must be loopback")
+if manager_env.get("TOOL_RUNNER_PROXY_URL") != "http://127.0.0.1:8888":
+    raise SystemExit("VPN manager TOOL_RUNNER_PROXY_URL must be loopback")
 
 grafana_env = service_env(vpn["services"]["grafana"])
 if grafana_env.get("PROMETHEUS_URL") != f"http://{pinned['prometheus']}:9090":

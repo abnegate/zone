@@ -167,17 +167,7 @@ impl ModelProvider for OllamaLibraryProvider {
 
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
         let offset = parse_cursor_offset(opts.cursor)?;
-
-        let search_query = opts.query.unwrap_or_default();
-        let url = if search_query.is_empty() {
-            "https://ollama.com/search".to_string()
-        } else {
-            format!(
-                "https://ollama.com/search?q={}",
-                urlencoding::encode(search_query)
-            )
-        };
-
+        let url = ollama_search_url(opts.query, opts.family);
         let response = self.client.get(&url).send().await?;
 
         if !response.status().is_success() {
@@ -228,6 +218,27 @@ async fn attach_ollama_download_sizes(
         .buffered(OLLAMA_SIZE_LOOKUP_CONCURRENCY)
         .collect()
         .await
+}
+
+fn ollama_search_url(query: Option<&str>, family: Option<&str>) -> String {
+    let mut terms = Vec::new();
+    if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+        terms.push(query);
+    }
+    if let Some(family) = family.map(str::trim).filter(|value| !value.is_empty())
+        && !terms.iter().any(|term| term.eq_ignore_ascii_case(family))
+    {
+        terms.push(family);
+    }
+
+    if terms.is_empty() {
+        "https://ollama.com/search".to_string()
+    } else {
+        format!(
+            "https://ollama.com/search?q={}",
+            urlencoding::encode(&terms.join(" "))
+        )
+    }
 }
 
 /// Split `llama3.2:1b` into repository + tag. Untagged names use `latest`.
@@ -2436,6 +2447,23 @@ mod tests {
                 &browse_opts(ModelSort::Relevance, None, ModelSizeFilter::All)
             ),
             3
+        );
+    }
+
+    #[test]
+    fn test_ollama_search_url_includes_family_when_query_is_empty() {
+        assert_eq!(ollama_search_url(None, None), "https://ollama.com/search");
+        assert_eq!(
+            ollama_search_url(Some(""), Some("llama")),
+            "https://ollama.com/search?q=llama"
+        );
+        assert_eq!(
+            ollama_search_url(Some("vision"), Some("llama")),
+            "https://ollama.com/search?q=vision%20llama"
+        );
+        assert_eq!(
+            ollama_search_url(Some("llama"), Some("llama")),
+            "https://ollama.com/search?q=llama"
         );
     }
 

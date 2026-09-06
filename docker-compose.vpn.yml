@@ -14,6 +14,7 @@ services:
   gluetun:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "gluetun:127.0.0.1"
       - "postgres:172.30.0.20"
       - "valkey:172.30.0.21"
       - "prometheus:172.30.0.22"
@@ -100,6 +101,8 @@ services:
       LITELLM_HOST: http://127.0.0.1:4000
       SEARCH_SEARXNG_QUERY_URL: http://127.0.0.1:8080/search?q=<query>&format=json
       MONITORING_GRAFANA_URL: http://127.0.0.1:3000
+      MODEL_SEARCH_PROXY_URL: http://127.0.0.1:8888
+      TOOL_RUNNER_PROXY_URL: http://127.0.0.1:8888
       # Docker forbids extra_hosts with network_mode=service. Gluetun DoT also
       # cannot resolve Docker names, so use the pinned internal addresses.
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD_URLENCODED}@172.30.0.20:5432/${MANAGER_POSTGRES_DB:-manager}

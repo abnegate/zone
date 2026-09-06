@@ -49,6 +49,10 @@ namespace, so all of their IP traffic uses the tunnel and Gluetun's kill switch:
 - Traefik ACME (HTTP proxy to Gluetun)
 - Tool and model-catalog HTTP (proxy env as belt-and-suspenders)
 
+Gluetun DoT cannot resolve Docker DNS names, so the overlay points Manager at
+`http://127.0.0.1:8888` for catalog and tool HTTP and extra_hosts `gluetun` to
+loopback. Traefik stays on the Docker network and keeps `http://gluetun:8888`.
+
 Postgres, Valkey, Prometheus, and the console stay on Docker networks so the
 local UI and databases keep working. Rebuilds preserve `ZONE_VPN=1`, so later
 `make rebuild`, `make up-comfyui`, and model-download targets keep the overlay.
