@@ -42,6 +42,11 @@ describe('ContextUsage', () => {
     expect(button.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(button);
   });
+  it('keeps the percentage visible while a draft preview is in flight', () => {
+    render(<ContextUsage usage={usage} previewing />);
+    expect(screen.getByRole('button').textContent).toContain('24%');
+    expect(screen.queryByText('Estimating…')).toBeNull();
+  });
   it('never renders a precise percentage for unknown image costs or zero capacity', () => {
     const { rerender } = render(
       <ContextUsage

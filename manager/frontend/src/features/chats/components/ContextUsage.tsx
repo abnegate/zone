@@ -38,9 +38,7 @@ export function ContextUsage({ usage, error, previewing = false }: Props) {
             ? 'Unavailable'
             : usage?.status === 'ready' && usage.threshold !== null && usage.remaining === 0
               ? 'Will compact before sending'
-              : previewing
-                ? 'Estimating…'
-                : null;
+              : null;
   const summary = usage
     ? `${usage.estimated || usage.incomplete ? '≈ ' : ''}${count(usage.used)} tokens`
     : 'Usage unavailable';
