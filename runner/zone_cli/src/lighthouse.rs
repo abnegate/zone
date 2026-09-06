@@ -150,12 +150,11 @@ pub fn run_all(project_root: &Path, verbose: bool) -> Result<()> {
 
     let mut errors = Vec::new();
 
-    for frontend in [Frontend::Manager] {
-        if let Err(e) = run_lighthouse(project_root, frontend, verbose) {
-            errors.push(format!("{}: {}", frontend.name(), e));
-        }
-        println!();
+    let frontend = Frontend::Manager;
+    if let Err(error) = run_lighthouse(project_root, frontend, verbose) {
+        errors.push(format!("{}: {}", frontend.name(), error));
     }
+    println!();
 
     if !errors.is_empty() {
         eprintln!("\n{} Some audits failed:", style("✗").red());

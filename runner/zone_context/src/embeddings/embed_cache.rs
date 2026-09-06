@@ -50,15 +50,14 @@ pub fn cache_put(key: String, vector: Vec<f32>) {
         return;
     };
     cache.tick += 1;
-    if cache.entries.len() >= CAPACITY {
-        if let Some(oldest) = cache
+    if cache.entries.len() >= CAPACITY
+        && let Some(oldest) = cache
             .entries
             .iter()
             .min_by_key(|(_, entry)| entry.tick)
             .map(|(key, _)| key.clone())
-        {
-            cache.entries.remove(&oldest);
-        }
+    {
+        cache.entries.remove(&oldest);
     }
     let tick = cache.tick;
     cache.entries.insert(key, Entry { tick, vector });

@@ -227,6 +227,18 @@ mod tests {
         };
         let ids = vec![entry.id.clone()];
         let original = fingerprint(&[entry.clone()], &ids).unwrap();
+        let canonical = zone_core::context::Entry {
+            id: entry.id.clone(),
+            message: entry.message.clone().into_message(),
+            preserve: false,
+            consumed: entry.consumed,
+        };
+        assert_eq!(
+            original,
+            zone_core::context::coverage(&[canonical], &ids)
+                .unwrap()
+                .fingerprint
+        );
         entry
             .message
             .images

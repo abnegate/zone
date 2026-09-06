@@ -214,14 +214,14 @@ async fn apply_character(
     chat_id: Uuid,
     character: Option<&ChatCharacter>,
     clear: bool,
-) -> Result<Option<chats::ChatRow>, axum::response::Response> {
+) -> Result<Option<chats::ChatRow>, (StatusCode, Json<ErrorResponse>)> {
     if !clear && character.is_none() {
         return Ok(None);
     }
     if let Some(card) = character
         && let Err(message) = card.validate()
     {
-        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response());
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))));
     }
     let stored = if clear { None } else { character };
     let chat = chats::set_chat_character(state.db(), chat_id, stored)
@@ -232,7 +232,6 @@ async fn apply_character(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::new("Internal server error")),
             )
-                .into_response()
         })?;
     if let Some(card) = stored
         && let Some(greeting) = card
@@ -376,7 +375,7 @@ pub async fn create(
             let chat = match apply_character(&state, chat.id, req.character.as_ref(), false).await {
                 Ok(Some(chat)) => chat,
                 Ok(None) => chat,
-                Err(response) => return response,
+                Err(response) => return response.into_response(),
             };
             (
                 StatusCode::CREATED,
@@ -457,13 +456,13 @@ pub async fn update(
                 match apply_character(&state, chat.id, None, true).await {
                     Ok(Some(chat)) => chat,
                     Ok(None) => chat,
-                    Err(response) => return response,
+                    Err(response) => return response.into_response(),
                 }
             } else {
                 match apply_character(&state, chat.id, req.character.as_ref(), false).await {
                     Ok(Some(chat)) => chat,
                     Ok(None) => chat,
-                    Err(response) => return response,
+                    Err(response) => return response.into_response(),
                 }
             };
             Json(SingleChatResponse {

@@ -63,7 +63,7 @@ impl Model {
         response.json().await.ok()
     }
 
-    fn into_profile(&self, name: &str) -> ModelProfile {
+    fn into_profile(self, name: &str) -> ModelProfile {
         let tools = self.supports_tools();
         ModelProfile {
             completion: self.supports_completion(),
@@ -169,11 +169,7 @@ mod tests {
     #[test]
     fn character_is_for_imported_weights_and_persona_templates() {
         assert!(needs_character("hf.co/owner/custom-7b-Q4_K_M", None, false));
-        assert!(needs_character(
-            "llama3.1:latest",
-            None,
-            true
-        ));
+        assert!(needs_character("llama3.1:latest", None, true));
         assert!(!needs_character("llama3.1:latest", None, false));
         assert!(!needs_character("mistral", None, false));
         assert!(!needs_character(

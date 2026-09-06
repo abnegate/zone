@@ -689,56 +689,58 @@ fn cmp_file_chunks(
                 0
             };
             left_stem.cmp(&right_stem).then_with(|| {
-            let left_conj = conjunction_ident_hit(&left.chunk_text, &identifiers);
-            let right_conj = conjunction_ident_hit(&right.chunk_text, &identifiers);
-            left_conj.cmp(&right_conj).then_with(|| {
-            let left_sym = defined_symbol_prefix(query, &left.chunk_text);
-            let right_sym = defined_symbol_prefix(query, &right.chunk_text);
-            left_sym.cmp(&right_sym).then_with(|| {
-            let left_excl =
-                exclusive_question_hits(query, &left.chunk_text, &right.chunk_text);
-            let right_excl =
-                exclusive_question_hits(query, &right.chunk_text, &left.chunk_text);
-            left_excl.cmp(&right_excl).then_with(|| {
-                let left_cover = question_coverage(query, &left.chunk_text, &identifiers);
-                let right_cover = question_coverage(query, &right.chunk_text, &identifiers);
-                left_cover.cmp(&right_cover).then_with(|| {
-                let left_role = crate::embeddings::ranker::role_strength(
-                    &left.chunk_text,
-                    &left.item_uri,
-                    &identifiers,
-                );
-                let right_role = crate::embeddings::ranker::role_strength(
-                    &right.chunk_text,
-                    &right.item_uri,
-                    &identifiers,
-                );
-                left_role.cmp(&right_role).then_with(|| {
-                    let left_lex = crate::embeddings::lexical_cross_score(
-                        query,
-                        &left.item_uri,
-                        &left.item_title,
-                        &left.chunk_text,
-                    );
-                    let right_lex = crate::embeddings::lexical_cross_score(
-                        query,
-                        &right.item_uri,
-                        &right.item_title,
-                        &right.chunk_text,
-                    );
-                    left_lex
-                        .partial_cmp(&right_lex)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| {
-                            left.score
-                                .partial_cmp(&right.score)
-                                .unwrap_or(std::cmp::Ordering::Equal)
+                let left_conj = conjunction_ident_hit(&left.chunk_text, &identifiers);
+                let right_conj = conjunction_ident_hit(&right.chunk_text, &identifiers);
+                left_conj.cmp(&right_conj).then_with(|| {
+                    let left_sym = defined_symbol_prefix(query, &left.chunk_text);
+                    let right_sym = defined_symbol_prefix(query, &right.chunk_text);
+                    left_sym.cmp(&right_sym).then_with(|| {
+                        let left_excl =
+                            exclusive_question_hits(query, &left.chunk_text, &right.chunk_text);
+                        let right_excl =
+                            exclusive_question_hits(query, &right.chunk_text, &left.chunk_text);
+                        left_excl.cmp(&right_excl).then_with(|| {
+                            let left_cover =
+                                question_coverage(query, &left.chunk_text, &identifiers);
+                            let right_cover =
+                                question_coverage(query, &right.chunk_text, &identifiers);
+                            left_cover.cmp(&right_cover).then_with(|| {
+                                let left_role = crate::embeddings::ranker::role_strength(
+                                    &left.chunk_text,
+                                    &left.item_uri,
+                                    &identifiers,
+                                );
+                                let right_role = crate::embeddings::ranker::role_strength(
+                                    &right.chunk_text,
+                                    &right.item_uri,
+                                    &identifiers,
+                                );
+                                left_role.cmp(&right_role).then_with(|| {
+                                    let left_lex = crate::embeddings::lexical_cross_score(
+                                        query,
+                                        &left.item_uri,
+                                        &left.item_title,
+                                        &left.chunk_text,
+                                    );
+                                    let right_lex = crate::embeddings::lexical_cross_score(
+                                        query,
+                                        &right.item_uri,
+                                        &right.item_title,
+                                        &right.chunk_text,
+                                    );
+                                    left_lex
+                                        .partial_cmp(&right_lex)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                        .then_with(|| {
+                                            left.score
+                                                .partial_cmp(&right.score)
+                                                .unwrap_or(std::cmp::Ordering::Equal)
+                                        })
+                                })
+                            })
                         })
+                    })
                 })
-            })
-            })
-            })
-            })
             })
         })
     })
@@ -751,11 +753,13 @@ fn conjunction_ident_hit(text: &str, identifiers: &[String]) -> bool {
 
 fn uri_path_hit(query: &str, uri: &str) -> u8 {
     let uri_l = uri.to_ascii_lowercase();
-    crate::embeddings::path_uri_tokens(query)
-        .iter()
-        .any(|token| uri_l.contains(&format!("/{token}.")) || uri_l.contains(&format!("/{token}@")))
-        .then_some(1)
-        .unwrap_or(0)
+    u8::from(
+        crate::embeddings::path_uri_tokens(query)
+            .iter()
+            .any(|token| {
+                uri_l.contains(&format!("/{token}.")) || uri_l.contains(&format!("/{token}@"))
+            }),
+    )
 }
 
 async fn path_matched_item_ids(
@@ -805,7 +809,9 @@ fn exclusive_question_hits(query: &str, text: &str, other: &str) -> u32 {
         .count() as u32;
     let phrases = crate::embeddings::nl_question_phrases(query)
         .into_iter()
-        .filter(|phrase| text_code.contains(phrase.as_str()) && !other_code.contains(phrase.as_str()))
+        .filter(|phrase| {
+            text_code.contains(phrase.as_str()) && !other_code.contains(phrase.as_str())
+        })
         .count() as u32;
     doc_words * 3 + body_words + phrases * 2
 }
@@ -860,7 +866,9 @@ fn uri_stem_matches_ident(uri: &str, identifiers: &[String]) -> bool {
     identifiers.iter().any(|id| {
         let id_l = id.to_ascii_lowercase();
         stem == id_l
-            || id_l.split(['_', '-', '/']).any(|part| part.len() >= 4 && (stem == part || stem.contains(part)))
+            || id_l
+                .split(['_', '-', '/'])
+                .any(|part| part.len() >= 4 && (stem == part || stem.contains(part)))
     })
 }
 
@@ -956,15 +964,12 @@ fn defined_symbol_prefix(query: &str, text: &str) -> u32 {
     let Some(leaf) = defined_leaf_symbol(text) else {
         return 0;
     };
-    crate::embeddings::nl_content_tokens(query)
-        .into_iter()
-        .chain(question_stems(query))
-        .any(|token| {
-            leaf.starts_with(&token)
-                || (token.len() >= 6 && leaf.contains(&token))
-        })
-        .then_some(1)
-        .unwrap_or(0)
+    u32::from(
+        crate::embeddings::nl_content_tokens(query)
+            .into_iter()
+            .chain(question_stems(query))
+            .any(|token| leaf.starts_with(&token) || (token.len() >= 6 && leaf.contains(&token))),
+    )
 }
 
 fn defined_symbol_overlap(query: &str, text: &str) -> u32 {
@@ -974,12 +979,12 @@ fn defined_symbol_overlap(query: &str, text: &str) -> u32 {
     let Some(leaf) = defined_leaf_symbol(text) else {
         return 0;
     };
-    crate::embeddings::nl_content_tokens(query)
-        .into_iter()
-        .chain(question_stems(query))
-        .any(|token| leaf.contains(&token) || (token.len() >= 4 && token.contains(&leaf)))
-        .then_some(1)
-        .unwrap_or(0)
+    u32::from(
+        crate::embeddings::nl_content_tokens(query)
+            .into_iter()
+            .chain(question_stems(query))
+            .any(|token| leaf.contains(&token) || (token.len() >= 4 && token.contains(&leaf))),
+    )
 }
 
 fn function_kind(text: &str) -> bool {
@@ -1036,9 +1041,7 @@ fn same_file_patterns(query: &str) -> Vec<String> {
     let mut push = |token: &str| {
         let token = token.to_ascii_lowercase();
         if token.len() < 3
-            || !token
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             || !seen.insert(token.clone())
         {
             return;
@@ -1614,7 +1617,7 @@ mod tests {
         let noise = (0..10).map(|idx| {
             hit(
                 idx + 1,
-                Uuid::from_u128(30 + idx as u128),
+                Uuid::from_u128(30 + idx),
                 &format!("github://zone/other/file{idx}.rs@main"),
                 "fn helper() {}",
                 2.0,
@@ -1634,15 +1637,26 @@ mod tests {
             "How are generated chat artifacts authorized before serving?",
         );
         assert!(
-            capped.iter().any(|row| row.item_uri.contains("artifacts.rs")),
+            capped
+                .iter()
+                .any(|row| row.item_uri.contains("artifacts.rs")),
             "uris {:?}",
-            capped.iter().map(|row| row.item_uri.as_str()).collect::<Vec<_>>()
+            capped
+                .iter()
+                .map(|row| row.item_uri.as_str())
+                .collect::<Vec<_>>()
         );
         assert!(
             capped[0].item_uri.contains("artifacts.rs")
-                || capped.get(1).is_some_and(|row| row.item_uri.contains("artifacts.rs")),
+                || capped
+                    .get(1)
+                    .is_some_and(|row| row.item_uri.contains("artifacts.rs")),
             "top {:?}",
-            capped.iter().take(2).map(|row| row.item_uri.as_str()).collect::<Vec<_>>()
+            capped
+                .iter()
+                .take(2)
+                .map(|row| row.item_uri.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
