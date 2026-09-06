@@ -369,6 +369,92 @@ async fn test_list_models_ollama_success() {
 }
 
 #[tokio::test]
+async fn installed_capabilities_follow_engine_metadata() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    let server = MockServer::start().await;
+    let cases = [
+        (
+            "multimodal",
+            json!({"capabilities": ["completion", "vision", "image", "audio", "tools", "thinking", "completion", "future"]}),
+            Some(json!([
+                "text",
+                "image_input",
+                "image_generation",
+                "audio",
+                "tools",
+                "reasoning"
+            ])),
+        ),
+        (
+            "vectors",
+            json!({"capabilities": ["embedding"]}),
+            Some(json!(["embeddings"])),
+        ),
+        ("missing", json!({}), None),
+        ("empty", json!({"capabilities": []}), None),
+        (
+            "unknown",
+            json!({"capabilities": ["video", "future"]}),
+            None,
+        ),
+    ];
+    let models: Vec<_> = cases
+        .iter()
+        .map(|(name, _, _)| {
+            json!({
+                "name": name,
+                "size": 1024,
+                "digest": "digest",
+                "modified_at": "2026-09-06T00:00:00Z"
+            })
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": models})))
+        .mount(&server)
+        .await;
+    for (name, metadata, _) in &cases {
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .and(body_json(json!({"model": name})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let router = create_test_router_with_ollama(&server.uri()).await;
+    let token = get_auth_token(&router).await;
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/models")
+                .header("Authorization", format!("Bearer {}", token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    for (model, (name, _, expected)) in models.iter().zip(cases) {
+        assert_eq!(model["name"], name);
+        assert_eq!(model.get("capabilities"), expected.as_ref(), "{name}");
+    }
+    assert_eq!(models[0]["completion"], true);
+    assert_eq!(models[0]["tools"], true);
+    assert_eq!(models[0]["needs_character"], false);
+    assert_eq!(models[1]["completion"], false);
+    assert!(models[2].get("completion").is_none());
+    assert!(models[2].get("tools").is_none());
+}
+
+#[tokio::test]
 async fn test_list_models_ollama_with_source_param() {
     // When source=ollama is explicitly provided, it enters "browse" mode
     // which uses the OllamaLibraryProvider and returns a BrowseResponse

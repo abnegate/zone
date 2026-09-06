@@ -7,6 +7,7 @@ const mockInstalledModels = [
     name: 'llama3.2:latest',
     size: 4661224448,
     modified_at: '2024-01-15T10:30:00Z',
+    capabilities: ['text', 'image_input', 'audio', 'video_input', 'tools'],
     details: { family: 'llama', description: 'Meta Llama 3.2' },
   },
   {
@@ -153,6 +154,30 @@ test.describe('Models Page', () => {
 
   test('shows model size formatted correctly', async ({ page }) => {
     await expect(page.locator('.model-meta').first()).toContainText('4.3 GB');
+  });
+
+  test('shows installed capabilities without hiding model controls', async ({ page }, testInfo) => {
+    const model = page.locator('.model-item').first();
+    await expect(
+      model.getByRole('group', { name: 'Model capabilities' }).locator('.tag')
+    ).toHaveText(['Text', 'Image input', 'Audio', 'Video input', 'Tools']);
+    await expect(model.locator('.model-meta')).toBeVisible();
+    await expect(model.getByTitle('Delete model')).toBeVisible();
+    await expect(page.locator('.model-item').nth(1)).toContainText('Capabilities unknown');
+    await page.screenshot({
+      path: testInfo.outputPath('capabilities-desktop.png'),
+      fullPage: true,
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.reload();
+    await expect(model.getByTitle('Delete model')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Installed Models' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Add Model' })).toBeVisible();
+    await expect(page.getByRole('progressbar', { name: 'Disk space used' })).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('capabilities-narrow.png'), fullPage: true });
   });
 
   test('displays browse models', async ({ page }) => {

@@ -751,11 +751,13 @@ fn conjunction_ident_hit(text: &str, identifiers: &[String]) -> bool {
 
 fn uri_path_hit(query: &str, uri: &str) -> u8 {
     let uri_l = uri.to_ascii_lowercase();
-    crate::embeddings::path_uri_tokens(query)
-        .iter()
-        .any(|token| uri_l.contains(&format!("/{token}.")) || uri_l.contains(&format!("/{token}@")))
-        .then_some(1)
-        .unwrap_or(0)
+    u8::from(
+        crate::embeddings::path_uri_tokens(query)
+            .iter()
+            .any(|token| {
+                uri_l.contains(&format!("/{token}.")) || uri_l.contains(&format!("/{token}@"))
+            }),
+    )
 }
 
 async fn path_matched_item_ids(
@@ -956,15 +958,12 @@ fn defined_symbol_prefix(query: &str, text: &str) -> u32 {
     let Some(leaf) = defined_leaf_symbol(text) else {
         return 0;
     };
-    crate::embeddings::nl_content_tokens(query)
-        .into_iter()
-        .chain(question_stems(query))
-        .any(|token| {
-            leaf.starts_with(&token)
-                || (token.len() >= 6 && leaf.contains(&token))
-        })
-        .then_some(1)
-        .unwrap_or(0)
+    u32::from(
+        crate::embeddings::nl_content_tokens(query)
+            .into_iter()
+            .chain(question_stems(query))
+            .any(|token| leaf.starts_with(&token) || (token.len() >= 6 && leaf.contains(&token))),
+    )
 }
 
 fn defined_symbol_overlap(query: &str, text: &str) -> u32 {
@@ -974,12 +973,12 @@ fn defined_symbol_overlap(query: &str, text: &str) -> u32 {
     let Some(leaf) = defined_leaf_symbol(text) else {
         return 0;
     };
-    crate::embeddings::nl_content_tokens(query)
-        .into_iter()
-        .chain(question_stems(query))
-        .any(|token| leaf.contains(&token) || (token.len() >= 4 && token.contains(&leaf)))
-        .then_some(1)
-        .unwrap_or(0)
+    u32::from(
+        crate::embeddings::nl_content_tokens(query)
+            .into_iter()
+            .chain(question_stems(query))
+            .any(|token| leaf.contains(&token) || (token.len() >= 4 && token.contains(&leaf))),
+    )
 }
 
 fn function_kind(text: &str) -> bool {

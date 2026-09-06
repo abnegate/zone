@@ -285,27 +285,27 @@ fn missing_manifest(model: &str, message: String) -> String {
 }
 
 async fn run_job(host: String, model: String, job: Arc<Job>) {
-    for attempt in 0..=MAX_RETRIES {
+    for backoff in RETRY_BACKOFF.into_iter().map(Some).chain([None]) {
         if job.is_cancelled() {
             job.publish(Event::Error {
                 message: "Installation cancelled".to_string(),
             });
             return;
         }
-        match download_once(&host, &model, &job).await {
-            Ok(()) => return,
-            Err(_) if job.is_cancelled() => {
+        match (download_once(&host, &model, &job).await, backoff) {
+            (Ok(()), _) => return,
+            (Err(_), _) if job.is_cancelled() => {
                 job.publish(Event::Error {
                     message: "Installation cancelled".to_string(),
                 });
                 return;
             }
-            Err(message) if retryable(&message) && attempt < MAX_RETRIES => {
+            (Err(message), Some(backoff)) if retryable(&message) => {
                 job.publish(Event::Step {
                     status: "resuming download".to_string(),
                 });
                 tokio::select! {
-                    () = tokio::time::sleep(RETRY_BACKOFF[attempt]) => {}
+                    () = tokio::time::sleep(backoff) => {}
                     () = job.cancelled() => {
                         job.publish(Event::Error {
                             message: "Installation cancelled".to_string(),
@@ -314,7 +314,7 @@ async fn run_job(host: String, model: String, job: Arc<Job>) {
                     }
                 }
             }
-            Err(message) => {
+            (Err(message), _) => {
                 job.publish(Event::Error {
                     message: missing_manifest(&model, message),
                 });

@@ -13,6 +13,7 @@ export const ModelDetailsSchema = z.object({
 });
 
 export const InstalledModelSchema = z.object({
+  capabilities: z.array(z.enum(MODEL_CAPABILITIES)).nullable().optional(),
   completion: z.boolean().optional(),
   tools: z.boolean().optional(),
   needs_character: z.boolean().optional(),

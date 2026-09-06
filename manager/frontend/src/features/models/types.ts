@@ -1,4 +1,5 @@
 export interface InstalledModel {
+  capabilities?: ModelCapability[] | null;
   completion?: boolean;
   tools?: boolean;
   needs_character?: boolean;

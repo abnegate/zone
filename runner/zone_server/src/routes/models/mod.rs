@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use crate::auth::AuthUser;
 use crate::state::AppState;
+use types::ModelCapability;
 
 // Constants
 
@@ -166,6 +167,8 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
                             let profile =
                                 crate::services::model::Model::profile(ollama_host, &model.name)
                                     .await;
+                            model.capabilities =
+                                installed_capabilities(profile.capabilities.as_deref());
                             model.completion = profile.completion;
                             model.tools = profile.tools;
                             model.needs_character = Some(profile.needs_character);
@@ -199,6 +202,27 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
         )
             .into_response(),
     }
+}
+
+/// Normalize only capabilities declared by the installed Ollama engine.
+fn installed_capabilities(declared: Option<&[String]>) -> Option<Vec<ModelCapability>> {
+    let mut capabilities = Vec::new();
+    for capability in declared? {
+        let capability = match capability.as_str() {
+            "completion" => ModelCapability::Text,
+            "vision" => ModelCapability::ImageInput,
+            "image" => ModelCapability::ImageGeneration,
+            "audio" => ModelCapability::Audio,
+            "tools" => ModelCapability::Tools,
+            "embedding" => ModelCapability::Embeddings,
+            "thinking" => ModelCapability::Reasoning,
+            _ => continue,
+        };
+        if !capabilities.contains(&capability) {
+            capabilities.push(capability);
+        }
+    }
+    (!capabilities.is_empty()).then_some(capabilities)
 }
 
 #[derive(Debug, serde::Deserialize)]

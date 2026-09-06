@@ -17,8 +17,9 @@ static CLIENT: LazyLock<Client> = LazyLock::new(|| {
 pub const UNSUPPORTED: &str =
     "This model supports embeddings, not chat responses. Choose a model that supports chat.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelProfile {
+    pub capabilities: Option<Vec<String>>,
     pub completion: Option<bool>,
     pub tools: Option<bool>,
     pub needs_character: bool,
@@ -44,6 +45,7 @@ impl Model {
         match Self::show(host, name).await {
             Some(model) => model.into_profile(name),
             None => ModelProfile {
+                capabilities: None,
                 completion: None,
                 tools: None,
                 needs_character: needs_character(name, None, false),
@@ -63,12 +65,13 @@ impl Model {
         response.json().await.ok()
     }
 
-    fn into_profile(&self, name: &str) -> ModelProfile {
+    fn into_profile(self, name: &str) -> ModelProfile {
         let tools = self.supports_tools();
         ModelProfile {
             completion: self.supports_completion(),
             tools,
             needs_character: needs_character(name, tools, self.expects_persona()),
+            capabilities: self.capabilities,
         }
     }
 
@@ -169,11 +172,7 @@ mod tests {
     #[test]
     fn character_is_for_imported_weights_and_persona_templates() {
         assert!(needs_character("hf.co/owner/custom-7b-Q4_K_M", None, false));
-        assert!(needs_character(
-            "llama3.1:latest",
-            None,
-            true
-        ));
+        assert!(needs_character("llama3.1:latest", None, true));
         assert!(!needs_character("llama3.1:latest", None, false));
         assert!(!needs_character("mistral", None, false));
         assert!(!needs_character(
@@ -192,6 +191,7 @@ mod tests {
         assert_eq!(
             tool_model.into_profile("llama3.1:latest"),
             ModelProfile {
+                capabilities: Some(vec!["completion".to_string(), "tools".to_string()]),
                 completion: Some(true),
                 tools: Some(true),
                 needs_character: false,
@@ -201,6 +201,7 @@ mod tests {
         assert_eq!(
             imported.into_profile("hf.co/owner/custom-7b:latest"),
             ModelProfile {
+                capabilities: Some(vec!["completion".to_string()]),
                 completion: Some(true),
                 tools: Some(false),
                 needs_character: true,
@@ -213,6 +214,7 @@ mod tests {
         assert_eq!(
             persona.into_profile("custom:latest"),
             ModelProfile {
+                capabilities: Some(vec!["completion".to_string()]),
                 completion: Some(true),
                 tools: Some(false),
                 needs_character: true,
@@ -310,6 +312,7 @@ mod tests {
         assert_eq!(
             Model::profile(&server.uri(), name).await,
             ModelProfile {
+                capabilities: None,
                 completion: None,
                 tools: None,
                 needs_character: true,

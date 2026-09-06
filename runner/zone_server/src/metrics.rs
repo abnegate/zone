@@ -250,6 +250,12 @@ pub struct SearchObs {
     results: usize,
 }
 
+impl Default for SearchObs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SearchObs {
     pub fn new() -> Self {
         init();
@@ -367,6 +373,12 @@ impl Drop for GatheringObs {
 pub struct TaskObs {
     start: Instant,
     status: &'static str,
+}
+
+impl Default for TaskObs {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TaskObs {

@@ -227,10 +227,10 @@ fn png_text_chunk(bytes: &[u8], keywords: &[&str]) -> Option<String> {
             return None;
         }
         let data = &bytes[data_start..data_end];
-        if kind == b"tEXt" || kind == b"iTXt" {
-            if let Some(text) = png_keyword_text(data, keywords, kind == b"iTXt") {
-                return Some(text);
-            }
+        if (kind == b"tEXt" || kind == b"iTXt")
+            && let Some(text) = png_keyword_text(data, keywords, kind == b"iTXt")
+        {
+            return Some(text);
         }
         if kind == b"IEND" {
             break;

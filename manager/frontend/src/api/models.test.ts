@@ -5,6 +5,18 @@ describe('Namespaced model requests', () => {
   const original = global.fetch;
   const name = 'hf.co/owner/repository:Q4_K_M';
 
+  it('preserves installed model capabilities through response validation', async () => {
+    const model = {
+      name,
+      size: 123,
+      modified_at: '2024-01-01T00:00:00Z',
+      capabilities: ['text', 'image_input', 'audio', 'video_input', 'tools'],
+    };
+    global.fetch = mock(async () => Response.json([model])) as typeof fetch;
+
+    expect(await modelsApi.getModels()).toEqual({ models: [model] });
+  });
+
   afterEach(() => {
     global.fetch = original;
   });

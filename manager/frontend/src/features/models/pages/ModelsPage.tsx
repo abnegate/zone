@@ -357,6 +357,7 @@ export default function ModelsPage() {
                             .filter(Boolean)
                             .join(' · ')}
                         </span>
+                        <Capabilities capabilities={model.capabilities} />
                       </div>
                       <div className="model-actions">
                         <button
