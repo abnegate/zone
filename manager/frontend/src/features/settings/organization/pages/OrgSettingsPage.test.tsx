@@ -46,6 +46,16 @@ mock.module('../../../auth', () => ({
   useAuth: mockUseAuth,
 }));
 
+mock.module('../../../models', () => ({
+  useModels: () => ({
+    models: [],
+    loading: false,
+    error: null,
+    refresh: mock(),
+    deleteModel: mock(),
+  }),
+}));
+
 // Mock useWorkspace
 const mockSetCurrentOrganization = mock();
 const mockSetCurrentWorkspace = mock();

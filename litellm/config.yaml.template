@@ -2,14 +2,24 @@
 # Documentation: https://docs.litellm.ai/docs/
 
 model_list:
-  # Fast Model - For simple queries (default)
+  - model_name: fast
+    litellm_params:
+      model: ollama_chat/{{OLLAMA_MODEL_FAST}}
+      api_base: {{OLLAMA_BASE_URL}}
+      timeout: 60
+
   - model_name: "{{OLLAMA_MODEL_FAST}}"
     litellm_params:
       model: ollama_chat/{{OLLAMA_MODEL_FAST}}
       api_base: {{OLLAMA_BASE_URL}}
       timeout: 60
 
-  # Reasoning Model - For complex analysis
+  - model_name: reason
+    litellm_params:
+      model: ollama_chat/{{OLLAMA_MODEL_REASON}}
+      api_base: {{OLLAMA_BASE_URL}}
+      timeout: 180
+
   - model_name: "{{OLLAMA_MODEL_REASON}}"
     litellm_params:
       model: ollama_chat/{{OLLAMA_MODEL_REASON}}
@@ -23,7 +33,12 @@ model_list:
       api_base: {{OLLAMA_BASE_URL}}
       timeout: 30
 
-  # Vision Model - For messages carrying images
+  - model_name: vision
+    litellm_params:
+      model: ollama_chat/{{OLLAMA_MODEL_VISION}}
+      api_base: {{OLLAMA_BASE_URL}}
+      timeout: 180
+
   - model_name: "{{OLLAMA_MODEL_VISION}}"
     litellm_params:
       model: ollama_chat/{{OLLAMA_MODEL_VISION}}
@@ -42,6 +57,7 @@ router_settings:
   num_retries: 2
   timeout: 180
   fallbacks:
+    - fast: ["reason", "{{OLLAMA_MODEL_REASON}}"]
     - "{{OLLAMA_MODEL_FAST}}": ["{{OLLAMA_MODEL_REASON}}"]
 
 # General Settings

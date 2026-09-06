@@ -1643,7 +1643,7 @@ async fn handle_send_message(
                         return Ok(());
                     }
                     _ = session.guard.lost() => { return Err("Chat generation ownership was lost".into()); }
-                    result = prepare_chat(state, sender, chat_id, workspace_id, user_id, content, chat, web_search_requested) => result?,
+                    result = prepare_chat(state, sender, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, web_search_requested) => result?,
                 };
                 handle_chat_generation(state, sender, chat_id, preparation, &mut request, &mut session).await
             }
@@ -1682,16 +1682,25 @@ async fn prepare_message(
         return Err("Chat does not belong to the authenticated workspace".into());
     }
     let mut image_config = state.config().comfyui.clone();
+    let mut settings = None;
     if let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
-        && let Ok(settings) = ai_settings::get_effective_ai_settings(
+        && let Ok(effective) = ai_settings::get_effective_ai_settings(
             state.db(),
             workspace.organization_id,
             workspace_id,
         )
         .await
     {
-        settings.apply_to_comfyui(&mut image_config);
+        effective.apply_to_comfyui(&mut image_config);
+        settings = Some(effective);
     }
+    let catalog = crate::services::stages::Catalog::load(&state.config().ollama_host).await;
+    let prefs = crate::services::stages::Preferences::from_optional_settings(
+        settings.as_ref(),
+        &image_config.classifier_model,
+    );
+    image_config.classifier_model =
+        crate::services::stages::classifier_model(&prefs, &catalog, &chat.model_name);
     let classifier = crate::services::image_intent::ImageIntentClassifier::new(
         image_config.clone(),
         state.config().litellm_host.clone(),
@@ -1753,9 +1762,38 @@ async fn prepare_chat(
     workspace_id: Uuid,
     user_id: Uuid,
     content: &str,
-    chat: chats::ChatRow,
+    metadata: Option<&serde_json::Value>,
+    mut chat: chats::ChatRow,
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
+    let catalog = crate::services::stages::Catalog::load(&state.config().ollama_host).await;
+    let prefs = if let Ok(Some(workspace)) =
+        workspaces::get_workspace(state.db(), workspace_id).await
+        && let Ok(settings) = ai_settings::get_effective_ai_settings(
+            state.db(),
+            workspace.organization_id,
+            workspace_id,
+        )
+        .await
+    {
+        crate::services::stages::Preferences::from_settings(
+            &settings,
+            &state.config().comfyui.classifier_model,
+        )
+    } else {
+        crate::services::stages::Preferences::from_optional_settings(
+            None,
+            &state.config().comfyui.classifier_model,
+        )
+    };
+    chat.model_name = crate::services::stages::chat_model(
+        &chat.model_name,
+        &prefs,
+        &catalog,
+        content,
+        crate::services::image_source::has_image_attachment(metadata),
+        chat.agent_enabled,
+    );
     if web_search_requested && !sanitize_query(content).is_empty() {
         let _ = send_server(
             sender,

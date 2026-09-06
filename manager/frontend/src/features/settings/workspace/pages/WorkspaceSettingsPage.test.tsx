@@ -46,6 +46,16 @@ mock.module('../../../../shared/context/ThemeContext', () => ({
   }),
 }));
 
+mock.module('../../../models', () => ({
+  useModels: () => ({
+    models: [],
+    loading: false,
+    error: null,
+    refresh: mock(),
+    deleteModel: mock(),
+  }),
+}));
+
 mock.module('../../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => ({
     currentOrganization: {

@@ -1,3 +1,9 @@
+export const AUTO_MODEL = 'auto';
+
+export function modelLabel(name: string): string {
+  return name === AUTO_MODEL ? 'Automatic' : name;
+}
+
 export function sameModelName(left: string, right: string): boolean {
   if (left === right) return true;
   const strip = (name: string) => name.replace(/:latest$/i, '');

@@ -792,7 +792,16 @@ describe('ChatsPage', () => {
       });
     });
 
-    it('disables create button when no model selected', async () => {
+    it('creates a chat with automatic routing by default', async () => {
+      mockCreateChat.mockResolvedValueOnce({
+        id: 'chat-auto',
+        workspace_id: 'ws-1',
+        title: 'New chat',
+        model_name: 'auto',
+        archived: false,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+      });
       renderChatsPage();
 
       await waitFor(() => {
@@ -800,8 +809,17 @@ describe('ChatsPage', () => {
       });
 
       fireEvent.click(screen.getByRole('button', { name: 'New chat' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Create Chat' }));
 
-      expect(screen.getByRole('button', { name: 'Create Chat' })).toBeDisabled();
+      await waitFor(() => {
+        expect(mockClient.createChat).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model_name: 'auto',
+            title: 'New chat',
+            automatic_title: true,
+          })
+        );
+      });
     });
 
     it('shows Agent mode only for a model that can call tools', async () => {
@@ -810,7 +828,7 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: 'New Chat' })).toBeInTheDocument();
       });
-      expect(screen.queryByLabelText('Agent mode')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Agent mode')).toBeInTheDocument();
 
       const selectTrigger = screen.getByRole('combobox');
       fireEvent.mouseDown(selectTrigger);

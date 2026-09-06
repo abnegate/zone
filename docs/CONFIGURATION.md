@@ -157,10 +157,11 @@ details, and native macOS / bundled NVIDIA instructions.
   Chat image generation uses the effective `model_image` setting when present.
 
 ### `COMFYUI_CLASSIFIER_MODEL`
-- **Default**: `llama3.2:3b`
-- **Description**: Fast LiteLLM model used when image-intent rules are unsure,
-  including informal edits of an attached photo (`IMAGE` vs `CHAT`, 3-token
-  reply). Org/workspace `model_fast` overrides this when set.
+- **Default**: empty (`auto`)
+- **Description**: Optional Fast LiteLLM model used when image-intent rules are
+  unsure, including informal edits of an attached photo (`IMAGE` vs `CHAT`,
+  3-token reply). Org/workspace Fast overrides this when set. When empty, Zone
+  uses the current chat model or a small installed completion model.
 - **Timeout**: `COMFYUI_CLASSIFIER_TIMEOUT_SECS` (default `3`, range 1–30).
   Timeouts fall back to normal chat.
 

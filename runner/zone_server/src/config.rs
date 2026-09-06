@@ -196,7 +196,7 @@ impl Default for ComfyUiConfig {
             video_clip: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string(),
             video_vae: "wan2.2_vae.safetensors".to_string(),
             artifact_root: "/app/artifacts".into(),
-            classifier_model: "llama3.2:3b".to_string(),
+            classifier_model: "auto".to_string(),
             classifier_timeout_secs: 3,
             request_timeout_secs: 15,
             generation_timeout_secs: 300,
@@ -235,7 +235,10 @@ impl ComfyUiConfig {
                 .unwrap_or_else(|_| "/app/artifacts".to_string())
                 .into(),
             classifier_model: env::var("COMFYUI_CLASSIFIER_MODEL")
-                .unwrap_or_else(|_| "llama3.2:3b".to_string()),
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "auto".to_string()),
             classifier_timeout_secs: env_u64("COMFYUI_CLASSIFIER_TIMEOUT_SECS", 3, 1, 30),
             request_timeout_secs: env_u64("COMFYUI_REQUEST_TIMEOUT_SECS", 15, 1, 120),
             generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),

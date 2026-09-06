@@ -2,9 +2,9 @@
 //!
 //! High-confidence rules route immediately. Anything leftover — including
 //! informal edits of an attached photo that the word lists miss — is decided
-//! by a short LiteLLM call (`COMFYUI_CLASSIFIER_MODEL` / workspace `model_fast`,
-//! default `llama3.2:3b`) with a small token budget. Timeouts and empty hosts
-//! fall back to chat.
+//! by a short LiteLLM call (workspace Fast, the current chat model, or a small
+//! installed completion model) with a small token budget. Timeouts and empty
+//! hosts fall back to chat.
 
 use serde_json::Value;
 use std::time::Duration;

@@ -252,10 +252,10 @@ grounded in what the user asked.
 Routing is hybrid. High-confidence phrases (`generate an image`, `remove this
 object`, `put this in a forest`) skip the model. If an image is attached and
 the word lists do not match, a fast LiteLLM classifier (`IMAGE` / `CHAT`, max
-3 tokens) decides. Default model is `llama3.2:3b` via
-`COMFYUI_CLASSIFIER_MODEL`, overridable with workspace/org `model_fast`.
-Timeouts and an empty LiteLLM host fall back to chat. How-to, analysis, and
-coding questions never call the classifier.
+3 tokens) decides. The classifier uses workspace/org Fast when set, otherwise
+the current chat model or a small installed completion model. Timeouts and an
+empty LiteLLM host fall back to chat. How-to, analysis, and coding questions
+never call the classifier.
 
 The packaged defaults are Schnell-appropriate: four Euler/simple steps and CFG
 1. Node `4` defaults to the manifest filename and is never changed from

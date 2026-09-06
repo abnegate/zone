@@ -4,6 +4,8 @@ import { client } from '../../../../api/client';
 import { useTheme } from '../../../../shared/context/ThemeContext';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
+import { useModels } from '../../../models';
+import { mergeStageOptions } from '../../../models/utils/stageOptions';
 import { WorkspaceMembersSection } from '../components';
 import { UpdateWorkspaceThemeRequestSchema } from '../schemas';
 import type {
@@ -72,6 +74,7 @@ const awsRegions = ['us-east-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-n
 
 export default function WorkspaceSettingsPage() {
   const { isAuthenticated } = useAuth();
+  const { models: installedModels } = useModels();
   const {
     workspaceTheme,
     workspaceThemeLoading,
@@ -394,6 +397,24 @@ export default function WorkspaceSettingsPage() {
   };
 
   const currentModels = modelOptions[aiProvider];
+  const fastOptions = mergeStageOptions(
+    currentModels.fast,
+    installedModels,
+    modelFast,
+    'chat'
+  );
+  const reasoningOptions = mergeStageOptions(
+    currentModels.reasoning,
+    installedModels,
+    modelReasoning,
+    'chat'
+  );
+  const embeddingOptions = mergeStageOptions(
+    currentModels.embedding,
+    installedModels,
+    modelEmbedding,
+    'embedding'
+  );
 
   if (loading) {
     return (
@@ -900,13 +921,17 @@ export default function WorkspaceSettingsPage() {
                             onChange={(e) => setModelFast(e.target.value)}
                             className="form-select"
                           >
-                            <option value="">Select a model</option>
-                            {currentModels.fast.map((model) => (
+                            <option value="">Automatic</option>
+                            {fastOptions.map((model) => (
                               <option key={model} value={model}>
                                 {model}
                               </option>
                             ))}
                           </select>
+                          <p className="form-hint">
+                            Short replies, titles, and image-intent classification. Empty uses the
+                            chat message and installed models.
+                          </p>
                         </div>
                         <div className="form-group">
                           <label htmlFor="model-reasoning">Reasoning Model</label>
@@ -916,26 +941,30 @@ export default function WorkspaceSettingsPage() {
                             onChange={(e) => setModelReasoning(e.target.value)}
                             className="form-select"
                           >
-                            <option value="">Select a model</option>
-                            {currentModels.reasoning.map((model) => (
+                            <option value="">Automatic</option>
+                            {reasoningOptions.map((model) => (
                               <option key={model} value={model}>
                                 {model}
                               </option>
                             ))}
                           </select>
+                          <p className="form-hint">
+                            Harder questions. Empty picks a larger installed model when the
+                            message looks like a reasoning task.
+                          </p>
                         </div>
                       </div>
                       <div className="form-group">
                         <label htmlFor="model-embedding">Embedding Model</label>
-                        {currentModels.embedding.length > 0 ? (
+                        {embeddingOptions.length > 0 ? (
                           <select
                             id="model-embedding"
                             value={modelEmbedding}
                             onChange={(e) => setModelEmbedding(e.target.value)}
                             className="form-select"
                           >
-                            <option value="">Select a model</option>
-                            {currentModels.embedding.map((model) => (
+                            <option value="">Automatic</option>
+                            {embeddingOptions.map((model) => (
                               <option key={model} value={model}>
                                 {model}
                               </option>

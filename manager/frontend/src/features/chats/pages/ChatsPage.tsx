@@ -22,7 +22,9 @@ import {
   type Attachment,
   attachmentMetadata,
   buildMessageWithAttachments,
+  AUTO_MODEL,
   chatShowsAgent,
+  modelLabel,
   chatShowsCharacter,
   chatShowsReasoning,
   findInstalledModel,
@@ -49,7 +51,7 @@ export default function ChatsPage() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(() => searchParams.get('id'));
   const linkedMessageId = searchParams.get('message');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
-  const [newChatModel, setNewChatModel] = useState('');
+  const [newChatModel, setNewChatModel] = useState(AUTO_MODEL);
   const [newChatAgent, setNewChatAgent] = useState(false);
   const [newChatAutoApprove, setNewChatAutoApprove] = useState(false);
   const [newChatReasoning, setNewChatReasoning] = useState<ReasoningEffort>('auto');
@@ -132,14 +134,26 @@ export default function ChatsPage() {
   // previous chat never flashes in the main pane while the next one loads.
   const displayedChat = activeChat?.id === selectedChatId ? activeChat : null;
   const installedForChat = displayedChat
-    ? findInstalledModel(models, displayedChat.model_name)
+    ? displayedChat.model_name === AUTO_MODEL
+      ? {
+          tools: models.some((model) => model.tools === true),
+          reasoning: models.some((model) => chatShowsReasoning({}, model)),
+        }
+      : findInstalledModel(models, displayedChat.model_name)
     : undefined;
   const showAgent = displayedChat ? chatShowsAgent(displayedChat, installedForChat) : false;
   const showCharacter = displayedChat ? chatShowsCharacter(displayedChat, installedForChat) : false;
   const showReasoning = displayedChat ? chatShowsReasoning(displayedChat, installedForChat) : false;
   const selectedNewModel = findInstalledModel(models, newChatModel);
-  const showNewChatAgent = selectedNewModel?.tools === true;
-  const showNewChatReasoning = selectedNewModel ? chatShowsReasoning({}, selectedNewModel) : false;
+  const autoNewChat = newChatModel === AUTO_MODEL;
+  const showNewChatAgent = autoNewChat
+    ? models.some((model) => model.tools === true)
+    : selectedNewModel?.tools === true;
+  const showNewChatReasoning = autoNewChat
+    ? models.some((model) => chatShowsReasoning({}, model))
+    : selectedNewModel
+      ? chatShowsReasoning({}, selectedNewModel)
+      : false;
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -186,25 +200,21 @@ export default function ChatsPage() {
       setOperationError('No workspace selected. Please select or create a workspace first.');
       return;
     }
-    if (!newChatModel) {
-      setOperationError('Please select a model');
-      return;
-    }
-
+    const modelName = newChatModel || AUTO_MODEL;
     setOperationError(null);
     try {
       const chat = await createChat({
         workspace_id: currentWorkspace.id,
-        title: `Chat with ${newChatModel}`,
+        title: modelName === AUTO_MODEL ? 'New chat' : `Chat with ${modelName}`,
         automatic_title: true,
-        model_name: newChatModel,
+        model_name: modelName,
         agent_enabled: newChatAgent,
         auto_approve: newChatAgent && newChatAutoApprove,
         reasoning_effort:
           showNewChatReasoning && newChatReasoning !== 'auto' ? newChatReasoning : undefined,
       });
       setShowNewChatModal(false);
-      setNewChatModel('');
+      setNewChatModel(AUTO_MODEL);
       setNewChatAgent(false);
       setNewChatAutoApprove(false);
       setNewChatReasoning('auto');
@@ -604,7 +614,7 @@ export default function ChatsPage() {
                 <div className="chat-item-content">
                   <span className="chat-title">{chat.title}</span>
                   <span className="chat-meta">
-                    {chat.model_name} · {formatDate(chat.updated_at)}
+                    {modelLabel(chat.model_name)} · {formatDate(chat.updated_at)}
                   </span>
                 </div>
                 <div className="chat-item-actions">
@@ -726,7 +736,7 @@ export default function ChatsPage() {
               </Button>
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
-                <span className="chat-model">{displayedChat.model_name}</span>
+                <span className="chat-model">{modelLabel(displayedChat.model_name)}</span>
               </div>
               <div className="chat-header-actions">
                 {showReasoning && (
@@ -1099,19 +1109,22 @@ export default function ChatsPage() {
               const name = e.target.value;
               setNewChatModel(name);
               const installed = findInstalledModel(models, name);
-              if (installed?.tools !== true) {
+              const automatic = name === AUTO_MODEL;
+              if (!automatic && installed?.tools !== true) {
                 setNewChatAgent(false);
                 setNewChatAutoApprove(false);
               }
-              if (!chatShowsReasoning({}, installed)) {
+              if (!automatic && !chatShowsReasoning({}, installed)) {
                 setNewChatReasoning('auto');
               }
             }}
-            placeholder="Choose a model..."
-            helpText="Embedding models are not available for chat."
-            options={models
-              .filter((model) => model.completion !== false)
-              .map((model) => ({ value: model.name, label: model.name }))}
+            helpText="Automatic picks chat, image, or video from the message when those modules are installed. You can still pin a model."
+            options={[
+              { value: AUTO_MODEL, label: 'Automatic' },
+              ...models
+                .filter((model) => model.completion !== false)
+                .map((model) => ({ value: model.name, label: model.name })),
+            ]}
           />
           {showNewChatAgent && (
             <Checkbox
@@ -1147,7 +1160,7 @@ export default function ChatsPage() {
             <Button variant="secondary" onClick={() => setShowNewChatModal(false)}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary" disabled={!newChatModel}>
+            <Button type="submit" variant="primary">
               Create Chat
             </Button>
           </div>

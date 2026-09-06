@@ -43,3 +43,4 @@ export {
 
 // Utils
 export { formatNumber } from './utils';
+export { mergeStageOptions } from './utils/stageOptions';

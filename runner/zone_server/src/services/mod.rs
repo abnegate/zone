@@ -17,3 +17,4 @@ pub mod model;
 pub mod pr;
 pub mod runner;
 pub mod searxng;
+pub mod stages;

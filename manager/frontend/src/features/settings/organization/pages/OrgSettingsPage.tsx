@@ -3,6 +3,8 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { client } from '../../../../api/client';
 import { useWorkspace } from '../../../../shared/context/WorkspaceContext';
 import { useAuth } from '../../../auth';
+import { useModels } from '../../../models';
+import { mergeStageOptions } from '../../../models/utils/stageOptions';
 import {
   AuditLogsSection,
   BillingSection,
@@ -72,6 +74,7 @@ const awsRegions = [
 export default function OrgSettingsPage() {
   const { isAuthenticated } = useAuth();
   const { currentOrganization } = useWorkspace();
+  const { models: installedModels } = useModels();
 
   const [activeTab, setActiveTab] = useState<TabType>('ai');
   const [loading, setLoading] = useState(true);
@@ -219,6 +222,19 @@ export default function OrgSettingsPage() {
   };
 
   const currentModels = modelOptions[provider];
+  const fastOptions = mergeStageOptions(currentModels.fast, installedModels, modelFast, 'chat');
+  const reasoningOptions = mergeStageOptions(
+    currentModels.reasoning,
+    installedModels,
+    modelReasoning,
+    'chat'
+  );
+  const embeddingOptions = mergeStageOptions(
+    currentModels.embedding,
+    installedModels,
+    modelEmbedding,
+    'embedding'
+  );
 
   if (!currentOrganization) {
     return (
@@ -473,13 +489,17 @@ export default function OrgSettingsPage() {
                       onChange={(e) => setModelFast(e.target.value)}
                       className="form-select"
                     >
-                      <option value="">Select a model</option>
-                      {currentModels.fast.map((model) => (
+                      <option value="">Automatic</option>
+                      {fastOptions.map((model) => (
                         <option key={model} value={model}>
                           {model}
                         </option>
                       ))}
                     </select>
+                    <p className="form-hint">
+                      Short replies, titles, and image-intent classification. Empty uses the chat
+                      message and installed models.
+                    </p>
                   </div>
                   <div className="form-group">
                     <label htmlFor="model-reasoning">Reasoning Model</label>
@@ -489,25 +509,29 @@ export default function OrgSettingsPage() {
                       onChange={(e) => setModelReasoning(e.target.value)}
                       className="form-select"
                     >
-                      <option value="">Select a model</option>
-                      {currentModels.reasoning.map((model) => (
+                      <option value="">Automatic</option>
+                      {reasoningOptions.map((model) => (
                         <option key={model} value={model}>
                           {model}
                         </option>
                       ))}
                     </select>
+                    <p className="form-hint">
+                      Harder questions. Empty picks a larger installed model when the message
+                      looks like a reasoning task.
+                    </p>
                   </div>
                   <div className="form-group">
                     <label htmlFor="model-embedding">Embedding Model</label>
-                    {currentModels.embedding.length > 0 ? (
+                    {embeddingOptions.length > 0 ? (
                       <select
                         id="model-embedding"
                         value={modelEmbedding}
                         onChange={(e) => setModelEmbedding(e.target.value)}
                         className="form-select"
                       >
-                        <option value="">Select a model</option>
-                        {currentModels.embedding.map((model) => (
+                        <option value="">Automatic</option>
+                        {embeddingOptions.map((model) => (
                           <option key={model} value={model}>
                             {model}
                           </option>

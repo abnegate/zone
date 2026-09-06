@@ -43,6 +43,19 @@ impl Model {
     }
 
     pub async fn profile(host: &str, name: &str) -> ModelProfile {
+        if crate::services::stages::is_auto(name) {
+            return ModelProfile {
+                capabilities: Some(vec![
+                    "completion".to_string(),
+                    "tools".to_string(),
+                    "thinking".to_string(),
+                ]),
+                completion: Some(true),
+                tools: Some(true),
+                reasoning: Some(true),
+                needs_character: false,
+            };
+        }
         match Self::show(host, name).await {
             Some(model) => model.into_profile(name),
             None => ModelProfile {
@@ -325,6 +338,24 @@ mod tests {
                 .await;
             assert_eq!(Model::completion(&server.uri(), &name).await, None);
         }
+    }
+
+    #[tokio::test]
+    async fn auto_is_a_virtual_completion_model() {
+        assert_eq!(
+            Model::profile("http://127.0.0.1:9", "auto").await,
+            ModelProfile {
+                capabilities: Some(vec![
+                    "completion".to_string(),
+                    "tools".to_string(),
+                    "thinking".to_string(),
+                ]),
+                completion: Some(true),
+                tools: Some(true),
+                reasoning: Some(true),
+                needs_character: false,
+            }
+        );
     }
 
     #[tokio::test]

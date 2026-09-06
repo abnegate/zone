@@ -43,10 +43,8 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
         return None;
     }
     let chat = chats::get_chat(state.db(), message.chat_id).await.ok()??;
-    // Use the existing text classifier configuration, not an image checkpoint
-    // that may be selected for this conversation.
-    let mut model = state.config().comfyui.classifier_model.clone();
-    if let Some(workspace_id) = chat.workspace_id
+    let catalog = crate::services::stages::Catalog::load(&state.config().ollama_host).await;
+    let prefs = if let Some(workspace_id) = chat.workspace_id
         && let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
         && let Ok(settings) = ai_settings::get_effective_ai_settings(
             state.db(),
@@ -54,11 +52,19 @@ async fn summarize(state: &AppState, message: &chats::MessageRow) -> Option<Stri
             workspace_id,
         )
         .await
-        && let Some(configured) = settings.model_fast.filter(|model| !model.trim().is_empty())
     {
-        model = configured;
-    }
-    if model.trim().is_empty() {
+        crate::services::stages::Preferences::from_settings(
+            &settings,
+            &state.config().comfyui.classifier_model,
+        )
+    } else {
+        crate::services::stages::Preferences::from_optional_settings(
+            None,
+            &state.config().comfyui.classifier_model,
+        )
+    };
+    let model = crate::services::stages::classifier_model(&prefs, &catalog, &chat.model_name);
+    if crate::services::stages::is_auto(&model) {
         return None;
     }
     let client = LlmClient::new(LlmConfig {

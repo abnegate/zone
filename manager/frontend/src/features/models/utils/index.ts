@@ -13,4 +13,5 @@ export {
   quantizationFromLabel,
 } from './formatters';
 export { sortBrowseModels } from './sortModels';
+export { mergeStageOptions } from './stageOptions';
 export { modelSourceUrl } from './sourceUrl';

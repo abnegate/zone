@@ -18,6 +18,7 @@ async fn automatic_title_fallback_is_persisted_once() {
     let pool = create_test_pool().await;
     let mut config = common::test_config();
     config.litellm_host = provider.uri();
+    config.comfyui.classifier_model = "llama3.2:3b".to_string();
     let state = common::create_test_state(config, pool.clone());
     for (content, expected) in [
         ("", "Attachment discussion"),
@@ -68,10 +69,7 @@ async fn automatic_title_fallback_is_persisted_once() {
     }
     let requests = provider.received_requests().await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(
-        body["model"],
-        common::test_config().comfyui.classifier_model
-    );
+    assert_eq!(body["model"], "llama3.2:3b");
 }
 
 #[tokio::test]
