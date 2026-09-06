@@ -1,0 +1,111 @@
+use std::collections::HashSet;
+
+use crate::llm::{Message, Role, ToolDefinition};
+
+use super::{ContextBreakdown, ContextSource, ContextStatus, ContextUsage, Entry, Policy, Summary};
+
+/// Conservative UTF-8 byte estimate, not a provider tokenizer measurement.
+/// Two bytes per token plus explicit framing and 20% input headroom deliberately
+/// favors early compaction over the common English four-characters heuristic.
+pub(super) fn tokens(text: &str) -> u64 {
+    u64::try_from(text.len()).unwrap_or(u64::MAX).div_ceil(2)
+}
+
+pub(super) fn message_cost(message: &Message) -> (u64, u64) {
+    let content = message.content.as_deref().map(tokens).unwrap_or_default();
+    let mut overhead = 8u64;
+    if let Some(name) = &message.name {
+        overhead = overhead.saturating_add(tokens(name));
+    }
+    if let Some(id) = &message.tool_call_id {
+        overhead = overhead.saturating_add(tokens(id));
+    }
+    if let Some(calls) = &message.tool_calls {
+        overhead =
+            overhead.saturating_add(tokens(&serde_json::to_string(calls).unwrap_or_default()));
+    }
+    (content, overhead)
+}
+
+pub fn estimate(
+    model: &str,
+    entries: &[Entry],
+    tools: Option<&[ToolDefinition]>,
+    policy: &Policy,
+    summary: Option<&Summary>,
+) -> ContextUsage {
+    let covered: HashSet<&str> = summary
+        .map(|summary| {
+            summary
+                .coverage
+                .entries
+                .iter()
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut breakdown = ContextBreakdown {
+        attachments: Some(0),
+        overhead: 3,
+        ..Default::default()
+    };
+    for entry in entries
+        .iter()
+        .filter(|entry| !covered.contains(entry.id.as_str()))
+    {
+        let (content, overhead) = message_cost(&entry.message);
+        let category = match entry.message.role {
+            Role::System => &mut breakdown.instructions,
+            Role::Tool => &mut breakdown.results,
+            _ => &mut breakdown.conversation,
+        };
+        *category = category.saturating_add(content);
+        breakdown.overhead = breakdown.overhead.saturating_add(overhead);
+        if !entry.message.images.is_empty() || !entry.message.generated_images.is_empty() {
+            breakdown.attachments = None;
+        }
+    }
+    if let Some(summary) = summary {
+        let (content, overhead) = message_cost(&super::compact::summary_message(summary));
+        breakdown.summary = content;
+        breakdown.overhead = breakdown.overhead.saturating_add(overhead);
+    }
+    if let Some(tools) = tools.filter(|tools| !tools.is_empty()) {
+        breakdown.tools = tokens(&serde_json::to_string(tools).unwrap_or_default());
+    }
+    let used = breakdown.total();
+    let threshold = policy.threshold();
+    let incomplete = breakdown.attachments.is_none();
+    let status = if policy.limit.is_none() {
+        ContextStatus::Unavailable
+    } else {
+        ContextStatus::Ready
+    };
+    ContextUsage {
+        model: model.into(),
+        used,
+        limit: policy.limit,
+        reserved: policy.reserved,
+        threshold,
+        remaining: threshold.map(|threshold| threshold.saturating_sub(used)),
+        estimated: true,
+        incomplete,
+        source: if policy.limit.is_none() {
+            ContextSource::Unknown
+        } else {
+            policy.source
+        },
+        status,
+        breakdown,
+        revision: summary.map_or(0, |summary| summary.revision),
+        compacted_messages: covered.len(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        reason: if policy.limit.is_none() {
+            Some("Effective model context capacity is unavailable; automatic compaction cannot be budgeted.".into())
+        } else if incomplete {
+            Some("Image token costs are unavailable; known text costs are estimated.".into())
+        } else {
+            None
+        },
+    }
+}

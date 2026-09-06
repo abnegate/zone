@@ -124,7 +124,14 @@ pub struct AgentState {
     /// Current phase
     pub phase: AgentPhase,
     /// All messages in the conversation
+    #[serde(with = "crate::llm::history")]
     pub messages: Vec<Message>,
+    /// Separate checkpoint; canonical messages are append-only.
+    #[serde(default)]
+    pub summary: Option<crate::context::Summary>,
+    /// Prefix already presented to the model. Newly appended tool output is protected.
+    #[serde(default)]
+    pub consumed: usize,
     /// All steps taken
     pub steps: Vec<AgentStep>,
     /// Current iteration count
@@ -158,6 +165,8 @@ impl AgentState {
             id: Uuid::new_v4(),
             phase: AgentPhase::Thinking,
             messages,
+            summary: None,
+            consumed: 0,
             steps: Vec::new(),
             iteration: 0,
             tokens_used: 0,
