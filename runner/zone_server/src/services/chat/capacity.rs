@@ -30,6 +30,8 @@ pub struct Capacity {
     pub source: Source,
     /// Apply only to requests for the alias used to resolve this capacity.
     pub ollama: Option<u64>,
+    /// Engine or provider advertised thinking / extended reasoning.
+    pub reasoning: bool,
     pub reason: Option<String>,
     pub identity: String,
 }
@@ -40,6 +42,7 @@ impl Capacity {
             limit: None,
             source: Source::Unknown,
             ollama: None,
+            reasoning: false,
             reason: Some(reason.into()),
             identity: model.into(),
         }
@@ -143,6 +146,7 @@ impl Resolver {
                     Source::Unknown
                 },
                 ollama: None,
+                reasoning: provider_reasoning(&route.model_info),
                 reason: limit.is_none().then(|| {
                     "The selected provider has not reported an input context limit.".into()
                 }),
@@ -187,6 +191,7 @@ impl Resolver {
         if let Some(runtime) = runtime {
             let limit = advertised.map_or(runtime, |advertised| runtime.min(advertised));
             return Capacity { limit: Some(limit), source: if limit == runtime { Source::Runtime } else { Source::Configured }, ollama: Some(limit),
+                reasoning: shown.as_ref().is_some_and(ollama_thinking),
                 reason: (limit != runtime).then(|| "The loaded context exceeds native capacity; this request uses the supported bound.".into()), identity };
         }
         let Some(advertised) = advertised else {
@@ -215,6 +220,7 @@ impl Resolver {
         };
         let limit = configured.min(advertised);
         Capacity { limit: Some(limit), source: Source::Configured, ollama: Some(limit),
+            reasoning: shown.as_ref().is_some_and(ollama_thinking),
             reason: (limit < configured).then(|| "The requested context allocation is bounded by the model's reported native capacity.".into()), identity }
     }
 
@@ -321,6 +327,33 @@ fn select(routes: &[Route], model: &str) -> Result<Route, &'static str> {
         route.litellm_params.model = route.litellm_params.model.replace('*', model);
     }
     Ok(route)
+}
+
+fn ollama_thinking(shown: &Value) -> bool {
+    shown
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability.as_str() == Some("thinking"))
+        })
+}
+
+fn provider_reasoning(info: &Value) -> bool {
+    if info.get("supports_reasoning").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    info.get("supported_openai_params")
+        .and_then(Value::as_array)
+        .is_some_and(|params| {
+            params.iter().any(|param| {
+                matches!(
+                    param.as_str(),
+                    Some("reasoning_effort" | "thinking" | "reasoning")
+                )
+            })
+        })
 }
 
 fn native_limit(body: &Value) -> Option<u64> {
@@ -485,5 +518,49 @@ mod tests {
         assert_eq!(capacity.ollama, Some(32768));
         assert!(capacity.identity.contains("ollama_chat/custom:1b"));
         assert_eq!(server.received_requests().await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn ollama_thinking_capability_enables_reasoning() {
+        let (_server, resolver) = fixture(
+            json!({"model":"ollama_chat/native:latest"}),
+            json!({"models":[]}),
+            json!({
+                "capabilities": ["completion", "thinking"],
+                "model_info": {"general.architecture":"qwen3","qwen3.context_length":16384}
+            }),
+        )
+        .await;
+        assert!(resolver.resolve("alias").await.reasoning);
+    }
+
+    #[tokio::test]
+    async fn provider_supports_reasoning_without_guessing_the_name() {
+        let server = MockServer::start().await;
+        Mock::given(path("/v2/model/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data":[{
+                    "model_name":"alias",
+                    "litellm_params":{"model":"anthropic/claude-sonnet"},
+                    "model_info":{"max_input_tokens":200000,"supports_reasoning":true}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let resolver = Resolver::new(&server.uri(), "key", &server.uri());
+        let capacity = resolver.resolve("alias").await;
+        assert!(capacity.reasoning);
+        assert_eq!(capacity.ollama, None);
+    }
+
+    #[test]
+    fn thinking_is_only_the_engine_declared_capability() {
+        assert!(ollama_thinking(&json!({"capabilities":["thinking"]})));
+        assert!(!ollama_thinking(&json!({"capabilities":["completion"]})));
+        assert!(!provider_reasoning(&json!({"supports_reasoning":false})));
+        assert!(provider_reasoning(&json!({"supports_reasoning":true})));
+        assert!(provider_reasoning(&json!({
+            "supported_openai_params": ["temperature", "reasoning_effort"]
+        })));
     }
 }

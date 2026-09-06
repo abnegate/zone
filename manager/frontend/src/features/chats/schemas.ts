@@ -57,6 +57,7 @@ export const MessageMetadataSchema = z
     citations: z.array(CitationSchema).optional(),
     action_receipts: z.array(ActionReceiptSchema).optional(),
     web_search: z.boolean().optional(),
+    reasoning: z.string().optional(),
   })
   .passthrough();
 

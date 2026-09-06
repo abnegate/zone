@@ -376,6 +376,9 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&model, limit);
     }
+    if capacity.reasoning {
+        llm = llm.with_reasoning(&model);
+    }
     let callback = DatabaseTaskCallback::new(state.db().clone(), run_id);
     let prompt = format!("# Task: {}\n\n{}", task.title, task.description);
     let messages = vec![LlmMessage::system(system_prompt), LlmMessage::user(prompt)];
@@ -568,6 +571,7 @@ async fn run_task_loop(
             | AgentEvent::Context(_)
             | AgentEvent::Usage(_)
             | AgentEvent::Image(_)
+            | AgentEvent::Reasoning(_)
             | AgentEvent::ToolApprovalRequired { .. } => {}
             AgentEvent::Failed(error) => return Err(error),
         }

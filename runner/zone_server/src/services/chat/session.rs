@@ -375,6 +375,9 @@ pub async fn build(
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&chat.model_name, limit);
     }
+    if capacity.reasoning {
+        llm = llm.with_reasoning(&chat.model_name);
+    }
     let mut context = RunContext {
         entries,
         summary: history.summary.map(core_summary),

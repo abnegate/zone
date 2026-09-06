@@ -24,6 +24,14 @@ pub(super) fn message_cost(message: &Message) -> (u64, u64) {
         overhead =
             overhead.saturating_add(tokens(&serde_json::to_string(calls).unwrap_or_default()));
     }
+    if let Some(reasoning) = &message.reasoning_content {
+        overhead = overhead.saturating_add(tokens(reasoning));
+    }
+    if !message.thinking_blocks.is_empty() {
+        overhead = overhead.saturating_add(tokens(
+            &serde_json::to_string(&message.thinking_blocks).unwrap_or_default(),
+        ));
+    }
     (content, overhead)
 }
 

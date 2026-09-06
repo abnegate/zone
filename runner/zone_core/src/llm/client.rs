@@ -95,6 +95,9 @@ pub struct LlmClient {
     config: LlmConfig,
     stop: Vec<String>,
     ollama: Option<(String, u64)>,
+    /// Alias that should receive `reasoning_effort` because the deployment
+    /// advertised thinking support. Summarization clones the client and clears this.
+    reasoning: Option<String>,
 }
 
 impl LlmClient {
@@ -105,6 +108,7 @@ impl LlmClient {
             config,
             stop: Vec::new(),
             ollama: None,
+            reasoning: None,
         }
     }
 
@@ -129,12 +133,28 @@ impl LlmClient {
         self
     }
 
+    /// Enable thinking for this alias. LiteLLM 1.99.1 maps `reasoning_effort`
+    /// to Ollama `think`, Anthropic extended thinking, and OpenAI o-series.
+    pub fn with_reasoning(mut self, model: impl Into<String>) -> Self {
+        self.reasoning = Some(model.into());
+        self
+    }
+
+    /// Context compaction must stay a cheap structured rewrite.
+    pub fn without_reasoning(mut self) -> Self {
+        self.reasoning = None;
+        self
+    }
+
     fn request(&self, request: ChatRequest<'_>) -> Result<serde_json::Value, LlmError> {
         let mut body = serde_json::to_value(&request)?;
         if let Some((model, limit)) = &self.ollama
             && model == request.model
         {
             body["num_ctx"] = (*limit).into();
+        }
+        if self.reasoning.as_deref() == Some(request.model) {
+            body["reasoning_effort"] = reasoning_effort(request.max_tokens).into();
         }
         if request.stream == Some(true) {
             body["stream_options"] = serde_json::json!({ "include_usage": true });
@@ -338,9 +358,18 @@ impl LlmClient {
     }
 }
 
+fn reasoning_effort(reserved: Option<u32>) -> &'static str {
+    match reserved.unwrap_or(0) {
+        0..=2047 => "low",
+        2048..=8191 => "medium",
+        _ => "high",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::types::{ChatRequest, Message};
 
     #[test]
     fn classifies_explicit_tool_capability_rejections() {
@@ -578,5 +607,54 @@ mod tests {
         let display = format!("{}", error);
         assert!(display.contains("500"));
         assert!(display.contains("API error"));
+    }
+
+    #[test]
+    fn reasoning_effort_is_model_bound_and_scaled_to_output_budget() {
+        let messages = [Message::user("Hi")];
+        let client = LlmClient::new(LlmConfig::default()).with_reasoning("thinker");
+        let enabled = client
+            .request(ChatRequest {
+                model: "thinker",
+                messages: &messages,
+                tools: None,
+                tool_choice: None,
+                temperature: None,
+                max_tokens: Some(4096),
+                stream: None,
+                stop: None,
+            })
+            .unwrap();
+        assert_eq!(enabled["reasoning_effort"], "medium");
+        let other = client
+            .request(ChatRequest {
+                model: "other",
+                messages: &messages,
+                tools: None,
+                tool_choice: None,
+                temperature: None,
+                max_tokens: Some(4096),
+                stream: None,
+                stop: None,
+            })
+            .unwrap();
+        assert!(other.get("reasoning_effort").is_none());
+        let compact = client
+            .without_reasoning()
+            .request(ChatRequest {
+                model: "thinker",
+                messages: &messages,
+                tools: None,
+                tool_choice: None,
+                temperature: None,
+                max_tokens: Some(4096),
+                stream: None,
+                stop: None,
+            })
+            .unwrap();
+        assert!(compact.get("reasoning_effort").is_none());
+        assert_eq!(reasoning_effort(Some(1024)), "low");
+        assert_eq!(reasoning_effort(Some(2048)), "medium");
+        assert_eq!(reasoning_effort(Some(8192)), "high");
     }
 }

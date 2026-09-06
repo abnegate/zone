@@ -22,6 +22,7 @@ pub struct ModelProfile {
     pub capabilities: Option<Vec<String>>,
     pub completion: Option<bool>,
     pub tools: Option<bool>,
+    pub reasoning: Option<bool>,
     pub needs_character: bool,
 }
 
@@ -48,6 +49,7 @@ impl Model {
                 capabilities: None,
                 completion: None,
                 tools: None,
+                reasoning: None,
                 needs_character: needs_character(name, None, false),
             },
         }
@@ -70,6 +72,7 @@ impl Model {
         ModelProfile {
             completion: self.supports_completion(),
             tools,
+            reasoning: self.supports_reasoning(),
             needs_character: needs_character(name, tools, self.expects_persona()),
             capabilities: self.capabilities,
         }
@@ -95,6 +98,15 @@ impl Model {
     fn supports_tools(&self) -> Option<bool> {
         let capabilities = self.capabilities.as_ref()?;
         Some(capabilities.iter().any(|capability| capability == "tools"))
+    }
+
+    fn supports_reasoning(&self) -> Option<bool> {
+        let capabilities = self.capabilities.as_ref()?;
+        Some(
+            capabilities
+                .iter()
+                .any(|capability| capability == "thinking"),
+        )
     }
 
     fn expects_persona(&self) -> bool {
@@ -194,6 +206,7 @@ mod tests {
                 capabilities: Some(vec!["completion".to_string(), "tools".to_string()]),
                 completion: Some(true),
                 tools: Some(true),
+                reasoning: Some(false),
                 needs_character: false,
             }
         );
@@ -204,6 +217,7 @@ mod tests {
                 capabilities: Some(vec!["completion".to_string()]),
                 completion: Some(true),
                 tools: Some(false),
+                reasoning: Some(false),
                 needs_character: true,
             }
         );
@@ -217,9 +231,23 @@ mod tests {
                 capabilities: Some(vec!["completion".to_string()]),
                 completion: Some(true),
                 tools: Some(false),
+                reasoning: Some(false),
                 needs_character: true,
             }
         );
+    }
+
+    #[test]
+    fn reasoning_follows_engine_thinking_capability() {
+        assert_eq!(
+            model(Some(vec!["completion", "thinking"])).supports_reasoning(),
+            Some(true)
+        );
+        assert_eq!(
+            model(Some(vec!["completion"])).supports_reasoning(),
+            Some(false)
+        );
+        assert_eq!(model(None).supports_reasoning(), None);
     }
 
     #[tokio::test]
@@ -315,6 +343,7 @@ mod tests {
                 capabilities: None,
                 completion: None,
                 tools: None,
+                reasoning: None,
                 needs_character: true,
             }
         );

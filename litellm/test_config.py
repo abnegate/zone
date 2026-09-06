@@ -15,6 +15,15 @@ class RoutingTest(unittest.TestCase):
         values = pathlib.Path(__file__).parents[1] / 'helm/zone-ai/values.yaml'
         self.assertIn('name: "llama3.1:8b"\n      provider: ollama_chat', values.read_text())
 
+    def test_proxy_rewrites_incomplete_thinking_turns(self) -> None:
+        template = pathlib.Path(__file__).with_name('config.yaml.template').read_text()
+        helm = (
+            pathlib.Path(__file__).parents[1]
+            / 'helm/zone-ai/templates/litellm/configmap.yaml'
+        ).read_text()
+        self.assertIn('modify_params: true', template)
+        self.assertIn('modify_params: true', helm)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -39,6 +39,7 @@ data:
     # LiteLLM Settings
     litellm_settings:
       drop_params: false
+      modify_params: true
       set_verbose: false
       return_response_headers: true
       success_callback: ["prometheus"]

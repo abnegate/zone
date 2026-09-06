@@ -10,7 +10,7 @@ use std::time::Duration;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-use zone_core::llm::{LlmClient, LlmConfig, Message};
+use zone_core::llm::{LlmClient, LlmConfig, Message, Role};
 use zone_server::agent::{
     AgentEvent, AgentRun, ApprovalGate, ApprovalPolicy, ChatTools, MAX_ITERATIONS, WorkspaceScope,
     run,
@@ -600,6 +600,70 @@ async fn changed_read_evidence_allows_a_previous_failure_to_be_retried() {
     assert_eq!(started(&events).len(), 3);
     assert_eq!(answer(&events), "A path is still required.");
     assert!(requests.last().unwrap()["tools"].is_array());
+}
+
+#[tokio::test]
+async fn reasoning_tokens_are_streamed_and_distinct_thinking_blocks_accumulate() {
+    let first = json!({"type":"thinking","thinking":"Need the capital.","signature":"a"});
+    let second = json!({"type":"thinking","thinking":"Paris is the capital.","signature":"b"});
+    let (events, _) = exercise(vec![vec![
+        json!({"reasoning_content":"Need the capital."}),
+        json!({"thinking_blocks":[first]}),
+        json!({"reasoning":" Paris is the capital.","thinking_blocks":[second]}),
+        json!({"content":"Paris."}),
+    ]])
+    .await;
+    let thinking: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Reasoning(content) => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking, "Need the capital. Paris is the capital.");
+    assert_eq!(answer(&events), "Paris.");
+    let assistant = events.iter().find_map(|event| match event {
+        AgentEvent::Canonical(entry)
+            if entry.message.role == Role::Assistant && entry.message.tool_calls.is_none() =>
+        {
+            Some(&entry.message)
+        }
+        _ => None,
+    });
+    let assistant = assistant.expect("final assistant message");
+    assert_eq!(
+        assistant.reasoning_content.as_deref(),
+        Some("Need the capital. Paris is the capital.")
+    );
+    assert_eq!(assistant.thinking_blocks.len(), 2);
+}
+
+#[tokio::test]
+async fn thinking_blocks_are_replayed_on_the_next_tool_turn() {
+    let blocks = json!([{
+        "type": "thinking",
+        "thinking": "Need the file.",
+        "signature": "sig"
+    }]);
+    let mut first = vec![json!({
+        "reasoning_content": "Need the file.",
+        "thinking_blocks": blocks
+    })];
+    first.extend(native(Some("call_0")));
+    let (events, requests) = exercise(vec![first, text("Please provide a path.")]).await;
+    assert!(events.iter().any(
+        |event| matches!(event, AgentEvent::Reasoning(content) if content == "Need the file.")
+    ));
+    assert_eq!(answer(&events), "Please provide a path.");
+    assert!(requests.len() >= 2);
+    let replayed = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant" && message.get("thinking_blocks").is_some())
+        .expect("assistant thinking replay");
+    assert_eq!(replayed["reasoning_content"], "Need the file.");
+    assert_eq!(replayed["thinking_blocks"], blocks);
 }
 
 #[tokio::test]

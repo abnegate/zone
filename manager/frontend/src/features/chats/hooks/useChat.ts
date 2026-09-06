@@ -32,6 +32,7 @@ type ServerMessage =
     }
   | { type: 'message_start'; message_id: string; role: MessageRole }
   | { type: 'chunk'; content: string; index: number }
+  | { type: 'reasoning'; content: string }
   | {
       type: 'tool_call';
       message_id: string;
@@ -546,6 +547,15 @@ export function useChat(
           if (assistantId) {
             assistantContent += payload.content;
             scheduleChunks();
+          }
+          break;
+        case 'reasoning':
+          if (assistantId) {
+            assistantMetadata = {
+              ...assistantMetadata,
+              reasoning: `${assistantMetadata?.reasoning ?? ''}${payload.content}`,
+            };
+            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
           }
           break;
         case 'tool_call':

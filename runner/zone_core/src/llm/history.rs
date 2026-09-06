@@ -15,6 +15,10 @@ struct Record {
     images: Vec<String>,
     #[serde(default)]
     generated_images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    thinking_blocks: Vec<serde_json::Value>,
 }
 
 pub fn serialize<S: Serializer>(messages: &[Message], serializer: S) -> Result<S::Ok, S::Error> {
@@ -32,6 +36,8 @@ pub fn serialize<S: Serializer>(messages: &[Message], serializer: S) -> Result<S
                 .iter()
                 .map(|image| image.image_url.url.clone())
                 .collect(),
+            reasoning_content: message.reasoning_content.clone(),
+            thinking_blocks: message.thinking_blocks.clone(),
         })
         .collect::<Vec<_>>()
         .serialize(serializer)
@@ -54,6 +60,8 @@ pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Mes
                     image_url: ImageUrl { url },
                 })
                 .collect(),
+            reasoning_content: record.reasoning_content,
+            thinking_blocks: record.thinking_blocks,
         })
         .collect())
 }

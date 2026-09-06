@@ -428,6 +428,23 @@
   word-wrap: break-word;
 }
 
+.message-reasoning {
+  margin: 0 0 var(--ui-space-3);
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-sm);
+}
+
+.message-reasoning summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.message-reasoning-body {
+  margin-top: var(--ui-space-2);
+  padding-left: var(--ui-space-3);
+  border-left: 2px solid var(--ui-border);
+}
+
 .message--linked {
   outline: 1px solid color-mix(in srgb, var(--ui-accent) 45%, transparent);
   outline-offset: 4px;

@@ -535,6 +535,31 @@ describe('ChatsPage', () => {
       expect(screen.queryByText('Assistant')).not.toBeInTheDocument();
     });
 
+    it('shows a reasoning disclosure when the assistant stored thinking', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            metadata: { reasoning: 'The capital is Paris.' },
+          },
+        ],
+      });
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        expect(screen.getByText('Reasoning')).toBeInTheDocument();
+        expect(screen.getByText('The capital is Paris.')).toBeInTheDocument();
+        expect(screen.getByText('Hi there!')).toBeInTheDocument();
+      });
+    });
+
     it('shows error when chat loading fails', async () => {
       mockClient.getChat.mockRejectedValueOnce(new Error('Chat not found'));
       renderChatsPage();

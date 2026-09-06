@@ -60,6 +60,8 @@ general_settings:
 # LiteLLM Settings
 litellm_settings:
   drop_params: false
+  # Anthropic tool turns without thinking_blocks drop thinking instead of 400.
+  modify_params: true
   set_verbose: false
 
   # Add routing info to response headers

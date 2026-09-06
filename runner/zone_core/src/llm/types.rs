@@ -53,6 +53,12 @@ pub struct Message {
     pub images: Vec<String>,
     #[serde(default, rename = "images", deserialize_with = "null_to_default")]
     pub generated_images: Vec<GeneratedImage>,
+    /// LiteLLM-normalized thinking text. Required on the next turn for some providers.
+    #[serde(default, alias = "reasoning")]
+    pub reasoning_content: Option<String>,
+    /// Anthropic signed thinking blocks. Must be resent with tool results.
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub thinking_blocks: Vec<serde_json::Value>,
 }
 
 impl Serialize for Message {
@@ -92,6 +98,12 @@ impl Serialize for Message {
         if let Some(tool_call_id) = &self.tool_call_id {
             map.serialize_entry("tool_call_id", tool_call_id)?;
         }
+        if let Some(reasoning) = &self.reasoning_content {
+            map.serialize_entry("reasoning_content", reasoning)?;
+        }
+        if !self.thinking_blocks.is_empty() {
+            map.serialize_entry("thinking_blocks", &self.thinking_blocks)?;
+        }
         map.end()
     }
 }
@@ -106,6 +118,8 @@ impl Message {
             tool_call_id: None,
             images: Vec::new(),
             generated_images: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 
@@ -118,6 +132,8 @@ impl Message {
             tool_call_id: None,
             images: Vec::new(),
             generated_images: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 
@@ -130,6 +146,8 @@ impl Message {
             tool_call_id: None,
             images: Vec::new(),
             generated_images: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 
@@ -142,6 +160,8 @@ impl Message {
             tool_call_id: None,
             images: Vec::new(),
             generated_images: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 
@@ -154,6 +174,8 @@ impl Message {
             tool_call_id: Some(tool_call_id.into()),
             images: Vec::new(),
             generated_images: Vec::new(),
+            reasoning_content: None,
+            thinking_blocks: Vec::new(),
         }
     }
 }
@@ -374,6 +396,10 @@ pub struct StreamDelta {
     pub tool_calls: Option<Vec<StreamToolCall>>,
     #[serde(default, rename = "images", deserialize_with = "null_to_default")]
     pub generated_images: Vec<GeneratedImage>,
+    #[serde(default, alias = "reasoning")]
+    pub reasoning_content: Option<String>,
+    #[serde(default, deserialize_with = "null_to_default")]
+    pub thinking_blocks: Vec<serde_json::Value>,
 }
 
 /// Streaming tool call
@@ -1150,6 +1176,80 @@ mod tests {
         assert!(delta.content.is_none());
         assert!(delta.tool_calls.is_none());
         assert!(delta.generated_images.is_empty());
+        assert!(delta.reasoning_content.is_none());
+        assert!(delta.thinking_blocks.is_empty());
+    }
+
+    #[test]
+    fn assistant_reasoning_round_trips_for_later_tool_turns() {
+        let mut msg = Message::assistant("Paris.");
+        msg.reasoning_content = Some("The capital is Paris.".into());
+        msg.thinking_blocks = vec![serde_json::json!({
+            "type": "thinking",
+            "thinking": "The capital is Paris.",
+            "signature": "sig"
+        })];
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.reasoning_content.as_deref(),
+            Some("The capital is Paris.")
+        );
+        assert_eq!(deserialized.thinking_blocks[0]["signature"], "sig");
+        let omitted = serde_json::to_string(&Message::assistant("Hi")).unwrap();
+        assert!(!omitted.contains("reasoning_content"));
+        assert!(!omitted.contains("thinking_blocks"));
+    }
+
+    #[test]
+    fn stream_delta_reads_litellm_reasoning_content() {
+        let chunk: ChatStreamChunk = serde_json::from_str(
+            r#"{
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "reasoning_content": "step",
+                    "thinking_blocks": [{"type":"thinking","thinking":"step"}]
+                },
+                "finish_reason": null
+            }]
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            chunk.choices[0].delta.reasoning_content.as_deref(),
+            Some("step")
+        );
+        assert_eq!(chunk.choices[0].delta.thinking_blocks.len(), 1);
+    }
+
+    #[test]
+    fn stream_delta_reads_reasoning_alias_and_null_thinking_blocks() {
+        let chunk: ChatStreamChunk = serde_json::from_str(
+            r#"{
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning": "step", "thinking_blocks": null},
+                "finish_reason": null
+            }]
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            chunk.choices[0].delta.reasoning_content.as_deref(),
+            Some("step")
+        );
+        assert!(chunk.choices[0].delta.thinking_blocks.is_empty());
+    }
+
+    #[test]
+    fn assistant_message_reads_reasoning_alias_and_null_thinking_blocks() {
+        let message: Message = serde_json::from_str(
+            r#"{"role":"assistant","content":"Paris.","reasoning":"step","thinking_blocks":null}"#,
+        )
+        .unwrap();
+        assert_eq!(message.reasoning_content.as_deref(), Some("step"));
+        assert!(message.thinking_blocks.is_empty());
     }
 
     #[test]

@@ -12,6 +12,7 @@ import {
   Citations,
   Generation,
   MessageContent,
+  Reasoning,
   ToolTrace,
 } from '../components';
 import { ContextUsage } from '../components/ContextUsage';
@@ -846,6 +847,9 @@ export default function ChatsPage() {
                           ))}
                         </div>
                       )}
+                      {message.metadata?.reasoning ? (
+                        <Reasoning content={message.metadata.reasoning} />
+                      ) : null}
                       {toolCalls.length > 0 && (
                         <ToolTrace calls={toolCalls} onDecide={approveTool} />
                       )}

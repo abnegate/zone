@@ -17,6 +17,10 @@ pub struct ReplayMessage {
     pub tool_call_id: Option<String>,
     pub images: Vec<String>,
     pub generated_images: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thinking_blocks: Vec<serde_json::Value>,
 }
 
 impl From<&Message> for ReplayMessage {
@@ -34,6 +38,8 @@ impl From<&Message> for ReplayMessage {
                 .iter()
                 .map(|image| image.image_url.url.clone())
                 .collect(),
+            reasoning_content: message.reasoning_content.clone(),
+            thinking_blocks: message.thinking_blocks.clone(),
         }
     }
 }
@@ -54,6 +60,8 @@ impl ReplayMessage {
                     image_url: ImageUrl { url },
                 })
                 .collect(),
+            reasoning_content: self.reasoning_content,
+            thinking_blocks: self.thinking_blocks,
         }
     }
 }

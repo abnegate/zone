@@ -730,6 +730,36 @@ async fn runtime_context_is_model_bound_and_identical_on_summary_and_ordinary_re
 }
 
 #[tokio::test]
+async fn reasoning_is_enabled_on_ordinary_requests_and_stripped_from_summaries() {
+    let provider = provider(|_| response(structured()), false).await;
+    let client = provider
+        .client
+        .clone()
+        .with_reasoning("test")
+        .with_ollama_context("test", 5_000);
+    let history = active_history();
+    let prepared = context::prepare(&client, "test", &history, None, &policy(5_000), None)
+        .await
+        .unwrap();
+    client
+        .chat_with_options(
+            "test",
+            &prepared.messages,
+            None,
+            RequestOptions { reserved: 4096 },
+        )
+        .await
+        .unwrap();
+    let requests = provider.requests.lock().await;
+    let (ordinary, summaries) = requests.split_last().unwrap();
+    assert!(!summaries.is_empty());
+    for summary in summaries {
+        assert!(summary.get("reasoning_effort").is_none());
+    }
+    assert_eq!(ordinary["reasoning_effort"], "medium");
+}
+
+#[tokio::test]
 async fn streaming_usage_after_finish_reason_is_preserved() {
     let provider = provider(|_| "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":2,\"total_tokens\":44}}\n\ndata: [DONE]\n\n".into(), true).await;
     let stream = provider

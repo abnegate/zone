@@ -63,6 +63,8 @@ impl LoopBudget {
 pub enum AgentEvent {
     /// A fragment of the assistant's visible answer.
     Chunk(String),
+    /// A fragment of model thinking, when the deployment advertised reasoning.
+    Reasoning(String),
     /// Persistence acknowledgement barriers: commit successfully before polling again.
     Canonical(NewEntry),
     Consumed(Vec<String>),
@@ -239,6 +241,8 @@ pub fn run_with_context(
             futures::pin_mut!(stream);
             let mut text = String::new();
             let mut streamed = 0usize;
+            let mut reasoning = String::new();
+            let mut thinking_blocks = Vec::new();
             let mut pending = ToolCallAccumulator::default();
             let mut images = Vec::new();
             while let Some(chunk) = stream.next().await {
@@ -262,6 +266,17 @@ pub fn run_with_context(
                     {
                         yield AgentEvent::Chunk(text[streamed..].to_string());
                         streamed = text.len();
+                    }
+                }
+                if let Some(content) = &choice.delta.reasoning_content
+                    && !content.is_empty()
+                {
+                    reasoning.push_str(content);
+                    yield AgentEvent::Reasoning(content.clone());
+                }
+                for block in &choice.delta.thinking_blocks {
+                    if !thinking_blocks.contains(block) {
+                        thinking_blocks.push(block.clone());
                     }
                 }
                 for image in &choice.delta.generated_images {
@@ -312,6 +327,8 @@ pub fn run_with_context(
                 }
                 let mut message = LlmMessage::assistant(text);
                 message.images = images;
+                message.reasoning_content = (!reasoning.is_empty()).then_some(reasoning);
+                message.thinking_blocks = thinking_blocks;
                 let entry = canonical(message, Vec::new());
                 context.append(&entry);
                 let id = entry.id.clone();
@@ -344,6 +361,8 @@ pub fn run_with_context(
                     tool_call_id: None,
                     images,
                     generated_images: Vec::new(),
+                    reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                    thinking_blocks,
                 },
                 mutations,
             );

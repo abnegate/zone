@@ -311,7 +311,11 @@ async fn summarize(
     let budget = policy
         .threshold()
         .ok_or_else(|| ContextError::Summary("No verified context budget.".into()))?;
-    let summarizer = llm.clone().with_temperature(0.0).with_stop(Vec::new());
+    let summarizer = llm
+        .clone()
+        .with_temperature(0.0)
+        .with_stop(Vec::new())
+        .without_reasoning();
     let mut previous = summary
         .map(|summary| summary.content.clone())
         .unwrap_or_default();

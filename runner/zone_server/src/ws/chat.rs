@@ -309,6 +309,8 @@ pub enum ServerMessage {
     },
     /// Content chunk streamed
     Chunk { content: String, index: u32 },
+    /// Thinking tokens from a model that advertised reasoning.
+    Reasoning { content: String },
     /// The agent started running a tool
     ToolCall {
         message_id: Uuid,
@@ -525,8 +527,9 @@ fn merge_metadata(
     tool_calls: &[ToolCallRecord],
     citations: &[Citation],
     receipts: &[ActionReceipt],
+    reasoning: Option<&str>,
 ) -> Option<serde_json::Value> {
-    if tool_calls.is_empty() && citations.is_empty() && receipts.is_empty() {
+    if tool_calls.is_empty() && citations.is_empty() && receipts.is_empty() && reasoning.is_none() {
         return images;
     }
 
@@ -542,6 +545,9 @@ fn merge_metadata(
     }
     if !receipts.is_empty() {
         object.insert("action_receipts".to_string(), serde_json::json!(receipts));
+    }
+    if let Some(reasoning) = reasoning {
+        object.insert("reasoning".to_string(), serde_json::json!(reasoning));
     }
     Some(serde_json::Value::Object(object))
 }
@@ -1963,6 +1969,7 @@ async fn handle_chat_generation(
         ));
     let mut full_content = String::new();
     let mut pending_content = String::new();
+    let mut reasoning_content = String::new();
     let mut pending_images = Vec::<String>::new();
     let mut generated_images = Vec::new();
     let mut chunk_index = 0;
@@ -2028,6 +2035,14 @@ async fn handle_chat_generation(
                     }
                     Some(AgentEvent::Usage(usage)) => {tracing::debug!(prompt_tokens=usage.prompt_tokens,completion_tokens=usage.completion_tokens,"Observed provider usage");}
                     Some(AgentEvent::Finalizing(message)) => { if !send_server(sender,ServerMessage::Status {message}).await {client_gone=true;} }
+                    Some(AgentEvent::Reasoning(content)) => {
+                        reasoning_content.push_str(&content);
+                        if !client_gone
+                            && !send_server(sender, ServerMessage::Reasoning { content }).await
+                        {
+                            client_gone = true;
+                        }
+                    }
                     Some(AgentEvent::Chunk(content)) => {
                         let filtered = match token_filter.push(&content) {
                             FilterStep::Hold => continue,
@@ -2256,6 +2271,7 @@ async fn handle_chat_generation(
         &tool_calls,
         &citations,
         &action_receipts,
+        (!reasoning_content.is_empty()).then_some(reasoning_content.as_str()),
     );
 
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
@@ -2570,6 +2586,16 @@ mod tests {
     }
 
     #[test]
+    fn test_server_message_reasoning_serialize() {
+        let msg = ServerMessage::Reasoning {
+            content: "The capital is Paris.".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"reasoning\""));
+        assert!(json.contains("\"content\":\"The capital is Paris.\""));
+    }
+
+    #[test]
     fn test_server_message_tool_call_serialize() {
         let msg = ServerMessage::ToolCall {
             message_id: Uuid::new_v4(),
@@ -2639,7 +2665,7 @@ mod tests {
         }];
 
         let merged =
-            merge_metadata(images, &records, &[], &[]).expect("both sides produce metadata");
+            merge_metadata(images, &records, &[], &[], None).expect("both sides produce metadata");
         assert_eq!(merged["attachments"][0]["name"], "generated-image-1.png");
         assert_eq!(merged["tool_calls"][0]["name"], "run_shell");
     }
@@ -2657,7 +2683,7 @@ mod tests {
             note: Some("Observed CI only".into()),
         }];
         let merged =
-            merge_metadata(None, &[], &citations, &[]).expect("citations produce metadata");
+            merge_metadata(None, &[], &citations, &[], None).expect("citations produce metadata");
         assert_eq!(merged["citations"][0]["url"], citations[0].url);
         assert_eq!(
             merged["citations"][0]["revision"],
@@ -2683,14 +2709,22 @@ mod tests {
             outcome: "Task created".to_string(),
             href: "/tasks?id=task-1".to_string(),
         }];
-        let merged = merge_metadata(None, &[], &[], &receipts).expect("receipts produce metadata");
+        let merged =
+            merge_metadata(None, &[], &[], &receipts, None).expect("receipts produce metadata");
         assert_eq!(merged["action_receipts"][0]["action"], "create_task");
         assert_eq!(merged["action_receipts"][0]["href"], "/tasks?id=task-1");
     }
 
     #[test]
     fn test_merge_metadata_is_none_when_the_turn_produced_neither() {
-        assert!(merge_metadata(None, &[], &[], &[]).is_none());
+        assert!(merge_metadata(None, &[], &[], &[], None).is_none());
+    }
+
+    #[test]
+    fn test_merge_metadata_keeps_reasoning() {
+        let merged =
+            merge_metadata(None, &[], &[], &[], Some("The capital is Paris.")).expect("reasoning");
+        assert_eq!(merged["reasoning"], "The capital is Paris.");
     }
 
     #[test]

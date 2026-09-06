@@ -67,6 +67,8 @@ export interface MessageMetadata {
   action_receipts?: ActionReceipt[];
   /** Optional API override: force web search on/off for one message. */
   web_search?: boolean;
+  /** Model thinking text, when the deployment advertised reasoning. */
+  reasoning?: string;
 }
 
 export interface Message {

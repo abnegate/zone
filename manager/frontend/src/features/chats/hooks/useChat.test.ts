@@ -229,6 +229,42 @@ describe('useChat', () => {
     expect(result.current.chat?.messages).toHaveLength(4);
   });
 
+  it('accumulates streamed reasoning into assistant metadata', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm4', role: 'assistant' });
+    lastSocket?.emit({ type: 'reasoning', content: 'Need the capital. ' });
+    lastSocket?.emit({ type: 'reasoning', content: 'Paris is the capital.' });
+    lastSocket?.emit({ type: 'chunk', content: 'Paris.', index: 0 });
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.reasoning).toBe(
+        'Need the capital. Paris is the capital.'
+      );
+    });
+
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm4',
+      content: 'Paris.',
+      metadata: { reasoning: 'Need the capital. Paris is the capital.' },
+    });
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+    });
+    expect(result.current.chat?.messages.at(-1)?.metadata?.reasoning).toBe(
+      'Need the capital. Paris is the capital.'
+    );
+  });
+
   it('builds the tool trace from the agent frames', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 
