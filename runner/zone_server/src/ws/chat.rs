@@ -1828,14 +1828,7 @@ async fn prepare_chat(
         }
     }
     preparation.context.entries[0].message = LlmMessage::system(prompt);
-    if search.has_lookup_outcome() {
-        preparation.context.entries.push(zone_core::context::Entry {
-            id: Uuid::new_v4().to_string(),
-            message: LlmMessage::system(search.prompt()),
-            preserve: true,
-            consumed: true,
-        });
-    }
+    preparation.context.search(&search);
     let _ = chat_id;
     Ok(preparation)
 }
@@ -2262,6 +2255,7 @@ async fn handle_chat_generation(
                             }),
                     );
                 replay.summary = history.summary.map(session::core_summary);
+                replay.search(&SearchContext::new(&state.config().web_search));
                 let usage =
                     blocked.unwrap_or_else(|| replay.usage(model_name, definitions.as_deref()));
                 let _ = send_server(

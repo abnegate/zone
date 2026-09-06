@@ -18,6 +18,7 @@ use crate::services::searxng::SearchContext;
 use crate::state::AppState;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
+const SEARCH: &str = "supplement:search";
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -152,6 +153,22 @@ impl RunContext {
             preserve: false,
             consumed: false,
         });
+    }
+
+    /// Request-local search data stays below trusted instructions and outside durable
+    /// coverage. Replacing it cannot change which canonical user entry is protected.
+    pub fn search(&mut self, search: &SearchContext) {
+        let supplement = Entry {
+            id: SEARCH.into(),
+            message: Message::user(search.prompt()),
+            preserve: true,
+            consumed: true,
+        };
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == SEARCH) {
+            *entry = supplement;
+        } else {
+            self.entries.push(supplement);
+        }
     }
 
     pub fn consume(&mut self) -> Vec<String> {
@@ -350,23 +367,25 @@ pub async fn build(
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(&chat.model_name, limit);
     }
+    let mut context = RunContext {
+        entries,
+        summary: history.summary.map(core_summary),
+        policy,
+        reason,
+        incomplete,
+        artifacts: Some((
+            state.config().comfyui.artifact_root.clone(),
+            workspace,
+            chat.id,
+        )),
+    };
+    context.search(&SearchContext::new(&state.config().web_search));
     Ok(Preparation {
         model: chat.model_name.clone(),
         agentic,
         auto_approve: chat.auto_approve,
         tools,
-        context: RunContext {
-            entries,
-            summary: history.summary.map(core_summary),
-            policy,
-            reason,
-            incomplete,
-            artifacts: Some((
-                state.config().comfyui.artifact_root.clone(),
-                workspace,
-                chat.id,
-            )),
-        },
+        context,
         llm,
         stop,
         budget: settings.budget(),
