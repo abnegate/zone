@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{
+    MAX_TOOL_MESSAGE_CHARS, Tool, ToolContext, ToolError, ToolRegistry, ToolResult,
+};
 
 use super::readiness::{
     self, CheckEvidence, CommentEvidence, CommitSha, Greptile, PullEvidence, ReviewComment,
@@ -31,6 +33,34 @@ reviewThreads(first:$first){pageInfo{hasNextPage}nodes{isResolved}}\
 comments(last:$first){pageInfo{hasPreviousPage}nodes{databaseId body url createdAt author{login}}}\
 }}}";
 const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
+const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
+const LOG_EXCERPT_CHARS: u64 = 5_500;
+const LOG_EXCERPT_FLOOR_CHARS: u64 = 500;
+const LOG_CONTEXT_LINES: usize = 40;
+const LOG_TAIL_LINES: usize = 120;
+const LOG_LINE_CHARS: usize = 500;
+const ELISION_RESERVE_CHARS: usize = 120;
+const RESULT_ENVELOPE_CHARS: usize = 256;
+const ANNOTATED_ERROR: &str = "##[error]";
+const ERROR_MARKERS: [&str; 10] = [
+    ANNOTATED_ERROR,
+    "traceback (most recent call last)",
+    "segmentation fault",
+    "assertion failed",
+    "exception:",
+    "failure:",
+    "error:",
+    "fatal:",
+    "panic:",
+    " failed",
+];
+const LOG_REDIRECT_HOSTS: [&str; 4] = [
+    "blob.core.windows.net",
+    "pipelines.actions.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "github.com",
+];
+const LOG_NOTE: &str = "Excerpt of what the job printed, not proof of why it failed. Per-line timestamps, progress redraws and over-long lines are trimmed, and unshown regions are marked as omitted.";
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -39,6 +69,7 @@ enum Operation {
     Issues,
     File,
     PullRequests,
+    CheckLogs,
     CreatePull,
     Comment,
 }
@@ -50,6 +81,7 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::Issues,
         Operation::File,
         Operation::PullRequests,
+        Operation::CheckLogs,
         Operation::CreatePull,
         Operation::Comment,
     ] {
@@ -83,6 +115,7 @@ struct Arguments {
     base: Option<String>,
     body: Option<String>,
     number: Option<u64>,
+    job_id: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +135,7 @@ impl Tool for Integration {
             Operation::Deployments => "list_deployments",
             Operation::Issues => "list_issues",
             Operation::File => "read_repository_file",
+            Operation::CheckLogs => "read_check_logs",
             Operation::PullRequests => "assess_pull_requests",
             Operation::CreatePull => "create_pull_request",
             Operation::Comment => "comment_on_issue",
@@ -124,6 +158,9 @@ impl Tool for Integration {
             }
             Operation::PullRequests => {
                 "Assess whether pull requests on a connected GitHub source are ready to merge, returning a verdict plus every blocker behind it. Ready is the conjunction of every positive condition: no unresolved review threads, a review-bot summary at full confidence naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
+            }
+            Operation::CheckLogs => {
+                "Read a bounded excerpt of one GitHub Actions job log for a connected source, after confirming the job runs against the pull request or commit being asked about. Returns the lines around the first error and the end of the log within a character budget, never the whole file; omitted regions and capped downloads are marked. An excerpt is evidence of what the job printed, never proof of why it failed, that the log names the real cause, or that a rerun would pass."
             }
             Operation::CreatePull => {
                 "Open a pull request on a connected GitHub source. Requires write access. Only do this when the user asked to open a PR."
@@ -155,6 +192,12 @@ impl Tool for Integration {
             properties["offset"] = json!({"type": "integer", "minimum": 0, "description": "Unicode character offset into the file, default 0."});
             properties["limit"] = json!({"type": "integer", "minimum": 1, "description": "Number of characters to return, default 8000, capped at 8000 so the page fits the remaining context budget. Follow next to continue."});
             required.push("path");
+        }
+        if matches!(self.operation, Operation::CheckLogs) {
+            properties["job_id"] = json!({"type": "integer", "minimum": 1, "description": "GitHub Actions job id, taken from the id of a check returned by get_build_status."});
+            properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Pull request number the job must belong to. Omit to bind the job to the commit that ref resolves to instead."});
+            properties["limit"] = json!({"type": "integer", "minimum": 1, "description": "Excerpt size in characters, default 5500 and capped at 5500 so the excerpt fits the remaining context budget."});
+            required.push("job_id");
         }
         if matches!(self.operation, Operation::CreatePull) {
             properties["title"] = json!({"type": "string", "description": "Pull request title."});
@@ -259,6 +302,7 @@ impl Integration {
 struct Github {
     client: Client,
     origin: Url,
+    log_bytes: u64,
     configuration: Configuration,
 }
 
@@ -276,6 +320,7 @@ impl Github {
         Ok(Self {
             client,
             origin: Url::parse(ORIGIN).expect("constant GitHub origin"),
+            log_bytes: MAX_LOG_BYTES,
             configuration,
         })
     }
@@ -515,6 +560,11 @@ impl Github {
                 .collect();
             return Ok(json!({"repository": repository, "issues": issues, "next_page": next}));
         }
+        if matches!(operation, Operation::CheckLogs) {
+            let mut result = self.check_logs(arguments).await?;
+            result["repository"] = json!(repository);
+            return Ok(result);
+        }
         let (reference, sha) = self.resolve(arguments.reference.as_deref()).await?;
         let mut result = match operation {
             Operation::Build => self.build(&sha).await?,
@@ -530,6 +580,7 @@ impl Github {
             }
             Operation::Issues
             | Operation::PullRequests
+            | Operation::CheckLogs
             | Operation::CreatePull
             | Operation::Comment => unreachable!(),
         };
@@ -880,6 +931,400 @@ impl Github {
             "url": format!("https://github.com/{}/{}/blob/{}/{}", self.configuration.owner, self.configuration.repo, sha, path.split('/').map(|part| urlencoding::encode(part).into_owned()).collect::<Vec<_>>().join("/"))}),
         )
     }
+    async fn check_logs(&self, arguments: &Arguments) -> Result<Value, String> {
+        let job_id = arguments.job_id.ok_or("job_id is required.")?;
+        if job_id == 0 {
+            return Err("job_id must be positive.".to_string());
+        }
+        let (reference, sha, pull) = self.log_target(arguments).await?;
+        let job = self
+            .get(&["actions", "jobs", &job_id.to_string()], &[])
+            .await?;
+        let run_id = self.verify_job(&job, job_id, &sha)?;
+        let (bytes, capped) = self.collect_log(self.log_response(job_id).await?).await?;
+        let lines = log_lines(&String::from_utf8_lossy(&bytes));
+        let log = JobLog {
+            job,
+            run_id,
+            sha,
+            reference,
+            pull,
+            downloaded: bytes.len(),
+            capped,
+            observed_at: Utc::now().to_rfc3339(),
+        };
+        let mut budget = arguments
+            .limit
+            .unwrap_or(LOG_EXCERPT_CHARS)
+            .clamp(LOG_EXCERPT_FLOOR_CHARS, LOG_EXCERPT_CHARS);
+        let envelope = MAX_TOOL_MESSAGE_CHARS.saturating_sub(RESULT_ENVELOPE_CHARS);
+        loop {
+            let result = log.result(&lines, budget);
+            if json_chars(&result) <= envelope || budget <= LOG_EXCERPT_FLOOR_CHARS {
+                return Ok(result);
+            }
+            budget = (budget / 2).max(LOG_EXCERPT_FLOOR_CHARS);
+        }
+    }
+
+    async fn log_target(
+        &self,
+        arguments: &Arguments,
+    ) -> Result<(String, String, Option<Value>), String> {
+        let Some(number) = arguments.number else {
+            let (reference, sha) = self.resolve(arguments.reference.as_deref()).await?;
+            return Ok((reference, sha, None));
+        };
+        if number == 0 {
+            return Err("number must be positive.".to_string());
+        }
+        let pull = self.get(&["pulls", &number.to_string()], &[]).await?;
+        if pull["number"].as_u64() != Some(number) {
+            return Err("GitHub returned a different pull request.".to_string());
+        }
+        let sha = pull["head"]["sha"]
+            .as_str()
+            .filter(|value| valid_sha(value))
+            .ok_or("GitHub did not return an immutable pull request head SHA.")?
+            .to_ascii_lowercase();
+        let reference = pull["head"]["ref"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("refs/pull/{number}/head"));
+        Ok((
+            reference,
+            sha,
+            Some(project(
+                &pull,
+                &["number", "title", "state", "draft", "html_url"],
+            )),
+        ))
+    }
+
+    fn verify_job(&self, job: &Value, job_id: u64, sha: &str) -> Result<u64, String> {
+        let run_id = job["run_id"]
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or("GitHub returned a job without its workflow run identity.")?;
+        let head_sha = job["head_sha"]
+            .as_str()
+            .filter(|value| valid_sha(value))
+            .ok_or("GitHub returned a job without a commit SHA.")?;
+        if job["id"].as_u64() != Some(job_id)
+            || !head_sha.eq_ignore_ascii_case(sha)
+            || !is_job_url(
+                job["html_url"].as_str().unwrap_or_default(),
+                &self.configuration.owner,
+                &self.configuration.repo,
+                run_id,
+                job_id,
+            )
+        {
+            return Err(
+                "That job does not belong to the pull request or commit being asked about."
+                    .to_string(),
+            );
+        }
+        Ok(run_id)
+    }
+
+    async fn log_response(&self, job_id: u64) -> Result<reqwest::Response, String> {
+        let mut request = self
+            .client
+            .get(self.url(&["actions", "jobs", &job_id.to_string(), "logs"]))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2026-03-10");
+        if let Some(token) = &self.configuration.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "GitHub request failed or timed out.".to_string())?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        if !response.status().is_redirection() {
+            return Err(format!(
+                "GitHub returned HTTP {}. Check source access, permissions, rate limits and the requested resource.",
+                response.status().as_u16()
+            ));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or("GitHub redirected the job log without a destination.")?;
+        let target = self.log_redirect(location)?;
+        // The signed destination carries its own authorization; forwarding the
+        // source token off the API origin would hand it to storage.
+        let redirected = self
+            .client
+            .get(target)
+            .send()
+            .await
+            .map_err(|_| "The job log download failed or timed out.".to_string())?;
+        if !redirected.status().is_success() {
+            return Err(format!(
+                "The job log download returned HTTP {}.",
+                redirected.status().as_u16()
+            ));
+        }
+        Ok(redirected)
+    }
+
+    fn log_redirect(&self, location: &str) -> Result<Url, String> {
+        let unexpected = "GitHub redirected the job log to an unexpected host.";
+        let target = self
+            .origin
+            .join(location)
+            .map_err(|_| unexpected.to_string())?;
+        let Some(host) = target.host_str() else {
+            return Err(unexpected.to_string());
+        };
+        if !target.username().is_empty() || target.password().is_some() {
+            return Err(unexpected.to_string());
+        }
+        let same_origin = target.scheme() == self.origin.scheme()
+            && Some(host) == self.origin.host_str()
+            && target.port_or_known_default() == self.origin.port_or_known_default();
+        let published = target.scheme() == "https"
+            && LOG_REDIRECT_HOSTS
+                .iter()
+                .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")));
+        if same_origin || published {
+            Ok(target)
+        } else {
+            Err(unexpected.to_string())
+        }
+    }
+
+    async fn collect_log(
+        &self,
+        mut response: reqwest::Response,
+    ) -> Result<(Vec<u8>, bool), String> {
+        let mut collected: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "The job log download failed part way through.".to_string())?
+        {
+            let room = (self.log_bytes as usize).saturating_sub(collected.len());
+            if chunk.len() > room {
+                collected.extend_from_slice(&chunk[..room]);
+                return Ok((collected, true));
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        Ok((collected, false))
+    }
+}
+
+struct JobLog {
+    job: Value,
+    run_id: u64,
+    sha: String,
+    reference: String,
+    pull: Option<Value>,
+    downloaded: usize,
+    capped: bool,
+    observed_at: String,
+}
+
+impl JobLog {
+    fn result(&self, lines: &[String], budget: u64) -> Value {
+        let error_line = find_error(lines);
+        let selected = select(lines, budget as usize, error_line);
+        let complete = !self.capped && selected.len() == lines.len();
+        let mut result = json!({
+            "job": project(&self.job, &["id", "run_id", "name", "status", "conclusion", "html_url", "started_at", "completed_at"]),
+            "run_id": self.run_id,
+            "ref": self.reference,
+            "sha": self.sha,
+            "log": {
+                "excerpt": render_excerpt(lines, &selected),
+                "total_lines": lines.len(),
+                "shown_lines": selected.len(),
+                "first_error_line": error_line.map(|index| index + 1),
+                "downloaded_bytes": self.downloaded,
+                "download_capped": self.capped,
+                "complete": complete,
+            },
+            "note": LOG_NOTE,
+            "citations": [self.citation(complete)],
+        });
+        if let Some(pull) = &self.pull {
+            result["pull_request"] = pull.clone();
+        }
+        result
+    }
+
+    fn citation(&self, complete: bool) -> Value {
+        let conclusion = if self.job["status"].as_str() == Some("completed") {
+            self.job["conclusion"].as_str().unwrap_or("unknown")
+        } else {
+            "pending"
+        };
+        json!({
+            "kind": "github_build",
+            "title": format!("{} job log excerpt", self.job["name"].as_str().unwrap_or("Check")),
+            "url": self.job["html_url"].as_str().unwrap_or_default(),
+            "revision": self.sha,
+            "observed_at": self.observed_at,
+            "complete": complete,
+            "outcome": match assessment(&[conclusion]) {
+                "failure" => "failure",
+                "pending" => "pending",
+                "success" => "success",
+                _ => "observed",
+            },
+            "note": LOG_NOTE,
+        })
+    }
+}
+
+fn is_job_url(value: &str, owner: &str, repo: &str, run_id: u64, job_id: u64) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path().eq_ignore_ascii_case(&format!(
+            "/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}"
+        ))
+}
+
+/// Strip the RFC 3339 stamp GitHub prefixes to every line of a job log.
+fn strip_timestamp(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    if bytes.len() < 21
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+    {
+        return line;
+    }
+    match line.find("Z ") {
+        Some(offset) if offset <= 32 => &line[offset + 2..],
+        _ => line,
+    }
+}
+
+/// Split a job log into lines a budget can be spent on: one entry per printed
+/// line, carriage-return redraws collapsed to the state that survived them, and
+/// no single line wide enough to crowd out the rest.
+fn log_lines(log: &str) -> Vec<String> {
+    let mut lines: Vec<String> = log
+        .split('\n')
+        .map(|line| {
+            let settled = line.trim_end_matches('\r');
+            let settled = settled.rsplit('\r').next().unwrap_or(settled);
+            truncate(strip_timestamp(settled).trim_end(), LOG_LINE_CHARS)
+        })
+        .collect();
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+fn find_error(lines: &[String]) -> Option<usize> {
+    let mut fallback = None;
+    for (index, line) in lines.iter().enumerate() {
+        let lowered = line.to_lowercase();
+        if lowered.contains(ANNOTATED_ERROR) {
+            return Some(index);
+        }
+        if fallback.is_none() && ERROR_MARKERS.iter().any(|marker| lowered.contains(marker)) {
+            fallback = Some(index);
+        }
+    }
+    fallback
+}
+
+/// Lines worth spending the budget on, most valuable first: the first error and
+/// the context that explains it, then the end of the log. Each step widens a
+/// region by one line, so whatever the budget affords stays contiguous.
+fn candidates(lines: &[String], error_line: Option<usize>) -> Vec<usize> {
+    let last = lines.len() - 1;
+    let mut order = Vec::new();
+    if let Some(index) = error_line {
+        order.push(index);
+        for offset in 1..=LOG_CONTEXT_LINES {
+            if index + offset <= last {
+                order.push(index + offset);
+            }
+            if let Some(before) = index.checked_sub(offset) {
+                order.push(before);
+            }
+        }
+    }
+    order.extend((0..LOG_TAIL_LINES.min(lines.len())).map(|offset| last - offset));
+    order
+}
+
+fn select(
+    lines: &[String],
+    budget: usize,
+    error_line: Option<usize>,
+) -> std::collections::BTreeSet<usize> {
+    let mut selected = std::collections::BTreeSet::new();
+    if lines.is_empty() {
+        return selected;
+    }
+    let mut spent = ELISION_RESERVE_CHARS;
+    for index in candidates(lines, error_line) {
+        if selected.contains(&index) {
+            continue;
+        }
+        let cost = lines[index].chars().count() + 1;
+        // Stopping rather than skipping keeps each region contiguous, so the
+        // excerpt reads as the log did instead of as scattered lines.
+        if !selected.is_empty() && spent + cost > budget {
+            break;
+        }
+        spent += cost;
+        selected.insert(index);
+    }
+    selected
+}
+
+fn ranges(selected: &std::collections::BTreeSet<usize>) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for index in selected {
+        match ranges.last_mut() {
+            Some(last) if last.1 + 1 == *index => last.1 = *index,
+            _ => ranges.push((*index, *index)),
+        }
+    }
+    ranges
+}
+
+fn render_excerpt(lines: &[String], selected: &std::collections::BTreeSet<usize>) -> String {
+    let mut rendered: Vec<String> = Vec::new();
+    let mut cursor = 0;
+    for (start, end) in ranges(selected) {
+        if start > cursor {
+            rendered.push(elision(start - cursor));
+        }
+        rendered.extend_from_slice(&lines[start..=end]);
+        cursor = end + 1;
+    }
+    if cursor < lines.len() {
+        rendered.push(elision(lines.len() - cursor));
+    }
+    rendered.join("\n")
+}
+
+fn elision(count: usize) -> String {
+    format!("… {count} lines omitted …")
 }
 
 fn text_page(content: &str, offset: u64, limit: u64) -> Result<(String, u64, Option<u64>), String> {
@@ -1349,6 +1794,7 @@ mod tests {
                     base: None,
                     body: None,
                     number: None,
+                    job_id: None,
                 },
             )
             .await
@@ -1652,6 +2098,7 @@ mod tests {
                     base: None,
                     body: None,
                     number: None,
+                    job_id: None,
                 },
             )
             .await
@@ -1779,6 +2226,7 @@ mod tests {
                     base: None,
                     body: Some("details".into()),
                     number: None,
+                    job_id: None,
                 },
             )
             .await
@@ -1820,6 +2268,7 @@ mod tests {
                     base: None,
                     body: Some("ship it".into()),
                     number: Some(7),
+                    job_id: None,
                 },
             )
             .await
@@ -1847,6 +2296,7 @@ mod tests {
             base: None,
             body: body.map(str::to_string),
             number,
+            job_id: None,
         }
     }
 
@@ -1970,6 +2420,7 @@ mod tests {
             base: None,
             body: None,
             number,
+            job_id: None,
         }
     }
 
@@ -2439,5 +2890,309 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+    const JOB_ID: u64 = 4242;
+
+    const RUN_ID: u64 = 99;
+
+    fn check_args(job_id: Option<u64>, number: Option<u64>, limit: Option<u64>) -> Arguments {
+        Arguments {
+            source_id: Uuid::new_v4(),
+            reference: None,
+            path: None,
+            page: None,
+            offset: None,
+            limit,
+            state: None,
+            title: None,
+            head: None,
+            base: None,
+            body: None,
+            number,
+            job_id,
+        }
+    }
+
+    fn job(head_sha: &str) -> Value {
+        json!({
+            "id": JOB_ID,
+            "run_id": RUN_ID,
+            "name": "build",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": head_sha,
+            "started_at": "2026-09-05T00:00:00Z",
+            "completed_at": "2026-09-05T00:01:00Z",
+            "html_url": format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}")
+        })
+    }
+
+    async fn mock_pull_for_job(server: &MockServer, number: u64, head_sha: &str) {
+        mock(
+            server,
+            &format!("pulls/{number}"),
+            json!({"number": number, "title": "Fix", "state": "open", "draft": false,
+                   "html_url": format!("https://github.com/owner/repository/pull/{number}"),
+                   "head": {"sha": head_sha, "ref": "feature"}}),
+        )
+        .await;
+    }
+
+    async fn mock_log(server: &MockServer, body: String) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/owner/repository/actions/jobs/{JOB_ID}/logs"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    fn noisy_log(lines: usize, failure_at: usize) -> String {
+        (0..lines)
+            .map(|index| {
+                let body = if index == failure_at {
+                    "##[error]Process completed with exit code 1.".to_string()
+                } else {
+                    format!("Compiling crate number {index}")
+                };
+                format!("2026-09-05T00:00:0{}.1234567Z {body}", index % 10)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_job_from_another_pull_request_is_refused_before_its_log_is_fetched() {
+        let server = MockServer::start().await;
+        mock_pull_for_job(&server, 7, COMMIT).await;
+        mock(&server, &format!("actions/jobs/{JOB_ID}"), job(BLOB)).await;
+        mock_log(&server, "secret log".into()).await;
+        let error = github(&server)
+            .observe(
+                Operation::CheckLogs,
+                &check_args(Some(JOB_ID), Some(7), None),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("does not belong"),
+            "a job on a different commit must be refused: {error}"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| !request.url.path().ends_with("/logs")),
+            "the log must not be fetched before the job is bound to the pull request"
+        );
+    }
+
+    #[tokio::test]
+    async fn job_identity_must_match_the_repository_and_the_requested_job() {
+        let server = MockServer::start().await;
+        let foreign_repository = json!({
+            "id": JOB_ID, "run_id": RUN_ID, "head_sha": COMMIT, "status": "completed",
+            "conclusion": "failure", "name": "build",
+            "html_url": format!("https://github.com/attacker/private/actions/runs/{RUN_ID}/job/{JOB_ID}")
+        });
+        let renumbered = json!({
+            "id": JOB_ID + 1, "run_id": RUN_ID, "head_sha": COMMIT, "status": "completed",
+            "conclusion": "failure", "name": "build",
+            "html_url": format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}")
+        });
+        for metadata in [foreign_repository, renumbered, job(BLOB)] {
+            assert!(
+                github(&server)
+                    .verify_job(&metadata, JOB_ID, COMMIT)
+                    .unwrap_err()
+                    .contains("does not belong")
+            );
+        }
+        assert_eq!(
+            github(&server).verify_job(&job(COMMIT), JOB_ID, COMMIT),
+            Ok(RUN_ID)
+        );
+        assert!(
+            github(&server)
+                .verify_job(&json!({"id": JOB_ID, "head_sha": COMMIT}), JOB_ID, COMMIT)
+                .unwrap_err()
+                .contains("workflow run identity")
+        );
+        assert!(!is_job_url(
+            &format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}?x=1"),
+            "owner",
+            "repository",
+            RUN_ID,
+            JOB_ID
+        ));
+        assert!(!is_job_url(
+            &format!(
+                "https://github.com.evil.test/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}"
+            ),
+            "owner",
+            "repository",
+            RUN_ID,
+            JOB_ID
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_log_is_capped_and_reported_rather_than_silently_cut() {
+        let server = MockServer::start().await;
+        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+        mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
+        mock_log(&server, noisy_log(400, 10)).await;
+        let mut github = github(&server);
+        github.log_bytes = 1_000;
+        let result = github
+            .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
+            .await
+            .unwrap();
+        let log = &result["log"];
+        assert_eq!(log["download_capped"], true);
+        assert_eq!(log["downloaded_bytes"], 1_000);
+        assert_eq!(log["complete"], false);
+        assert!(
+            log["excerpt"].as_str().is_some_and(|text| !text.is_empty()),
+            "a capped download must still return usable evidence"
+        );
+        let citation = crate::agent::citations::from_tool_at(
+            "read_check_logs",
+            &result.to_string(),
+            "2026-09-05T00:00:00+00:00",
+        )
+        .remove(0);
+        assert!(
+            !citation.complete && !citation.passing(),
+            "a capped log is incomplete evidence and must never read as a pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_excerpt_keeps_the_failure_region_and_the_end_of_a_long_log() {
+        let server = MockServer::start().await;
+        mock_pull_for_job(&server, 7, COMMIT).await;
+        mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
+        mock_log(&server, noisy_log(4_000, 900)).await;
+        let result = github(&server)
+            .observe(
+                Operation::CheckLogs,
+                &check_args(Some(JOB_ID), Some(7), None),
+            )
+            .await
+            .unwrap();
+        let log = &result["log"];
+        let excerpt = log["excerpt"].as_str().unwrap();
+        assert_eq!(log["total_lines"], 4_000);
+        assert_eq!(log["first_error_line"], 901);
+        assert_eq!(log["complete"], false);
+        assert!(
+            excerpt.contains("##[error]Process completed with exit code 1."),
+            "the failure line must survive trimming"
+        );
+        assert!(
+            excerpt.contains("Compiling crate number 899")
+                && excerpt.contains("Compiling crate number 901"),
+            "the lines around the failure must survive trimming"
+        );
+        assert!(
+            excerpt.contains("Compiling crate number 3999"),
+            "the end of the log must survive trimming"
+        );
+        assert!(
+            excerpt.contains("lines omitted"),
+            "dropped regions must be marked, not silently removed"
+        );
+        assert!(
+            excerpt.chars().count() <= LOG_EXCERPT_CHARS as usize,
+            "the excerpt must respect its character budget"
+        );
+        assert!(
+            !excerpt.contains("2026-09-05T00:00:0"),
+            "per-line timestamps are noise the budget should not pay for"
+        );
+        assert_eq!(result["sha"], COMMIT);
+        assert_eq!(result["ref"], "feature");
+        assert_eq!(result["pull_request"]["number"], 7);
+        assert_eq!(result["job"]["conclusion"], "failure");
+        assert!(json_chars(&result) <= MAX_TOOL_MESSAGE_CHARS);
+    }
+
+    #[tokio::test]
+    async fn a_noisy_log_is_trimmed_to_what_it_printed_and_survives_the_tool_result() {
+        let server = MockServer::start().await;
+        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+        mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
+        let mut lines: Vec<String> = (0..300)
+            .map(|index| {
+                format!(
+                    "2026-09-05T00:00:00.1234567Z \u{1b}[32mok\u{1b}[0m step {index}\rretry {index}\rdone {index}"
+                )
+            })
+            .collect();
+        lines.push(format!(
+            "2026-09-05T00:00:00.1234567Z \u{1b}[31m##[error]assertion failed\u{1b}[0m {}",
+            "detail ".repeat(400)
+        ));
+        mock_log(&server, lines.join("\r\n")).await;
+        let result = github(&server)
+            .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
+            .await
+            .unwrap();
+        let excerpt = result["log"]["excerpt"].as_str().unwrap();
+        assert!(
+            !excerpt.contains('\r'),
+            "carriage-return redraws must collapse to the state that survived them"
+        );
+        assert!(
+            excerpt.contains("done 299") && !excerpt.contains("retry 299"),
+            "only the settled state of a redrawn line is worth the budget"
+        );
+        assert!(
+            excerpt.contains("##[error]assertion failed"),
+            "terminal escapes must not hide the failure region"
+        );
+        assert!(
+            excerpt
+                .lines()
+                .all(|line| line.chars().count() <= LOG_LINE_CHARS + 1),
+            "no single line may crowd out the rest of the excerpt"
+        );
+        assert!(excerpt.chars().count() <= LOG_EXCERPT_CHARS as usize);
+        let message = ToolResult::success(result.to_string()).to_message();
+        assert_eq!(
+            message,
+            result.to_string(),
+            "the excerpt must fit the tool message budget instead of being cut at the boundary"
+        );
+    }
+
+    #[test]
+    fn log_lines_collapse_redraws_strip_stamps_and_bound_width() {
+        assert_eq!(
+            log_lines("2026-09-05T00:00:00.1234567Z hello\r\n\r\n"),
+            vec!["hello".to_string()]
+        );
+        assert_eq!(
+            log_lines("1%\r50%\r100% done"),
+            vec!["100% done".to_string()]
+        );
+        assert_eq!(log_lines("plain\r"), vec!["plain".to_string()]);
+        assert_eq!(
+            strip_timestamp("not a stamp at all here"),
+            "not a stamp at all here"
+        );
+        let wide = log_lines(&"x".repeat(LOG_LINE_CHARS * 3));
+        assert_eq!(wide[0].chars().count(), LOG_LINE_CHARS + 1);
+        assert!(log_lines("").is_empty());
+        assert_eq!(find_error(&log_lines("a\nb")), None);
+        assert_eq!(
+            find_error(&log_lines("Command failed\nlater\n##[error]real")),
+            Some(2),
+            "an annotated error outranks an earlier generic marker"
+        );
     }
 }

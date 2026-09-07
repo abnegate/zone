@@ -137,6 +137,7 @@ const SERVER_OBSERVED_TOOLS: &[&str] = &[
     "list_deployments",
     "list_documents",
     "list_issues",
+    "read_check_logs",
     "read_document",
     "read_repository_file",
 ];
