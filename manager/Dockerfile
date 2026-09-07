@@ -15,10 +15,18 @@ WORKDIR /build/runner
 ARG TARGETARCH
 ARG TARGETVARIANT
 
+# Every workspace member, because Cargo reads the whole workspace manifest
+# before it builds any one package.
 COPY runner/Cargo.toml runner/Cargo.lock ./
 COPY runner/tool_runner ./tool_runner/
 COPY runner/zone_runner ./zone_runner/
 COPY runner/zone_core ./zone_core/
+COPY runner/zone_chat ./zone_chat/
+COPY runner/zone_comfy ./zone_comfy/
+COPY runner/zone_email ./zone_email/
+COPY runner/zone_search ./zone_search/
+COPY runner/zone_vcs ./zone_vcs/
+COPY runner/zone_vision ./zone_vision/
 COPY runner/zone_context ./zone_context/
 COPY runner/zone_server ./zone_server/
 COPY runner/zone_cli ./zone_cli/
