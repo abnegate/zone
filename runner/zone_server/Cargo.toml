@@ -82,6 +82,7 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
 # Internal
+tool_runner = { path = "../tool_runner" }
 zone_chat = { path = "../zone_chat" }
 zone_comfy = { path = "../zone_comfy" }
 zone_email = { path = "../zone_email" }
@@ -100,3 +101,4 @@ tokio-tungstenite = "=0.30.0"
 futures-util = "=0.3.34"
 zone_context = { path = "../zone_context", features = ["test-utils"] }
 wiremock = "=0.6.5"
+tempfile = "=3.27.0"

@@ -17,6 +17,7 @@ use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBu
 use crate::db::tasks;
 use crate::services::chat::session::{self, RunContext};
 use crate::state::AppState;
+use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
 use zone_chat::capacity::Resolver;
 
@@ -277,6 +278,27 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
     };
 
+    let evaluator = Evaluator::detect(
+        &workspace_path,
+        EvaluationSettings::from_process_environment(),
+    );
+    let baseline = if evaluator.is_active() {
+        record_evaluation_log(
+            state,
+            run_id,
+            "info",
+            &format!(
+                "Measuring code quality with {} tool(s) before the agent starts",
+                evaluator.tools().len()
+            ),
+            None,
+        )
+        .await;
+        evaluator.baseline().await
+    } else {
+        Vec::new()
+    };
+
     let tools = ChatTools::for_task(state, workspace_path.clone()).await;
     let mut system_prompt = agent::system_prompt(&tools, true);
     system_prompt.push_str(
@@ -408,6 +430,8 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
                 outcome.tool_calls
             );
 
+            let evaluation = evaluator.compare(baseline).await;
+
             // Attempt PR creation if there are code changes
             let pr_info = match create_pr_for_task(state, task_id, &workspace_path).await {
                 PrCreationResult::Created {
@@ -453,6 +477,32 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
                 artifacts["pr"] = pr;
             }
 
+            if !evaluation.deltas.is_empty() {
+                let level = if evaluation.has_regressions() {
+                    "warn"
+                } else {
+                    "info"
+                };
+                let artifact = evaluation.artifact();
+                record_evaluation_log(
+                    state,
+                    run_id,
+                    level,
+                    &evaluation.summary,
+                    Some(artifact.clone()),
+                )
+                .await;
+                artifacts["evaluation"] = artifact;
+
+                if evaluation.verdict == Verdict::Regressed {
+                    tracing::warn!(
+                        "Task run {} regressed code quality in: {}",
+                        run_id,
+                        evaluation.regressed_tools().join(", ")
+                    );
+                }
+            }
+
             if let Err(e) =
                 tasks::complete_task_run(state.db(), run_id, "completed", None, Some(artifacts))
                     .await
@@ -494,6 +544,35 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
                 tracing::error!("CRITICAL: Failed to update run {} status: {}", run_id, e);
             }
         }
+    }
+}
+
+const EVALUATION_PHASE: &str = "evaluating";
+const EVALUATION_AGENT: &str = "evaluation";
+
+async fn record_evaluation_log(
+    state: &AppState,
+    run_id: Uuid,
+    log_level: &str,
+    message: &str,
+    metadata: Option<serde_json::Value>,
+) {
+    if let Err(error) = tasks::add_task_run_log(
+        state.db(),
+        run_id,
+        EVALUATION_PHASE,
+        EVALUATION_AGENT,
+        log_level,
+        message,
+        metadata,
+    )
+    .await
+    {
+        tracing::error!(
+            "Failed to record evaluation log for run {}: {}",
+            run_id,
+            error
+        );
     }
 }
 

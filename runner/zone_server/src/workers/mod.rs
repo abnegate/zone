@@ -10,6 +10,7 @@
 //! - Cleanup tasks
 
 pub mod embeddings;
+pub mod evaluation;
 pub mod gathering;
 pub mod indexing;
 pub mod knowledge_refresh;
