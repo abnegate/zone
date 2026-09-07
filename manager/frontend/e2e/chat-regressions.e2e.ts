@@ -81,13 +81,14 @@ test.describe('Chat regressions', () => {
   async function mockChatRoutes(
     page: Parameters<typeof routeApi>[0],
     messages: unknown[] = [],
-    options: { failListAfter?: number } = {}
+    options: { failListAfter?: number; holdChat?: Promise<void> } = {}
   ) {
     let listGets = 0;
-    await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
+    await routeApi(page, /\/api\/chats($|\?|\/)/i, async (route) => {
       const url = route.request().url();
       const method = route.request().method();
       if (url.includes('/chat-1') && method === 'GET' && !url.includes('/context')) {
+        await options.holdChat;
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -541,6 +542,47 @@ test.describe('Chat regressions', () => {
     await expect(page.getByText('[Stopped before answering]')).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath('resumes-after-drop.png'),
+      fullPage: true,
+    });
+  });
+
+  test('shows a replay that arrived before the chat had loaded', async ({ page }, testInfo) => {
+    let release: () => void = () => {};
+    const holdChat = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await mockChatRoutes(page, [userMessage], { holdChat });
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await expect(page.locator('.chat-item')).toHaveCount(1);
+    await page.click('.chat-item');
+
+    // The socket connects while the chat itself is still being fetched.
+    await page.waitForFunction(() => {
+      const sockets =
+        (window as Window & { __chatSockets?: Array<{ readyState: number }> }).__chatSockets ?? [];
+      return sockets.some((candidate) => candidate.readyState === 1);
+    });
+    await socket.emit({
+      type: 'message_start',
+      message_id: 'a1',
+      role: 'assistant',
+      resumed: true,
+    });
+    await socket.emit({ type: 'chunk', content: 'Streamed before the chat loaded.', index: 0 });
+    await socket.emit({
+      type: 'tool_call',
+      message_id: 'a1',
+      tool_call_id: 'tool',
+      name: 'read_file',
+      arguments: '{}',
+    });
+
+    release();
+    await expect(page.getByText('Streamed before the chat loaded.')).toBeVisible();
+    await expect(page.getByText('Running…')).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath('replay-before-load.png'),
       fullPage: true,
     });
   });
