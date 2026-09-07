@@ -274,6 +274,7 @@ const VISUAL_NOUNS: &[&str] = &[
     "portrait",
     "portraits",
 ];
+const VISUAL_IMPERATIVES: &[&str] = &["draw", "paint", "illustrate", "sketch"];
 
 fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision {
     let tokens = tokenize(content);
@@ -303,7 +304,12 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
     ]
     .iter()
     .any(|word| has(word));
-    let discusses_code = (programming_language && implementation_term)
+    let software_only_noun = ["endpoint", "endpoints"].iter().any(|word| has(word));
+    let asks_for_visual = tokens.iter().any(|token| {
+        VISUAL_NOUNS.contains(&token.as_str()) || VISUAL_IMPERATIVES.contains(&token.as_str())
+    });
+    let discusses_code = (software_only_noun && !asks_for_visual)
+        || (programming_language && implementation_term)
         || ((has("image") || has("images"))
             && ["component", "api", "workflow", "code", "implement"]
                 .iter()
@@ -348,7 +354,7 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
     let visual_imperative = tokens
         .iter()
         .take(4)
-        .any(|token| ["draw", "paint", "illustrate", "sketch"].contains(&token.as_str()))
+        .any(|token| VISUAL_IMPERATIVES.contains(&token.as_str()))
         && !["conclusion", "conclusions", "attention", "parallel"]
             .iter()
             .any(|word| has(word));
@@ -865,6 +871,10 @@ mod tests {
             "write song lyrics about the sea",
             "write a blog post about music production",
             "write a poem about music",
+            "create an audio recording endpoint",
+            "create audio recording endpoints",
+            "create an endpoint that returns song metadata",
+            "create a rust endpoint that streams music",
         ] {
             assert_eq!(
                 deterministic_decision(chat, false),
@@ -872,6 +882,30 @@ mod tests {
                 "{chat}"
             );
         }
+    }
+
+    #[test]
+    fn implementation_nouns_leave_the_generation_lanes_alone() {
+        for image in [
+            "generate an image of a music studio",
+            "make a poster for a music festival",
+            "draw a line segment with two endpoints",
+            "draw a diagram showing the endpoints of a vector",
+            "generate an image of the endpoint of a hiking trail",
+            "illustrate the endpoint of the journey",
+            "generate an image of a rust covered endpoint",
+        ] {
+            assert_eq!(
+                deterministic_decision(image, false),
+                RuleDecision::Image,
+                "{image}"
+            );
+        }
+
+        assert_eq!(
+            deterministic_decision("make a music video of a fox", false),
+            RuleDecision::Video,
+        );
     }
 
     #[test]
