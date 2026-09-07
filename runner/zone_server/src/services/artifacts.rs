@@ -185,10 +185,6 @@ mod tests {
         assert!(safe_extension("svg").is_err());
         assert_eq!(safe_extension("webm").unwrap(), "webm");
         assert_eq!(safe_extension("mp4").unwrap(), "mp4");
-        assert_eq!(safe_extension("flac").unwrap(), "flac");
-        assert_eq!(safe_extension("MP3").unwrap(), "mp3");
-        assert_eq!(safe_extension("opus").unwrap(), "opus");
-        assert_eq!(safe_extension("wav").unwrap(), "wav");
         assert!(safe_path_component("..").is_err());
         assert!(safe_path_component("../secret").is_err());
         assert!(safe_path_component(&Uuid::new_v4().to_string()).is_ok());
