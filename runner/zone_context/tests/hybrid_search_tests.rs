@@ -285,21 +285,46 @@ async fn test_hybrid_search() {
 
     assert!(!results.is_empty(), "Hybrid search should find results");
 
-    // Verify RRF combination
     for result in &results {
-        // Combined score should be present
-        assert!(
-            result.score > 0.0,
-            "Hybrid results should have combined score"
+        assert_eq!(
+            result.keyword_score.is_some(),
+            result.keyword_rank.is_some(),
+            "keyword_score and keyword_rank are paired provenance, but {} carried {:?} / {:?}",
+            result.item_uri,
+            result.keyword_score,
+            result.keyword_rank
         );
-
-        // Results may have both keyword and semantic ranks, or just one
-        let has_keyword = result.keyword_rank.is_some();
-        let has_semantic = result.semantic_rank.is_some();
-        assert!(has_keyword || has_semantic, "Should have at least one rank");
+        assert_eq!(
+            result.semantic_score.is_some(),
+            result.semantic_rank.is_some(),
+            "semantic_score and semantic_rank are paired provenance, but {} carried {:?} / {:?}",
+            result.item_uri,
+            result.semantic_score,
+            result.semantic_rank
+        );
     }
 
-    // Results should be sorted by score
+    // Same-file expansion appends neighbouring chunks as deliberately unscored
+    // context, so only the rows the fusion legs produced carry ranks and an RRF score.
+    let fused: Vec<&_> = results
+        .iter()
+        .filter(|result| result.keyword_rank.is_some() || result.semantic_rank.is_some())
+        .collect();
+
+    assert!(
+        !fused.is_empty(),
+        "Fusion legs should contribute at least one ranked hit"
+    );
+
+    for hit in &fused {
+        assert!(
+            hit.fusion_score > 0.0,
+            "Ranked hits should carry the combined RRF score, got {} for {}",
+            hit.fusion_score,
+            hit.item_uri
+        );
+    }
+
     for i in 1..results.len() {
         assert!(
             results[i - 1].score >= results[i].score,
@@ -394,13 +419,24 @@ async fn test_hybrid_search_no_keyword_matches() {
     .await
     .unwrap();
 
-    // Should still get semantic results even with no keyword matches
-    // (assuming semantic threshold is met)
+    // Same-file expansion appends unscored context rows, so the semantic leg is
+    // the only thing that can supply ranked hits for a query no keyword matches.
     if !results.is_empty() {
         for result in &results {
-            // These should only have semantic scores
-            assert!(result.semantic_rank.is_some() || result.keyword_rank.is_some());
+            assert_eq!(
+                result.semantic_score.is_some(),
+                result.semantic_rank.is_some(),
+                "semantic_score and semantic_rank are paired provenance, but {} carried {:?} / {:?}",
+                result.item_uri,
+                result.semantic_score,
+                result.semantic_rank
+            );
         }
+
+        assert!(
+            results.iter().any(|result| result.semantic_rank.is_some()),
+            "Semantic leg should still rank hits when nothing matches by keyword"
+        );
     }
 }
 
