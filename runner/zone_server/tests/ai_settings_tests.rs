@@ -742,7 +742,8 @@ async fn test_ai_settings_with_all_models() {
                 "model_reasoning": "o1-preview",
                 "model_embedding": "text-embedding-3-large",
                 "model_image": "custom-image.safetensors",
-                "model_video": "custom-video.safetensors"
+                "model_video": "custom-video.safetensors",
+                "model_audio": "custom-audio.safetensors"
             }),
             &token,
         )
@@ -755,6 +756,7 @@ async fn test_ai_settings_with_all_models() {
     assert_eq!(body["model_embedding"], "text-embedding-3-large");
     assert_eq!(body["model_image"], "custom-image.safetensors");
     assert_eq!(body["model_video"], "custom-video.safetensors");
+    assert_eq!(body["model_audio"], "custom-audio.safetensors");
 }
 
 #[tokio::test]
@@ -815,6 +817,167 @@ async fn test_empty_model_video_clears_saved_override() {
     assert_eq!(
         omitted.json_value()["model_video"],
         "keep-video.safetensors"
+    );
+}
+
+#[tokio::test]
+async fn test_empty_model_audio_clears_saved_override() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({
+                "provider": "self_hosted",
+                "model_video": "custom-video.safetensors",
+                "model_audio": "custom-audio.safetensors"
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let cleared = client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({
+                "provider": "self_hosted",
+                "model_audio": ""
+            }),
+            &token,
+        )
+        .await;
+    cleared.assert_status(StatusCode::OK);
+    let body = cleared.json_value();
+    assert!(body["model_audio"].is_null());
+    assert_eq!(
+        body["model_video"], "custom-video.safetensors",
+        "clearing model_audio must not disturb the sibling video override"
+    );
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({
+                "provider": "self_hosted",
+                "model_audio": "keep-audio.safetensors"
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let omitted = client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({ "provider": "self_hosted" }),
+            &token,
+        )
+        .await;
+    omitted.assert_status(StatusCode::OK);
+    assert_eq!(
+        omitted.json_value()["model_audio"],
+        "keep-audio.safetensors"
+    );
+}
+
+#[tokio::test]
+async fn test_workspace_model_audio_overrides_organization() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{}/settings/ai", org_id),
+            &json!({
+                "provider": "self_hosted",
+                "model_audio": "org-audio.safetensors"
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let inherited = client
+        .get_auth(
+            &format!(
+                "/api/organizations/{}/workspaces/{}/settings/ai/effective",
+                org_id, ws_id
+            ),
+            &token,
+        )
+        .await;
+    inherited.assert_status(StatusCode::OK);
+    assert_eq!(
+        inherited.json_value()["model_audio"],
+        "org-audio.safetensors"
+    );
+
+    let workspace_path = format!(
+        "/api/organizations/{}/workspaces/{}/settings/ai",
+        org_id, ws_id
+    );
+
+    client
+        .put_json_auth(
+            &workspace_path,
+            &json!({
+                "provider": "self_hosted",
+                "model_audio": "ws-audio.safetensors"
+            }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let overridden = client
+        .get_auth(&format!("{}/effective", workspace_path), &token)
+        .await;
+    overridden.assert_status(StatusCode::OK);
+    assert_eq!(
+        overridden.json_value()["model_audio"],
+        "ws-audio.safetensors"
+    );
+
+    let omitted = client
+        .put_json_auth(
+            &workspace_path,
+            &json!({ "provider": "self_hosted" }),
+            &token,
+        )
+        .await;
+    omitted.assert_status(StatusCode::OK);
+    assert_eq!(
+        omitted.json_value()["model_audio"],
+        "ws-audio.safetensors",
+        "omitting model_audio must preserve the workspace override"
+    );
+
+    let cleared = client
+        .put_json_auth(
+            &workspace_path,
+            &json!({
+                "provider": "self_hosted",
+                "model_audio": ""
+            }),
+            &token,
+        )
+        .await;
+    cleared.assert_status(StatusCode::OK);
+    assert!(cleared.json_value()["model_audio"].is_null());
+
+    let reinherited = client
+        .get_auth(&format!("{}/effective", workspace_path), &token)
+        .await;
+    reinherited.assert_status(StatusCode::OK);
+    assert_eq!(
+        reinherited.json_value()["model_audio"],
+        "org-audio.safetensors",
+        "clearing the workspace override must fall back to the organization"
     );
 }
 
