@@ -2086,17 +2086,9 @@ async fn prepare_message(
         return Err("Chat does not belong to the authenticated workspace".into());
     }
     let mut image_config = state.config().comfyui.clone();
-    let mut settings = None;
-    if let Ok(Some(workspace)) = workspaces::get_workspace(state.db(), workspace_id).await
-        && let Ok(effective) = ai_settings::get_effective_ai_settings(
-            state.db(),
-            workspace.organization_id,
-            workspace_id,
-        )
-        .await
-    {
+    let settings = ai_settings::for_workspace(state.db(), workspace_id).await;
+    if let Some(effective) = &settings {
         effective.apply_to_comfyui(&mut image_config);
-        settings = Some(effective);
     }
     let catalog = crate::services::stages::Catalog::load(&state.config().ollama_host).await;
     let prefs = crate::services::stages::Preferences::from_optional_settings(

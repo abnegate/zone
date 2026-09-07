@@ -486,6 +486,37 @@ pub async fn get_effective_ai_settings(
     Ok(effective)
 }
 
+/// Effective settings for a workspace, resolving the owning organization for
+/// the caller. Returns `None` when the workspace or its settings cannot be
+/// read, so a settings outage degrades to process defaults instead of failing
+/// the request.
+pub async fn for_workspace(pool: &PgPool, workspace_id: Uuid) -> Option<EffectiveAiSettings> {
+    let workspace = super::workspaces::get_workspace(pool, workspace_id)
+        .await
+        .ok()
+        .flatten()?;
+    get_effective_ai_settings(pool, workspace.organization_id, workspace_id)
+        .await
+        .ok()
+}
+
+/// The ComfyUI config a workspace should actually generate with: process
+/// defaults overlaid with the models its organization and workspace pinned.
+///
+/// Every media lane must resolve through here. Reading `state.config().comfyui`
+/// directly silently ignores a pinned `model_image`/`model_video`/`model_audio`.
+pub async fn effective_comfyui(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    defaults: &crate::config::ComfyUiConfig,
+) -> crate::config::ComfyUiConfig {
+    let mut config = defaults.clone();
+    if let Some(settings) = for_workspace(pool, workspace_id).await {
+        settings.apply_to_comfyui(&mut config);
+    }
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
