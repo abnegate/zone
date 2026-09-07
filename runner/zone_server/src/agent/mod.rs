@@ -19,6 +19,7 @@ pub mod monitoring;
 pub mod receipts;
 pub mod runner;
 pub mod tools;
+pub mod verification;
 pub mod web;
 
 pub use approval::{ApprovalGate, ApprovalPolicy};
