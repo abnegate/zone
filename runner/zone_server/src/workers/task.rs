@@ -938,6 +938,15 @@ async fn guidance(state: &AppState, task: &tasks::TaskRow) -> String {
         guidance.push_str(&format!("\n# Acceptance Criteria\n{}\n", criteria));
     }
 
+    match crate::db::knowledge::standing_instructions_prompt(state.db(), task.workspace_id).await {
+        Ok(instructions) => guidance.push_str(&instructions),
+        Err(error) => tracing::warn!(
+            task_id = %task.id,
+            %error,
+            "Failed to load standing instructions; continuing without them"
+        ),
+    }
+
     guidance
 }
 
