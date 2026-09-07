@@ -581,7 +581,7 @@ test-client: ## Run Zone desktop/Android/iOS client unit, integration, and e2e t
 	cd runner && cargo test -p zone_installer --lib
 	cd runner && cargo test -p zone_installer --test '*'
 	@echo "$(BLUE)Running Zone client sidebar unit tests...$(NC)"
-	cd manager/frontend && bun test src/shared/components/Sidebar/Sidebar.test.tsx
+	cd manager/frontend && bun run test src/shared/components/Sidebar/Sidebar.test.tsx
 	@echo "$(BLUE)Running Zone client Playwright tests...$(NC)"
 	cd manager/frontend && bun run test:e2e e2e/zone-client.e2e.ts
 
@@ -604,11 +604,11 @@ sqlx-prepare: ## Prepare sqlx offline query data (requires running postgres)
 
 test-console: ## Run console (React) unit tests
 	@echo "$(BLUE)Running console unit tests...$(NC)"
-	cd manager/frontend && bun test
+	cd manager/frontend && bun run test
 
 test-console-coverage: ## Run console tests with coverage report
 	@echo "$(BLUE)Running console tests with coverage...$(NC)"
-	cd manager/frontend && bun test --coverage
+	cd manager/frontend && bun run test:coverage
 
 test-e2e: ## Run Playwright end-to-end tests
 	@echo "$(BLUE)Running E2E tests...$(NC)"

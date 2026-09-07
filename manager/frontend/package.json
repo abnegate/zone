@@ -43,10 +43,15 @@
   "scripts": {
     "dev": "vite",
     "start": "vite",
+    "build:ui": "bun run --filter @zone/ui build",
+    "prebuild": "bun run build:ui",
     "build": "vite build",
     "preview": "vite preview",
+    "pretest": "bun run build:ui",
     "test": "bun test --isolate",
+    "pretest:watch": "bun run build:ui",
     "test:watch": "bun test --isolate --watch",
+    "pretest:coverage": "bun run build:ui",
     "test:coverage": "bun test --isolate --coverage",
     "test:e2e": "playwright test",
     "test:e2e:coverage": "COLLECT_COVERAGE=true playwright test --project=chromium",
@@ -58,6 +63,7 @@
     "format:check": "biome format src",
     "check": "biome check src",
     "check:fix": "biome check --write src",
+    "pretypecheck": "bun run build:ui",
     "typecheck": "tsc --noEmit",
     "lighthouse": "lhci autorun",
     "audit": "bun audit --ignore GHSA-jmr9-qjv8-65gv"
