@@ -172,10 +172,6 @@ fn safe_extension(extension: &str) -> Result<&str, ArtifactError> {
         "webp" => Ok("webp"),
         "webm" => Ok("webm"),
         "mp4" => Ok("mp4"),
-        "flac" => Ok("flac"),
-        "mp3" => Ok("mp3"),
-        "opus" => Ok("opus"),
-        "wav" => Ok("wav"),
         _ => Err(ArtifactError::InvalidPath),
     }
 }

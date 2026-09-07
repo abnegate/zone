@@ -1,36 +1,60 @@
 //! Authorized generated-artifact serving.
 
 use axum::{
+    Json,
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use chrono::Utc;
+use serde::Deserialize;
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
     auth::AuthUser,
     db::{chats, workspace_members},
-    services::artifacts::{ArtifactError, ArtifactStore},
+    services::{
+        artifact_access::{self, Location},
+        artifacts::{ArtifactError, ArtifactStore},
+    },
     state::AppState,
 };
 
+#[derive(Deserialize)]
+pub struct Access {
+    expires: Option<i64>,
+    signature: Option<String>,
+}
+
 pub async fn get(
     State(state): State<AppState>,
-    auth: AuthUser,
+    auth: Option<AuthUser>,
     headers: HeaderMap,
+    Query(access): Query<Access>,
     Path((workspace_id, chat_id, owner_id, filename)): Path<(Uuid, Uuid, Uuid, String)>,
 ) -> Response {
-    let Ok(user_id) = auth.0.user_id() else {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let location = Location {
+        workspace_id,
+        chat_id,
+        owner_id,
+        filename: &filename,
     };
-    let authorized = match chats::get_chat(state.db(), chat_id).await {
-        Ok(Some(chat)) if chat.workspace_id == Some(workspace_id) => {
-            workspace_members::can_read(state.db(), workspace_id, user_id)
-                .await
-                .unwrap_or(false)
+    let authorized = match (access.expires, access.signature.as_deref()) {
+        (Some(expires), Some(signature)) => artifact_access::verify(
+            state.config().jwt_secret(),
+            location,
+            expires,
+            signature,
+            Utc::now().timestamp(),
+        ),
+        _ => {
+            let Some(user_id) = auth.and_then(|auth| auth.0.user_id().ok()) else {
+                return StatusCode::UNAUTHORIZED.into_response();
+            };
+            readable(&state, workspace_id, chat_id, user_id).await
         }
-        _ => false,
     };
     if !authorized {
         // Do not reveal whether an artifact exists to another workspace.
@@ -85,10 +109,6 @@ pub async fn get(
         Some("webp") => "image/webp",
         Some("webm") => "video/webm",
         Some("mp4") => "video/mp4",
-        Some("flac") => "audio/flac",
-        Some("mp3") => "audio/mpeg",
-        Some("opus") => "audio/opus",
-        Some("wav") => "audio/wav",
         _ => "image/png",
     };
     let mut response = Response::builder()
@@ -107,6 +127,43 @@ pub async fn get(
     response
         .body(Body::from(bytes))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+pub async fn signature(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((workspace_id, chat_id, owner_id, filename)): Path<(Uuid, Uuid, Uuid, String)>,
+) -> Response {
+    let Ok(user_id) = auth.0.user_id() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !readable(&state, workspace_id, chat_id, user_id).await {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let expires = Utc::now().timestamp() + artifact_access::LIFETIME_SECONDS;
+    let url = artifact_access::signed_url(
+        state.config().jwt_secret(),
+        Location {
+            workspace_id,
+            chat_id,
+            owner_id,
+            filename: &filename,
+        },
+        expires,
+    );
+    Json(json!({"url": url, "expires_at": expires})).into_response()
+}
+
+async fn readable(state: &AppState, workspace_id: Uuid, chat_id: Uuid, user_id: Uuid) -> bool {
+    match chats::get_chat(state.db(), chat_id).await {
+        Ok(Some(chat)) if chat.workspace_id == Some(workspace_id) => {
+            workspace_members::can_read(state.db(), workspace_id, user_id)
+                .await
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 enum Requested {

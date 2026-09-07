@@ -236,6 +236,11 @@ impl TestClient {
         self.send(request).await
     }
 
+    /// Send a fully built request, for cases the typed helpers do not cover
+    pub async fn send_request(&self, request: Request<Body>) -> TestResponse {
+        self.send(request).await
+    }
+
     /// Send a request and get a response
     async fn send(&self, request: Request<Body>) -> TestResponse {
         let response = self

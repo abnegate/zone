@@ -1,5 +1,5 @@
 import { useEffect, useState, type VideoHTMLAttributes } from 'react';
-import { fetchProtectedImage, isProtectedArtifactUrl } from '../api/protectedImages';
+import { fetchSignedArtifactUrl, isProtectedArtifactUrl } from '../api/protectedImages';
 
 interface AuthenticatedVideoProps
   extends Omit<VideoHTMLAttributes<HTMLVideoElement>, 'src' | 'aria-label'> {
@@ -8,9 +8,9 @@ interface AuthenticatedVideoProps
   accessToken?: string | null;
 }
 
-interface LoadedVideo {
+interface SignedVideo {
   source: string;
-  objectUrl: string;
+  signedUrl: string;
 }
 
 export function AuthenticatedVideo({
@@ -20,7 +20,7 @@ export function AuthenticatedVideo({
   ...videoProps
 }: AuthenticatedVideoProps) {
   const protectedArtifact = isProtectedArtifactUrl(src);
-  const [loadedVideo, setLoadedVideo] = useState<LoadedVideo | null>(null);
+  const [signedVideo, setSignedVideo] = useState<SignedVideo | null>(null);
   const [failedSource, setFailedSource] = useState<string | null>(null);
 
   useEffect(() => {
@@ -29,20 +29,15 @@ export function AuthenticatedVideo({
     }
 
     const controller = new AbortController();
-    let objectUrl: string | null = null;
 
-    fetchProtectedImage(src, controller.signal, accessToken)
-      .then((blob) => {
+    // A signed URL rather than a blob: the element must fetch the media itself
+    // for the browser to issue the range requests that make it seekable.
+    fetchSignedArtifactUrl(src, controller.signal, accessToken)
+      .then((signedUrl) => {
         if (controller.signal.aborted) {
           return;
         }
-        objectUrl = URL.createObjectURL(blob);
-        if (controller.signal.aborted) {
-          URL.revokeObjectURL(objectUrl);
-          objectUrl = null;
-          return;
-        }
-        setLoadedVideo({ source: src, objectUrl });
+        setSignedVideo({ source: src, signedUrl });
         setFailedSource(null);
       })
       .catch(() => {
@@ -53,9 +48,6 @@ export function AuthenticatedVideo({
 
     return () => {
       controller.abort();
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
     };
   }, [accessToken, protectedArtifact, src]);
 
@@ -68,8 +60,8 @@ export function AuthenticatedVideo({
   }
 
   const displaySrc = protectedArtifact
-    ? loadedVideo?.source === src
-      ? loadedVideo.objectUrl
+    ? signedVideo?.source === src
+      ? signedVideo.signedUrl
       : null
     : src;
 
