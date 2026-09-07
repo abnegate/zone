@@ -16,9 +16,11 @@ pub mod documents;
 pub mod images;
 pub mod integrations;
 pub mod monitoring;
+pub mod readiness;
 pub mod receipts;
 pub mod runner;
 pub mod tools;
+pub mod verification;
 pub mod web;
 
 pub use approval::{ApprovalGate, ApprovalPolicy};
@@ -114,6 +116,9 @@ pub fn system_prompt(tools: &ChatTools, auto_approve: bool) -> String {
              - Keep each command narrow and inspectable.",
             );
         }
+
+        prompt.push_str("\n\n");
+        prompt.push_str(verification::SYSTEM_PROMPT);
     }
 
     if tools.has("generate_image") {

@@ -90,7 +90,7 @@ async fn main() {
         let default_settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
             litellm_host: Some(config.litellm_host.clone()),
-            litellm_key: Some(config.litellm_key.clone()),
+            litellm_key: Some(zone_core::SecretValue::new(config.litellm_key.clone())),
             openai_api_key: None,
             openai_base_url: None,
             anthropic_api_key: None,
