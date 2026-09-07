@@ -16,6 +16,7 @@ pub mod documents;
 pub mod images;
 pub mod integrations;
 pub mod monitoring;
+pub mod readiness;
 pub mod receipts;
 pub mod runner;
 pub mod tools;
