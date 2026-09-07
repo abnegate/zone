@@ -1,0 +1,52 @@
+[package]
+name = "zone_vision"
+description = "Image understanding for Zone - subject detection and subject-aware cropping for training data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Salient-object detection with U2-Net. Pulls in the ONNX Runtime native
+# library, so it is opt-in for the same reason zone_context's local-embeddings
+# is: linking it into every test binary exhausts CI disk. Without it the crate
+# still decodes, plans, and renders crops around a caller-supplied focal point.
+saliency = ["dep:ort"]
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+fast_image_resize = "=6.1.0"
+image = { version = "=0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+] }
+
+# Salient-object detection (feature: saliency).
+#
+# Feature-unified with fastembed's ort in zone_context, so the configuration
+# has to match it exactly: same version, same API level, same binary source.
+# Diverging here would either resolve to two ONNX Runtimes or, with
+# load-dynamic, disable the linking fastembed relies on.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "api-24",
+    "download-binaries",
+    "tls-native",
+], optional = true }
+
+# An example cannot disable itself with `#![cfg(...)]` — that leaves it with no
+# `main` — so the feature gate has to live here.
+[[example]]
+name = "autocrop"
+required-features = ["saliency"]
+
+[dev-dependencies]
+image = { version = "=0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+] }
