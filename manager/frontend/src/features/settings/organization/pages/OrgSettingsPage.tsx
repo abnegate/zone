@@ -636,7 +636,8 @@ export default function OrgSettingsPage() {
                       ))}
                     </select>
                     <p className="form-hint">
-                      ComfyUI checkpoint used when a message asks for audio.
+                      ComfyUI checkpoint used when a message asks for audio. Leave empty to use
+                      COMFYUI_AUDIO_CHECKPOINT.
                     </p>
                   </div>
                 </div>
