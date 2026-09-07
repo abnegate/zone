@@ -517,8 +517,8 @@ export default function OrgSettingsPage() {
                       ))}
                     </select>
                     <p className="form-hint">
-                      Harder questions. Empty picks a larger installed model when the message
-                      looks like a reasoning task.
+                      Harder questions. Empty picks a larger installed model when the message looks
+                      like a reasoning task.
                     </p>
                   </div>
                   <div className="form-group">

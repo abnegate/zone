@@ -397,12 +397,7 @@ export default function WorkspaceSettingsPage() {
   };
 
   const currentModels = modelOptions[aiProvider];
-  const fastOptions = mergeStageOptions(
-    currentModels.fast,
-    installedModels,
-    modelFast,
-    'chat'
-  );
+  const fastOptions = mergeStageOptions(currentModels.fast, installedModels, modelFast, 'chat');
   const reasoningOptions = mergeStageOptions(
     currentModels.reasoning,
     installedModels,
@@ -949,8 +944,8 @@ export default function WorkspaceSettingsPage() {
                             ))}
                           </select>
                           <p className="form-hint">
-                            Harder questions. Empty picks a larger installed model when the
-                            message looks like a reasoning task.
+                            Harder questions. Empty picks a larger installed model when the message
+                            looks like a reasoning task.
                           </p>
                         </div>
                       </div>

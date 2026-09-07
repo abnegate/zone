@@ -529,214 +529,217 @@ export function useChat(
 
       socket.onmessage = (event) => {
         if (socket !== socketRef.current) return;
-      let payload: ServerMessage;
-      try {
-        payload = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-
-      if (payload.type !== 'chunk') {
-        flushChunksNow();
-      }
-
-      switch (payload.type) {
-        case 'context': {
-          if (payload.chat_id !== chatId) break;
-          if (
-            payload.message_id === null
-              ? generationSeen || activeGenerationRef.current
-              : payload.message_id !== assistantId
-          )
-            break;
-          const parsed = ContextUsageSchema.safeParse(payload.usage);
-          if (!parsed.success || parsed.data.model !== contextModel.current) break;
-          contextEpoch.current += 1;
-          setContext(parsed.data);
-          setContextError(null);
-          setPreviewing(false);
-          break;
+        let payload: ServerMessage;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          return;
         }
-        case 'title_updated':
-          if (payload.chat_id === chatId && !renamed.current.has(payload.chat_id)) {
-            applyTitle(payload.chat_id, payload.title);
-            titleCallback.current?.(payload.chat_id, payload.title);
-          }
-          break;
-        case 'message_saved':
-          if (payload.role === 'user') {
-            applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
-          } else {
-            upsertMessage(payload.message_id, payload.role, payload.content, payload.metadata);
-          }
-          break;
-        case 'status':
-          setStatus(payload.message);
-          break;
-        case 'message_start':
-          if (completed.has(payload.message_id) || assistantId === payload.message_id) break;
-          activeGenerationRef.current = true;
-          setStreaming(true);
-          generationSeen = true;
-          contextEpoch.current += 1;
-          setStatus(null);
-          assistantId = payload.message_id;
-          assistantContent = '';
-          assistantMetadata = undefined;
-          upsertMessage(payload.message_id, payload.role, '');
-          break;
-        case 'chunk':
-          if (assistantId) {
-            assistantContent += payload.content;
-            scheduleChunks();
-          }
-          break;
-        case 'reasoning':
-          if (assistantId) {
-            assistantMetadata = {
-              ...assistantMetadata,
-              reasoning: `${assistantMetadata?.reasoning ?? ''}${payload.content}`,
-            };
-            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
-          }
-          break;
-        case 'tool_call': {
-          const preceding = payload.reasoning ?? assistantMetadata?.reasoning;
-          if (preceding) {
-            assistantMetadata = { ...assistantMetadata, reasoning: undefined };
-          }
-          patchToolCall(payload.message_id, payload.tool_call_id, {
-            name: payload.name,
-            arguments: payload.arguments,
-            detail: 'Running…',
-            pending: true,
-            reasoning: preceding,
-          });
-          if (assistantId === payload.message_id) {
-            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
-          }
-          break;
-        }
-        case 'tool_approval_required':
-          patchToolCall(payload.message_id, payload.tool_call_id, {
-            name: payload.name,
-            arguments: payload.arguments,
-            detail: 'Waiting for approval…',
-            pending: true,
-            approval: 'pending',
-          });
-          break;
-        case 'tool_result':
-          patchToolCall(payload.message_id, payload.tool_call_id, {
-            name: payload.name,
-            success: payload.success,
-            detail: payload.detail,
-            duration_ms: payload.duration_ms,
-            pending: false,
-          });
-          if (payload.citations?.length) {
-            appendCitations(payload.message_id, payload.citations);
-          }
-          break;
-        case 'action_receipt':
-          appendReceipt(payload.message_id, payload.receipt);
-          break;
-        case 'image':
-        case 'video':
-          if (assistantId === payload.message_id) {
-            const attachments = assistantMetadata?.attachments ?? [];
-            assistantMetadata = {
-              ...assistantMetadata,
-              attachments: [
-                ...attachments.filter((attachment) => attachment.url !== payload.attachment.url),
-                payload.attachment,
-              ],
-            };
-            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
-          }
-          break;
-        case 'message_end':
-          if (
-            completed.has(payload.message_id) ||
-            (assistantId !== null && payload.message_id !== assistantId)
-          )
-            break;
-          completed.add(payload.message_id);
-          contextEpoch.current += 1;
-          setStatus(null);
-          setError(payload.error ?? null);
-          upsertMessage(
-            payload.message_id,
-            'assistant',
-            payload.content,
-            payload.metadata ?? assistantMetadata
-          );
-          assistantId = null;
-          assistantContent = '';
-          assistantMetadata = undefined;
-          activeGenerationRef.current = false;
-          setStreaming(false);
-          break;
-        case 'cancelled': {
-          if (
-            payload.message_id === null
-              ? assistantId !== null
-              : completed.has(payload.message_id) ||
-                (assistantId !== null && payload.message_id !== assistantId)
-          )
-            break;
-          if (payload.message_id !== null) completed.add(payload.message_id);
-          settleStoppedAssistant(assistantId ?? payload.message_id);
-          assistantId = null;
-          contextEpoch.current += 1;
-          const pendingId = pendingUserIdRef.current;
-          pendingUserIdRef.current = null;
-          if (pendingId) {
-            supersededPendingIdsRef.current.add(pendingId);
-            setChat((prev) =>
-              prev
-                ? { ...prev, messages: prev.messages.filter((message) => message.id !== pendingId) }
-                : prev
-            );
-          }
-          setStatus(null);
-          activeGenerationRef.current = false;
-          setStreaming(false);
-          break;
-        }
-        case 'error':
-          settleStoppedAssistant(assistantId);
-          if (assistantId !== null) completed.add(assistantId);
-          assistantId = null;
-          contextEpoch.current += 1;
-          setStatus(null);
-          setError(payload.message);
-          activeGenerationRef.current = false;
-          setStreaming(false);
-          break;
-        default:
-          break;
-      }
-    };
 
-    const invalidateContext = (): void => {
-      settleStoppedAssistant(assistantId);
-      if (assistantId !== null) completed.add(assistantId);
-      const interrupted = activeGenerationRef.current;
-      setContext((previous) =>
-        previous
-          ? {
-              ...previous,
-              status: 'unavailable',
-              incomplete: true,
-              reason: interrupted
-                ? 'Connection interrupted during generation. Usage is the last observation until a fresh preview is available.'
-                : 'Connection closed. Usage is the last observation until a fresh preview is available.',
+        if (payload.type !== 'chunk') {
+          flushChunksNow();
+        }
+
+        switch (payload.type) {
+          case 'context': {
+            if (payload.chat_id !== chatId) break;
+            if (
+              payload.message_id === null
+                ? generationSeen || activeGenerationRef.current
+                : payload.message_id !== assistantId
+            )
+              break;
+            const parsed = ContextUsageSchema.safeParse(payload.usage);
+            if (!parsed.success || parsed.data.model !== contextModel.current) break;
+            contextEpoch.current += 1;
+            setContext(parsed.data);
+            setContextError(null);
+            setPreviewing(false);
+            break;
+          }
+          case 'title_updated':
+            if (payload.chat_id === chatId && !renamed.current.has(payload.chat_id)) {
+              applyTitle(payload.chat_id, payload.title);
+              titleCallback.current?.(payload.chat_id, payload.title);
             }
-          : null
-      );
-      setContextRefresh((value) => value + 1);
-    };
+            break;
+          case 'message_saved':
+            if (payload.role === 'user') {
+              applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
+            } else {
+              upsertMessage(payload.message_id, payload.role, payload.content, payload.metadata);
+            }
+            break;
+          case 'status':
+            setStatus(payload.message);
+            break;
+          case 'message_start':
+            if (completed.has(payload.message_id) || assistantId === payload.message_id) break;
+            activeGenerationRef.current = true;
+            setStreaming(true);
+            generationSeen = true;
+            contextEpoch.current += 1;
+            setStatus(null);
+            assistantId = payload.message_id;
+            assistantContent = '';
+            assistantMetadata = undefined;
+            upsertMessage(payload.message_id, payload.role, '');
+            break;
+          case 'chunk':
+            if (assistantId) {
+              assistantContent += payload.content;
+              scheduleChunks();
+            }
+            break;
+          case 'reasoning':
+            if (assistantId) {
+              assistantMetadata = {
+                ...assistantMetadata,
+                reasoning: `${assistantMetadata?.reasoning ?? ''}${payload.content}`,
+              };
+              upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+            }
+            break;
+          case 'tool_call': {
+            const preceding = payload.reasoning ?? assistantMetadata?.reasoning;
+            if (preceding) {
+              assistantMetadata = { ...assistantMetadata, reasoning: undefined };
+            }
+            patchToolCall(payload.message_id, payload.tool_call_id, {
+              name: payload.name,
+              arguments: payload.arguments,
+              detail: 'Running…',
+              pending: true,
+              reasoning: preceding,
+            });
+            if (assistantId === payload.message_id) {
+              upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+            }
+            break;
+          }
+          case 'tool_approval_required':
+            patchToolCall(payload.message_id, payload.tool_call_id, {
+              name: payload.name,
+              arguments: payload.arguments,
+              detail: 'Waiting for approval…',
+              pending: true,
+              approval: 'pending',
+            });
+            break;
+          case 'tool_result':
+            patchToolCall(payload.message_id, payload.tool_call_id, {
+              name: payload.name,
+              success: payload.success,
+              detail: payload.detail,
+              duration_ms: payload.duration_ms,
+              pending: false,
+            });
+            if (payload.citations?.length) {
+              appendCitations(payload.message_id, payload.citations);
+            }
+            break;
+          case 'action_receipt':
+            appendReceipt(payload.message_id, payload.receipt);
+            break;
+          case 'image':
+          case 'video':
+            if (assistantId === payload.message_id) {
+              const attachments = assistantMetadata?.attachments ?? [];
+              assistantMetadata = {
+                ...assistantMetadata,
+                attachments: [
+                  ...attachments.filter((attachment) => attachment.url !== payload.attachment.url),
+                  payload.attachment,
+                ],
+              };
+              upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+            }
+            break;
+          case 'message_end':
+            if (
+              completed.has(payload.message_id) ||
+              (assistantId !== null && payload.message_id !== assistantId)
+            )
+              break;
+            completed.add(payload.message_id);
+            contextEpoch.current += 1;
+            setStatus(null);
+            setError(payload.error ?? null);
+            upsertMessage(
+              payload.message_id,
+              'assistant',
+              payload.content,
+              payload.metadata ?? assistantMetadata
+            );
+            assistantId = null;
+            assistantContent = '';
+            assistantMetadata = undefined;
+            activeGenerationRef.current = false;
+            setStreaming(false);
+            break;
+          case 'cancelled': {
+            if (
+              payload.message_id === null
+                ? assistantId !== null
+                : completed.has(payload.message_id) ||
+                  (assistantId !== null && payload.message_id !== assistantId)
+            )
+              break;
+            if (payload.message_id !== null) completed.add(payload.message_id);
+            settleStoppedAssistant(assistantId ?? payload.message_id);
+            assistantId = null;
+            contextEpoch.current += 1;
+            const pendingId = pendingUserIdRef.current;
+            pendingUserIdRef.current = null;
+            if (pendingId) {
+              supersededPendingIdsRef.current.add(pendingId);
+              setChat((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      messages: prev.messages.filter((message) => message.id !== pendingId),
+                    }
+                  : prev
+              );
+            }
+            setStatus(null);
+            activeGenerationRef.current = false;
+            setStreaming(false);
+            break;
+          }
+          case 'error':
+            settleStoppedAssistant(assistantId);
+            if (assistantId !== null) completed.add(assistantId);
+            assistantId = null;
+            contextEpoch.current += 1;
+            setStatus(null);
+            setError(payload.message);
+            activeGenerationRef.current = false;
+            setStreaming(false);
+            break;
+          default:
+            break;
+        }
+      };
+
+      const invalidateContext = (): void => {
+        settleStoppedAssistant(assistantId);
+        if (assistantId !== null) completed.add(assistantId);
+        const interrupted = activeGenerationRef.current;
+        setContext((previous) =>
+          previous
+            ? {
+                ...previous,
+                status: 'unavailable',
+                incomplete: true,
+                reason: interrupted
+                  ? 'Connection interrupted during generation. Usage is the last observation until a fresh preview is available.'
+                  : 'Connection closed. Usage is the last observation until a fresh preview is available.',
+              }
+            : null
+        );
+        setContextRefresh((value) => value + 1);
+      };
 
       socket.onerror = () => {
         if (socket !== socketRef.current) return;
@@ -757,7 +760,8 @@ export function useChat(
         setStatus(null);
         activeGenerationRef.current = false;
         setStreaming(false);
-        const delay = reconnectAttempt === 0 ? 0 : Math.min(500 * 2 ** (reconnectAttempt - 1), 8000);
+        const delay =
+          reconnectAttempt === 0 ? 0 : Math.min(500 * 2 ** (reconnectAttempt - 1), 8000);
         reconnectAttempt += 1;
         reconnectTimer = setTimeout(() => {
           if (disposed) return;

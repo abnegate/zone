@@ -25,8 +25,9 @@ describe('mergeStageOptions', () => {
   });
 
   it('includes the current pin even when it is not suggested', () => {
-    expect(
-      mergeStageOptions(['llama3.2:3b'], [], 'custom:7b', 'chat')
-    ).toEqual(['llama3.2:3b', 'custom:7b']);
+    expect(mergeStageOptions(['llama3.2:3b'], [], 'custom:7b', 'chat')).toEqual([
+      'llama3.2:3b',
+      'custom:7b',
+    ]);
   });
 });

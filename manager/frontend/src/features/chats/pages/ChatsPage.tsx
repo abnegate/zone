@@ -169,8 +169,7 @@ export default function ChatsPage() {
     if (!node) {
       return;
     }
-    stickToBottom.current =
-      node.scrollHeight - node.scrollTop - node.clientHeight <= 80;
+    stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight <= 80;
   };
 
   useEffect(() => {
