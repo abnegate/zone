@@ -4,11 +4,14 @@
 
 mod command;
 mod file;
+mod sanitize;
 
 pub use command::*;
 pub use file::*;
+pub use sanitize::sanitize;
 
 use async_trait::async_trait;
+use sanitize::sanitize_owned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -59,20 +62,22 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    /// Wrap successful tool output, [`sanitize`]d on the way in.
     pub fn success(output: impl Into<String>) -> Self {
         Self {
             success: true,
-            output: Some(output.into()),
+            output: Some(sanitize_owned(output.into())),
             error: None,
             images: Vec::new(),
         }
     }
 
+    /// Wrap a tool failure, [`sanitize`]d on the way in.
     pub fn error(error: impl Into<String>) -> Self {
         Self {
             success: false,
             output: None,
-            error: Some(error.into()),
+            error: Some(sanitize_owned(error.into())),
             images: Vec::new(),
         }
     }
@@ -342,6 +347,23 @@ mod tests {
         assert!(result.output.is_none());
         assert_eq!(result.error, Some("Something went wrong".to_string()));
         assert_eq!(result.to_message(), "Error: Something went wrong");
+    }
+
+    #[test]
+    fn success_redacts_a_credential_in_the_output() {
+        let result = ToolResult::success("printenv\nGITHUB_TOKEN=ghp_0123456789abcdefghij\n");
+        assert_eq!(
+            result.output.as_deref(),
+            Some("printenv\nGITHUB_TOKEN=[REDACTED]\n")
+        );
+        assert_eq!(result.to_message(), "printenv\nGITHUB_TOKEN=[REDACTED]\n");
+    }
+
+    #[test]
+    fn error_strips_terminal_control_sequences() {
+        let result = ToolResult::error("\u{1b}]0;stolen title\u{7}command not found\r\n");
+        assert_eq!(result.error.as_deref(), Some("command not found\n"));
+        assert_eq!(result.to_message(), "Error: command not found\n");
     }
 
     #[test]
