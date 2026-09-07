@@ -428,12 +428,16 @@ pub fn run_with_context(
                 let call = &batch[0];
                 let denied =
                     if mutation && !approval.is_auto() && requires_approval(&call.function.name) {
+                        // Register before the request goes out: a client that
+                        // answers immediately would otherwise be told the call
+                        // is not waiting for approval.
+                        let pending = approval.expect_decision(&call.id);
                         yield AgentEvent::ToolApprovalRequired {
                             id: call.id.clone(),
                             name: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
                         };
-                        !approval.await_decision(&call.id).await
+                        !approval.awaited_decision(&call.id, pending).await
                     } else {
                         false
                     };

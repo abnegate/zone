@@ -55,19 +55,43 @@ impl ApprovalPolicy {
         self.gate.same_as(&other.gate)
     }
 
-    pub async fn await_decision(&self, id: &str) -> bool {
+    /// Register the waiter before the request reaches the client.
+    ///
+    /// The decision can come back before the caller has even finished emitting
+    /// the request, and a decision with nothing to resolve is reported to the
+    /// client as "not waiting for approval", so the waiter has to exist first.
+    pub fn expect_decision(&self, id: &str) -> Option<oneshot::Receiver<bool>> {
         if self.is_auto() {
-            return true;
+            return None;
         }
-        let receiver = self.gate.begin(id);
+        Some(self.gate.begin(id))
+    }
+
+    /// Await a decision registered earlier by [`Self::expect_decision`].
+    pub async fn awaited_decision(
+        &self,
+        id: &str,
+        pending: Option<oneshot::Receiver<bool>>,
+    ) -> bool {
+        let Some(receiver) = pending else {
+            return true;
+        };
         if self.is_auto() {
             let _ = self.decide(id, true);
             return true;
         }
         match tokio::time::timeout(APPROVAL_TIMEOUT, receiver).await {
             Ok(Ok(approved)) => approved || self.is_auto(),
-            _ => self.is_auto(),
+            _ => {
+                self.gate.forget(id);
+                self.is_auto()
+            }
         }
+    }
+
+    pub async fn await_decision(&self, id: &str) -> bool {
+        let pending = self.expect_decision(id);
+        self.awaited_decision(id, pending).await
     }
 
     pub fn decide(&self, id: &str, approved: bool) -> bool {
@@ -127,6 +151,10 @@ impl ApprovalGate {
     /// Block until the user decides, or time out as a denial.
     pub async fn await_decision(&self, id: &str) -> bool {
         self.await_decision_with_timeout(id, APPROVAL_TIMEOUT).await
+    }
+
+    fn forget(&self, id: &str) {
+        self.pending.remove(id);
     }
 
     fn begin(&self, id: &str) -> oneshot::Receiver<bool> {
