@@ -83,6 +83,22 @@ class ZoneTrainSampler(TrainSampler):
         return loss
 
 
+def reseed(adapter) -> None:
+    """Let both LoRA matrices learn.
+
+    Comfy seeds lora_up with kaiming noise and lora_down at zero. The product is
+    zero either way, but the gradient is not: lora_down gets a signal amplified
+    by lora_up, while lora_up gets grad @ lora_down.T, which is exactly zero on
+    the first step and stays negligible after. lora_up therefore keeps its random
+    values and the adapter can only ever write into that fixed random subspace.
+    Swapping the two is what every other LoRA trainer does and lets rank 8 mean
+    rank 8.
+    """
+    with torch.no_grad():
+        torch.nn.init.kaiming_uniform_(adapter.lora_down.weight, a=5**0.5)
+        torch.nn.init.constant_(adapter.lora_up.weight, 0.0)
+
+
 def setup_identity_lora(mp, existing_weights, algorithm, lora_dtype, rank):
     settings = load_config()
     alpha = lora_alpha(rank, settings)
@@ -108,6 +124,7 @@ def setup_identity_lora(mp, existing_weights, algorithm, lora_dtype, rank):
             train_adapter = adapter_cls.create_train(
                 module.weight, rank=rank, alpha=alpha
             ).to(lora_dtype)
+            reseed(train_adapter)
         for param_name, parameter in train_adapter.named_parameters():
             lora_sd[f'{name}.{param_name}'] = parameter
         trained.append(train_adapter.train().requires_grad_(True))

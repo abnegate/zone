@@ -22,18 +22,23 @@ MLP_RATIO = 4.0
 RANK = 4
 
 
-def load_hooks():
-    package = types.ModuleType('zone_lora_under_test')
-    package.__path__ = [str(NODE_DIR)]
-    sys.modules['zone_lora_under_test'] = package
+def load_module(name: str):
+    if 'zone_lora_under_test' not in sys.modules:
+        package = types.ModuleType('zone_lora_under_test')
+        package.__path__ = [str(NODE_DIR)]
+        sys.modules['zone_lora_under_test'] = package
     spec = importlib.util.spec_from_file_location(
-        'zone_lora_under_test.inference_hooks', NODE_DIR / 'inference_hooks.py'
+        f'zone_lora_under_test.{name}', NODE_DIR / f'{name}.py'
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def load_hooks():
+    return load_module('inference_hooks')
 
 
 def comfy_available() -> bool:
@@ -66,6 +71,7 @@ class FluxTrainingGradientTests(unittest.TestCase):
         comfy.model_management.in_training = True
         cls.hooks = load_hooks()
         cls.hooks.install_out_of_place_residuals()
+        cls.node = load_module('train_node')
 
     @contextmanager
     def upstream_apply_mod(self):
@@ -162,6 +168,36 @@ class FluxTrainingGradientTests(unittest.TestCase):
         loss.backward()
         gradients = [adapter.lora_down.weight.grad for adapter in adapters]
         return float(loss.detach()), hidden.detach(), gradients
+
+    def test_reseeding_lets_both_lora_matrices_learn(self):
+        """Comfy's default seeds lora_down at zero, so lora_up never gets a
+        gradient and the adapter is stuck in a fixed random subspace."""
+        import torch
+        from comfy.weight_adapter import adapter_maps
+
+        linear = torch.nn.Linear(HIDDEN, HIDDEN * 3)
+        x = torch.randn(1, 4, HIDDEN)
+
+        def gradients(reseed):
+            torch.manual_seed(0)
+            adapter = adapter_maps['LoRA'].create_train(
+                linear.weight, rank=RANK, alpha=float(RANK)
+            )
+            if reseed:
+                self.node.reseed(adapter)
+            adapter.train().requires_grad_(True)
+            adapter.multiplier, adapter.is_conv, adapter.conv_dim = 1.0, False, 0
+            adapter.kw_dict = {}
+            base = linear(x)
+            (base + adapter.h(x, base)).pow(2).mean().backward()
+            return adapter.lora_up.weight.grad, adapter.lora_down.weight.grad
+
+        up, down = gradients(reseed=False)
+        self.assertEqual(float(up.abs().sum()), 0.0, 'upstream leaves lora_up untrained')
+        self.assertGreater(float(down.abs().sum()), 0.0)
+
+        up, down = gradients(reseed=True)
+        self.assertGreater(float(up.abs().sum()), 0.0, 'lora_up must receive gradient')
 
     def test_upstream_in_place_residuals_break_training(self):
         with self.upstream_apply_mod():
