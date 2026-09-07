@@ -271,9 +271,10 @@ mod tests {
                 .persist(workspace, chat, owner, requested, b"audio-data")
                 .await
                 .unwrap_or_else(|error| panic!("expected {requested} to persist, got {error}"));
-            assert!(
-                url.ends_with(&format!(".{expected}")),
-                "expected the {requested} artifact URL to end with .{expected}, got {url}"
+            let actual = url.rsplit('.').next().unwrap_or_default();
+            assert_eq!(
+                actual, expected,
+                "expected the {requested} artifact to be stored as .{expected}"
             );
             let filename = url.rsplit('/').next().unwrap();
             assert_eq!(
