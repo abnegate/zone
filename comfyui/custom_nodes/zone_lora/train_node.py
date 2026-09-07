@@ -345,10 +345,11 @@ class ZoneTrainLoRA(io.ComfyNode):
                 for module in modules_to_patch:
                     patch(module)
             logging.info('Zone LoRA: training %s steps on the loaded checkpoint', steps)
+            settings = load_config()
             losses = []
             stem = Path(save_name).name.removesuffix('.safetensors')
             output_dir = Path(folder_paths.get_output_directory()) / 'loras'
-            every = int(load_config().get('checkpoint_every', 0))
+            every = int(settings.get('checkpoint_every', 0))
 
             def loss_callback(loss):
                 losses.append(loss)
@@ -367,12 +368,12 @@ class ZoneTrainLoRA(io.ComfyNode):
                 optimizer,
                 loss_callback=loss_callback,
                 batch_size=1,
-                grad_acc=1,
+                grad_acc=max(1, int(settings.get('gradient_accumulation', 1))),
                 total_steps=steps,
                 seed=seed,
                 training_dtype=dtype,
                 use_grad_scaler=use_grad_scaler,
-                sigma_floor=float(load_config().get('sigma_floor', 0.0)),
+                sigma_floor=float(settings.get('sigma_floor', 0.0)),
             )
             guider = TrainGuider(mp, offloading=False)
             guider.set_conds(positive)

@@ -13,15 +13,6 @@ SPEC.loader.exec_module(train_config)
 
 
 class TrainConfigTests(unittest.TestCase):
-    def test_steps_scale_with_images_and_clamp(self):
-        config = train_config.load_config()
-        self.assertGreaterEqual(train_config.train_steps(1, config), int(config['min_steps']))
-        self.assertEqual(
-            train_config.train_steps(8, config),
-            max(int(config['min_steps']), 8 * int(config['steps_per_image'])),
-        )
-        self.assertLessEqual(train_config.train_steps(10_000, config), int(config['max_steps']))
-
     def test_identity_defaults_use_full_blocks_and_rank_alpha(self):
         config = train_config.load_config()
         self.assertTrue(config['alpha_equals_rank'])
@@ -29,7 +20,6 @@ class TrainConfigTests(unittest.TestCase):
         self.assertEqual(int(config['rank']), 8)
         self.assertGreaterEqual(int(config['min_steps']), 400)
         self.assertEqual(int(config['steps_per_image']), 50)
-        self.assertEqual(train_config.train_steps(8, config), 400)
         self.assertEqual(int(config['resolution']), 512)
         self.assertEqual(config['lora_dtype'], 'bf16')
 

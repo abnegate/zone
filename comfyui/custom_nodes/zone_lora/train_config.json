@@ -16,5 +16,6 @@
   "checkpoint_depth": 2,
   "seed": 42,
   "batch_size": 1,
+  "gradient_accumulation": 4,
   "min_adapters": 16
 }

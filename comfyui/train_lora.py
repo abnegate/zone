@@ -21,13 +21,15 @@ def load_config() -> dict:
 
 
 def train_steps(image_count: int, config: dict) -> int:
+    """Steps are forward passes, and the budget in config counts optimiser updates."""
     override = env('ZONE_TRAIN_STEPS')
     if override:
         return int(override)
-    return min(
+    updates = min(
         int(config['max_steps']),
         max(int(config['min_steps']), max(image_count, 1) * int(config['steps_per_image'])),
     )
+    return updates * max(1, int(config.get('gradient_accumulation', 1)))
 
 
 def env(name: str, default: str = '') -> str:
