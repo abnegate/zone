@@ -132,6 +132,7 @@ mod tests {
             model_embedding: Some("nomic-embed-text".to_string()),
             model_image: None,
             model_video: None,
+            model_audio: None,
         };
 
         // When: Creating embedding service
@@ -164,6 +165,7 @@ mod tests {
             model_embedding: None,
             model_image: None,
             model_video: None,
+            model_audio: None,
         };
 
         // When: Creating embedding service
@@ -193,6 +195,7 @@ mod tests {
             model_embedding: Some("text-embedding-3-small".to_string()),
             model_image: None,
             model_video: None,
+            model_audio: None,
         };
 
         // When: Creating embedding service
@@ -222,6 +225,7 @@ mod tests {
             model_embedding: None, // No model specified
             model_image: None,
             model_video: None,
+            model_audio: None,
         };
 
         // When: Creating embedding service
