@@ -1,9 +1,10 @@
 {
   "steps_per_image": 50,
   "min_steps": 400,
+  "checkpoint_every": 150,
   "max_steps": 800,
   "rank": 8,
-  "learning_rate": 0.0003,
+  "learning_rate": 0.0001,
   "lora_dtype": "bf16",
   "training_dtype": "none",
   "resolution": 512,

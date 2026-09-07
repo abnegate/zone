@@ -12,8 +12,6 @@ import urllib.request
 from pathlib import Path
 
 WORKFLOWS = Path(__file__).with_name('workflows')
-BASE_WORKFLOW = WORKFLOWS / 'flux1-schnell-fp8-api.json'
-ADAPTER_WORKFLOW = WORKFLOWS / 'flux1-schnell-fp8-adapter-api.json'
 PROMPT_NODE = '6'
 SAMPLER_NODE = '3'
 LATENT_NODE = '5'
@@ -22,6 +20,11 @@ ADAPTER_NODE = '13'
 
 def env(name: str, default: str = '') -> str:
     return os.environ.get(name, default)
+
+
+def workflow(name: str, default: str) -> Path:
+    """Sampler settings differ per base, so the graph has to match the weights."""
+    return WORKFLOWS / env(name, default)
 
 
 def request(url: str, payload: dict | None = None, timeout: int = 120) -> bytes:
@@ -90,10 +93,12 @@ def main() -> None:
     timeout = int(env('ZONE_LORA_TIMEOUT', '900'))
     only = env('ZONE_LORA_ONLY')
 
+    base = workflow('ZONE_LORA_BASE_WORKFLOW', 'flux1-dev-fp8-api.json')
+    adapter = workflow('ZONE_LORA_ADAPTER_WORKFLOW', 'flux1-dev-fp8-adapter-api.json')
     if only != 'with':
-        render(base_url, graph(BASE_WORKFLOW, prompt, seed, size, None), out_dir / 'without_lora.png', timeout)
+        render(base_url, graph(base, prompt, seed, size, None), out_dir / 'without_lora.png', timeout)
     if only != 'without':
-        render(base_url, graph(ADAPTER_WORKFLOW, prompt, seed, size, lora), out_dir / 'with_lora.png', timeout)
+        render(base_url, graph(adapter, prompt, seed, size, lora), out_dir / 'with_lora.png', timeout)
 
 
 if __name__ == '__main__':

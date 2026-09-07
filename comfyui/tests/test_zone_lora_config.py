@@ -46,6 +46,16 @@ class TrainConfigTests(unittest.TestCase):
         self.assertFalse(train_config.is_transformer_block('diffusion_model.img_in'))
         self.assertTrue(train_config.is_output_module('diffusion_model.final_layer.linear'))
 
+    def test_checkpoints_land_often_enough_to_judge_a_run_early(self):
+        config = train_config.load_config()
+        every = int(config['checkpoint_every'])
+        self.assertGreater(every, 0, 'a long run must be testable before it ends')
+        self.assertLessEqual(
+            every,
+            int(config['min_steps']) // 2,
+            'at least two checkpoints before the shortest run finishes',
+        )
+
     def test_modulation_layers_are_left_alone_by_default(self):
         config = train_config.load_config()
         self.assertFalse(config['train_modulation'])

@@ -83,6 +83,18 @@ class ZoneTrainSampler(TrainSampler):
         return loss
 
 
+def snapshot(lora_sd: dict, dtype) -> dict:
+    return {
+        key: value.detach().to(dtype).contiguous().cpu() for key, value in lora_sd.items()
+    }
+
+
+def write_lora(lora_sd: dict, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    safetensors.torch.save_file(lora_sd, str(destination))
+    logging.info('Zone LoRA: wrote %s (%s tensors)', destination, len(lora_sd))
+
+
 def reseed(adapter) -> None:
     """Let both LoRA matrices learn.
 
@@ -314,11 +326,19 @@ class ZoneTrainLoRA(io.ComfyNode):
                     patch(module)
             logging.info('Zone LoRA: training %s steps on the loaded checkpoint', steps)
             losses = []
+            stem = Path(save_name).name.removesuffix('.safetensors')
+            output_dir = Path(folder_paths.get_output_directory()) / 'loras'
+            every = int(load_config().get('checkpoint_every', 0))
 
             def loss_callback(loss):
                 losses.append(loss)
                 if len(losses) == 1 or len(losses) % 10 == 0:
                     logging.info('Zone LoRA step %s/%s loss=%s', len(losses), steps, f'{loss:.4f}')
+                if every and len(losses) % every == 0 and len(losses) < steps:
+                    write_lora(
+                        snapshot(lora_sd, lora_dtype_t),
+                        output_dir / f'{stem}-step{len(losses)}.safetensors',
+                    )
                 if loss != loss:
                     raise RuntimeError('training loss became NaN')
 
@@ -348,13 +368,7 @@ class ZoneTrainLoRA(io.ComfyNode):
                     unpatch(module)
                 for module, original in frozen_restores:
                     module.forward = original
-            for key in list(lora_sd):
-                lora_sd[key] = lora_sd[key].detach().to(lora_dtype_t).contiguous().cpu()
-            stem = Path(save_name).name.removesuffix('.safetensors')
-            output_dir = Path(folder_paths.get_output_directory()) / 'loras'
-            output_dir.mkdir(parents=True, exist_ok=True)
-            dest = output_dir / f'{stem}.safetensors'
-            safetensors.torch.save_file(lora_sd, str(dest))
-            logging.info('Zone LoRA: wrote %s (%s tensors)', dest, len(lora_sd))
+            lora_sd = snapshot(lora_sd, lora_dtype_t)
+            write_lora(lora_sd, output_dir / f'{stem}.safetensors')
             del trained
             return io.NodeOutput(lora_sd, steps + existing_steps)

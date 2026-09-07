@@ -142,6 +142,17 @@ def train_graph(checkpoint: str, folder: str, captions: dict[str, str], save_nam
     }
 
 
+def comfy_input_dir() -> Path:
+    """Path('') is '.', so the override has to be tested as a string or staging lands in the cwd."""
+    override = env('ZONE_COMFY_INPUT')
+    if override:
+        return Path(override)
+    models_dir = env('COMFYUI_MODELS_DIR')
+    if models_dir:
+        return Path(models_dir).parent / 'input'
+    raise SystemExit('ZONE_COMFY_INPUT is required so images land in ComfyUI/input')
+
+
 def main() -> None:
     config = load_config()
     train_dir = Path(env('ZONE_TRAIN_DIR'))
@@ -149,15 +160,7 @@ def main() -> None:
     name = Path(env('ZONE_TRAIN_NAME', output.name)).name.removesuffix('.safetensors')
     base_url = env('COMFYUI_BASE_URL', env('ZONE_COMFY_URL', 'http://127.0.0.1:8188')).rstrip('/')
     checkpoint = env('ZONE_TRAIN_CHECKPOINT', 'flux1-schnell-fp8.safetensors')
-    comfy_input = Path(env('ZONE_COMFY_INPUT', ''))
-    if not comfy_input.as_posix():
-        models_dir = Path(env('COMFYUI_MODELS_DIR', ''))
-        if models_dir:
-            candidate = models_dir.parent / 'input'
-            if candidate.is_dir() or models_dir.parent.is_dir():
-                comfy_input = candidate
-    if not comfy_input.as_posix():
-        raise SystemExit('ZONE_COMFY_INPUT is required so images land in ComfyUI/input')
+    comfy_input = comfy_input_dir()
     folder = f'zone-train-{name}'
     count, captions = stage_dataset(Path(train_dir) / 'targets', comfy_input / folder)
     steps = train_steps(count, config)
