@@ -48,6 +48,18 @@
       "size_bytes": 6735906897,
       "sha256": "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68",
       "license": "Apache-2.0"
+    },
+    {
+      "id": "ace-step-v1-3.5b",
+      "bundle": "audio",
+      "filename": "ace_step_v1_3.5b.safetensors",
+      "relative_path": "checkpoints/ace_step_v1_3.5b.safetensors",
+      "source_repository": "Comfy-Org/ACE-Step_ComfyUI_repackaged",
+      "source_revision": "7db52aef8610c6a1574392422e7fd20046a62c11",
+      "url": "https://huggingface.co/Comfy-Org/ACE-Step_ComfyUI_repackaged/resolve/7db52aef8610c6a1574392422e7fd20046a62c11/all_in_one/ace_step_v1_3.5b.safetensors",
+      "size_bytes": 7699743341,
+      "sha256": "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40",
+      "license": "Apache-2.0"
     }
   ]
 }

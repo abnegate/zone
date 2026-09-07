@@ -14,11 +14,12 @@ MODEL_BUNDLE=image
 
 usage() {
     cat <<EOF
-Usage: $0 [--download-model | --download-video-model | --verify-model | --verify-video-model] [--force-model]
+Usage: $0 [--download-model | --download-video-model | --download-audio-model |
+          --verify-model | --verify-video-model | --verify-audio-model] [--force-model]
 
 Install the pinned native Apple Silicon ComfyUI runtime. Image weights are
-downloaded only when --download-model is supplied. Video weights are a
-separate explicit download.
+downloaded only when --download-model is supplied. Video and audio weights
+are separate explicit downloads.
 
 Environment:
   COMFYUI_INSTALL_DIR  Runtime directory (default: $INSTALL_DIR)
@@ -31,8 +32,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --download-model) MODEL_ACTION=download; MODEL_BUNDLE=image ;;
         --download-video-model) MODEL_ACTION=download; MODEL_BUNDLE=video ;;
+        --download-audio-model) MODEL_ACTION=download; MODEL_BUNDLE=audio ;;
         --verify-model) MODEL_ACTION=verify; MODEL_BUNDLE=image ;;
         --verify-video-model) MODEL_ACTION=verify; MODEL_BUNDLE=video ;;
+        --verify-audio-model) MODEL_ACTION=verify; MODEL_BUNDLE=audio ;;
         --force-model) MODEL_FORCE=1 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;

@@ -35,3 +35,15 @@ downloaded only when the operator runs an explicit setup command.
 These weights are not included in Zone images or source distributions. They
 are downloaded only when the operator runs the explicit video model setup
 command.
+
+## ACE-Step v1 3.5B
+
+- Packaged model: <https://huggingface.co/Comfy-Org/ACE-Step_ComfyUI_repackaged>
+- Original model: <https://huggingface.co/ACE-Step/ACE-Step-v1-3.5B>
+- Files: `ace_step_v1_3.5b.safetensors`
+- License: Apache License 2.0
+- License text: <https://github.com/ace-step/ACE-Step/blob/main/LICENSE>
+
+These weights are not included in Zone images or source distributions. They
+are downloaded only when the operator runs the explicit audio model setup
+command.
