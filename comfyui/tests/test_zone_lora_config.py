@@ -17,7 +17,7 @@ class TrainConfigTests(unittest.TestCase):
         config = train_config.load_config()
         self.assertTrue(config['alpha_equals_rank'])
         self.assertEqual(train_config.lora_alpha(8, config), 8.0)
-        self.assertEqual(int(config['rank']), 8)
+        self.assertGreaterEqual(int(config['rank']), 32)
         self.assertGreaterEqual(int(config['min_steps']), 400)
         self.assertEqual(int(config['steps_per_image']), 50)
         self.assertEqual(int(config['resolution']), 512)

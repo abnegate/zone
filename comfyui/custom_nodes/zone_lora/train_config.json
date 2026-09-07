@@ -3,7 +3,7 @@
   "min_steps": 400,
   "checkpoint_every": 150,
   "max_steps": 800,
-  "rank": 8,
+  "rank": 32,
   "learning_rate": 0.0001,
   "sigma_floor": 0.05,
   "lora_dtype": "bf16",
@@ -16,6 +16,6 @@
   "checkpoint_depth": 2,
   "seed": 42,
   "batch_size": 1,
-  "gradient_accumulation": 4,
+  "gradient_accumulation": 1,
   "min_adapters": 16
 }
