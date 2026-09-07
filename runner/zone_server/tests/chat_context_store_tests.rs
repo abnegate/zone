@@ -186,6 +186,49 @@ async fn interrupt_marks_tool_evidence_consumed() {
 }
 
 #[tokio::test]
+async fn publish_makes_streamed_assistant_visible_before_finish() {
+    let (pool, store, chat, _) = fixture().await;
+    let lease = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (turn, _) = begin(&store, &lease).await;
+    store
+        .publish(&lease, turn, "partial reply", None)
+        .await
+        .unwrap();
+    let listed = chats::list_messages(&pool, chat).await.unwrap();
+    let assistant = listed
+        .iter()
+        .find(|message| message.role == "assistant")
+        .expect("live snapshot");
+    assert_eq!(assistant.id, turn);
+    assert_eq!(assistant.content, "partial reply");
+    store
+        .publish(&lease, turn, "partial reply continues", None)
+        .await
+        .unwrap();
+    store
+        .complete(&lease, turn, "partial reply continues. Done.", None)
+        .await
+        .unwrap();
+    let listed = chats::list_messages(&pool, chat).await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count(),
+        1
+    );
+    assert_eq!(
+        listed
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap()
+            .content,
+        "partial reply continues. Done."
+    );
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+#[tokio::test]
 async fn independent_app_states_cannot_save_competing_user_turns() {
     let (pool, store, chat, workspace) = fixture().await;
     let first = common::create_test_state(common::test_config(), pool.clone());

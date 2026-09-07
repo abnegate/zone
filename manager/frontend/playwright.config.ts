@@ -87,6 +87,9 @@ export default defineConfig({
   reporter: collectCoverage ? coverageReporter : defaultReporters,
   use: {
     baseURL,
+    ...(process.env.PLAYWRIGHT_CHANNEL
+      ? { channel: process.env.PLAYWRIGHT_CHANNEL }
+      : {}),
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     navigationTimeout: 30000, // 30s for navigation

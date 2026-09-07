@@ -2387,6 +2387,74 @@ async fn test_chat_cancel_preserves_partial_reply_before_one_terminal() {
 }
 
 #[tokio::test]
+async fn test_streamed_chunks_are_visible_on_reload_before_the_turn_finishes() {
+    let router = axum::Router::new().route("/chat/completions", axum::routing::post(|| async {
+        let events = async_stream::stream! {
+            yield Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
+                json!({"choices":[{"index":0,"delta":{"role":"assistant","content":"partial reply"},"finish_reason":null}]}).to_string()
+            ));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            yield Ok(axum::response::sse::Event::default().data(
+                json!({"choices":[{"index":0,"delta":{"content":" too late"},"finish_reason":"stop"}]}).to_string()
+            ));
+        };
+        axum::response::Sse::new(events)
+    }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut config = test_config();
+    config.litellm_host = format!("http://{address}");
+    let (client, token, chat_id, mut socket) = image_socket(config).await;
+    client
+        .put_json_auth(
+            &format!("/api/chats/{chat_id}"),
+            &json!({"agent_enabled":false}),
+            &token,
+        )
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send", "content":"Hello"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let mut assistant = Value::Null;
+    loop {
+        let frame = next_frame(&mut socket, Duration::from_secs(3))
+            .await
+            .unwrap();
+        match frame["type"].as_str() {
+            Some("message_start") => assistant = frame["message_id"].clone(),
+            Some("chunk") => {
+                assert_eq!(frame["content"], "partial reply");
+                break;
+            }
+            Some("error" | "cancelled" | "message_end") => {
+                panic!("expected partial reply: {frame}")
+            }
+            _ => {}
+        }
+    }
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let saved = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == assistant)
+        .expect("streamed chunk must already be a visible message");
+    assert_eq!(saved["content"], "partial reply");
+    service.abort();
+    let _ = service.await;
+}
+
+#[tokio::test]
 async fn test_chat_stream_error_saves_partial_reply_before_one_terminal() {
     let provider = MockServer::start().await;
     let attachment = red_png_data_url();

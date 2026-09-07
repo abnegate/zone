@@ -546,6 +546,45 @@ fn merge_metadata(
     Some(serde_json::Value::Object(object))
 }
 
+const LIVE_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(300);
+
+async fn publish_live_assistant(
+    session: &session::Session,
+    content: &str,
+    tool_calls: &[ToolCallRecord],
+    citations: &[Citation],
+    receipts: &[ActionReceipt],
+    images: &[ChatImageAttachment],
+    reasoning: &str,
+) -> Result<(), String> {
+    if content.is_empty()
+        && tool_calls.is_empty()
+        && citations.is_empty()
+        && receipts.is_empty()
+        && images.is_empty()
+        && reasoning.is_empty()
+    {
+        return Ok(());
+    }
+    session
+        .store
+        .publish(
+            &session.lease,
+            session.turn,
+            content,
+            merge_metadata(
+                image_metadata(images),
+                tool_calls,
+                citations,
+                receipts,
+                (!reasoning.is_empty()).then_some(reasoning),
+            ),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Handle the WebSocket connection
 async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
@@ -2012,6 +2051,7 @@ async fn handle_chat_generation(
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut citations: Vec<Citation> = Vec::new();
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
+    let mut last_snapshot: Option<Instant> = None;
 
     loop {
         if client_gone {
@@ -2036,6 +2076,9 @@ async fn handle_chat_generation(
 
             // Process agent events
             event = events.next() => {
+                let mut persist = false;
+                let mut persist_now = false;
+                let mut stop_stream = false;
                 match event {
                     Some(AgentEvent::Canonical(entry)) => {
                         if entry.message.role == LlmRole::Assistant {
@@ -2043,6 +2086,7 @@ async fn handle_chat_generation(
                             if !leftover.is_empty() {
                                 pending_content.push_str(&leftover);
                                 let _=emit_chunk(sender,&mut full_content,&mut chunk_index,&mut client_gone,leftover,&mut response_truncated).await;
+                                persist = true;
                             }
                         }
                         if let Err(error)=session.store.append(&session.lease,session.turn,std::slice::from_ref(&entry)).await {failure=Some(error.to_string());break;}
@@ -2073,6 +2117,7 @@ async fn handle_chat_generation(
                         {
                             client_gone = true;
                         }
+                        persist = true;
                     }
                     Some(AgentEvent::Chunk(content)) => {
                         let filtered = match token_filter.push(&content) {
@@ -2080,8 +2125,8 @@ async fn handle_chat_generation(
                             FilterStep::Emit(text) => text,
                             FilterStep::Halt(text) => {
                                 pending_content.push_str(&text);
-                                if !text.is_empty()
-                                    && !emit_chunk(
+                                if !text.is_empty() {
+                                    let _ = emit_chunk(
                                         sender,
                                         &mut full_content,
                                         &mut chunk_index,
@@ -2089,25 +2134,30 @@ async fn handle_chat_generation(
                                         text,
                                         &mut response_truncated,
                                     )
-                                    .await
-                                {
-                                    break;
+                                    .await;
                                 }
-                                break;
+                                persist_now = true;
+                                stop_stream = true;
+                                String::new()
                             }
                         };
-                        pending_content.push_str(&filtered);
-                        if !emit_chunk(
-                            sender,
-                            &mut full_content,
-                            &mut chunk_index,
-                            &mut client_gone,
-                            filtered,
-                            &mut response_truncated,
-                        )
-                        .await
-                        {
-                            break;
+                        if !stop_stream {
+                            pending_content.push_str(&filtered);
+                            if !emit_chunk(
+                                sender,
+                                &mut full_content,
+                                &mut chunk_index,
+                                &mut client_gone,
+                                filtered,
+                                &mut response_truncated,
+                            )
+                            .await
+                            {
+                                persist_now = true;
+                                stop_stream = true;
+                            } else {
+                                persist = true;
+                            }
                         }
                     }
                     Some(AgentEvent::ToolApprovalRequired { id, name, arguments }) => {
@@ -2123,6 +2173,7 @@ async fn handle_chat_generation(
                         if !client_gone && !send_server(sender, tool_msg).await {
                             client_gone = true;
                         }
+                        persist_now = true;
                     }
                     Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
                         // Recorded before the tool runs so a turn cancelled
@@ -2151,6 +2202,7 @@ async fn handle_chat_generation(
                         if !client_gone && !send_server(sender, tool_msg).await {
                             client_gone = true;
                         }
+                        persist_now = true;
                     }
                     Some(AgentEvent::Image(url)) => {
                         // Images arrive as deltas and repeat, so the cap and
@@ -2187,6 +2239,7 @@ async fn handle_chat_generation(
                                 client_gone = true;
                             }
                         }
+                        persist_now = true;
                     }
                     Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt }) => {
                         if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
@@ -2218,6 +2271,7 @@ async fn handle_chat_generation(
                                 client_gone = true;
                             }
                         }
+                        persist_now = true;
                     }
                     Some(AgentEvent::Failed(message)) => {
                         failure = Some(message);
@@ -2227,6 +2281,36 @@ async fn handle_chat_generation(
                         // Stream ended
                         break;
                     }
+                }
+                if persist_now
+                    || (persist
+                        && last_snapshot
+                            .map(|instant| instant.elapsed() >= LIVE_SNAPSHOT_INTERVAL)
+                            .unwrap_or(true))
+                {
+                    match publish_live_assistant(
+                        session,
+                        &full_content,
+                        &tool_calls,
+                        &citations,
+                        &action_receipts,
+                        &generated_images,
+                        &round_reasoning,
+                    )
+                    .await
+                    {
+                        Ok(()) => last_snapshot = Some(Instant::now()),
+                        Err(error) => {
+                            tracing::warn!("Failed to persist live assistant snapshot: {error}");
+                            if error.contains("ownership") || error.contains("expired") {
+                                failure = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if stop_stream {
+                    break;
                 }
             }
         }

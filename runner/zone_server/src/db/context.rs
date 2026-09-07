@@ -433,6 +433,33 @@ impl Store {
         Ok(row)
     }
 
+    /// Write the visible assistant row for a running turn so a refresh sees
+    /// streamed chunks before the turn finishes.
+    pub async fn publish(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        content: &str,
+        metadata: Option<Value>,
+    ) -> Result<MessageRow, Error> {
+        let mut transaction = self.pool.begin().await?;
+        self.lock(&mut transaction, lease).await?;
+        self.turn(&mut transaction, lease, turn_id).await?;
+        let row = self
+            .visible(
+                &mut transaction,
+                turn_id,
+                "assistant",
+                content,
+                metadata,
+                false,
+            )
+            .await?;
+        self.lock(&mut transaction, lease).await?;
+        transaction.commit().await?;
+        Ok(row)
+    }
+
     /// Persist partial visible prose and uncertain outcomes in one fenced transaction.
     pub async fn finish(
         &self,
@@ -854,8 +881,21 @@ impl Store {
         metadata: Option<Value>,
         title_claimed: bool,
     ) -> Result<MessageRow, Error> {
-        let created_at: Option<NaiveDateTime> = sqlx::query_scalar("INSERT INTO messages (id,chat_id,role,content,metadata) VALUES ($1,$2,$3,$4,$5) RETURNING created_at")
-            .bind(id).bind(self.chat_id).bind(role).bind(content).bind(&metadata).fetch_one(connection).await?;
+        let created_at: Option<NaiveDateTime> = sqlx::query_scalar(
+            "INSERT INTO messages (id, chat_id, role, content, metadata) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, metadata = EXCLUDED.metadata \
+             WHERE messages.chat_id = EXCLUDED.chat_id \
+             RETURNING created_at",
+        )
+        .bind(id)
+        .bind(self.chat_id)
+        .bind(role)
+        .bind(content)
+        .bind(&metadata)
+        .fetch_optional(connection)
+        .await?
+        .ok_or_else(|| Error::Integrity("Visible message does not belong to this chat".into()))?;
         Ok(MessageRow {
             title_claimed,
             id,

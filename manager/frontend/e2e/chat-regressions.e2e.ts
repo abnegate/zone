@@ -472,6 +472,27 @@ test.describe('Chat regressions', () => {
     await page.screenshot({ path: testInfo.outputPath('reconnect.png'), fullPage: true });
   });
 
+  test('a stored partial assistant reply is still visible after reload', async ({ page }, testInfo) => {
+    await mockChatRoutes(page, [
+      userMessage,
+      {
+        id: 'msg-partial',
+        chat_id: 'chat-1',
+        role: 'assistant',
+        content: 'partial reply that would have vanished',
+        created_at: new Date().toISOString(),
+      },
+    ]);
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openChat(page);
+    await expect(page.getByText('partial reply that would have vanished')).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath('partial-survives-reload.png'),
+      fullPage: true,
+    });
+  });
+
   test('opening a protected image full size uses a blob that survives unmount', async ({
     page,
   }) => {
