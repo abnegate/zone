@@ -108,6 +108,18 @@
       "size_bytes": 7699743341,
       "sha256": "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40",
       "license": "Apache-2.0"
+    },
+    {
+      "id": "u2net",
+      "bundle": "vision",
+      "filename": "u2net.onnx",
+      "relative_path": "vision/u2net.onnx",
+      "source_repository": "danielgatis/rembg",
+      "source_revision": "v0.0.0",
+      "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
+      "size_bytes": 175997641,
+      "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
+      "license": "Apache-2.0"
     }
   ]
 }

@@ -1,7 +1,7 @@
 .PHONY: help setup up down restart logs logs-follow ps health check vision-model test-vision \
 	pull-models clean clean-volumes backup restore \
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
-	setup-comfyui-video-model setup-comfyui-audio-model \
+	setup-comfyui-video-model setup-comfyui-audio-model setup-vision-model \
 	verify-comfyui-model verify-comfyui-video-model verify-comfyui-audio-model validate test \
 	up-vpn up-monitoring up-comfyui up-all dev rebuild update \
 	shell-ollama shell-litellm shell-manager shell-console \
@@ -71,6 +71,14 @@ setup-comfyui-audio-model: ## Explicitly download ACE-Step v1 3.5B audio weights
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
 		--bundle audio \
+		$(if $(filter 1 true yes,$(FORCE)),--force,)
+
+setup-vision-model: ## Download the U2-Net weights that frame training crops on their subject (~168 MiB)
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle vision \
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
 verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-256
@@ -456,11 +464,13 @@ vision-model: ## Download the U2-Net model zone_vision needs (~168 MiB, not vend
 	@echo "$(VISION_MODEL_SHA256)  $(VISION_MODEL)" | shasum -a 256 -c
 	@echo "$(GREEN)Model ready: $(VISION_MODEL)$(NC)"
 
-test-vision: vision-model ## Run zone_vision tests against the real model
-	@echo "$(BLUE)Running zone_vision tests...$(NC)"
+test-vision: vision-model ## Run the subject-detection tests against the real model
+	@echo "$(BLUE)Running subject detection tests...$(NC)"
 	cd runner && ZONE_VISION_MODEL=$(CURDIR)/$(VISION_MODEL) \
 		cargo test --package zone_vision --features saliency
-	@echo "$(GREEN)zone_vision tests passed!$(NC)"
+	cd runner && ZONE_VISION_MODEL=$(CURDIR)/$(VISION_MODEL) \
+		cargo test --package zone_comfy --features saliency
+	@echo "$(GREEN)Subject detection tests passed!$(NC)"
 
 setup-runner-coverage: ## Install dependencies for Rust code coverage
 	@echo "$(BLUE)Setting up Rust code coverage tools...$(NC)"

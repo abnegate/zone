@@ -4,6 +4,9 @@
 //! ```sh
 //! cargo run --example frames -p zone_comfy -- clip.mp4 out/
 //! ```
+//!
+//! Build it with `--features saliency` and point `ZONE_VISION_MODEL` at a
+//! U2-Net model to see the crops subject detection produces.
 
 use zone_comfy::{Config, video};
 
@@ -17,8 +20,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = arguments.next().unwrap_or_else(|| "frames".to_string());
     std::fs::create_dir_all(&output)?;
 
+    let config = Config::from_env();
+    println!(
+        "subject detection: {}",
+        match &config.vision_model {
+            Some(path) => path.display().to_string(),
+            None => "off".to_string(),
+        }
+    );
     let extracted = video::extract(
-        &Config::default(),
+        &config,
         &std::fs::read(&clip)?,
         &clip,
         video::Options {

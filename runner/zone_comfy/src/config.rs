@@ -57,6 +57,9 @@ pub struct Config {
     pub frame_fps: u32,
     /// Frames one clip contributes to a training set.
     pub frame_limit: u32,
+    /// U2-Net weights that locate the subject of a training image. `None`
+    /// crops photos on their centre and video frames on whatever moved.
+    pub vision_model: Option<std::path::PathBuf>,
 }
 
 impl Default for Config {
@@ -93,12 +96,16 @@ impl Default for Config {
             ffprobe: "ffprobe".to_string(),
             frame_fps: 4,
             frame_limit: 48,
+            vision_model: None,
         }
     }
 }
 
 impl Config {
     pub fn from_env() -> Self {
+        let models_dir: std::path::PathBuf = env::var("COMFYUI_MODELS_DIR")
+            .unwrap_or_else(|_| "/app/comfyui/models".to_string())
+            .into();
         Self {
             enabled: env_truthy("COMFYUI_ENABLED", false),
             base_url: env::var("COMFYUI_BASE_URL")
@@ -157,9 +164,13 @@ impl Config {
                 3600,
             ),
             poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
-            models_dir: env::var("COMFYUI_MODELS_DIR")
-                .unwrap_or_else(|_| "/app/comfyui/models".to_string())
-                .into(),
+            vision_model: env::var("ZONE_VISION_MODEL")
+                .ok()
+                .map(|value| std::path::PathBuf::from(value.trim()))
+                .filter(|path| !path.as_os_str().is_empty())
+                .or_else(|| Some(models_dir.join("vision/u2net.onnx")))
+                .filter(|path| path.is_file()),
+            models_dir,
             train_command: env::var("COMFYUI_TRAIN_COMMAND")
                 .ok()
                 .map(|value| value.trim().to_string())

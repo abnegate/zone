@@ -4,12 +4,14 @@ use crate::caption::{Captioner, Draft};
 use crate::config::Config;
 use crate::inventory::WeightSidecar;
 use crate::recipe::{RecipeCatalog, sanitize_weight_filename};
+use crate::subject::{CENTRE, Subject};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
-use zone_vision::crop::{self, Region, Rendered, Target};
+use zone_vision::gravity::Point;
+use zone_vision::{Raster, Rendered, decode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrainError {
@@ -119,12 +121,24 @@ pub async fn train(
     if recipe.prompt_mode == crate::recipe::PromptMode::EditInstruction {
         fs::create_dir_all(&controls).map_err(|error| TrainError::Failed(error.to_string()))?;
     }
+    // Cropping comes before captioning so the vision model describes the image
+    // that will be trained on. Captioning the upload instead would have it
+    // describe a background the crop is about to remove.
+    let subject = Subject::shared(config);
+    let side = crate::train::packaged_config()?.resolution();
+    let framed = request
+        .images
+        .iter()
+        .map(|image| frame(&subject, image, side))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let trigger = request.trigger.clone().unwrap_or_default();
-    let mut drafts: Vec<Draft> = shots(&request.images)
+    let groups: Vec<usize> = shots(&request.images).collect();
+    let mut drafts: Vec<Draft> = framed
+        .iter()
         .zip(request.images.iter())
-        .map(|(group, image)| {
-            Draft::new(&image.filename, &image.bytes_base64, &image.caption, group)
-        })
+        .zip(groups)
+        .map(|((framed, image), group)| Draft::new(CROP, &framed.encoded(), &image.caption, group))
         .collect();
     Captioner::new(config, litellm_host, litellm_key)
         .fill(&mut drafts, trigger.trim())
@@ -134,16 +148,19 @@ pub async fn train(
             image.caption = draft.caption;
         }
     }
-    for (index, image) in request.images.iter().enumerate() {
+
+    for (index, (image, framed)) in request.images.iter().zip(&framed).enumerate() {
         let stem = format!("{index:04}");
-        write_png(&targets.join(format!("{stem}.png")), &image.bytes_base64)?;
-        fs::write(
+        let write = |path: PathBuf, bytes: &[u8]| {
+            fs::write(path, bytes).map_err(|error| TrainError::Failed(error.to_string()))
+        };
+        write(targets.join(format!("{stem}.png")), &framed.target)?;
+        write(
             targets.join(format!("{stem}.txt")),
-            caption(image, request.trigger.as_deref()),
-        )
-        .map_err(|error| TrainError::Failed(error.to_string()))?;
-        if let Some(before) = &image.before_base64 {
-            write_png(&controls.join(format!("{stem}.png")), before)?;
+            caption(image, request.trigger.as_deref()).as_bytes(),
+        )?;
+        if let Some(control) = &framed.control {
+            write(controls.join(format!("{stem}.png")), control)?;
         }
     }
     let output = config.models_dir.join("loras").join(&filename);
@@ -248,38 +265,69 @@ fn shots(images: &[TrainImage]) -> impl Iterator<Item = usize> + '_ {
         .map(move |(index, image)| image.group.unwrap_or(clips + index))
 }
 
-/// Writes one training image as the PNG the dataset is read back as.
+/// The filename a crop is captioned under. Only its extension is read, to pick
+/// the MIME type of the data URL a vision model is handed.
+const CROP: &str = "crop.png";
+
+/// One upload as the dataset will hold it: a square PNG framed on its subject,
+/// and the control image that has to keep answering it.
+#[derive(Debug)]
+struct Framed {
+    target: Vec<u8>,
+    control: Option<Vec<u8>>,
+}
+
+impl Framed {
+    fn encoded(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&self.target)
+    }
+}
+
+/// Crops one upload square onto its subject.
 ///
-/// Anything that is not already PNG is decoded and re-encoded rather than
-/// dropped into a `.png` under a name it does not match, which is also what
-/// applies a photo's EXIF rotation: a sideways image trains a sideways subject.
-fn write_png(path: &Path, base64: &str) -> Result<(), TrainError> {
+/// Cropping here rather than leaving it to the loader is what keeps the subject
+/// in the dataset: the loader fits whatever it is given onto a white square, so
+/// an uncropped photo trains on its own letterboxing and on however much
+/// background the photographer happened to include.
+fn frame(subject: &Subject, image: &TrainImage, side: u32) -> Result<Framed, TrainError> {
+    let raster = decode(&image.bytes_base64)?;
+    let focus = subject.focus(&raster, CENTRE);
+    let control = match &image.before_base64 {
+        // The control has to keep answering the target pixel for pixel, so it
+        // is cropped to the target's subject rather than to its own.
+        Some(before) => Some(square(subject, &decode(before)?, side, focus)?),
+        None => None,
+    };
+    Ok(Framed {
+        target: square(subject, &raster, side, focus)?,
+        control,
+    })
+}
+
+fn square(
+    subject: &Subject,
+    raster: &Raster,
+    side: u32,
+    focus: Point,
+) -> Result<Vec<u8>, TrainError> {
+    png(&subject
+        .render(raster, side, focus)
+        .map_err(|error| TrainError::Failed(error.to_string()))?)
+}
+
+/// Decoding is also what applies a photo's EXIF rotation: a sideways image
+/// otherwise trains a sideways subject.
+fn decode(base64: &str) -> Result<Raster, TrainError> {
     use base64::Engine;
-    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(base64.trim())
         .map_err(|_| TrainError::Invalid("image is not valid base64"))?;
     if bytes.is_empty() {
         return Err(TrainError::Invalid("image is empty"));
     }
-    if bytes.starts_with(PNG) {
-        return fs::write(path, bytes).map_err(|error| TrainError::Failed(error.to_string()));
-    }
-    let raster = zone_vision::decode::decode(&bytes)
-        .map_err(|_| TrainError::Invalid("training images must be PNG, JPEG, or WebP"))?;
-    let (width, height) = raster.oriented_size();
-    let upright = crop::render(
-        &raster,
-        Region {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        },
-        Target::new(width, height),
-    )
-    .map_err(|error| TrainError::Failed(error.to_string()))?;
-    fs::write(path, png(&upright)?).map_err(|error| TrainError::Failed(error.to_string()))
+    decode::decode(&bytes)
+        .map_err(|_| TrainError::Invalid("training images must be PNG, JPEG, or WebP"))
 }
 
 /// Encodes a rendered RGB image as PNG.
@@ -310,6 +358,20 @@ mod tests {
                 width: 1,
                 height: 1,
                 pixels: colour.to_vec(),
+            })
+            .unwrap(),
+        )
+    }
+
+    /// A flat image of the given size, encoded the way an upload arrives.
+    fn encoded_at(width: u32, height: u32) -> String {
+        base64::engine::general_purpose::STANDARD.encode(
+            png(&Rendered {
+                width,
+                height,
+                pixels: (0..width * height)
+                    .flat_map(|index| [(index % 251) as u8, 40, 90])
+                    .collect(),
             })
             .unwrap(),
         )
@@ -413,46 +475,71 @@ mod tests {
     }
 
     #[test]
-    fn an_upload_that_is_not_png_is_re_encoded_upright() {
-        let root = std::env::temp_dir().join(format!("zone-png-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
+    fn a_photo_is_framed_as_the_upright_square_the_dataset_reads_back() {
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
-            .encode(
-                &[10, 20, 30, 40, 50, 60],
-                2,
-                1,
-                image::ExtendedColorType::Rgb8,
-            )
+            .encode(&[10; 8 * 4 * 3], 8, 4, image::ExtendedColorType::Rgb8)
             .unwrap();
-        let path = root.join("0000.png");
-        write_png(
-            &path,
-            &base64::engine::general_purpose::STANDARD.encode(&jpeg),
+        let framed = frame(
+            &Subject::none(),
+            &TrainImage {
+                filename: "a.jpg".into(),
+                caption: String::new(),
+                bytes_base64: base64::engine::general_purpose::STANDARD.encode(&jpeg),
+                before_base64: None,
+                group: None,
+            },
+            4,
         )
         .unwrap();
-        let written = fs::read(&path).unwrap();
         assert!(
-            written.starts_with(b"\x89PNG\r\n\x1a\n"),
+            framed.target.starts_with(b"\x89PNG\r\n\x1a\n"),
             "a .png in the dataset has to be a PNG"
         );
-        let raster = zone_vision::decode::decode(&written).unwrap();
-        assert_eq!(raster.oriented_size(), (2, 1));
-        let _ = fs::remove_dir_all(root);
+        assert_eq!(
+            decode::decode(&framed.target).unwrap().oriented_size(),
+            (4, 4),
+            "the loader letterboxes anything that is not already square"
+        );
+        assert!(framed.control.is_none(), "there was no before image");
     }
 
     #[test]
-    fn an_undecodable_upload_is_rejected_rather_than_written() {
-        let root = std::env::temp_dir().join(format!("zone-png-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("0000.png");
-        let error = write_png(
-            &path,
-            &base64::engine::general_purpose::STANDARD.encode(b"not an image"),
+    fn an_undecodable_upload_is_rejected_rather_than_framed() {
+        let error = frame(
+            &Subject::none(),
+            &TrainImage {
+                filename: "a.png".into(),
+                caption: String::new(),
+                bytes_base64: base64::engine::general_purpose::STANDARD.encode(b"not an image"),
+                before_base64: None,
+                group: None,
+            },
+            512,
         )
         .unwrap_err();
         assert!(matches!(error, TrainError::Invalid(_)), "{error}");
-        assert!(!path.exists(), "a rejected upload leaves nothing behind");
-        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_edit_pair_is_cropped_the_same_way_on_both_sides() {
+        let wide = encoded_at(16, 8);
+        let framed = frame(
+            &Subject::none(),
+            &TrainImage {
+                filename: "a.png".into(),
+                caption: String::new(),
+                bytes_base64: wide.clone(),
+                before_base64: Some(wide),
+                group: None,
+            },
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            framed.control.as_deref(),
+            Some(framed.target.as_slice()),
+            "a control cropped to its own subject stops answering its target"
+        );
     }
 }

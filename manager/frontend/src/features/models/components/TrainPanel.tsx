@@ -185,9 +185,9 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     <section className="card">
       <h2>Train a LoRA</h2>
       <p className="help-text">
-        Drop images or a video, pick an installed base, and set a unique trigger word. Zone trains
-        every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that
-        identity.
+        Drop images or a video, pick an installed base, and set a unique trigger word. Every image
+        is cropped square on its subject, then Zone trains every transformer block (rank 32, alpha
+        equals rank, 400+ steps) so the LoRA can keep that identity.
       </p>
       {error && <div className="error-placeholder">{error}</div>}
       <form className="ui-form" onSubmit={handleSubmit}>

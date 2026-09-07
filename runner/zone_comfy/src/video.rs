@@ -7,12 +7,16 @@
 //! moment wins its slot, and a frame that repeats a shot already kept is
 //! dropped rather than counted twice.
 //!
-//! What survives is cropped around whatever moved — in a clip the subject is
-//! the thing that moves — and mirrored in alternation, so a subject filmed from
-//! one side does not teach the adapter that it only ever faces that way.
+//! What survives is cropped on its subject and mirrored in alternation, so a
+//! subject filmed from one side does not teach the adapter that it only ever
+//! faces that way. Finding the subject is where a clip has an advantage over a
+//! photo: motion says which of the things in frame is being filmed, and it
+//! costs nothing here because the same frame differences already decide which
+//! frames are worth keeping.
 
 use crate::config::Config;
 use crate::lora::{TrainError, png};
+use crate::subject::Subject;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -141,14 +145,20 @@ pub async fn extract(
 
     // Decoding, measuring, cropping and encoding hundreds of frames is seconds
     // of CPU that would otherwise sit on a runtime thread other requests need.
-    tokio::task::spawn_blocking(move || build(&stills, sampled_fps, options))
+    let subject = Subject::shared(config);
+    tokio::task::spawn_blocking(move || build(&stills, sampled_fps, options, &subject))
         .await
         .map_err(|error| TrainError::Failed(error.to_string()))?
 }
 
 /// Reads the sampled stills back, picks the frames worth training on, and
 /// renders each one. Blocking from end to end.
-fn build(stills: &Path, sampled_fps: f64, options: Options) -> Result<Clip, TrainError> {
+fn build(
+    stills: &Path,
+    sampled_fps: f64,
+    options: Options,
+    subject: &Subject,
+) -> Result<Clip, TrainError> {
     let measured = measure(stills, sampled_fps)?;
     if measured.is_empty() {
         return Err(TrainError::Invalid("video has no readable frames"));
@@ -169,7 +179,7 @@ fn build(stills: &Path, sampled_fps: f64, options: Options) -> Result<Clip, Trai
             within = 0;
         }
         let mirrored = options.mirror && within % 2 == 1;
-        let bytes = render(frame, &motion[index], options.resolution, mirrored)?;
+        let bytes = render(subject, frame, &motion[index], options.resolution, mirrored)?;
         frames.push(Frame {
             filename: format!("frame-{position:04}.png"),
             bytes_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -438,7 +448,12 @@ fn group(chosen: &[usize], measured: &[Measured]) -> Vec<usize> {
 }
 
 /// Decodes a chosen frame again and renders the square crop that trains on it.
+///
+/// Subject detection leads and motion biases it, so in a crowd the crop lands
+/// on the person being filmed rather than on whoever the model liked most.
+/// Without the model, motion decides on its own.
 fn render(
+    subject: &Subject,
     measured: &Measured,
     motion: &[f32],
     resolution: u32,
@@ -447,10 +462,12 @@ fn render(
     let bytes =
         std::fs::read(&measured.path).map_err(|error| TrainError::Failed(error.to_string()))?;
     let raster = decode::decode(&bytes).map_err(|error| TrainError::Failed(error.to_string()))?;
-    let target = Target::square(resolution);
-    let region = crop::plan(raster.oriented_size(), target, focus(motion))
-        .map_err(|error| TrainError::Failed(error.to_string()))?;
-    let mut rendered = crop::render(&raster, region, target)
+    let mut rendered = subject
+        .render(
+            &raster,
+            resolution,
+            subject.weighted(&raster, motion, focus(motion)),
+        )
         .map_err(|error| TrainError::Failed(error.to_string()))?;
     if mirrored {
         mirror(&mut rendered);

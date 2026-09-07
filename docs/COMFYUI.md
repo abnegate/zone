@@ -314,6 +314,38 @@ one file rather than fetching both bases:
 ./scripts/setup-comfyui-macos.sh --download-model --bundle image-dev
 ```
 
+### Crops are framed on the subject
+
+Every training image, photo or video frame, is written as a square at the
+training resolution rather than handed to the loader whole. The loader fits what
+it is given onto a white square, so an uncropped photo trains on its own
+letterboxing and on however much background the shot happened to include.
+
+Which square is chosen is `zone_vision`'s port of
+[autogravity](https://github.com/appwrite/autogravity): U2-Net segments what
+looks like a subject, and the crop is centred on the centre of mass of that,
+then slid back inside the frame so a subject near an edge stays whole. Weights
+are 168 MiB and are not vendored:
+
+```bash
+make setup-vision-model    # into the shared models volume, as vision/u2net.onnx
+```
+
+`ZONE_VISION_MODEL` overrides where the manager looks. Without the weights
+nothing fails: a photo is cropped on its centre and a video frame on whatever
+moved, which is what both did before subject detection was wired in.
+
+For a clip the two signals are combined rather than ranked. Saliency leads, and
+a frame's motion doubles the weight of the region that moved, which is enough to
+pick the subject being filmed out of a group and never enough to invent one
+where the model saw none. It matters most where motion says nothing at all: on a
+tripod shot of a subject off to one side, motion falls back to the centre and
+crops half the subject away, while detection frames it.
+
+Inference is about 250 ms an image on an 8-core machine, and runs on a blocking
+thread. It is loaded once per process, so the first training request after a
+restart pays for the model load.
+
 ### Captions decide whether identity is learned
 
 Caption the *variable* parts of each image and let the trigger token carry the
@@ -390,10 +422,18 @@ earned rather than taken:
   of shots the clip holds. Once the only frames left repeat one already taken,
   selection stops early — a clip of someone standing still contributes a handful
   of frames, not eighty copies of one pose.
+<<<<<<< HEAD
 - **Cropped on the subject**, the same way a photo is. The loader takes the
   centre square of whatever it is handed, which keeps the frame full but loses a
   subject that is not in the middle of it; frames arrive already square and
   already framed, so that crop is a no-op rather than a second opinion.
+=======
+- **Cropped on the subject**, the same way a photo is, except that a clip knows
+  something a photo does not: the frames are diffed against their neighbours,
+  and the region that moved is weighted up, so the crop lands on the subject
+  being filmed rather than on whichever of several the model liked most. Without
+  the weights, motion decides on its own.
+>>>>>>> 280f580 ((feat): frame every training crop on its subject)
 - **Mirrored in alternation.** Half the frames of each second are flipped left
   to right, so a subject filmed from one side does not teach the adapter that it
   only ever faces that way. Turn it off for a subject carrying text, or anything

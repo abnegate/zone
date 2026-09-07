@@ -417,6 +417,7 @@ zone/
 │   │   ├── src/inventory.rs # Installed weights on disk
 │   │   ├── src/lora.rs      # LoRA training jobs
 │   │   ├── src/video.rs     # Training frames pulled out of a submitted clip
+│   │   ├── src/subject.rs   # Subject-aware framing for training crops
 │   │   └── src/caption.rs   # Vision captioning for training sets
 │   ├── zone_email/          # Transactional email over SMTP
 │   ├── zone_search/         # SearXNG web search client

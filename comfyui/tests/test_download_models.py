@@ -10,6 +10,14 @@ import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# Weights come from the Hub, except U2-Net, which its authors publish only as a
+# GitHub release asset. Either way the pinned revision and the SHA-256 in the
+# manifest are what make the download safe; this only bounds where to look.
+TRUSTED_PREFIXES = (
+    "https://huggingface.co/",
+    "https://github.com/danielgatis/rembg/releases/download/",
+)
+
 MODULE_PATH = Path(__file__).parents[1] / "download-models.py"
 MANIFEST_PATH = Path(__file__).parents[1] / "model-manifest.json"
 SPEC = importlib.util.spec_from_file_location("download_models", MODULE_PATH)
@@ -112,7 +120,7 @@ class DownloadModelsTest(unittest.TestCase):
     def test_parse_args_accepts_every_valid_bundle(self) -> None:
         self.assertEqual(
             download_models.VALID_BUNDLES,
-            {"audio", "image", "image-dev", "image-edit", "video"},
+            {"audio", "image", "image-dev", "image-edit", "video", "vision"},
         )
         for bundle in [*sorted(download_models.VALID_BUNDLES), "all"]:
             with self.subTest(bundle=bundle):
@@ -138,7 +146,10 @@ class DownloadModelsTest(unittest.TestCase):
                 self.assertGreater(model["size_bytes"], 0)
                 self.assertRegex(str(model["sha256"]), r"^[0-9a-f]{64}$")
                 self.assertIn(model["source_revision"], model["url"])
-                self.assertTrue(str(model["url"]).startswith("https://huggingface.co/"))
+                self.assertTrue(
+                    str(model["url"]).startswith(TRUSTED_PREFIXES),
+                    f"{model['url']} is not on a host weights are fetched from",
+                )
                 self.assertTrue(
                     str(model["relative_path"]).endswith(str(model["filename"])),
                     "relative_path must land on the declared filename",
@@ -190,7 +201,7 @@ class ModelManifestTest(unittest.TestCase):
             with self.subTest(model=model.get("id")):
                 self.assertIn(
                     download_models.model_bundle(model),
-                    {"audio", "image", "image-dev", "image-edit", "video"},
+                    {"audio", "image", "image-dev", "image-edit", "video", "vision"},
                 )
 
     def test_every_bundle_selects_at_least_one_entry(self) -> None:

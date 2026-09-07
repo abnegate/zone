@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Subject detection for training crops. Pulls in the ONNX Runtime native
+# library, so it is opt-in for the same reason zone_context's local-embeddings
+# is. Without it a photo is cropped on its centre and a video frame on whatever
+# moved.
+saliency = ["zone_vision/saliency"]
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }

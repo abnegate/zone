@@ -69,6 +69,7 @@ pub mod lora;
 pub mod media;
 pub mod observe;
 pub mod recipe;
+pub mod subject;
 pub mod train;
 pub mod video;
 
@@ -80,4 +81,5 @@ pub use lora::{TrainBase, TrainError, TrainImage, TrainRequest, available_bases,
 pub use media::MediaType;
 pub use observe::{RequestObserver, observe_requests};
 pub use recipe::{PromptMode, Recipe, RecipeCatalog, sanitize_weight_filename};
+pub use subject::Subject;
 pub use video::{Clip, Frame, FrameRequest, extract};
