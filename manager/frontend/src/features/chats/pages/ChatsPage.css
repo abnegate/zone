@@ -977,7 +977,7 @@
 .message-audio {
   display: block;
   width: 100%;
-  background: var(--ui-bg-surface);
+  height: 3.5rem;
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-lg);
 }
