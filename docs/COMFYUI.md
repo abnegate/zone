@@ -290,9 +290,10 @@ wants request metrics installs a hook with `zone_comfy::observe_requests`.
 
 
 Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
-Defaults live in `train_config.json`: rank 8, alpha equal to rank, every
-2-D linear in the transformer blocks (304 adapters on FLUX.1 Schnell), 512px,
-and at least 400 steps.
+Defaults live in `train_config.json`: rank 8, alpha equal to rank, every 2-D
+linear in the transformer blocks except the modulation layers (228 adapters on
+FLUX.1 Dev), 512px, and at least 400 steps. An adapter is written every 150
+steps as well as at the end, so a long run can be judged before it finishes.
 
 ### Train on Dev, not Schnell
 
@@ -340,6 +341,22 @@ write by hand are never overwritten. The Models Train tab exposes this as
 **Auto-caption images**, so the captions can be reviewed and edited before
 training starts.
 
+### Why the loss is divided by sigma
+
+Flow matching makes the x0 error exactly sigma times the velocity error, so a
+plain MSE on x0 weights each step by sigma squared. Uniform sampling over the
+schedule already puts the median sigma at 0.76 on FLUX; squaring it on top means
+the noisy end, where only colour and layout survive, supplies almost the whole
+gradient and the clean end that carries a subject's shape supplies almost none.
+A run trained that way learns a subject's palette and never its structure: 400
+steps on a single image ended 24% worse than the base model on that same image,
+8% better at high noise and 136% worse at low noise.
+
+`sigma_floor` in `train_config.json` divides the error by sigma so every noise
+level counts alike, with the floor bounding the amplification as sigma
+approaches zero — 1.7% of draws fall below the default 0.05. Set it to 0 to
+train on the x0 error instead.
+
 ### Why the residual hook exists
 
 `comfy/ldm/flux/layers.py` applies block residuals in place (`img += ...`,
@@ -364,6 +381,39 @@ python3 comfyui/compare_lora.py
 ```
 
 Renders the same prompt and seed with and without the adapter.
+
+### Measuring a run without rendering
+
+Renders answer whether an adapter looks right, which is slow and subjective. The
+probe nodes answer whether it *is* right, in minutes.
+
+`ZoneProbeLoss` reports the training loss at fixed noise levels for the base and
+for each adapter, over the images the adapter trained on. An adapter that has
+learned its subject scores below its base on those images; one that has not
+scores above. A zero adapter measures byte-identical to the base, which is what
+makes the comparison worth anything.
+
+```bash
+ZONE_TRAIN_DIR=/tmp/my-train-set \
+COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+python3 comfyui/probe_lora.py my_lora-step150.safetensors my_lora.safetensors
+```
+
+`ZoneProbeGradient` descends on one unchanging batch, where a correct gradient
+has to lower the loss. It is how the learning rate gets chosen — 1e-4 descends,
+5e-4 drifts up, 2e-3 leaves the basin inside 40 steps — and how a run that
+diverges gets caught in minutes rather than at the end of an hour.
+
+```bash
+ZONE_PROBE_MODE=gradient \
+ZONE_PROBE_LEARNING_RATE=0.0001 \
+ZONE_TRAIN_DIR=/tmp/my-train-set \
+COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+python3 comfyui/probe_lora.py
+```
+
+ComfyUI runs prompts one at a time, so a probe queued during training waits for
+it to finish.
 
 ## Workflow contract
 

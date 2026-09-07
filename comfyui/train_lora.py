@@ -85,11 +85,8 @@ def wait_prompt(base: str, prompt_id: str, timeout: int) -> dict:
             if status == 'error':
                 raise SystemExit(json.dumps(entry.get('status'), indent=2)[:4000])
             completed = (entry.get('status') or {}).get('completed')
-            if completed or status == 'success':
-                if completed is False:
-                    pass
-                else:
-                    return entry
+            if completed or (completed is None and status == 'success'):
+                return entry
         time.sleep(2)
     raise SystemExit(f'train timed out after {timeout}s')
 
