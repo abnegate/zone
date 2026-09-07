@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::media::MediaType;
 use crate::recipe::{
     Fill, PromptMode, Recipe, RecipeCatalog, sanitize_upload_name, sanitize_weight_filename,
 };
@@ -973,11 +974,10 @@ fn normalize_source_mime(mime: &str) -> Result<String, Error> {
 }
 
 fn extension_for_mime(mime: &str) -> &'static str {
-    match mime {
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        _ => "png",
-    }
+    MediaType::for_mime(mime)
+        .filter(MediaType::is_image)
+        .unwrap_or(MediaType::PNG)
+        .extension
 }
 
 fn is_model_filename(name: &str) -> bool {
@@ -985,41 +985,18 @@ fn is_model_filename(name: &str) -> bool {
 }
 
 fn is_video_filename(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".webm") || name.ends_with(".mp4") || name.ends_with(".mkv")
+    MediaType::for_filename(name).is_some_and(|media| media.is_video())
 }
 
 fn is_audio_filename(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".flac")
-        || name.ends_with(".mp3")
-        || name.ends_with(".opus")
-        || name.ends_with(".wav")
+    MediaType::for_filename(name).is_some_and(|media| media.is_audio())
 }
 
 fn mime_for_filename(name: &str) -> String {
-    let name = name.to_ascii_lowercase();
-    if name.ends_with(".webm") {
-        "video/webm".to_string()
-    } else if name.ends_with(".mp4") {
-        "video/mp4".to_string()
-    } else if name.ends_with(".mkv") {
-        "video/x-matroska".to_string()
-    } else if name.ends_with(".flac") {
-        "audio/flac".to_string()
-    } else if name.ends_with(".mp3") {
-        "audio/mpeg".to_string()
-    } else if name.ends_with(".opus") {
-        "audio/opus".to_string()
-    } else if name.ends_with(".wav") {
-        "audio/wav".to_string()
-    } else if name.ends_with(".jpg") || name.ends_with(".jpeg") {
-        "image/jpeg".to_string()
-    } else if name.ends_with(".webp") {
-        "image/webp".to_string()
-    } else {
-        "image/png".to_string()
-    }
+    MediaType::for_filename(name)
+        .unwrap_or(MediaType::PNG)
+        .mime
+        .to_string()
 }
 
 fn uploaded_image_name(uploaded: &UploadResponse, fallback: &str) -> Result<String, Error> {
@@ -1278,7 +1255,7 @@ mod tests {
     fn mime_for_filename_covers_audio_extensions() {
         assert_eq!(mime_for_filename("zone.flac"), "audio/flac");
         assert_eq!(mime_for_filename("ZONE.MP3"), "audio/mpeg");
-        assert_eq!(mime_for_filename("zone.opus"), "audio/opus");
+        assert_eq!(mime_for_filename("zone.opus"), "audio/ogg");
         assert_eq!(mime_for_filename("zone.wav"), "audio/wav");
     }
 

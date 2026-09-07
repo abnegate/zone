@@ -27,6 +27,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
+use zone_comfy::MediaType;
 use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
 
 use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, ToolCallRecord};
@@ -602,45 +603,29 @@ fn generated_media_attachment(url: &str, mime: &str, index: usize) -> Option<Cha
         || url.starts_with("/api/artifacts/")
     {
         if mime.starts_with("image/") || mime.starts_with("video/") || mime.starts_with("audio/") {
-            mime.to_string()
-        } else if url.ends_with(".webm") {
-            "video/webm".to_string()
-        } else if url.ends_with(".mp4") {
-            "video/mp4".to_string()
-        } else if url.ends_with(".flac") {
-            "audio/flac".to_string()
-        } else if url.ends_with(".mp3") {
-            "audio/mpeg".to_string()
-        } else if url.ends_with(".opus") {
-            "audio/opus".to_string()
-        } else if url.ends_with(".wav") {
-            "audio/wav".to_string()
-        } else if url.ends_with(".jpg") || url.ends_with(".jpeg") {
-            "image/jpeg".to_string()
-        } else if url.ends_with(".webp") {
-            "image/webp".to_string()
+            // Canonicalise what the generator reported so the metadata agrees
+            // with the Content-Type the artifact route will serve.
+            MediaType::for_mime(mime)
+                .map(|media| media.mime.to_string())
+                .unwrap_or_else(|| mime.to_string())
         } else {
-            "image/png".to_string()
+            MediaType::for_filename(url)
+                .unwrap_or(MediaType::PNG)
+                .mime
+                .to_string()
         }
     } else {
         return None;
     };
 
-    let (prefix, extension) = match mime.as_str() {
-        "video/webm" => ("generated-video", "webm"),
-        "video/mp4" => ("generated-video", "mp4"),
-        "audio/flac" => ("generated-audio", "flac"),
-        "audio/mpeg" => ("generated-audio", "mp3"),
-        "audio/opus" => ("generated-audio", "opus"),
-        "audio/wav" => ("generated-audio", "wav"),
-        "image/jpeg" => ("generated-image", "jpg"),
-        "image/webp" => ("generated-image", "webp"),
-        "image/gif" => ("generated-image", "gif"),
-        "image/avif" => ("generated-image", "avif"),
-        _ if mime.starts_with("video/") => ("generated-video", "webm"),
-        _ if mime.starts_with("audio/") => ("generated-audio", "flac"),
-        _ => ("generated-image", "png"),
+    let (prefix, fallback) = if mime.starts_with("video/") {
+        ("generated-video", MediaType::WEBM)
+    } else if mime.starts_with("audio/") {
+        ("generated-audio", MediaType::FLAC)
+    } else {
+        ("generated-image", MediaType::PNG)
     };
+    let extension = MediaType::for_mime(&mime).unwrap_or(fallback).extension;
 
     Some(ChatImageAttachment {
         name: format!("{prefix}-{}.{}", index + 1, extension),
@@ -1804,12 +1789,10 @@ async fn handle_audio_generation(
             tracing::warn!("ComfyUI audio output exceeded artifact size limit");
             continue;
         }
-        let extension = match clip.mime.as_str() {
-            "audio/mpeg" => "mp3",
-            "audio/opus" => "opus",
-            "audio/wav" => "wav",
-            _ => "flac",
-        };
+        let extension = MediaType::for_mime(&clip.mime)
+            .filter(MediaType::is_audio)
+            .unwrap_or(MediaType::FLAC)
+            .extension;
         let url = match store
             .persist(
                 workspace_id,
@@ -3255,6 +3238,59 @@ mod tests {
             generated_media_attachment("/api/artifacts/w/c/m/x.flac", "", 0).expect("valid audio");
         assert_eq!(attachment.mime, "audio/flac");
         assert_eq!(attachment.name, "generated-audio-1.flac");
+    }
+
+    /// A tool may hand back an external URL with any casing. Inferring the type
+    /// case-sensitively rendered those clips in an `<img>` element.
+    #[test]
+    fn extension_inference_ignores_url_casing() {
+        for url in [
+            "https://example.test/clip.FLAC",
+            "https://example.test/clip.Flac",
+        ] {
+            let attachment =
+                generated_media_attachment(url, "", 0).unwrap_or_else(|| panic!("{url} is audio"));
+            assert_eq!(attachment.mime, "audio/flac", "{url}");
+            assert_eq!(attachment.name, "generated-audio-1.flac", "{url}");
+        }
+
+        let video = generated_media_attachment("https://example.test/clip.WEBM", "", 0)
+            .expect("uppercase video");
+        assert_eq!(video.mime, "video/webm");
+    }
+
+    #[test]
+    fn opus_attachments_are_ogg_not_the_rtp_payload_type() {
+        let inferred =
+            generated_media_attachment("/api/artifacts/w/c/m/x.opus", "", 0).expect("valid audio");
+        assert_eq!(
+            inferred.mime, "audio/ogg",
+            "browsers return \"\" from canPlayType(\"audio/opus\") and nosniff blocks recovery"
+        );
+        assert_eq!(inferred.name, "generated-audio-1.opus");
+
+        let reported = generated_media_attachment("/api/artifacts/w/c/m/x.opus", "audio/opus", 0)
+            .expect("valid audio");
+        assert_eq!(
+            reported.mime, "audio/ogg",
+            "metadata must agree with the Content-Type the artifact route serves"
+        );
+    }
+
+    #[test]
+    fn unknown_media_falls_back_within_its_own_lane() {
+        let audio = generated_media_attachment("/api/artifacts/w/c/m/x.flac", "audio/basic", 0)
+            .expect("valid audio");
+        assert_eq!(audio.mime, "audio/basic");
+        assert_eq!(audio.name, "generated-audio-1.flac");
+
+        let video = generated_media_attachment("/api/artifacts/w/c/m/x.webm", "video/quicktime", 0)
+            .expect("valid video");
+        assert_eq!(video.name, "generated-video-1.webm");
+
+        let image = generated_media_attachment("/api/artifacts/w/c/m/x.png", "image/heic", 0)
+            .expect("valid image");
+        assert_eq!(image.name, "generated-image-1.png");
     }
 
     #[test]
