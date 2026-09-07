@@ -346,6 +346,15 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         system_prompt.push_str(&format!("\n# Acceptance Criteria\n{}\n", criteria));
     }
 
+    match crate::db::knowledge::standing_instructions_prompt(state.db(), task.workspace_id).await {
+        Ok(instructions) => system_prompt.push_str(&instructions),
+        Err(error) => tracing::warn!(
+            task_id = %task_id,
+            %error,
+            "Failed to load standing instructions; continuing without them"
+        ),
+    }
+
     // Get LLM configuration (from task, then environment, then defaults)
     let temperature = default_temperature();
     let max_tokens = default_max_tokens();
