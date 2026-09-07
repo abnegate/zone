@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { mergeStageOptions } from './stageOptions';
 import type { InstalledModel } from '../types';
+import { mergeStageOptions } from './stageOptions';
 
 const model = (name: string, extra: Partial<InstalledModel> = {}): InstalledModel => ({
   name,
