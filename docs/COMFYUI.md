@@ -329,16 +329,16 @@ workflow. It uses only built-in ComfyUI nodes: `CheckpointLoaderSimple`,
 `EmptyAceStepLatentAudio`, `KSampler`, `VAEDecodeAudio`, and `PreviewAudio`.
 Integration code may replace only these inputs:
 
-- the checkpoint filename from trusted server configuration (`model_audio` /
-  `COMFYUI_AUDIO_CHECKPOINT`)
-- the positive prompt text, written to the `tags` input of
+- node `1`: checkpoint filename from trusted server configuration
+  (`model_audio` / `COMFYUI_AUDIO_CHECKPOINT`)
+- node `5`: positive prompt text, written to the `tags` input of
   `TextEncodeAceStepAudio`
-- the seed
+- node `8`: seed
 
 Sampler, steps, CFG, tonemap multiplier, clip duration, and the lyrics input
-stay packaged and are never taken from untrusted request data. The output node
-must be `PreviewAudio` so ComfyUI writes into its temporary directory rather
-than its persistent output directory. Zone copies successful output into the
+stay packaged and are never taken from untrusted request data. Node `10` is the
+output node and must stay `PreviewAudio` so ComfyUI writes into its temporary
+directory rather than its persistent output directory. Zone copies successful output into the
 protected artifact store and clears the ComfyUI history entry.
 
 ## Troubleshooting
