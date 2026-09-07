@@ -18,4 +18,14 @@ describe('Reasoning', () => {
     expect(screen.getByText('Inspect the file first.')).toBeInTheDocument();
     expect(screen.getByTestId('reasoning')).toHaveAttribute('open');
   });
+
+  it('does not nest a markdown quote inside the thinking disclosure', () => {
+    const { container } = render(
+      <Reasoning content={'> Search the workspace first.'} open />
+    );
+
+    expect(screen.getByText('Search the workspace first.')).toBeInTheDocument();
+    expect(container.querySelector('blockquote')).toBeNull();
+    expect(container.querySelector('.message-markdown--compact')).not.toBeNull();
+  });
 });

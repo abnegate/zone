@@ -130,14 +130,14 @@ test.describe('Chat regressions', () => {
 
     socket.setOnSend(async () => {
       await socket.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
-      await socket.emit({ type: 'reasoning', content: 'Search the workspace first.' });
+      await socket.emit({ type: 'reasoning', content: '> Search the workspace first.' });
       await socket.emit({
         type: 'tool_call',
         message_id: 'a1',
         tool_call_id: 'call_1',
         name: 'search_knowledge',
         arguments: '{"query":"deploys"}',
-        reasoning: 'Search the workspace first.',
+        reasoning: '> Search the workspace first.',
       });
       await socket.emit({
         type: 'tool_result',
@@ -180,7 +180,7 @@ test.describe('Chat regressions', () => {
               success: true,
               detail: '3 passages',
               duration_ms: 12,
-              reasoning: 'Search the workspace first.',
+              reasoning: '> Search the workspace first.',
             },
             {
               id: 'call_2',
@@ -220,6 +220,7 @@ test.describe('Chat regressions', () => {
 
     const openBlocks = page.locator('[data-testid="reasoning"][open]');
     await expect(openBlocks).toHaveCount(2);
+    await expect(page.locator('[data-testid="reasoning"] blockquote')).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('thinking-between-tools.png'), fullPage: true });
   });
 

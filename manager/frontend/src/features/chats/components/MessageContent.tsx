@@ -4,13 +4,14 @@ import { AuthenticatedImage } from './AuthenticatedImage';
 
 interface MessageContentProps {
   content: string;
+  compact?: boolean;
 }
 
 // Assistant replies are markdown. react-markdown renders no raw HTML unless a
 // rehype plugin enables it, so model output cannot inject markup here.
-export function MessageContent({ content }: MessageContentProps) {
+export function MessageContent({ content, compact }: MessageContentProps) {
   return (
-    <div className="message-markdown">
+    <div className={compact ? 'message-markdown message-markdown--compact' : 'message-markdown'}>
       <Markdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -23,6 +24,7 @@ export function MessageContent({ content }: MessageContentProps) {
                 className="message-md-image"
               />
             ) : null,
+          ...(compact ? { blockquote: ({ children }) => children } : {}),
         }}
       >
         {content}

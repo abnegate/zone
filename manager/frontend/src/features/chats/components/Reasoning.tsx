@@ -10,7 +10,7 @@ export function Reasoning({ content, open }: { content: string; open?: boolean }
     <details className="message-reasoning" data-testid="reasoning" open={open || undefined}>
       <summary>Reasoning</summary>
       <div className="message-reasoning-body">
-        <MessageContent content={text} />
+        <MessageContent content={text} compact />
       </div>
     </details>
   );
