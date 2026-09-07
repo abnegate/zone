@@ -322,8 +322,8 @@ pub fn from_verification(
         revision: revision.and_then(|revision| nonempty(revision.to_string())),
         observed_at: observed_at.to_string(),
         complete: outcome.complete(),
-        provenance: outcome.provenance,
-        outcome: verification_outcome(outcome.verdict),
+        provenance: outcome.provenance(),
+        outcome: verification_outcome(outcome.verdict()),
         note: verification_note(outcome),
     }
     .normalize()
@@ -874,9 +874,15 @@ mod tests {
     #[test]
     fn the_same_verification_passes_once_the_server_proves_it() {
         let asserted = VerificationOutcome::asserted(marker("verified"));
-        let proven = VerificationOutcome::proven(asserted.verdict, asserted.recipes.clone());
-        assert_eq!(asserted.verdict, proven.verdict);
-        assert_eq!(asserted.recipes, proven.recipes);
+        let closure = verification::scaffold::proven();
+        let proven = VerificationOutcome::proven(
+            closure.witness().expect("the scaffolded closure held"),
+            asserted.verdict(),
+            asserted.recipes().to_vec(),
+        );
+        assert_eq!(asserted.verdict(), proven.verdict());
+        assert_eq!(asserted.recipes(), proven.recipes());
+        assert_eq!(proven.closure(), Some(closure.entrypoint()));
 
         let citation = verification_citation(&proven, "Checkout probe");
 
@@ -898,8 +904,13 @@ mod tests {
         assert!(!refuted.passing());
         assert_eq!(refuted.note.as_deref(), Some(ADVISORY_NOTE));
 
+        let closure = verification::scaffold::proven();
         let unavailable = verification_citation(
-            &VerificationOutcome::proven(Verdict::Unavailable, Vec::new()),
+            &VerificationOutcome::proven(
+                closure.witness().expect("the scaffolded closure held"),
+                Verdict::Unavailable,
+                Vec::new(),
+            ),
             "",
         );
         assert_eq!(unavailable.title, VERIFICATION_TITLE);
