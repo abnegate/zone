@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn unapproved_extensions_are_still_rejected() {
         for extension in [
-            "exe", "sh", "flac.exe", "mp3.sh", "ogg", "m4a", "", "../flac",
+            "exe", "sh", "flac.exe", "mp3.sh", "ogg", "m4a", "mkv", "", "../flac",
         ] {
             assert!(
                 safe_extension(extension).is_err(),

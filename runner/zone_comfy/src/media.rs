@@ -66,12 +66,6 @@ impl MediaType {
         extension: "mp4",
         aliases: &[],
     };
-    pub const MATROSKA: Self = Self {
-        lane: Lane::Video,
-        mime: "video/x-matroska",
-        extension: "mkv",
-        aliases: &[],
-    };
     pub const FLAC: Self = Self {
         lane: Lane::Audio,
         mime: "audio/flac",
@@ -108,7 +102,6 @@ impl MediaType {
         Self::AVIF,
         Self::WEBM,
         Self::MP4,
-        Self::MATROSKA,
         Self::FLAC,
         Self::MP3,
         Self::OPUS,
@@ -189,6 +182,16 @@ mod tests {
         assert_eq!(MediaType::for_filename("zone.jpeg"), Some(MediaType::JPEG));
         assert_eq!(MediaType::for_filename("zone.jpg"), Some(MediaType::JPEG));
         assert_eq!(MediaType::JPEG.extension, "jpg");
+    }
+
+    #[test]
+    fn matroska_is_not_a_format_zone_can_store() {
+        assert_eq!(
+            MediaType::for_filename("zone.mkv"),
+            None,
+            "the artifact store rejects .mkv, so the pipeline must not collect one"
+        );
+        assert_eq!(MediaType::for_mime("video/x-matroska"), None);
     }
 
     #[test]
