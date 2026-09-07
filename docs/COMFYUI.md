@@ -37,7 +37,7 @@ Comfy checkout so core files stay unmodified:
 - UNET: `wan2.2_ti2v_5B_fp16.safetensors` (`9,999,658,848` bytes)
 - VAE: `wan2.2_vae.safetensors` (`1,409,400,960` bytes)
 - CLIP: `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (`6,735,906,897` bytes)
-- Combined size: approximately 16.9 GB
+- Combined size: `18,144,966,705` bytes (approximately 16.90 GiB / 18.14 GB)
 - Model license: Apache-2.0
 - Default output: 832×480, 49 frames (~2s at 24 fps), WebM VP9
 
@@ -47,7 +47,7 @@ Comfy checkout so core files stay unmodified:
 - Model revision: `7db52aef8610c6a1574392422e7fd20046a62c11`
 - Checkpoint: `ace_step_v1_3.5b.safetensors` (`7,699,743,341` bytes), installed
   into `models/checkpoints/`
-- Size: approximately 7.7 GB
+- Size: approximately 7.17 GiB / 7.70 GB
 - Model license: Apache-2.0
 
 The machine-readable source of truth is `comfyui/model-manifest.json`.
@@ -408,11 +408,14 @@ Integration code may replace only these inputs:
   `TextEncodeAceStepAudio`
 - node `8`: seed
 
-Sampler, steps, CFG, tonemap multiplier, clip duration, and the lyrics input
-stay packaged and are never taken from untrusted request data. Node `10` is the
-output node and must stay `PreviewAudio` so ComfyUI writes into its temporary
-directory rather than its persistent output directory. Zone copies successful output into the
-protected artifact store and clears the ComfyUI history entry.
+Packaged defaults are ACE-Step-appropriate: a 30 s clip, 50 `euler`/`simple`
+steps, CFG 5, and ModelSamplingSD3 shift 5.0. Those, the tonemap multiplier,
+and the lyrics input stay packaged and are never taken from untrusted request
+data. Node `10` is the output node and must stay `PreviewAudio` so ComfyUI
+writes into its temporary directory rather than its persistent output
+directory. Zone copies successful output into the protected artifact store and
+clears the ComfyUI history entry. Chat can force this path with
+`metadata.audio_generation: true`.
 
 ## Troubleshooting
 
