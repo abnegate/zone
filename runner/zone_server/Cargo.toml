@@ -82,6 +82,7 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
 # Internal
+zone_comfy = { path = "../zone_comfy" }
 zone_core = { path = "../zone_core" }
 zone_context = { path = "../zone_context" }
 

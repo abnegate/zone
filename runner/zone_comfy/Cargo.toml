@@ -1,0 +1,30 @@
+[package]
+name = "zone_comfy"
+description = "ComfyUI image and video generation, model inventory, and LoRA training"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+urlencoding = "=2.1.3"
+
+# Vision captioning talks to an OpenAI-compatible endpoint
+zone_core = { path = "../zone_core" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "=3.27.0"
+wiremock = "=0.6.5"

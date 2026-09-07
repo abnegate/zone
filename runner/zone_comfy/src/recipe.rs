@@ -8,43 +8,43 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::comfyui::ComfyUiError;
+use crate::client::ComfyUiError;
 
-const PACKAGED_CATALOG: &str = include_str!("../../../../comfyui/recipes/catalog.json");
+const PACKAGED_CATALOG: &str = include_str!("../../../comfyui/recipes/catalog.json");
 
 fn packaged_workflow(name: &str) -> Option<&'static str> {
     match name {
         "flux1-schnell-fp8-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/flux1-schnell-fp8-api.json"
+            "../../../comfyui/workflows/flux1-schnell-fp8-api.json"
         )),
         "flux1-schnell-fp8-img2img-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/flux1-schnell-fp8-img2img-api.json"
+            "../../../comfyui/workflows/flux1-schnell-fp8-img2img-api.json"
         )),
-        "sd15-api.json" => Some(include_str!("../../../../comfyui/workflows/sd15-api.json")),
+        "sd15-api.json" => Some(include_str!("../../../comfyui/workflows/sd15-api.json")),
         "sd15-img2img-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/sd15-img2img-api.json"
+            "../../../comfyui/workflows/sd15-img2img-api.json"
         )),
-        "sdxl-api.json" => Some(include_str!("../../../../comfyui/workflows/sdxl-api.json")),
+        "sdxl-api.json" => Some(include_str!("../../../comfyui/workflows/sdxl-api.json")),
         "sdxl-img2img-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/sdxl-img2img-api.json"
+            "../../../comfyui/workflows/sdxl-img2img-api.json"
         )),
         "flux1-schnell-fp8-adapter-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/flux1-schnell-fp8-adapter-api.json"
+            "../../../comfyui/workflows/flux1-schnell-fp8-adapter-api.json"
         )),
         "flux1-schnell-fp8-adapter-img2img-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/flux1-schnell-fp8-adapter-img2img-api.json"
+            "../../../comfyui/workflows/flux1-schnell-fp8-adapter-img2img-api.json"
         )),
         "qwen-image-edit-2511-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/qwen-image-edit-2511-api.json"
+            "../../../comfyui/workflows/qwen-image-edit-2511-api.json"
         )),
         "qwen-image-edit-2511-edit-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/qwen-image-edit-2511-edit-api.json"
+            "../../../comfyui/workflows/qwen-image-edit-2511-edit-api.json"
         )),
         "qwen-image-edit-2511-adapter-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/qwen-image-edit-2511-adapter-api.json"
+            "../../../comfyui/workflows/qwen-image-edit-2511-adapter-api.json"
         )),
         "qwen-image-edit-2511-adapter-edit-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/qwen-image-edit-2511-adapter-edit-api.json"
+            "../../../comfyui/workflows/qwen-image-edit-2511-adapter-edit-api.json"
         )),
         _ => None,
     }

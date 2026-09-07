@@ -230,6 +230,12 @@ it is not in the image catalog yet.
 
 ## LoRA training
 
+The Rust side lives in the `zone_comfy` crate, which owns generation, the recipe
+catalog, weight inventory, training, and captioning. It has no web framework,
+database, or application state, so it can be reused outside Zone; a host that
+wants request metrics installs a hook with `zone_comfy::observe_requests`.
+
+
 Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
 Defaults live in `train_config.json`: rank 8, alpha equal to rank, every
 2-D linear in the transformer blocks (304 adapters on FLUX.1 Schnell), 512px,

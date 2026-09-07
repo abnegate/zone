@@ -1,8 +1,8 @@
 //! HTTP client that runs packaged ZoneTrainLoRA graphs on ComfyUI.
 
-use super::comfy_recipe::Recipe;
-use super::lora_train::TrainError;
 use crate::config::ComfyUiConfig;
+use crate::lora::TrainError;
+use crate::recipe::Recipe;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -12,10 +12,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 const PACKAGED_TRAIN_CONFIG: &str =
-    include_str!("../../../../comfyui/custom_nodes/zone_lora/train_config.json");
+    include_str!("../../../comfyui/custom_nodes/zone_lora/train_config.json");
 
 #[derive(Debug, Deserialize)]
-struct TrainConfig {
+pub struct TrainConfig {
     steps_per_image: u32,
     min_steps: u32,
     max_steps: u32,
@@ -45,16 +45,17 @@ struct HistoryStatus {
     completed: Option<bool>,
 }
 
-pub fn packaged_config() -> Result<Value, TrainError> {
+/// The packaged identity-training defaults.
+pub fn packaged_config() -> Result<TrainConfig, TrainError> {
     serde_json::from_str(PACKAGED_TRAIN_CONFIG)
         .map_err(|error| TrainError::Failed(format!("train config: {error}")))
 }
 
-pub fn train_steps(image_count: usize, config: &Value) -> u32 {
-    let per_image = config["steps_per_image"].as_u64().unwrap_or(32) as u32;
-    let minimum = config["min_steps"].as_u64().unwrap_or(250) as u32;
-    let maximum = config["max_steps"].as_u64().unwrap_or(800) as u32;
-    (image_count.max(1) as u32 * per_image).clamp(minimum, maximum)
+impl TrainConfig {
+    /// Steps for a dataset of this size, clamped to the configured bounds.
+    pub fn steps(&self, image_count: usize) -> u32 {
+        (image_count.max(1) as u32 * self.steps_per_image).clamp(self.min_steps, self.max_steps)
+    }
 }
 
 pub async fn run(
@@ -68,8 +69,7 @@ pub async fn run(
     if !config.enabled {
         return Err(TrainError::Disabled);
     }
-    let settings: TrainConfig = serde_json::from_str(PACKAGED_TRAIN_CONFIG)
-        .map_err(|error| TrainError::Failed(format!("train config: {error}")))?;
+    let settings = packaged_config()?;
     let checkpoint = recipe
         .defaults
         .get("checkpoint")
@@ -77,7 +77,7 @@ pub async fn run(
         .unwrap_or_else(|| config.checkpoint.clone());
     let folder = format!("zone-train-{}", Uuid::new_v4());
     let captions = stage_or_upload(config, work, &folder).await?;
-    let steps = train_steps(image_count, &packaged_config()?);
+    let steps = settings.steps(image_count);
     let graph = train_graph(
         &checkpoint,
         &folder,
@@ -356,20 +356,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packaged_train_config_deserializes() {
-        let _: TrainConfig = serde_json::from_str(PACKAGED_TRAIN_CONFIG).unwrap();
-    }
-
-    #[test]
     fn identity_config_trains_long_enough_for_eight_images() {
         let config = packaged_config().unwrap();
-        assert_eq!(train_steps(8, &config), 400);
-        assert_eq!(config["rank"], 8);
-        assert_eq!(config["alpha_equals_rank"], true);
-        assert_eq!(config["train_blocks"], "all");
-        assert_eq!(config["resolution"], 512);
-        assert_eq!(config["min_steps"], 400);
-        assert_eq!(config["steps_per_image"], 50);
+        assert_eq!(config.steps(8), 400);
+        assert_eq!(config.steps(1), config.min_steps, "a tiny set still trains");
+        assert_eq!(
+            config.steps(10_000),
+            config.max_steps,
+            "a huge set is capped"
+        );
+        assert_eq!(config.rank, 8);
+        assert_eq!(config.resolution, 512);
+        assert_eq!(config.min_steps, 400);
+        assert_eq!(config.steps_per_image, 50);
+    }
+
+    /// Keys the packaged Python node reads. Rust never touches them, so only a
+    /// test keeps the two sides of the file in step.
+    #[test]
+    fn packaged_config_keeps_the_keys_the_train_node_reads() {
+        let raw: Value = serde_json::from_str(PACKAGED_TRAIN_CONFIG).unwrap();
+        assert_eq!(raw["alpha_equals_rank"], true);
+        assert_eq!(raw["train_blocks"], "all");
+        assert!(raw["min_adapters"].as_u64().is_some());
+        assert!(raw["batch_size"].as_u64().is_some());
     }
 
     #[test]

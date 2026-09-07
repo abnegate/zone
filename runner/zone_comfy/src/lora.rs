@@ -1,9 +1,9 @@
 //! Packaged LoRA training jobs. Default path posts ZoneTrainLoRA to ComfyUI.
 
-use super::caption::{Captioner, data_url};
-use super::comfy_inventory::{self, WeightSidecar};
-use super::comfy_recipe::{RecipeCatalog, sanitize_weight_filename};
+use crate::caption::{Captioner, data_url};
 use crate::config::ComfyUiConfig;
+use crate::inventory::WeightSidecar;
+use crate::recipe::{RecipeCatalog, sanitize_weight_filename};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,7 +46,7 @@ pub struct TrainBase {
 }
 
 pub fn available_bases(catalog: &RecipeCatalog, models_dir: &Path) -> Vec<TrainBase> {
-    let items = comfy_inventory::scan(models_dir, catalog);
+    let items = crate::inventory::scan(models_dir, catalog);
     catalog
         .image_recipes()
         .filter(|recipe| !recipe.adapter)
@@ -60,7 +60,7 @@ pub fn available_bases(catalog: &RecipeCatalog, models_dir: &Path) -> Vec<TrainB
             label: recipe.label.clone(),
             edit: matches!(
                 recipe.prompt_mode,
-                super::comfy_recipe::PromptMode::EditInstruction
+                crate::recipe::PromptMode::EditInstruction
             ),
         })
         .collect()
@@ -111,7 +111,7 @@ pub async fn train(
     let targets = work.join("targets");
     let controls = work.join("control_1");
     fs::create_dir_all(&targets).map_err(|error| TrainError::Failed(error.to_string()))?;
-    if recipe.prompt_mode == super::comfy_recipe::PromptMode::EditInstruction {
+    if recipe.prompt_mode == crate::recipe::PromptMode::EditInstruction {
         fs::create_dir_all(&controls).map_err(|error| TrainError::Failed(error.to_string()))?;
     }
     let trigger = request.trigger.clone().unwrap_or_default();
@@ -193,7 +193,7 @@ pub async fn train(
             )));
         }
     } else {
-        super::comfy_train::run(
+        crate::train::run(
             config,
             recipe,
             &work,
@@ -212,7 +212,7 @@ pub async fn train(
         .adapter_recipe_for_base(recipe.hf_bases.first().unwrap_or(&recipe.id))
         .or_else(|| catalog.adapter_recipe_for_filename(&filename))
     {
-        let _ = comfy_inventory::write_sidecar(
+        let _ = crate::inventory::write_sidecar(
             &output,
             &WeightSidecar {
                 recipe_id: adapter.id.clone(),

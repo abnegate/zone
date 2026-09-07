@@ -25,14 +25,11 @@ use serde::Serialize;
 use std::time::Duration;
 
 use crate::auth::AuthUser;
-use crate::services::{
-    caption::{CaptionRequest, Captioner, data_url},
-    comfy_inventory,
-    comfy_recipe::RecipeCatalog,
-    lora_train::{self, TrainRequest},
-};
 use crate::state::AppState;
 use types::ModelCapability;
+use zone_comfy::caption::{CaptionRequest, Captioner, data_url};
+use zone_comfy::lora::{self, TrainRequest};
+use zone_comfy::recipe::RecipeCatalog;
 
 // Constants
 
@@ -191,7 +188,7 @@ fn list_comfy_models(state: &AppState) -> Vec<ModelResponse> {
     let Some(catalog) = catalog else {
         return Vec::new();
     };
-    comfy_inventory::scan(&state.config().comfyui.models_dir, &catalog)
+    zone_comfy::inventory::scan(&state.config().comfyui.models_dir, &catalog)
         .into_iter()
         .map(|item| ModelResponse {
             name: item.filename,
@@ -488,7 +485,7 @@ pub async fn train_bases(State(state): State<AppState>, _auth: AuthUser) -> impl
     let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
         .or_else(|_| RecipeCatalog::packaged());
     match catalog {
-        Ok(catalog) => Json(lora_train::available_bases(
+        Ok(catalog) => Json(lora::available_bases(
             &catalog,
             &state.config().comfyui.models_dir,
         ))
@@ -546,7 +543,7 @@ pub async fn train(
     _auth: AuthUser,
     Json(request): Json<TrainRequest>,
 ) -> impl IntoResponse {
-    match lora_train::train(
+    match lora::train(
         &state.config().comfyui,
         state.config().litellm_host.clone(),
         state.config().litellm_key.clone(),
@@ -558,17 +555,17 @@ pub async fn train(
             "filename": path.file_name().and_then(|name| name.to_str()),
         }))
         .into_response(),
-        Err(lora_train::TrainError::Disabled) => (
+        Err(lora::TrainError::Disabled) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse::new(
                 "LoRA training is not configured on this server",
             )),
         )
             .into_response(),
-        Err(lora_train::TrainError::Invalid(message)) => {
+        Err(lora::TrainError::Invalid(message)) => {
             (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response()
         }
-        Err(lora_train::TrainError::Failed(message)) => {
+        Err(lora::TrainError::Failed(message)) => {
             (StatusCode::BAD_GATEWAY, Json(ErrorResponse::new(message))).into_response()
         }
     }
@@ -588,7 +585,7 @@ pub async fn disk(_auth: AuthUser) -> impl IntoResponse {
 }
 
 fn delete_comfy_weight(state: &AppState, name: &str) -> bool {
-    let Ok(filename) = crate::services::comfy_recipe::sanitize_weight_filename(name) else {
+    let Ok(filename) = zone_comfy::recipe::sanitize_weight_filename(name) else {
         return false;
     };
     let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
@@ -597,8 +594,8 @@ fn delete_comfy_weight(state: &AppState, name: &str) -> bool {
     let Some(catalog) = catalog else {
         return false;
     };
-    let items = comfy_inventory::scan(&state.config().comfyui.models_dir, &catalog);
-    let Some(item) = comfy_inventory::find(&items, &filename) else {
+    let items = zone_comfy::inventory::scan(&state.config().comfyui.models_dir, &catalog);
+    let Some(item) = zone_comfy::inventory::find(&items, &filename) else {
         return false;
     };
     let path = state

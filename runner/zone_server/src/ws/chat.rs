@@ -1120,10 +1120,8 @@ async fn resolve_generation_source(
     prompt: &str,
     metadata: Option<&serde_json::Value>,
     store: &crate::services::artifacts::ArtifactStore,
-) -> Result<
-    Option<crate::services::comfyui::SourceImage>,
-    crate::services::image_source::SourceImageError,
-> {
+) -> Result<Option<zone_comfy::client::SourceImage>, crate::services::image_source::SourceImageError>
+{
     use crate::services::image_source::{
         has_image_attachment, resolve_source_image, resolve_source_image_from,
     };
@@ -1213,10 +1211,8 @@ async fn handle_image_generation(
     generation: &mut Generation,
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::services::{
-        artifacts::ArtifactStore,
-        comfyui::{ComfyUiClient, ComfyUiError},
-    };
+    use crate::services::artifacts::ArtifactStore;
+    use zone_comfy::client::{ComfyUiClient, ComfyUiError};
 
     const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;
@@ -1265,7 +1261,7 @@ async fn handle_image_generation(
     )
     .await;
     let generation_prompt = if source.is_some()
-        && client.prompt_mode() != crate::services::comfy_recipe::PromptMode::EditInstruction
+        && client.prompt_mode() != zone_comfy::recipe::PromptMode::EditInstruction
     {
         crate::services::image_intent::ImageIntentClassifier::new(
             image_config.clone(),
@@ -1468,10 +1464,8 @@ async fn handle_video_generation(
     generation: &mut Generation,
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::services::{
-        artifacts::ArtifactStore,
-        comfyui::{ComfyUiClient, ComfyUiError},
-    };
+    use crate::services::artifacts::ArtifactStore;
+    use zone_comfy::client::{ComfyUiClient, ComfyUiError};
 
     const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;

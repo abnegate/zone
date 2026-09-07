@@ -10,17 +10,16 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
-use super::comfy_inventory;
-use super::comfy_recipe::{
+use crate::config::ComfyUiConfig;
+use crate::recipe::{
     Fill, PromptMode, Recipe, RecipeCatalog, sanitize_upload_name, sanitize_weight_filename,
 };
-use crate::config::ComfyUiConfig;
 
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const PACKAGED_VIDEO_WORKFLOW: &str =
-    include_str!("../../../../comfyui/workflows/wan2.2-ti2v-5b-api.json");
+    include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-api.json");
 const PACKAGED_I2V_WORKFLOW: &str =
-    include_str!("../../../../comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json");
+    include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json");
 
 #[derive(Debug, thiserror::Error)]
 pub enum ComfyUiError {
@@ -206,8 +205,8 @@ impl ComfyUiClient {
     fn image_recipe(&self) -> Result<&Recipe, ComfyUiError> {
         let selected = self.config.checkpoint.as_str();
         if self.config.models_dir.is_dir() {
-            let items = comfy_inventory::scan(&self.config.models_dir, &self.catalog);
-            if let Some(item) = comfy_inventory::find(&items, selected)
+            let items = crate::inventory::scan(&self.config.models_dir, &self.catalog);
+            if let Some(item) = crate::inventory::find(&items, selected)
                 && let Some(recipe) = self.catalog.get(&item.recipe_id)
             {
                 return Ok(recipe);
@@ -394,7 +393,7 @@ impl ComfyUiClient {
             Err(ComfyUiError::Configuration(_)) => "config_error",
             Err(ComfyUiError::InvalidResponse(_)) => "invalid_response",
         };
-        crate::metrics::record_comfyui(kind, status, started.elapsed());
+        crate::observe::record(kind, status, started.elapsed());
         result
     }
 
@@ -1154,7 +1153,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             client.prompt_mode(),
-            crate::services::comfy_recipe::PromptMode::EditInstruction
+            crate::recipe::PromptMode::EditInstruction
         );
         let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (progress_tx, _) = mpsc::unbounded_channel();

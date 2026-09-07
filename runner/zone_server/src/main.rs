@@ -36,6 +36,8 @@ async fn main() {
 
     tracing::info!("Starting Zone server...");
 
+    zone_comfy::observe_requests(zone_server::metrics::record_comfyui);
+
     // Load config
     let config = Config::from_env().expect("Failed to load configuration");
 

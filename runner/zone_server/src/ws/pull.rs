@@ -15,8 +15,8 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use crate::auth::validate_token;
 use crate::pull::{ComfyPull, Event, Pull, PullRegistry, PullStart};
-use crate::services::comfy_recipe::RecipeCatalog;
 use crate::state::AppState;
+use zone_comfy::recipe::RecipeCatalog;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const PING_INTERVAL: Duration = Duration::from_secs(15);

@@ -1,6 +1,6 @@
 //! Scan the ComfyUI models directory and join files to packaged recipes.
 
-use super::comfy_recipe::{Recipe, RecipeCatalog, RequiredFile, sanitize_weight_filename};
+use crate::recipe::{Recipe, RecipeCatalog, RequiredFile, sanitize_weight_filename};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,10 +92,8 @@ pub fn scan(models_dir: &Path, catalog: &RecipeCatalog) -> Vec<InventoryItem> {
                 },
                 adapter: recipe.adapter,
                 prompt_mode: match recipe.prompt_mode {
-                    super::comfy_recipe::PromptMode::ClipScene => "clip_scene".to_string(),
-                    super::comfy_recipe::PromptMode::EditInstruction => {
-                        "edit_instruction".to_string()
-                    }
+                    crate::recipe::PromptMode::ClipScene => "clip_scene".to_string(),
+                    crate::recipe::PromptMode::EditInstruction => "edit_instruction".to_string(),
                 },
             });
         }
@@ -187,7 +185,7 @@ fn rfc3339(time: SystemTime) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::comfy_recipe::RecipeCatalog;
+    use crate::recipe::RecipeCatalog;
     use std::fs;
 
     fn temp_models() -> PathBuf {

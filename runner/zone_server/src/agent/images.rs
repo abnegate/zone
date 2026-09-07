@@ -9,11 +9,8 @@ use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::db::chats;
-use crate::services::{
-    artifacts::ArtifactStore,
-    comfyui::{ComfyUiClient, SourceImage},
-    image_source::resolve_source_image_from,
-};
+use crate::services::{artifacts::ArtifactStore, image_source::resolve_source_image_from};
+use zone_comfy::client::{ComfyUiClient, SourceImage};
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     if !scope.state.config().comfyui.enabled {
