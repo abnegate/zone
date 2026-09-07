@@ -83,6 +83,7 @@ class DownloadModelsTest(unittest.TestCase):
     def test_select_models_filters_bundle(self) -> None:
         models = [
             {"id": "image", "bundle": "image"},
+            {"id": "image-edit", "bundle": "image-edit"},
             {"id": "video", "bundle": "video"},
             {"id": "legacy"},
         ]
@@ -91,10 +92,32 @@ class DownloadModelsTest(unittest.TestCase):
             ["image", "legacy"],
         )
         self.assertEqual(
+            [model["id"] for model in download_models.select_models(models, "image-edit")],
+            ["image-edit"],
+        )
+        self.assertEqual(
             [model["id"] for model in download_models.select_models(models, "video")],
             ["video"],
         )
-        self.assertEqual(len(download_models.select_models(models, "all")), 3)
+        self.assertEqual(len(download_models.select_models(models, "all")), 4)
+
+    def test_shipped_manifest_can_be_verified(self) -> None:
+        models = download_models.load_manifest(MODULE_PATH.with_name("model-manifest.json"))
+        identifiers = [model["id"] for model in models]
+        self.assertEqual(len(identifiers), len(set(identifiers)), "duplicate model id")
+        for model in models:
+            with self.subTest(model=model["id"]):
+                # verify() indexes these, so a missing one is a crash at setup.
+                self.assertIn(download_models.model_bundle(model), download_models.VALID_BUNDLES)
+                self.assertIsInstance(model["size_bytes"], int)
+                self.assertGreater(model["size_bytes"], 0)
+                self.assertRegex(str(model["sha256"]), r"^[0-9a-f]{64}$")
+                self.assertIn(model["source_revision"], model["url"])
+                self.assertTrue(str(model["url"]).startswith("https://huggingface.co/"))
+                self.assertTrue(
+                    str(model["relative_path"]).endswith(str(model["filename"])),
+                    "relative_path must land on the declared filename",
+                )
 
     def test_download_resumes_partial_file(self) -> None:
         payload = b"0123456789" * 1000

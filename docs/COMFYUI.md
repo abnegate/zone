@@ -29,6 +29,18 @@ Comfy checkout so core files stay unmodified:
 - CUDA base image manifest:
   `sha256:14d94b039cb94bbd5da559f303b46bc4b0d5d6c24ab1a9d7b186e566ed3400dc`
 
+### Qwen Image Edit 2511 (image-edit)
+
+- UNET repository: `Comfy-Org/Qwen-Image-Edit_ComfyUI`
+- UNET revision: `984166f60a9b1fcede5e9b9287b7a7aebc050010`
+- UNET: `qwen_image_edit_2511_fp8mixed.safetensors` (`20,533,762,817` bytes)
+- Encoder and VAE repository: `Comfy-Org/Qwen-Image_ComfyUI`
+- Encoder and VAE revision: `7beb7b647f04469fbe64ba8adc2bb0d7e5e9f73f`
+- CLIP: `qwen_2.5_vl_7b_fp8_scaled.safetensors` (`9,384,670,680` bytes)
+- VAE: `qwen_image_vae.safetensors` (`253,806,246` bytes)
+- Combined size: approximately 28.2 GiB / 30.2 GB
+- Model license: Apache-2.0
+
 ### Wan 2.2 TI2V 5B (video)
 
 - Model repository: `Comfy-Org/Wan_2.2_ComfyUI_Repackaged`
@@ -147,8 +159,9 @@ Use the same overrides for later verification and startup.
 - Current NVIDIA driver compatible with CUDA 13
 - NVIDIA Container Toolkit configured for Docker
 - At least 24 GB VRAM recommended
-- At least 25 GB free Docker volume storage for the image checkpoint, or about
-  45 GB if also downloading the video bundle
+- At least 25 GB free Docker volume storage for the image checkpoint, about
+  45 GB if also downloading the video bundle, and a further 30 GB for the
+  image-edit bundle
 
 Set the manager's internal endpoint in `.env`:
 
@@ -165,9 +178,13 @@ make setup-comfyui-model
 make verify-comfyui-model
 ```
 
-Video weights are a separate bundle:
+Qwen Image Edit and video weights are separate bundles, each downloaded only
+when asked for:
 
 ```bash
+make setup-comfyui-image-edit-model
+make verify-comfyui-image-edit-model
+
 make setup-comfyui-video-model
 make verify-comfyui-video-model
 ```
@@ -215,15 +232,25 @@ filename. Sampler, steps, CFG, size, and negative prompt stay packaged.
 Shipped image recipes:
 
 - `flux-schnell` — FLUX.1 Schnell FP8 (default, including unknown filenames)
+- `flux-schnell-adapter` — the same graph with a LoRA slot
+- `qwen-image-edit` — Qwen Image Edit 2511, prompted as an edit instruction
+- `qwen-image-edit-adapter` — the same graph with a LoRA slot
 - `sd15` — Stable Diffusion 1.5 (512, 20 Euler steps)
 - `sdxl` — SDXL / Pony / Illustrious (1024, 25 Euler steps)
+
+`sd15` and `sdxl` carry no weights of their own: they match a checkpoint you
+supply by filename hint. The other recipes name the files they need in
+`required_files`, and the weight inventory reports a recipe as not ready until
+every one of them is on disk.
 
 To add another family, drop two API-format graphs in `comfyui/workflows/`
 (generate + edit) and list them in `comfyui/recipes/catalog.json` with slot
 pointers. Do not add settings fields or sampler controls. Compose bind-mounts
 those directories, so a catalog on disk replaces the packaged catalog. To bake
 a new graph into the manager binary (no bind mounts), also add the filename to
-`packaged_workflow` in `runner/zone_server/src/services/comfy_recipe.rs`.
+`packaged_workflow` in `runner/zone_comfy/src/recipe.rs`. To make the weights
+downloadable, add an entry to `comfyui/model-manifest.json` with a bundle,
+pinned revision, size, and SHA-256.
 
 Video (Wan) still uses the graphs in [Video workflow contract](#video-workflow-contract);
 it is not in the image catalog yet.
