@@ -27,9 +27,10 @@ use std::time::Duration;
 use crate::auth::AuthUser;
 use crate::state::AppState;
 use types::ModelCapability;
-use zone_comfy::caption::{CaptionRequest, Captioner, data_url};
+use zone_comfy::caption::{CaptionRequest, Captioner, Draft};
 use zone_comfy::lora::{self, TrainRequest};
 use zone_comfy::recipe::RecipeCatalog;
+use zone_comfy::video::{self, FrameRequest};
 
 // Constants
 
@@ -519,22 +520,84 @@ pub async fn captions(
         )
             .into_response();
     }
-    let mut drafts: Vec<(String, String)> = request
+    let clips = request
         .images
         .iter()
-        .map(|image| {
-            (
-                data_url(&image.filename, &image.bytes_base64),
-                image.caption.clone(),
+        .filter_map(|image| image.group)
+        .max()
+        .map_or(0, |last| last + 1);
+    let mut drafts: Vec<Draft> = request
+        .images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            Draft::new(
+                &image.filename,
+                &image.bytes_base64,
+                &image.caption,
+                image.group.unwrap_or(clips + index),
             )
         })
         .collect();
     let trigger = request.trigger.unwrap_or_default();
     captioner.fill(&mut drafts, trigger.trim()).await;
     Json(serde_json::json!({
-        "captions": drafts.into_iter().map(|(_, caption)| caption).collect::<Vec<_>>(),
+        "captions": drafts.into_iter().map(|draft| draft.caption).collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+/// POST /api/models/train/frames
+pub async fn frames(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    Json(request): Json<FrameRequest>,
+) -> impl IntoResponse {
+    use base64::Engine;
+    let config = state.config();
+    let resolution = match zone_comfy::train::packaged_config() {
+        Ok(settings) => settings.resolution(),
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new(error.to_string())),
+            )
+                .into_response();
+        }
+    };
+    let Ok(video) = base64::engine::general_purpose::STANDARD.decode(request.bytes_base64.trim())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new("video is not valid base64")),
+        )
+            .into_response();
+    };
+    let options = video::Options {
+        fps: request.fps.unwrap_or(config.comfyui.frame_fps),
+        resolution,
+        mirror: request.mirror.unwrap_or(true),
+        limit: config.comfyui.frame_limit as usize,
+    };
+    match video::extract(&config.comfyui, &video, &request.filename, options).await {
+        Ok(clip) => Json(clip).into_response(),
+        Err(lora::TrainError::Invalid(message)) => {
+            (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response()
+        }
+        Err(lora::TrainError::Disabled) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse::new(format!(
+                "{} is not installed on this server, so a video cannot be turned into training frames",
+                config.comfyui.ffmpeg
+            ))),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(error.to_string())),
+        )
+            .into_response(),
+    }
 }
 
 /// POST /api/models/train

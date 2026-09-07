@@ -16,6 +16,20 @@ import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
+export type TrainFrame = {
+  filename: string;
+  bytes_base64: string;
+  timestamp_ms: number;
+  mirrored: boolean;
+  group: number;
+};
+
+export type TrainClip = {
+  frames: TrainFrame[];
+  sampled: number;
+  sampled_fps: number;
+};
+
 /**
  * Models API
  * Provides methods for managing AI models: listing installed models,
@@ -133,7 +147,7 @@ export const modelsApi = {
 
   async captions(body: {
     trigger?: string;
-    images: Array<{ filename: string; caption: string; bytes_base64: string }>;
+    images: Array<{ filename: string; caption: string; bytes_base64: string; group?: number }>;
   }): Promise<{ captions: string[] }> {
     const response = await fetch(`${API_BASE}/api/models/train/captions`, {
       method: 'POST',
@@ -156,6 +170,7 @@ export const modelsApi = {
       caption: string;
       bytes_base64: string;
       before_base64?: string;
+      group?: number;
     }>;
   }): Promise<{ filename: string | null }> {
     const response = await fetch(`${API_BASE}/api/models/train`, {
@@ -166,6 +181,29 @@ export const modelsApi = {
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ error: 'Training failed' }));
       throw new Error(payload.error || `Failed to train: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  /**
+   * Pull training frames out of a video. The server samples above the kept rate,
+   * keeps the sharpest frame of each moment, drops repeats of a shot it already
+   * has, and crops what is left around whatever moved.
+   */
+  async frames(body: {
+    filename: string;
+    bytes_base64: string;
+    fps?: number;
+    mirror?: boolean;
+  }): Promise<TrainClip> {
+    const response = await fetch(`${API_BASE}/api/models/train/frames`, {
+      method: 'POST',
+      headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: 'Frame extraction failed' }));
+      throw new Error(payload.error || `Failed to read the video: ${response.status}`);
     }
     return response.json();
   },

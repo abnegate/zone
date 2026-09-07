@@ -55,8 +55,10 @@ RUN --mount=type=cache,id=zone-manager-registry,target=/usr/local/cargo/registry
 # linked against is present. libstdc++6 backs the statically linked ONNX Runtime.
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
 
+# ffmpeg (with ffprobe) decodes the clips submitted for LoRA training. Without
+# it images still train; videos are refused with a message saying why.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates libssl3t64 libstdc++6 \
+        curl ca-certificates libssl3t64 libstdc++6 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system zone \

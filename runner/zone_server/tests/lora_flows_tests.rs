@@ -1,4 +1,5 @@
-//! End-to-end coverage for image LoRA browse, inventory, pull, train, and delete.
+//! End-to-end coverage for image LoRA browse, inventory, pull, train, frame
+//! extraction, and delete.
 mod common;
 
 use axum::{
@@ -33,6 +34,19 @@ fn token(secret: &str) -> String {
         chrono::Duration::hours(1),
     )
     .unwrap()
+}
+
+/// A one-pixel PNG, which is what the dataset writer expects an upload to be.
+const TINY_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPgUbIAAACkAGeY0OCYAAAAAElFTkSuQmCC";
+
+fn ffmpeg_installed() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 fn temp_models() -> PathBuf {
@@ -264,8 +278,6 @@ async fn train_endpoint_writes_lora_and_lists_it() {
         Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
     )
     .await;
-    use base64::Engine;
-    let png = base64::engine::general_purpose::STANDARD.encode([137_u8, 80, 78, 71]);
     let request = axum::http::Request::builder()
         .method("POST")
         .uri("/api/models/train")
@@ -279,7 +291,7 @@ async fn train_endpoint_writes_lora_and_lists_it() {
                 "images": [{
                     "filename": "a.png",
                     "caption": "a portrait",
-                    "bytes_base64": png
+                    "bytes_base64": TINY_PNG
                 }]
             })
             .to_string(),
@@ -415,6 +427,116 @@ async fn comfy_pull_writes_lora_from_hub_origin() {
     )
     .unwrap();
     assert_eq!(sidecar["recipe_id"], "qwen-image-edit-adapter");
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn frames_endpoint_turns_a_clip_into_training_images() {
+    if !ffmpeg_installed() {
+        eprintln!("skipping: ffmpeg is not installed");
+        return;
+    }
+    use base64::Engine;
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+
+    let clip = models_dir.join("clip.mp4");
+    let built = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=30",
+            "-t",
+            "2",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&clip)
+        .status()
+        .unwrap();
+    assert!(built.success(), "could not build the test clip");
+
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/models/train/frames")
+        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "filename": "clip.mp4",
+                "bytes_base64": base64::engine::general_purpose::STANDARD
+                    .encode(fs::read(&clip).unwrap()),
+                "fps": 3,
+                "mirror": true,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    let frames = body["frames"].as_array().unwrap();
+    assert!(!frames.is_empty(), "the clip produced no training frames");
+    assert!(
+        body["sampled"].as_u64().unwrap() > frames.len() as u64,
+        "sampling runs above the rate the frames are kept at"
+    );
+    assert!(
+        frames.iter().any(|frame| frame["mirrored"] == true),
+        "half of each second is mirrored"
+    );
+    assert!(
+        frames.iter().all(|frame| frame["group"].as_u64().is_some()
+            && !frame["bytes_base64"].as_str().unwrap().is_empty()),
+        "every frame carries its shot and its pixels"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn frames_endpoint_rejects_a_file_that_is_not_a_video() {
+    use base64::Engine;
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/models/train/frames")
+        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({
+                "filename": "notes.txt",
+                "bytes_base64": base64::engine::general_purpose::STANDARD.encode("not a video"),
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a file that holds no video is the caller's problem, not the server's"
+    );
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "the failure has to say what went wrong: {body}"
+    );
     let _ = fs::remove_dir_all(models_dir);
 }
 

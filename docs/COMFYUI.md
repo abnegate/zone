@@ -370,6 +370,56 @@ contributing almost nothing.
 level counts alike, with the floor bounding the amplification as sigma
 approaches zero — 1.7% of draws fall below the default 0.05. Set it to 0 to
 train on the x0 error instead.
+### Training from a video
+
+A clip can stand in for the photo set. The Models Train tab takes one under
+**Video**, and `POST /api/models/train/frames` returns the frames it becomes, so
+they can be captioned and edited like any other training image before training
+starts.
+
+A video is a worse photo set than its frame count suggests, so the frames are
+earned rather than taken:
+
+- **Sampled above the rate they are kept at.** `COMFYUI_TRAIN_FRAME_FPS` (4) is
+  the rate that survives, but ffmpeg is asked for twice that, and each second
+  keeps only its sharpest frames. Whichever frame the clock lands on is as
+  likely to be smeared by motion as it is to be sharp; the sharpest of the ones
+  that competed for a slot is not.
+- **Deduplicated by shot.** Frames are ranked by how far their difference hash
+  sits from everything already kept, so the budget is spent on the widest spread
+  of shots the clip holds. Once the only frames left repeat one already taken,
+  selection stops early — a clip of someone standing still contributes a handful
+  of frames, not eighty copies of one pose.
+- **Cropped on the subject**, the same way a photo is. The loader takes the
+  centre square of whatever it is handed, which keeps the frame full but loses a
+  subject that is not in the middle of it; frames arrive already square and
+  already framed, so that crop is a no-op rather than a second opinion.
+- **Mirrored in alternation.** Half the frames of each second are flipped left
+  to right, so a subject filmed from one side does not teach the adapter that it
+  only ever faces that way. Turn it off for a subject carrying text, or anything
+  else a mirror would render backwards.
+- **Captioned by shot, not by frame.** Frames of one shot share a caption, so a
+  fifty-frame clip costs a handful of vision-model round trips rather than
+  fifty. Separate photos are still captioned one at a time.
+
+A long clip lowers its own sampling rate rather than being cut short, so the
+whole video is represented. `COMFYUI_TRAIN_FRAME_LIMIT` (48) caps what one clip
+contributes: the trainer's step ceiling means each frame past that is seen fewer
+times without adding variety the selection has not already found.
+
+Decoding needs `ffmpeg` and `ffprobe`, which ship in the manager image. Without
+them images still train and a submitted video is refused with a message saying
+why. `TRAIN_UPLOAD_LIMIT_MB` (512) bounds one upload; clips are posted inline as
+base64 and held in memory while the request is read.
+
+To see what a clip becomes without going through the UI:
+
+```bash
+cd runner && cargo run --example frames -p zone_comfy -- clip.mp4 /tmp/frames
+```
+
+It writes every frame the trainer would see, and prints the timestamp, shot, and
+mirroring of each.
 
 ### Why the residual hook exists
 

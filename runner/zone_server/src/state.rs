@@ -296,6 +296,7 @@ pub(crate) fn test_config() -> Config {
         source_index: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
+        train_upload_limit_mb: 512,
     }
 }
 
@@ -328,6 +329,7 @@ mod tests {
             source_index: Default::default(),
             monitoring: Default::default(),
             chat: Default::default(),
+            train_upload_limit_mb: 512,
         }
     }
 

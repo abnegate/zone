@@ -25,7 +25,9 @@ pub mod workspaces;
 
 use axum::http::{Method, header};
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{delete, get, patch, post},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -64,6 +66,11 @@ pub fn create_router(state: AppState) -> Router {
         .allow_credentials(true);
 
     crate::metrics::init();
+
+    // Training posts its images and clips inline as base64, so the 2 MB default
+    // rejects any set worth training on before a handler sees it.
+    let uploads =
+        DefaultBodyLimit::max((state.config().train_upload_limit_mb * 1024 * 1024) as usize);
 
     // Public routes (no auth required)
     // Note: WebSocket routes use in-message auth, not middleware
@@ -251,9 +258,16 @@ pub fn create_router(state: AppState) -> Router {
         // Models
         .route("/api/models", get(models::list))
         .route("/api/models/disk", get(models::disk))
-        .route("/api/models/train", post(models::train))
+        .route("/api/models/train", post(models::train).layer(uploads))
         .route("/api/models/train/bases", get(models::train_bases))
-        .route("/api/models/train/captions", post(models::captions))
+        .route(
+            "/api/models/train/captions",
+            post(models::captions).layer(uploads),
+        )
+        .route(
+            "/api/models/train/frames",
+            post(models::frames).layer(uploads),
+        )
         .route(
             "/api/models/{name}",
             get(models::get).delete(models::delete),

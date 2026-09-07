@@ -48,6 +48,15 @@ pub struct Config {
     pub train_command: Option<String>,
     /// Wall clock budget for a ComfyUI train job.
     pub train_timeout_secs: u64,
+    /// Decoder that turns a submitted clip into training frames.
+    pub ffmpeg: String,
+    /// Reads a clip's duration, so a long one lowers its sampling rate instead
+    /// of being cut short.
+    pub ffprobe: String,
+    /// Frames kept per second of submitted video.
+    pub frame_fps: u32,
+    /// Frames one clip contributes to a training set.
+    pub frame_limit: u32,
 }
 
 impl Default for Config {
@@ -80,6 +89,10 @@ impl Default for Config {
             models_dir: std::path::PathBuf::from("/app/comfyui/models"),
             train_command: None,
             train_timeout_secs: 3600,
+            ffmpeg: "ffmpeg".to_string(),
+            ffprobe: "ffprobe".to_string(),
+            frame_fps: 4,
+            frame_limit: 48,
         }
     }
 }
@@ -152,6 +165,18 @@ impl Config {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
             train_timeout_secs: env_u64("COMFYUI_TRAIN_TIMEOUT_SECS", 3600, 60, 14400),
+            ffmpeg: env::var("COMFYUI_FFMPEG")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "ffmpeg".to_string()),
+            ffprobe: env::var("COMFYUI_FFPROBE")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "ffprobe".to_string()),
+            frame_fps: env_u64("COMFYUI_TRAIN_FRAME_FPS", 4, 1, 30) as u32,
+            frame_limit: env_u64("COMFYUI_TRAIN_FRAME_LIMIT", 48, 1, 400) as u32,
         }
     }
 }

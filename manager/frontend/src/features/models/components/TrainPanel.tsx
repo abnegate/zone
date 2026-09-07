@@ -1,14 +1,18 @@
-import { Button, Input, Select } from '@zone/ui';
+import { Button, Checkbox, Input, Select } from '@zone/ui';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
 
 type TrainBase = { id: string; label: string; edit: boolean };
 
 type TrainImage = {
+  id: string;
   filename: string;
   caption: string;
   bytes_base64: string;
   before_base64?: string;
+  group?: number;
+  source?: string;
+  mirrored?: boolean;
 };
 
 function fileToBase64(file: File): Promise<string> {
@@ -24,15 +28,32 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
+// Frames of one clip are all named alike, so the clip they came from is what
+// tells them apart, and a mirrored one is worth saying so its caption can allow
+// for it.
+function captionOf(image: TrainImage): string {
+  const named = image.source ? `${image.source} ${image.filename}` : image.filename;
+  return image.mirrored ? `${named} (mirrored)` : named;
+}
+
+// Frames arrive grouped per clip, so a second clip has to be shifted past the
+// groups already on the list or the two clips would be captioned as one.
+function nextGroup(images: TrainImage[]): number {
+  return images.reduce((highest, image) => Math.max(highest, (image.group ?? -1) + 1), 0);
+}
+
 export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [bases, setBases] = useState<TrainBase[]>([]);
   const [name, setName] = useState('');
   const [base, setBase] = useState('');
   const [trigger, setTrigger] = useState('');
   const [images, setImages] = useState<TrainImage[]>([]);
+  const [mirror, setMirror] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [captioning, setCaptioning] = useState(false);
+  const [sampling, setSampling] = useState<string | null>(null);
+  const [sampled, setSampled] = useState<string | null>(null);
 
   useEffect(() => {
     modelsApi
@@ -58,10 +79,53 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           next[index] = { ...next[index], before_base64: encoded };
         }
       } else {
-        next.push({ filename: file.name, caption: '', bytes_base64: encoded });
+        next.push({
+          id: crypto.randomUUID(),
+          filename: file.name,
+          caption: '',
+          bytes_base64: encoded,
+        });
       }
     }
     setImages(next);
+  };
+
+  const handleVideos = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setError(null);
+    setSampled(null);
+    try {
+      let collected = [...images];
+      for (const file of Array.from(files)) {
+        setSampling(file.name);
+        const clip = await modelsApi.frames({
+          filename: file.name,
+          bytes_base64: await fileToBase64(file),
+          mirror,
+        });
+        const offset = nextGroup(collected);
+        collected = [
+          ...collected,
+          ...clip.frames.map((frame) => ({
+            id: crypto.randomUUID(),
+            filename: frame.filename,
+            caption: '',
+            bytes_base64: frame.bytes_base64,
+            group: offset + frame.group,
+            source: file.name,
+            mirrored: frame.mirrored,
+          })),
+        ];
+        setSampled(
+          `${file.name}: ${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`
+        );
+      }
+      setImages(collected);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not read the video');
+    } finally {
+      setSampling(null);
+    }
   };
 
   const handleCaption = async () => {
@@ -71,10 +135,11 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     try {
       const { captions } = await modelsApi.captions({
         trigger: trigger.trim() || undefined,
-        images: images.map(({ filename, caption, bytes_base64 }) => ({
+        images: images.map(({ filename, caption, bytes_base64, group }) => ({
           filename,
           caption,
           bytes_base64,
+          group,
         })),
       });
       setImages((current) =>
@@ -97,10 +162,17 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         name: name.trim(),
         base,
         trigger: trigger.trim() || undefined,
-        images,
+        images: images.map(({ filename, caption, bytes_base64, before_base64, group }) => ({
+          filename,
+          caption,
+          bytes_base64,
+          before_base64,
+          group,
+        })),
       });
       setImages([]);
       setName('');
+      setSampled(null);
       onTrained();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Training failed');
@@ -113,8 +185,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     <section className="card">
       <h2>Train a LoRA</h2>
       <p className="help-text">
-        Drop images, pick an installed base, and set a unique trigger word. Zone trains every
-        transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that
+        Drop images or a video, pick an installed base, and set a unique trigger word. Zone trains
+        every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that
         identity.
       </p>
       {error && <div className="error-placeholder">{error}</div>}
@@ -156,6 +228,27 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             onChange={(event) => void handleFiles(event.target.files, true)}
           />
         )}
+        <Input
+          label="Video"
+          type="file"
+          accept="video/*"
+          multiple
+          disabled={Boolean(sampling)}
+          onChange={(event) => void handleVideos(event.target.files)}
+        />
+        <p className="help-text">
+          A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins its
+          slot, repeats of a shot already taken are dropped, and every frame is cropped around
+          whatever moved.
+        </p>
+        <Checkbox
+          label="Mirror half the frames of each second"
+          helpText="More variety from one angle, applied as each clip is read. Turn it off for a subject carrying text, or one a mirror would get wrong."
+          checked={mirror}
+          onCheckedChange={setMirror}
+        />
+        {sampling && <p className="help-text">Reading {sampling}…</p>}
+        {sampled && <p className="help-text">{sampled}</p>}
         {images.length > 0 && (
           <div>
             <Button
@@ -169,15 +262,15 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             </Button>
             <p className="help-text">
               Describes pose, setting, and lighting only, so the trigger word carries the identity.
-              Captions you have written are kept.
+              Captions you have written are kept, and frames of one shot are described once.
             </p>
           </div>
         )}
         {images.map((image, index) => (
           <Input
-            key={`${image.filename}-${index}`}
+            key={image.id}
             id={`train-caption-${index}`}
-            label={`Caption for ${image.filename}`}
+            label={`Caption for ${captionOf(image)}`}
             value={image.caption}
             onChange={(event) => {
               const next = [...images];
@@ -189,7 +282,9 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         <Button
           type="submit"
           loading={busy}
-          disabled={!name.trim() || !base || !trigger.trim() || images.length === 0}
+          disabled={
+            !name.trim() || !base || !trigger.trim() || images.length === 0 || Boolean(sampling)
+          }
         >
           Train
         </Button>

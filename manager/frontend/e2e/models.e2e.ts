@@ -210,8 +210,36 @@ test.describe('Models Page', () => {
   test('shows the train tab and a simple LoRA form', async ({ page }) => {
     await page.getByRole('tab', { name: 'Train' }).click();
     await expect(page.getByRole('heading', { name: 'Train a LoRA' })).toBeVisible();
-    await expect(page.getByText('Drop images, pick an installed base')).toBeVisible();
+    await expect(page.getByText('Drop images or a video, pick an installed base')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Train' })).toBeVisible();
+  });
+
+  test('takes a video and lists the frames it becomes', async ({ page }) => {
+    await routeApi(page, '**/api/models/train/frames', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          sampled: 24,
+          sampled_fps: 8,
+          frames: [
+            { filename: 'frame-0000.png', bytes_base64: 'aaa', timestamp_ms: 0, mirrored: false, group: 0 },
+            { filename: 'frame-0001.png', bytes_base64: 'bbb', timestamp_ms: 250, mirrored: true, group: 0 },
+          ],
+        }),
+      })
+    );
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await page.getByLabel('Video').setInputFiles({
+      name: 'subject.mp4',
+      mimeType: 'video/mp4',
+      buffer: Buffer.from('clip'),
+    });
+    await expect(
+      page.getByText('subject.mp4: 24 frames read at 8.0/s, 2 kept')
+    ).toBeVisible();
+    await expect(page.getByText('Caption for subject.mp4 frame-0000.png')).toBeVisible();
+    await expect(page.getByText('mirrored')).toBeVisible();
   });
 
   test('displays installed models', async ({ page }) => {
