@@ -268,6 +268,24 @@ Defaults live in `train_config.json`: rank 8, alpha equal to rank, every
 2-D linear in the transformer blocks (304 adapters on FLUX.1 Schnell), 512px,
 and at least 400 steps.
 
+### Train on Dev, not Schnell
+
+FLUX.1 Schnell is timestep-distilled to produce an image in four steps without
+guidance. That distillation is what a LoRA has to fight: the standard denoising
+objective does not match what Schnell learned, so training pushes the model off
+its own distribution and the adapter ends up degrading it rather than teaching
+it a subject. FLUX.1 Dev is guidance-distilled but still samples normally, and
+is what LoRA recipes are written against.
+
+Dev is a 17.2 GB download and carries the FLUX.1-dev Non-Commercial License,
+where Schnell is Apache-2.0. Check that before shipping anything trained on it.
+
+```bash
+python3 comfyui/download-models.py \
+  --models-dir "$HOME/Library/Application Support/Zone/ComfyUI/models" \
+  --only flux1-dev-fp8
+```
+
 ### Captions decide whether identity is learned
 
 Caption the *variable* parts of each image and let the trigger token carry the

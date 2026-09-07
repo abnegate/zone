@@ -34,6 +34,18 @@ fn packaged_workflow(name: &str) -> Option<&'static str> {
         "flux1-schnell-fp8-adapter-img2img-api.json" => Some(include_str!(
             "../../../comfyui/workflows/flux1-schnell-fp8-adapter-img2img-api.json"
         )),
+        "flux1-dev-fp8-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-dev-fp8-api.json"
+        )),
+        "flux1-dev-fp8-img2img-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-dev-fp8-img2img-api.json"
+        )),
+        "flux1-dev-fp8-adapter-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-dev-fp8-adapter-api.json"
+        )),
+        "flux1-dev-fp8-adapter-img2img-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-dev-fp8-adapter-img2img-api.json"
+        )),
         "qwen-image-edit-2511-api.json" => Some(include_str!(
             "../../../comfyui/workflows/qwen-image-edit-2511-api.json"
         )),

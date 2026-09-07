@@ -14,6 +14,18 @@
       "license": "Apache-2.0"
     },
     {
+      "id": "flux1-dev-fp8",
+      "bundle": "image",
+      "filename": "flux1-dev-fp8.safetensors",
+      "relative_path": "checkpoints/flux1-dev-fp8.safetensors",
+      "source_repository": "Comfy-Org/flux1-dev",
+      "source_revision": "40a8a3d745c7d7adb077cb19879a975aa19c847b",
+      "url": "https://huggingface.co/Comfy-Org/flux1-dev/resolve/40a8a3d745c7d7adb077cb19879a975aa19c847b/flux1-dev-fp8.safetensors",
+      "size_bytes": 17246524772,
+      "sha256": "8e91b68084b53a7fc44ed2a3756d821e355ac1a7b6fe29be760c1db532f3d88a",
+      "license": "FLUX.1-dev Non-Commercial License"
+    },
+    {
       "id": "wan2.2-ti2v-5b",
       "bundle": "video",
       "filename": "wan2.2_ti2v_5B_fp16.safetensors",
