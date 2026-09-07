@@ -9,7 +9,7 @@ pub mod context;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -160,6 +160,19 @@ impl TestClient {
         self.send(request).await
     }
 
+    /// Make a GET request with authorization and a Range header
+    pub async fn get_range_auth(&self, uri: &str, range: &str, token: &str) -> TestResponse {
+        let request = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Range", range)
+            .body(Body::empty())
+            .unwrap();
+
+        self.send(request).await
+    }
+
     /// Make a POST request with JSON body
     pub async fn post_json(&self, uri: &str, body: &Value) -> TestResponse {
         let request = Request::builder()
@@ -233,6 +246,7 @@ impl TestClient {
             .expect("Failed to send request");
 
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response
             .into_body()
             .collect()
@@ -240,13 +254,18 @@ impl TestClient {
             .expect("Failed to read body")
             .to_bytes();
 
-        TestResponse { status, body }
+        TestResponse {
+            status,
+            headers,
+            body,
+        }
     }
 }
 
 /// Response from a test request
 pub struct TestResponse {
     pub status: StatusCode,
+    pub headers: HeaderMap,
     body: bytes::Bytes,
 }
 
@@ -254,6 +273,16 @@ impl TestResponse {
     /// Get the response body as a string
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).to_string()
+    }
+
+    /// Get the response body as raw bytes
+    pub fn bytes(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Get a response header as a string
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).and_then(|value| value.to_str().ok())
     }
 
     /// Parse the response body as JSON
