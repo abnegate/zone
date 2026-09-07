@@ -41,6 +41,23 @@ from .train_config import (
 
 
 class ZoneTrainSampler(TrainSampler):
+    def __init__(self, *args, sigma_floor=0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sigma_floor = sigma_floor
+
+    def error_scale(self, sigmas, sample):
+        """Flow matching makes the x0 error exactly sigma times the velocity error.
+
+        Training on the x0 error therefore weights every step by sigma squared,
+        so the noisy end of the schedule — where only colour and layout are
+        recoverable — supplies almost the whole gradient and the clean end that
+        carries a subject's shape supplies close to none.
+        """
+        if not self.sigma_floor:
+            return 1.0
+        shape = (-1,) + (1,) * (sample.ndim - 1)
+        return sigmas.detach().float().reshape(shape).clamp(min=self.sigma_floor)
+
     def fwd_bwd(
         self,
         model_wrap,
@@ -73,7 +90,8 @@ class ZoneTrainSampler(TrainSampler):
             batch_sigmas = batch_sigmas.detach().clone()
         with torch.autocast(xt.device.type, dtype=self.training_dtype):
             x0_pred = model_wrap(xt, batch_sigmas, **batch_extra_args)
-            loss = self.loss_fn(x0_pred.float(), x0.float())
+            scale = self.error_scale(batch_sigmas, x0_pred)
+            loss = self.loss_fn(x0_pred.float() / scale, x0.float() / scale)
         if bwd:
             bwd_loss = loss / self.grad_acc
             if self.grad_scaler is not None:
@@ -137,9 +155,11 @@ def setup_identity_lora(mp, existing_weights, algorithm, lora_dtype, rank):
                 module.weight, rank=rank, alpha=alpha
             ).to(lora_dtype)
             reseed(train_adapter)
+        train_adapter.train()
         for param_name, parameter in train_adapter.named_parameters():
+            parameter.requires_grad_(param_name != 'alpha')
             lora_sd[f'{name}.{param_name}'] = parameter
-        trained.append(train_adapter.train().requires_grad_(True))
+        trained.append(train_adapter)
         bypass_manager.add_adapter(f'{name}.weight', trained[-1], strength=1.0)
     minimum = int(settings.get('min_adapters', 16))
     if len(trained) < minimum:
@@ -352,6 +372,7 @@ class ZoneTrainLoRA(io.ComfyNode):
                 seed=seed,
                 training_dtype=dtype,
                 use_grad_scaler=use_grad_scaler,
+                sigma_floor=float(load_config().get('sigma_floor', 0.0)),
             )
             guider = TrainGuider(mp, offloading=False)
             guider.set_conds(positive)

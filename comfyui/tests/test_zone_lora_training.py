@@ -233,6 +233,38 @@ class FluxTrainingGradientTests(unittest.TestCase):
         self.assertIs(type(hooked), torch.Tensor, 'inference must not see the residual subclass')
         self.assertTrue(bool(torch.equal(hooked, expected)))
 
+    def identity_lora(self):
+        node = self.node
+        settings = node.load_config()
+        settings['min_adapters'] = 1
+        original = node.load_config
+        node.load_config = lambda *args, **kwargs: settings
+        try:
+            return node.setup_identity_lora(
+                types.SimpleNamespace(model=self.build_blocks()),
+                {},
+                'LoRA',
+                self.torch.float32,
+                RANK,
+            )
+        finally:
+            node.load_config = original
+
+    def test_alpha_is_a_constant_not_a_parameter_to_optimise(self):
+        """A trained alpha rescales every adapter each step and diverges the run."""
+        lora_sd, _, _ = self.identity_lora()
+        alphas = [key for key in lora_sd if key.endswith('.alpha')]
+        self.assertTrue(alphas, 'adapters must record their alpha')
+        for key in alphas:
+            self.assertFalse(lora_sd[key].requires_grad, f'{key} would be stepped by the optimiser')
+
+    def test_both_lora_matrices_are_trainable(self):
+        lora_sd, _, _ = self.identity_lora()
+        matrices = [key for key in lora_sd if key.endswith(('lora_up.weight', 'lora_down.weight'))]
+        self.assertTrue(matrices)
+        for key in matrices:
+            self.assertTrue(lora_sd[key].requires_grad, f'{key} must train')
+
     def test_gradient_checkpointing_matches_plain_backward(self):
         torch = self.torch
         plain_loss, _, plain_gradients = self.train_step(checkpointing=False)
@@ -244,6 +276,51 @@ class FluxTrainingGradientTests(unittest.TestCase):
                 bool(torch.allclose(expected, actual, rtol=1e-5, atol=1e-7)),
                 f'adapter {index} gradient differs under gradient checkpointing',
             )
+
+
+@unittest.skipUnless(AVAILABLE, f'ComfyUI runtime not installed at {COMFY_DIR}')
+class LossWeightingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import torch
+
+        cls.torch = torch
+        cls.sampler_cls = load_module('train_node').ZoneTrainSampler
+
+    def sampler(self, sigma_floor):
+        sampler = self.sampler_cls.__new__(self.sampler_cls)
+        sampler.sigma_floor = sigma_floor
+        return sampler
+
+    def losses_across_sigmas(self, sigma_floor):
+        """The x0 error a fixed velocity error produces is exactly sigma times it."""
+        torch = self.torch
+        sampler = self.sampler(sigma_floor)
+        velocity_error = torch.full((1, 4, 8, 8), 0.25)
+        losses = []
+        for sigma in (0.2, 0.5, 1.0):
+            sigmas = torch.tensor([sigma])
+            error = velocity_error * sigma
+            scale = sampler.error_scale(sigmas, error)
+            losses.append(float(torch.nn.functional.mse_loss(error / scale, torch.zeros_like(error) / scale)))
+        return losses
+
+    def test_x0_space_loss_ignores_the_clean_end_of_the_schedule(self):
+        quietest, middle, noisiest = self.losses_across_sigmas(0.0)
+        self.assertAlmostEqual(middle / quietest, (0.5 / 0.2) ** 2, places=4)
+        self.assertAlmostEqual(noisiest / quietest, (1.0 / 0.2) ** 2, places=4)
+
+    def test_velocity_space_loss_weights_every_noise_level_alike(self):
+        quietest, middle, noisiest = self.losses_across_sigmas(0.05)
+        self.assertAlmostEqual(middle, quietest, places=6)
+        self.assertAlmostEqual(noisiest, quietest, places=6)
+
+    def test_floor_caps_the_amplification_near_zero_noise(self):
+        torch = self.torch
+        sampler = self.sampler(0.05)
+        error = torch.zeros((1, 4, 8, 8))
+        scale = sampler.error_scale(torch.tensor([1e-6]), error)
+        self.assertAlmostEqual(float(scale.reshape(-1)[0]), 0.05, places=6)
 
 
 if __name__ == '__main__':
