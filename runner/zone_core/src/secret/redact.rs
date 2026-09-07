@@ -12,6 +12,20 @@ const MINIMUM_DISTINCT_CHARACTERS: usize = 12;
 const MINIMUM_ENTROPY_BITS: f64 = 3.5;
 const JSON_WEB_TOKEN_PREFIX: &[u8] = b"eyJ";
 const JSON_WEB_TOKEN_SEGMENT: usize = 8;
+const KEY_LOOKBEHIND: usize = 64;
+const SECRET_KEY_WORDS: &[&str] = &[
+    "apikey",
+    "auth",
+    "credential",
+    "key",
+    "passwd",
+    "password",
+    "pwd",
+    "secret",
+    "session",
+    "signature",
+    "token",
+];
 
 #[derive(Clone, Copy)]
 enum Charset {
@@ -223,7 +237,40 @@ fn encoded_at(text: &str, index: usize) -> Option<usize> {
     if end - index < MINIMUM_ENCODED_LENGTH {
         return None;
     }
-    is_secret_like(&bytes[index..end]).then_some(end)
+    (is_secret_like(&bytes[index..end]) && assigned_to_secret(bytes, index)).then_some(end)
+}
+
+/// Whether an assignment immediately before `index` names a credential.
+///
+/// A run with no recognised prefix is indistinguishable from an integrity
+/// hash, a base64 payload or a build identifier, so entropy alone must not
+/// redact it: `cargo test` output and lockfiles are full of such runs.
+fn assigned_to_secret(bytes: &[u8], index: usize) -> bool {
+    let skip_padding = |mut cursor: usize| {
+        while cursor > 0 && matches!(bytes[cursor - 1], b' ' | b'\t' | b'"' | b'\'' | b'`') {
+            cursor -= 1;
+        }
+        cursor
+    };
+
+    let cursor = skip_padding(index);
+    if cursor == 0 || !matches!(bytes[cursor - 1], b'=' | b':') {
+        return false;
+    }
+
+    let end = skip_padding(cursor - 1);
+    let limit = end.saturating_sub(KEY_LOOKBEHIND);
+    let mut start = end;
+    while start > limit && Charset::Word.contains(bytes[start - 1]) {
+        start -= 1;
+    }
+
+    let key: String = bytes[start..end]
+        .iter()
+        .filter(|byte| byte.is_ascii_alphanumeric())
+        .map(|byte| byte.to_ascii_lowercase() as char)
+        .collect();
+    SECRET_KEY_WORDS.iter().any(|word| key.contains(word))
 }
 
 fn run(bytes: &[u8], from: usize, charset: Charset) -> usize {
@@ -334,6 +381,38 @@ mod tests {
     fn redacts_a_high_entropy_blob() {
         let text = "SESSION=R8kQz2vXpL7mNc4JwYbTfH1sAe6UgD3iKo9BrVtZxS0";
         assert_eq!(redact(text), format!("SESSION={REDACTED}"));
+    }
+
+    #[test]
+    fn leaves_an_unassigned_high_entropy_run_alone() {
+        for text in [
+            "\"integrity\": \"sha512-cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca\"",
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk",
+            "target/debug/deps/confinement_tests-28f61f4f60f8bfde",
+            "/Users/dev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/axum-0.8.9",
+        ] {
+            assert_eq!(redact(text), text, "redaction altered real tool output");
+        }
+    }
+
+    #[test]
+    fn redacts_a_high_entropy_run_assigned_to_a_credential_key() {
+        for (text, expected) in [
+            (
+                "JWT_SECRET=R8kQz2vXpL7mNc4JwYbTfH1sAe6UgD3iKo9BrVtZxS0",
+                format!("JWT_SECRET={REDACTED}"),
+            ),
+            (
+                "\"api_key\": \"R8kQz2vXpL7mNc4JwYbTfH1sAe6UgD3iKo9BrVtZxS0\"",
+                format!("\"api_key\": \"{REDACTED}\""),
+            ),
+            (
+                "POSTGRES_PASSWORD=R8kQz2vXpL7mNc4JwYbTfH1sAe6UgD3iKo9BrVtZxS0",
+                format!("POSTGRES_PASSWORD={REDACTED}"),
+            ),
+        ] {
+            assert_eq!(redact(text), expected);
+        }
     }
 
     #[test]
