@@ -101,6 +101,11 @@ async fn video_wait_releases_ownership_before_media_capacity_returns() {
     lost_media_wait("video").await;
 }
 
+#[tokio::test]
+async fn audio_wait_releases_ownership_before_media_capacity_returns() {
+    lost_media_wait("audio").await;
+}
+
 async fn status(socket: &mut Socket, expected: &str) {
     loop {
         let frame = next(socket).await;
@@ -185,7 +190,7 @@ async fn lost_media_wait(lane: &str) {
         waiter.store().release(&replacement).await.unwrap();
         send(
             &mut waiting,
-            json!({"type":"send","content":"Please continue with text", "metadata":{"image_generation":false,"video_generation":false}}),
+            json!({"type":"send","content":"Please continue with text", "metadata":{"image_generation":false,"video_generation":false,"audio_generation":false}}),
         )
         .await;
         Some(tokio::time::timeout(Duration::from_secs(3), finish(&mut waiting)).await)

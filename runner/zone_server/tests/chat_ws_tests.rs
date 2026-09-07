@@ -1344,6 +1344,132 @@ async fn test_video_request_routes_directly_and_serves_protected_artifact() {
 }
 
 #[tokio::test]
+async fn test_audio_request_routes_directly_and_serves_protected_artifact() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .and(wiremock::matchers::body_string_contains(
+            "custom-audio.safetensors",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "ace-1"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/ace-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ace-1": {
+                "status": {"status_str": "success"},
+                "outputs": {"10": {"audio": [{
+                    "filename": "zone.flac", "subfolder": "", "type": "temp"
+                }]}}
+            }
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "audio/flac")
+                .set_body_bytes(b"flac-bytes"),
+        )
+        .expect(1)
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-audio-artifacts-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    config.comfyui.audio_checkpoint = "custom-audio.safetensors".to_string();
+    let addr = spawn_server_with_config(config).await;
+
+    let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "make a background audio track that sounds like shuffling through a forest",
+                "metadata": {"audio_generation": true}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut audio_url = None;
+    let mut assistant_message_id = None;
+    let mut saw_progress = false;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("status") => saw_progress = true,
+            Some("audio") => {
+                audio_url = frame["attachment"]["url"].as_str().map(str::to_string);
+                assert_eq!(frame["attachment"]["mime"], "audio/flac");
+                assert_eq!(frame["attachment"]["name"], "generated-audio-1.flac");
+            }
+            Some("message_end") => {
+                assistant_message_id = frame["message_id"].as_str().map(str::to_string);
+                break;
+            }
+            Some("error") => panic!("unexpected audio generation error: {frame}"),
+            _ => {}
+        }
+    }
+    assert!(saw_progress);
+    let audio_url = audio_url.expect("audio event must contain an artifact URL");
+    let assistant_message_id =
+        assistant_message_id.expect("message_end must contain the persisted message ID");
+    assert!(audio_url.starts_with("/api/artifacts/"));
+    assert!(audio_url.contains(&format!("/{assistant_message_id}/")));
+
+    let artifact = reqwest::Client::new()
+        .get(format!("http://{addr}{audio_url}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(artifact.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        artifact.headers().get("content-type").unwrap(),
+        "audio/flac"
+    );
+    assert_eq!(artifact.bytes().await.unwrap().as_ref(), b"flac-bytes");
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let persisted = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["metadata"]["attachments"][0]["url"] == audio_url)
+        .expect("generated audio metadata must survive reload");
+    assert_eq!(persisted["id"], assistant_message_id);
+    assert_eq!(persisted["content"], "Generated audio.");
+    assert_eq!(
+        persisted["metadata"]["attachments"][0]["mime"],
+        "audio/flac"
+    );
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
 async fn test_attached_image_routes_to_image_to_image() {
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))

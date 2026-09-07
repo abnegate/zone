@@ -44,6 +44,10 @@ pub async fn get(
                 Some("webp") => "image/webp",
                 Some("webm") => "video/webm",
                 Some("mp4") => "video/mp4",
+                Some("flac") => "audio/flac",
+                Some("mp3") => "audio/mpeg",
+                Some("opus") => "audio/opus",
+                Some("wav") => "audio/wav",
                 _ => "image/png",
             };
             Response::builder()
