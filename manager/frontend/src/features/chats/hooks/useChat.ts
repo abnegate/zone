@@ -31,7 +31,7 @@ type ServerMessage =
       content: string;
       metadata?: MessageMetadata | null;
     }
-  | { type: 'message_start'; message_id: string; role: MessageRole }
+  | { type: 'message_start'; message_id: string; role: MessageRole; resumed?: boolean }
   | { type: 'chunk'; content: string; index: number }
   | { type: 'reasoning'; content: string }
   | {
@@ -306,6 +306,27 @@ export function useChat(
     []
   );
 
+  // A turn the server is still running is replayed to a connection that joins
+  // it, so the row may already be on screen with everything saved so far.
+  const startAssistant = useCallback((id: string, role: MessageRole) => {
+    setChat((prev) => {
+      if (!prev || prev.messages.some((message) => message.id === id)) return prev;
+      return {
+        ...prev,
+        messages: [
+          ...prev.messages,
+          {
+            id,
+            chat_id: prev.id,
+            role,
+            content: '',
+            created_at: new Date().toISOString(),
+          },
+        ],
+      };
+    });
+  }, []);
+
   // Tool calls arrive in two frames: one when the agent starts a tool and one
   // when it finishes, so this merges a partial update into the message's trace
   // rather than replacing the record.
@@ -578,18 +599,28 @@ export function useChat(
           case 'status':
             setStatus(payload.message);
             break;
-          case 'message_start':
-            if (completed.has(payload.message_id) || assistantId === payload.message_id) break;
+          case 'message_start': {
+            // A dropped socket settles the turn locally, because from here it
+            // cannot tell a reply that died from one still being written. The
+            // replay says it is still being written, so take it back up.
+            const settled = completed.has(payload.message_id);
+            if (payload.resumed) completed.delete(payload.message_id);
+            else if (settled || assistantId === payload.message_id) break;
             activeGenerationRef.current = true;
             setStreaming(true);
             generationSeen = true;
             contextEpoch.current += 1;
             setStatus(null);
+            setError(null);
             assistantId = payload.message_id;
             assistantContent = '';
             assistantMetadata = undefined;
-            upsertMessage(payload.message_id, payload.role, '');
+            // Replayed frames rebuild the reply from the start of the turn, so
+            // only a locally settled row needs its stopped placeholder cleared.
+            if (settled) upsertMessage(payload.message_id, payload.role, '');
+            else startAssistant(payload.message_id, payload.role);
             break;
+          }
           case 'chunk':
             if (assistantId) {
               assistantContent += payload.content;
@@ -797,6 +828,7 @@ export function useChat(
   }, [
     chatId,
     upsertMessage,
+    startAssistant,
     applySavedUserMessage,
     patchToolCall,
     appendCitations,

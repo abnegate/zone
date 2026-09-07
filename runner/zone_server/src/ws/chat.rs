@@ -23,7 +23,7 @@ use futures::{SinkExt, Stream, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
@@ -91,6 +91,12 @@ const STATUS_CONNECTED: &str = "connected";
 /// Global connection limiter per chat
 static CHAT_CONNECTIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
 
+/// Live frames per chat, kept while a connection or a generation holds one.
+static CHAT_STREAMS: Lazy<DashMap<Uuid, Weak<ChatStream>>> = Lazy::new(DashMap::new);
+
+/// Frames a connection may fall behind by before it re-joins the stream.
+const CHAT_STREAM_CAPACITY: usize = 256;
+
 /// Global cancellation broadcaster per (chat_id, message_id)
 /// Using composite key prevents race conditions when multiple streams run concurrently
 static CHAT_CANCELLATIONS: Lazy<DashMap<(Uuid, Uuid), broadcast::Sender<()>>> =
@@ -117,10 +123,9 @@ fn format_retrieved_line(kind: &str, title: &str, uri: &str, text: &str) -> Stri
 }
 
 async fn emit_chunk(
-    sender: &SharedSender,
+    stream: &ChatStream,
     full_content: &mut String,
     chunk_index: &mut u32,
-    client_gone: &mut bool,
     content: String,
     response_truncated: &mut bool,
 ) -> bool {
@@ -136,9 +141,7 @@ async fn emit_chunk(
         content,
         index: *chunk_index,
     };
-    if !*client_gone && !send_server(sender, chunk_msg).await {
-        *client_gone = true;
-    }
+    publish(stream, chunk_msg).await;
     *chunk_index += 1;
     true
 }
@@ -190,6 +193,116 @@ async fn send_server(sender: &SharedSender, message: ServerMessage) -> bool {
         .is_ok()
 }
 
+/// Frames already published for the turn in flight.
+///
+/// A turn belongs to the chat rather than to the socket that started it, so a
+/// connection that arrives while one is running replays this log and picks the
+/// reply up where it left off.
+#[derive(Default)]
+struct LiveTurn {
+    frames: Vec<ServerMessage>,
+}
+
+impl LiveTurn {
+    fn record(&mut self, message: &ServerMessage) {
+        match message {
+            ServerMessage::MessageStart { .. } => {
+                self.frames.clear();
+                self.frames.push(message.clone());
+            }
+            ServerMessage::MessageEnd { .. }
+            | ServerMessage::Cancelled { .. }
+            | ServerMessage::Error { .. } => self.frames.clear(),
+            // Anything outside a turn is already in the chat a joining client loads.
+            _ if self.frames.is_empty() => {}
+            // Text arrives a token at a time, so keeping a frame each would
+            // make the log as long as the reply.
+            ServerMessage::Chunk { content, .. } => match self.frames.last_mut() {
+                Some(ServerMessage::Chunk {
+                    content: earlier, ..
+                }) => earlier.push_str(content),
+                _ => self.frames.push(message.clone()),
+            },
+            ServerMessage::Reasoning { content } => match self.frames.last_mut() {
+                Some(ServerMessage::Reasoning { content: earlier }) => earlier.push_str(content),
+                _ => self.frames.push(message.clone()),
+            },
+            _ => self.frames.push(message.clone()),
+        }
+    }
+
+    fn replay(&self) -> Vec<ServerMessage> {
+        self.frames
+            .iter()
+            .map(|frame| match frame {
+                ServerMessage::MessageStart {
+                    message_id, role, ..
+                } => ServerMessage::MessageStart {
+                    message_id: *message_id,
+                    role: role.clone(),
+                    resumed: true,
+                },
+                frame => frame.clone(),
+            })
+            .collect()
+    }
+}
+
+/// The frames of one chat, shared by every connection to it.
+struct ChatStream {
+    chat_id: Uuid,
+    events: broadcast::Sender<ServerMessage>,
+    live: Mutex<LiveTurn>,
+}
+
+impl ChatStream {
+    fn of(chat_id: Uuid) -> Arc<Self> {
+        let mut entry = CHAT_STREAMS.entry(chat_id).or_default();
+        if let Some(stream) = entry.upgrade() {
+            return stream;
+        }
+        let stream = Arc::new(Self {
+            chat_id,
+            events: broadcast::channel(CHAT_STREAM_CAPACITY).0,
+            live: Mutex::new(LiveTurn::default()),
+        });
+        *entry = Arc::downgrade(&stream);
+        stream
+    }
+
+    /// Replay the turn in flight and subscribe under one lock, so a joining
+    /// connection can neither miss a frame published between the two nor see
+    /// one twice.
+    async fn join(&self) -> (Vec<ServerMessage>, broadcast::Receiver<ServerMessage>) {
+        let live = self.live.lock().await;
+        (live.replay(), self.events.subscribe())
+    }
+}
+
+impl Drop for ChatStream {
+    fn drop(&mut self) {
+        CHAT_STREAMS.remove_if(&self.chat_id, |_, stream| stream.strong_count() == 0);
+    }
+}
+
+/// Record and broadcast under one lock, so the log and the subscribers stay in
+/// the same order.
+async fn publish(stream: &ChatStream, message: ServerMessage) {
+    let mut live = stream.live.lock().await;
+    live.record(&message);
+    let _ = stream.events.send(message);
+}
+
+/// Send frames the caller already holds to one connection.
+async fn forward(sender: &SharedSender, frames: Vec<ServerMessage>) -> bool {
+    for frame in frames {
+        if !send_server(sender, frame).await {
+            return false;
+        }
+    }
+    true
+}
+
 /// A request owns its cancellation registration from the moment the socket
 /// accepts it, including time spent waiting or preparing context.
 struct Generation {
@@ -221,9 +334,9 @@ impl Generation {
         )
     }
 
-    async fn cancelled(&self, sender: &SharedSender) {
-        let _ = send_server(
-            sender,
+    async fn cancelled(&self, stream: &ChatStream) {
+        publish(
+            stream,
             ServerMessage::Cancelled {
                 message_id: self.started.then_some(self.message_id),
             },
@@ -293,8 +406,15 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
-    /// Assistant message started
-    MessageStart { message_id: Uuid, role: String },
+    /// Assistant message started. `resumed` marks a replay to a connection
+    /// that joined a turn already in flight, so it revives that message
+    /// instead of starting a second one.
+    MessageStart {
+        message_id: Uuid,
+        role: String,
+        #[serde(skip_serializing_if = "is_not_resumed")]
+        resumed: bool,
+    },
     Context {
         chat_id: Uuid,
         message_id: Option<Uuid>,
@@ -368,6 +488,10 @@ pub enum ServerMessage {
     Error { message: String },
     /// Non-fatal progress (e.g. web search in progress)
     Status { message: String },
+}
+
+fn is_not_resumed(resumed: &bool) -> bool {
+    !*resumed
 }
 
 fn saved_action(value: &serde_json::Value) -> Option<ServerMessage> {
@@ -779,6 +903,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     let mut titles = crate::workers::titles::subscribe();
     let mut actions = crate::db::actions::subscribe();
 
+    // Catch this connection up on the turn in flight before it sees any new
+    // frame, so a reload or a dropped socket rejoins the reply mid-sentence.
+    let stream = ChatStream::of(chat_id);
+    let (resume, mut events) = stream.join().await;
+    if !forward(&sender, resume).await {
+        return;
+    }
+
     // Setup state for message loop
     let mut auth_check_counter = 0;
     let mut consecutive_errors = 0;
@@ -803,6 +935,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                     {
                         break;
                     }
+                }
+            }
+            frame = events.recv() => {
+                match frame {
+                    Ok(frame) => {
+                        if !send_server(&sender, frame).await {
+                            break;
+                        }
+                    }
+                    // Too far behind to apply the frames it missed, so take
+                    // the turn from the top instead of rendering a gap.
+                    Err(broadcast::error::RecvError::Lagged(frames)) => {
+                        tracing::warn!(%chat_id, frames, "Chat connection fell behind, replaying");
+                        let (resume, receiver) = stream.join().await;
+                        events = receiver;
+                        if !forward(&sender, resume).await {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             update = titles.recv() => {
@@ -848,13 +1000,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
 
                                 // Handle the send message
                                 let task_state = state.clone();
-                                let task_sender = sender.clone();
+                                let task_stream = stream.clone();
                                 let task_content = content;
                                 let generation = Generation::new(chat_id);
                                 tokio::spawn(async move {
                                     handle_send_message(
                                         &task_state,
-                                        &task_sender,
+                                        &task_stream,
                                         chat_id,
                                         workspace_id,
                                         user_id,
@@ -1046,7 +1198,7 @@ async fn watch_lease(
 async fn wait_media(
     generation: &mut Generation,
     session: &mut Session,
-    sender: &SharedSender,
+    stream: &ChatStream,
 ) -> Result<Option<tokio::sync::SemaphorePermit<'static>>, Box<dyn std::error::Error + Send + Sync>>
 {
     tokio::select! {
@@ -1055,8 +1207,8 @@ async fn wait_media(
         error = watch_lease(&session.store, &session.lease) => Err(error.into()),
         _ = generation.cancel.recv() => {
             session.close().await?;
-            let _ = send_server(
-                sender,
+            publish(
+                stream,
                 ServerMessage::Cancelled {
                     message_id: Some(generation.message_id),
                 },
@@ -1072,7 +1224,7 @@ async fn wait_media(
 
 async fn handle_image_generation(
     state: &AppState,
-    sender: &SharedSender,
+    stream: &Arc<ChatStream>,
     chat_id: Uuid,
     workspace_id: Uuid,
     prompt: &str,
@@ -1093,8 +1245,8 @@ async fn handle_image_generation(
         Ok(client) => client,
         Err(error) => {
             session.close().await?;
-            let _ = send_server(
-                sender,
+            publish(
+                stream,
                 ServerMessage::Error {
                     message: format!("Image generation is not configured: {error}"),
                 },
@@ -1111,8 +1263,8 @@ async fn handle_image_generation(
             Ok(source) => source,
             Err(error) => {
                 session.close().await?;
-                let _ = send_server(
-                    sender,
+                publish(
+                    stream,
                     ServerMessage::Error {
                         message: format!("Image generation failed: {error}"),
                     },
@@ -1121,8 +1273,8 @@ async fn handle_image_generation(
                 return Ok(());
             }
         };
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::Status {
             message: if source.is_some() {
                 "Preparing image-to-image...".to_string()
@@ -1143,17 +1295,15 @@ async fn handle_image_generation(
     } else {
         prompt.to_string()
     };
-    let Some(_generation_permit) = wait_media(generation, session, sender).await? else {
+    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
         return Ok(());
     };
 
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = sender.clone();
+    let progress_sender = stream.clone();
     let progress_task = tokio::spawn(async move {
         while let Some(message) = progress_rx.recv().await {
-            if !send_server(&progress_sender, ServerMessage::Status { message }).await {
-                break;
-            }
+            publish(&progress_sender, ServerMessage::Status { message }).await;
         }
     });
 
@@ -1177,7 +1327,7 @@ async fn handle_image_generation(
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
-        generation.cancelled(sender).await;
+        generation.cancelled(stream).await;
         return Ok(());
     }
 
@@ -1185,8 +1335,8 @@ async fn handle_image_generation(
         Ok(images) => images,
         Err(ComfyUiError::Cancelled) => {
             session.close().await?;
-            let _ = send_server(
-                sender,
+            publish(
+                stream,
                 ServerMessage::Cancelled {
                     message_id: generation.started.then_some(assistant_message_id),
                 },
@@ -1203,7 +1353,7 @@ async fn handle_image_generation(
                 _ => format!("Image generation failed: {error}"),
             };
             session.close().await?;
-            let _ = send_server(sender, ServerMessage::Error { message }).await;
+            publish(stream, ServerMessage::Error { message }).await;
             return Ok(());
         }
     };
@@ -1236,8 +1386,8 @@ async fn handle_image_generation(
                     .cleanup_owner(workspace_id, chat_id, assistant_message_id)
                     .await;
                 session.close().await?;
-                let _ = send_server(
-                    sender,
+                publish(
+                    stream,
                     ServerMessage::Error {
                         message: "Image generation failed: could not store the image".to_string(),
                     },
@@ -1252,8 +1402,8 @@ async fn handle_image_generation(
     }
     if attachments.is_empty() {
         session.close().await?;
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: "Image generation completed without a usable image".to_string(),
             },
@@ -1283,8 +1433,8 @@ async fn handle_image_generation(
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
             .await;
         session.close().await?;
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: "Image generation failed: could not save the message".to_string(),
             },
@@ -1292,17 +1442,18 @@ async fn handle_image_generation(
         .await;
         return Ok(());
     }
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::MessageStart {
             message_id: assistant_message_id,
             role: "assistant".to_string(),
+            resumed: false,
         },
     )
     .await;
     for attachment in &attachments {
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Image {
                 message_id: assistant_message_id,
                 attachment: attachment.clone(),
@@ -1311,8 +1462,8 @@ async fn handle_image_generation(
         .await;
     }
     session.close().await?;
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::MessageEnd {
             message_id: assistant_message_id,
             content: content.to_string(),
@@ -1326,7 +1477,7 @@ async fn handle_image_generation(
 
 async fn handle_video_generation(
     state: &AppState,
-    sender: &SharedSender,
+    stream: &Arc<ChatStream>,
     chat_id: Uuid,
     workspace_id: Uuid,
     prompt: &str,
@@ -1347,8 +1498,8 @@ async fn handle_video_generation(
         Ok(client) => client,
         Err(error) => {
             session.close().await?;
-            let _ = send_server(
-                sender,
+            publish(
+                stream,
                 ServerMessage::Error {
                     message: format!("Video generation is not configured: {error}"),
                 },
@@ -1365,8 +1516,8 @@ async fn handle_video_generation(
             Ok(source) => source,
             Err(error) => {
                 session.close().await?;
-                let _ = send_server(
-                    sender,
+                publish(
+                    stream,
                     ServerMessage::Error {
                         message: format!("Video generation failed: {error}"),
                     },
@@ -1375,8 +1526,8 @@ async fn handle_video_generation(
                 return Ok(());
             }
         };
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::Status {
             message: if source.is_some() {
                 "Preparing image-to-video...".to_string()
@@ -1386,16 +1537,14 @@ async fn handle_video_generation(
         },
     )
     .await;
-    let Some(_generation_permit) = wait_media(generation, session, sender).await? else {
+    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
         return Ok(());
     };
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = sender.clone();
+    let progress_sender = stream.clone();
     let progress_task = tokio::spawn(async move {
         while let Some(message) = progress_rx.recv().await {
-            if !send_server(&progress_sender, ServerMessage::Status { message }).await {
-                break;
-            }
+            publish(&progress_sender, ServerMessage::Status { message }).await;
         }
     });
 
@@ -1414,7 +1563,7 @@ async fn handle_video_generation(
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
-        generation.cancelled(sender).await;
+        generation.cancelled(stream).await;
         return Ok(());
     }
 
@@ -1422,8 +1571,8 @@ async fn handle_video_generation(
         Ok(videos) => videos,
         Err(ComfyUiError::Cancelled) => {
             session.close().await?;
-            let _ = send_server(
-                sender,
+            publish(
+                stream,
                 ServerMessage::Cancelled {
                     message_id: generation.started.then_some(assistant_message_id),
                 },
@@ -1440,7 +1589,7 @@ async fn handle_video_generation(
                 _ => format!("Video generation failed: {error}"),
             };
             session.close().await?;
-            let _ = send_server(sender, ServerMessage::Error { message }).await;
+            publish(stream, ServerMessage::Error { message }).await;
             return Ok(());
         }
     };
@@ -1472,8 +1621,8 @@ async fn handle_video_generation(
                     .cleanup_owner(workspace_id, chat_id, assistant_message_id)
                     .await;
                 session.close().await?;
-                let _ = send_server(
-                    sender,
+                publish(
+                    stream,
                     ServerMessage::Error {
                         message: "Video generation failed: could not store the video".to_string(),
                     },
@@ -1488,8 +1637,8 @@ async fn handle_video_generation(
     }
     if attachments.is_empty() {
         session.close().await?;
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: "Video generation completed without a usable video".to_string(),
             },
@@ -1519,8 +1668,8 @@ async fn handle_video_generation(
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
             .await;
         session.close().await?;
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: "Video generation failed: could not save the message".to_string(),
             },
@@ -1528,17 +1677,18 @@ async fn handle_video_generation(
         .await;
         return Ok(());
     }
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::MessageStart {
             message_id: assistant_message_id,
             role: "assistant".to_string(),
+            resumed: false,
         },
     )
     .await;
     for attachment in &attachments {
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Video {
                 message_id: assistant_message_id,
                 attachment: attachment.clone(),
@@ -1547,8 +1697,8 @@ async fn handle_video_generation(
         .await;
     }
     session.close().await?;
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::MessageEnd {
             message_id: assistant_message_id,
             content: content.to_string(),
@@ -1561,7 +1711,7 @@ async fn handle_video_generation(
 }
 
 async fn handle_audio_generation(
-    sender: &SharedSender,
+    stream: &Arc<ChatStream>,
     chat_id: Uuid,
     workspace_id: Uuid,
     prompt: &str,
@@ -1581,8 +1731,8 @@ async fn handle_audio_generation(
         Ok(client) => client,
         Err(error) => {
             session.close().await?;
-            let _ = send_server(
-                sender,
+            publish(
+                stream,
                 ServerMessage::Error {
                     message: format!("Audio generation is not configured: {error}"),
                 },
@@ -1592,23 +1742,21 @@ async fn handle_audio_generation(
         }
     };
     let store = ArtifactStore::new(audio_config.artifact_root.clone());
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::Status {
             message: "Preparing audio generation...".to_string(),
         },
     )
     .await;
-    let Some(_generation_permit) = wait_media(generation, session, sender).await? else {
+    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
         return Ok(());
     };
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let progress_sender = sender.clone();
+    let progress_sender = stream.clone();
     let progress_task = tokio::spawn(async move {
         while let Some(message) = progress_rx.recv().await {
-            if !send_server(&progress_sender, ServerMessage::Status { message }).await {
-                break;
-            }
+            publish(&progress_sender, ServerMessage::Status { message }).await;
         }
     });
 
@@ -1625,7 +1773,7 @@ async fn handle_audio_generation(
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
-        generation.cancelled(sender).await;
+        generation.cancelled(stream).await;
         return Ok(());
     }
 
@@ -1633,8 +1781,8 @@ async fn handle_audio_generation(
         Ok(clips) => clips,
         Err(ComfyUiError::Cancelled) => {
             session.close().await?;
-            let _ = send_server(
-                sender,
+            publish(
+                stream,
                 ServerMessage::Cancelled {
                     message_id: generation.started.then_some(assistant_message_id),
                 },
@@ -1651,7 +1799,7 @@ async fn handle_audio_generation(
                 _ => format!("Audio generation failed: {error}"),
             };
             session.close().await?;
-            let _ = send_server(sender, ServerMessage::Error { message }).await;
+            publish(stream, ServerMessage::Error { message }).await;
             return Ok(());
         }
     };
@@ -1685,8 +1833,8 @@ async fn handle_audio_generation(
                     .cleanup_owner(workspace_id, chat_id, assistant_message_id)
                     .await;
                 session.close().await?;
-                let _ = send_server(
-                    sender,
+                publish(
+                    stream,
                     ServerMessage::Error {
                         message: "Audio generation failed: could not store the audio".to_string(),
                     },
@@ -1701,8 +1849,8 @@ async fn handle_audio_generation(
     }
     if attachments.is_empty() {
         session.close().await?;
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: "Audio generation completed without a usable clip".to_string(),
             },
@@ -1732,8 +1880,8 @@ async fn handle_audio_generation(
             .cleanup_owner(workspace_id, chat_id, assistant_message_id)
             .await;
         session.close().await?;
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: "Audio generation failed: could not save the message".to_string(),
             },
@@ -1741,17 +1889,18 @@ async fn handle_audio_generation(
         .await;
         return Ok(());
     }
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::MessageStart {
             message_id: assistant_message_id,
             role: "assistant".to_string(),
+            resumed: false,
         },
     )
     .await;
     for attachment in &attachments {
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Audio {
                 message_id: assistant_message_id,
                 attachment: attachment.clone(),
@@ -1760,8 +1909,8 @@ async fn handle_audio_generation(
         .await;
     }
     session.close().await?;
-    let _ = send_server(
-        sender,
+    publish(
+        stream,
         ServerMessage::MessageEnd {
             message_id: assistant_message_id,
             content: content.to_string(),
@@ -1779,7 +1928,7 @@ async fn handle_audio_generation(
 /// This is intentionally stricter than context.rs which only requires membership.
 async fn handle_send_message(
     state: &AppState,
-    sender: &SharedSender,
+    stream: &Arc<ChatStream>,
     chat_id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
@@ -1794,7 +1943,7 @@ async fn handle_send_message(
     let _permit = tokio::select! {
         biased;
         _ = request.cancel.recv() => {
-            request.cancelled(sender).await;
+            request.cancelled(stream).await;
             return;
         }
         permit = generation.acquire() => permit.expect("chat semaphore is never closed"),
@@ -1804,8 +1953,8 @@ async fn handle_send_message(
         .await
         .unwrap_or(false)
     {
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: "Workspace access denied".to_string(),
             },
@@ -1817,8 +1966,8 @@ async fn handle_send_message(
     {
         Ok(session) => session,
         Err(error) => {
-            let _ = send_server(
-                sender,
+            publish(
+                stream,
                 ServerMessage::Error {
                     message: error.to_string(),
                 },
@@ -1829,8 +1978,8 @@ async fn handle_send_message(
     };
     if generation_deadline(state.config().chat.timeout).is_err() {
         let _ = session.close().await;
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: "Chat generation deadline is not representable".into(),
             },
@@ -1841,10 +1990,10 @@ async fn handle_send_message(
     crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
     let preparation = tokio::select! {
         biased;
-        _ = session.guard.lost() => { let _=session.close().await; let _=send_server(sender,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
+        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:"Chat generation ownership was lost".into()}).await; return; }
         _ = request.cancel.recv() => {
             let _=session.close().await;
-                        request.cancelled(sender).await;
+                        request.cancelled(stream).await;
             return;
         }
         result = prepare_message(state, chat_id, workspace_id, content, metadata.as_ref()) => result,
@@ -1853,7 +2002,7 @@ async fn handle_send_message(
         let routing = preparation?;
         if request.is_cancelled() {
             let _=session.close().await;
-                        request.cancelled(sender).await;
+                        request.cancelled(stream).await;
             return Ok(());
         }
         let web_search_requested = state.config().web_search.requested_for(content, metadata.as_ref());
@@ -1864,18 +2013,18 @@ async fn handle_send_message(
         let user_message=session.store.begin(&session.lease,session.turn,Uuid::new_v4(),content,metadata.clone(),ReplayMessage::from(&message)).await?;
         crate::workers::titles::spawn(state.clone(),&user_message);
         spawn_message_embedding_task(state.clone(),user_message.id,chat_id,content.to_string());
-        let _=send_server(sender,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
+        publish(stream,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
 
         if request.is_cancelled() {
             let _=session.close().await;
-                        request.cancelled(sender).await;
+                        request.cancelled(stream).await;
             return Ok(());
         }
         match routing {
             Routing::Image(config) => {
                 handle_image_generation(
                     state,
-                    sender,
+                    stream,
                     chat_id,
                     workspace_id,
                     content,
@@ -1889,7 +2038,7 @@ async fn handle_send_message(
             Routing::Video(config) => {
                 handle_video_generation(
                     state,
-                    sender,
+                    stream,
                     chat_id,
                     workspace_id,
                     content,
@@ -1902,7 +2051,7 @@ async fn handle_send_message(
             }
             Routing::Audio(config) => {
                 handle_audio_generation(
-                    sender,
+                    stream,
                     chat_id,
                     workspace_id,
                     content,
@@ -1917,13 +2066,13 @@ async fn handle_send_message(
                     biased;
                     _ = request.cancel.recv() => {
                         let _=session.close().await;
-                        request.cancelled(sender).await;
+                        request.cancelled(stream).await;
                         return Ok(());
                     }
                     _ = session.guard.lost() => { return Err("Chat generation ownership was lost".into()); }
-                    result = prepare_chat(state, sender, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, web_search_requested) => result?,
+                    result = prepare_chat(state, stream, chat_id, workspace_id, user_id, content, metadata.as_ref(), chat, web_search_requested) => result?,
                 };
-                handle_chat_generation(state, sender, chat_id, preparation, &mut request, &mut session).await
+                handle_chat_generation(state, stream, chat_id, preparation, &mut request, &mut session).await
             }
         }
     }.await;
@@ -1932,8 +2081,8 @@ async fn handle_send_message(
     }
     if let Err(error) = result {
         tracing::error!("Error handling send message: {error}");
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Error {
                 message: error.to_string(),
             },
@@ -2000,8 +2149,8 @@ async fn prepare_message(
     Ok(match intent {
         crate::services::image_intent::GenerationIntent::Video => Routing::Video(image_config),
         crate::services::image_intent::GenerationIntent::Image => Routing::Image(image_config),
-        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
         crate::services::image_intent::GenerationIntent::Audio => Routing::Audio(image_config),
+        crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
     })
 }
 
@@ -2036,7 +2185,7 @@ async fn load_web_search(
 
 async fn prepare_chat(
     state: &AppState,
-    sender: &SharedSender,
+    stream: &ChatStream,
     chat_id: Uuid,
     workspace_id: Uuid,
     user_id: Uuid,
@@ -2074,8 +2223,8 @@ async fn prepare_chat(
         chat.agent_enabled,
     );
     if web_search_requested && !sanitize_query(content).is_empty() {
-        let _ = send_server(
-            sender,
+        publish(
+            stream,
             ServerMessage::Status {
                 message: "Searching the web...".into(),
             },
@@ -2229,7 +2378,7 @@ fn chat_system_prompt(
 
 async fn handle_chat_generation(
     state: &AppState,
-    sender: &SharedSender,
+    stream: &ChatStream,
     chat_id: Uuid,
     preparation: ChatPreparation,
     generation: &mut Generation,
@@ -2254,17 +2403,19 @@ async fn handle_chat_generation(
     let stream_deadline = generation_deadline(timeout)?;
     if generation.cancel.try_recv().is_ok() {
         session.close().await?;
-        generation.cancelled(sender).await;
+        generation.cancelled(stream).await;
         return Ok(());
     }
 
-    let start_msg = ServerMessage::MessageStart {
-        message_id: assistant_message_id,
-        role: "assistant".to_string(),
-    };
-    if !send_server(sender, start_msg).await {
-        return Ok(());
-    }
+    publish(
+        stream,
+        ServerMessage::MessageStart {
+            message_id: assistant_message_id,
+            role: "assistant".to_string(),
+            resumed: false,
+        },
+    )
+    .await;
     generation.started = true;
 
     let mut events: Pin<Box<dyn Stream<Item = AgentEvent> + Send>> =
@@ -2290,7 +2441,6 @@ async fn handle_chat_generation(
     let mut generated_images = Vec::new();
     let mut chunk_index = 0;
     let mut cancelled = false;
-    let mut client_gone = false;
     let mut failure = None;
     let mut blocked = None;
     let mut response_truncated = false;
@@ -2300,10 +2450,6 @@ async fn handle_chat_generation(
     let mut last_snapshot: Option<Instant> = None;
 
     loop {
-        if client_gone {
-            cancelled = true;
-            break;
-        }
         tokio::select! {
             biased;
             _ = session.guard.lost() => { failure=Some("Chat generation ownership was lost".into()); break; }
@@ -2331,7 +2477,7 @@ async fn handle_chat_generation(
                             let leftover=token_filter.finish();
                             if !leftover.is_empty() {
                                 pending_content.push_str(&leftover);
-                                let _=emit_chunk(sender,&mut full_content,&mut chunk_index,&mut client_gone,leftover,&mut response_truncated).await;
+                                let _=emit_chunk(stream,&mut full_content,&mut chunk_index,leftover,&mut response_truncated).await;
                                 persist = true;
                             }
                         }
@@ -2352,17 +2498,13 @@ async fn handle_chat_generation(
                     Some(AgentEvent::Context(usage)) => {
                         if usage.status==zone_core::context::ContextStatus::Blocked { blocked=Some(usage.clone()); }
                         if let Err(error)=session.store.assert_current(&session.lease).await {failure=Some(error.to_string());break;}
-                        if !send_server(sender,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await {client_gone=true;}
+                        publish(stream,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await;
                     }
                     Some(AgentEvent::Usage(usage)) => {tracing::debug!(prompt_tokens=usage.prompt_tokens,completion_tokens=usage.completion_tokens,"Observed provider usage");}
-                    Some(AgentEvent::Finalizing(message)) => { if !send_server(sender,ServerMessage::Status {message}).await {client_gone=true;} }
+                    Some(AgentEvent::Finalizing(message)) => { publish(stream,ServerMessage::Status {message}).await; }
                     Some(AgentEvent::Reasoning(content)) => {
                         round_reasoning.push_str(&content);
-                        if !client_gone
-                            && !send_server(sender, ServerMessage::Reasoning { content }).await
-                        {
-                            client_gone = true;
-                        }
+                        publish(stream, ServerMessage::Reasoning { content }).await;
                         persist = true;
                     }
                     Some(AgentEvent::Chunk(content)) => {
@@ -2373,10 +2515,9 @@ async fn handle_chat_generation(
                                 pending_content.push_str(&text);
                                 if !text.is_empty() {
                                     let _ = emit_chunk(
-                                        sender,
+                                        stream,
                                         &mut full_content,
                                         &mut chunk_index,
-                                        &mut client_gone,
                                         text,
                                         &mut response_truncated,
                                     )
@@ -2390,10 +2531,9 @@ async fn handle_chat_generation(
                         if !stop_stream {
                             pending_content.push_str(&filtered);
                             if !emit_chunk(
-                                sender,
+                                stream,
                                 &mut full_content,
                                 &mut chunk_index,
-                                &mut client_gone,
                                 filtered,
                                 &mut response_truncated,
                             )
@@ -2416,9 +2556,7 @@ async fn handle_chat_generation(
                             name,
                             arguments,
                         };
-                        if !client_gone && !send_server(sender, tool_msg).await {
-                            client_gone = true;
-                        }
+                        publish(stream, tool_msg).await;
                         persist_now = true;
                     }
                     Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
@@ -2445,9 +2583,7 @@ async fn handle_chat_generation(
                             arguments,
                             reasoning,
                         };
-                        if !client_gone && !send_server(sender, tool_msg).await {
-                            client_gone = true;
-                        }
+                        publish(stream, tool_msg).await;
                         persist_now = true;
                     }
                     Some(AgentEvent::Image(url)) => {
@@ -2487,9 +2623,7 @@ async fn handle_chat_generation(
                             }
                         };
                         generated_images.push(attachment);
-                        if !client_gone && !send_server(sender, media_msg).await {
-                            client_gone = true;
-                        }
+                        publish(stream, media_msg).await;
                         persist_now = true;
                     }
                     Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt }) => {
@@ -2509,18 +2643,14 @@ async fn handle_chat_generation(
                             duration_ms,
                             citations: observed,
                         };
-                        if !client_gone && !send_server(sender, tool_msg).await {
-                            client_gone = true;
-                        }
+                        publish(stream, tool_msg).await;
                         if let Some(receipt) = receipt {
                             let receipt_msg = ServerMessage::ActionReceipt {
                                 message_id: assistant_message_id,
                                 receipt: receipt.clone(),
                             };
                             action_receipts.push(receipt);
-                            if !client_gone && !send_server(sender, receipt_msg).await {
-                                client_gone = true;
-                            }
+                            publish(stream, receipt_msg).await;
                         }
                         persist_now = true;
                     }
@@ -2575,10 +2705,9 @@ async fn handle_chat_generation(
     if !leftover.is_empty() {
         pending_content.push_str(&leftover);
         let _ = emit_chunk(
-            sender,
+            stream,
             &mut full_content,
             &mut chunk_index,
-            &mut client_gone,
             leftover,
             &mut response_truncated,
         )
@@ -2598,25 +2727,22 @@ async fn handle_chat_generation(
             .interrupt(&session.lease, session.turn)
             .await?;
         session.close().await?;
-        if !client_gone {
-            let _ = send_server(
-                sender,
-                ServerMessage::Context {
-                    chat_id,
-                    message_id: Some(assistant_message_id),
-                    usage: blocked
-                        .unwrap_or_else(|| replay.usage(model_name, definitions.as_deref())),
-                },
-            )
-            .await;
-            let terminal = match failure {
-                Some(message) => ServerMessage::Error { message },
-                None => ServerMessage::Cancelled {
-                    message_id: Some(assistant_message_id),
-                },
-            };
-            let _ = send_server(sender, terminal).await;
-        }
+        publish(
+            stream,
+            ServerMessage::Context {
+                chat_id,
+                message_id: Some(assistant_message_id),
+                usage: blocked.unwrap_or_else(|| replay.usage(model_name, definitions.as_deref())),
+            },
+        )
+        .await;
+        let terminal = match failure {
+            Some(message) => ServerMessage::Error { message },
+            None => ServerMessage::Cancelled {
+                message_id: Some(assistant_message_id),
+            },
+        };
+        publish(stream, terminal).await;
         return Ok(());
     }
 
@@ -2668,38 +2794,35 @@ async fn handle_chat_generation(
         .await
     {
         Ok(msg) => {
-            if !client_gone {
-                let history = session.store.load().await?;
-                replay
-                    .entries
-                    .retain(|entry| entry.message.role == LlmRole::System);
-                replay
-                    .entries
-                    .extend(
-                        history
-                            .entries
-                            .into_iter()
-                            .map(|entry| zone_core::context::Entry {
-                                id: entry.id,
-                                message: entry.message.into_message(),
-                                preserve: false,
-                                consumed: entry.consumed,
-                            }),
-                    );
-                replay.summary = history.summary.map(session::core_summary);
-                replay.search(&SearchContext::new(&state.config().web_search));
-                let usage =
-                    blocked.unwrap_or_else(|| replay.usage(model_name, definitions.as_deref()));
-                let _ = send_server(
-                    sender,
-                    ServerMessage::Context {
-                        chat_id,
-                        message_id: Some(assistant_message_id),
-                        usage,
-                    },
-                )
-                .await;
-            }
+            let history = session.store.load().await?;
+            replay
+                .entries
+                .retain(|entry| entry.message.role == LlmRole::System);
+            replay
+                .entries
+                .extend(
+                    history
+                        .entries
+                        .into_iter()
+                        .map(|entry| zone_core::context::Entry {
+                            id: entry.id,
+                            message: entry.message.into_message(),
+                            preserve: false,
+                            consumed: entry.consumed,
+                        }),
+                );
+            replay.summary = history.summary.map(session::core_summary);
+            replay.search(&SearchContext::new(&state.config().web_search));
+            let usage = blocked.unwrap_or_else(|| replay.usage(model_name, definitions.as_deref()));
+            publish(
+                stream,
+                ServerMessage::Context {
+                    chat_id,
+                    message_id: Some(assistant_message_id),
+                    usage,
+                },
+            )
+            .await;
             session.close().await?;
             // Spawn background task to generate assistant message embedding
             if !full_content.trim().is_empty() {
@@ -2708,21 +2831,19 @@ async fn handle_chat_generation(
 
             // CRITICAL-4: Send message end with the SAME ID we sent in MessageStart
             // The database generates msg.id, but we use assistant_message_id for protocol consistency
-            if !client_gone {
-                let end_msg = if cancelled {
-                    ServerMessage::Cancelled {
-                        message_id: Some(assistant_message_id),
-                    }
-                } else {
-                    ServerMessage::MessageEnd {
-                        message_id: assistant_message_id,
-                        content: full_content.clone(),
-                        metadata: assistant_metadata,
-                        error: failure,
-                    }
-                };
-                let _ = send_server(sender, end_msg).await;
-            }
+            let end_msg = if cancelled {
+                ServerMessage::Cancelled {
+                    message_id: Some(assistant_message_id),
+                }
+            } else {
+                ServerMessage::MessageEnd {
+                    message_id: assistant_message_id,
+                    content: full_content.clone(),
+                    metadata: assistant_metadata,
+                    error: failure,
+                }
+            };
+            publish(stream, end_msg).await;
 
             tracing::debug!(
                 "Assistant message completed: chat_id={}, message_id={}, db_id={}, length={}",
@@ -2741,6 +2862,193 @@ async fn handle_chat_generation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn started(message_id: Uuid) -> ServerMessage {
+        ServerMessage::MessageStart {
+            message_id,
+            role: "assistant".to_string(),
+            resumed: false,
+        }
+    }
+
+    fn chunk(content: &str, index: u32) -> ServerMessage {
+        ServerMessage::Chunk {
+            content: content.to_string(),
+            index,
+        }
+    }
+
+    #[test]
+    fn a_turn_in_flight_replays_as_resumed() {
+        let message_id = Uuid::new_v4();
+        let mut turn = LiveTurn::default();
+        turn.record(&started(message_id));
+        turn.record(&chunk("Reading ", 0));
+
+        let replay = turn.replay();
+        assert!(
+            matches!(
+                replay.first(),
+                Some(ServerMessage::MessageStart { resumed: true, message_id: replayed, .. })
+                    if *replayed == message_id
+            ),
+            "a joining connection revives the message it already has: {replay:?}"
+        );
+    }
+
+    #[test]
+    fn replayed_text_arrives_as_one_frame() {
+        let mut turn = LiveTurn::default();
+        turn.record(&started(Uuid::new_v4()));
+        turn.record(&chunk("Rust ", 0));
+        turn.record(&chunk("is ", 1));
+        turn.record(&chunk("fine", 2));
+
+        let replay = turn.replay();
+        assert_eq!(replay.len(), 2, "one start and one chunk: {replay:?}");
+        assert!(
+            matches!(&replay[1], ServerMessage::Chunk { content, .. } if content == "Rust is fine"),
+            "{replay:?}"
+        );
+    }
+
+    #[test]
+    fn replay_keeps_the_order_tools_ran_in() {
+        let message_id = Uuid::new_v4();
+        let mut turn = LiveTurn::default();
+        turn.record(&started(message_id));
+        turn.record(&ServerMessage::Reasoning {
+            content: "I should look".to_string(),
+        });
+        turn.record(&ServerMessage::ToolCall {
+            message_id,
+            tool_call_id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+            reasoning: None,
+        });
+        turn.record(&chunk("Found it", 0));
+
+        let kinds: Vec<_> = turn
+            .replay()
+            .iter()
+            .map(|frame| {
+                serde_json::to_value(frame).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["message_start", "reasoning", "tool_call", "chunk"],
+            "thinking still sits with the call it preceded"
+        );
+    }
+
+    #[test]
+    fn a_finished_turn_leaves_nothing_to_replay() {
+        let message_id = Uuid::new_v4();
+        let mut turn = LiveTurn::default();
+        turn.record(&started(message_id));
+        turn.record(&chunk("Done", 0));
+        turn.record(&ServerMessage::MessageEnd {
+            message_id,
+            content: "Done".to_string(),
+            metadata: None,
+            error: None,
+        });
+
+        assert!(
+            turn.replay().is_empty(),
+            "the saved message is what a joining connection loads"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_turn_leaves_nothing_to_replay() {
+        let message_id = Uuid::new_v4();
+        let mut turn = LiveTurn::default();
+        turn.record(&started(message_id));
+        turn.record(&chunk("Partly", 0));
+        turn.record(&ServerMessage::Cancelled {
+            message_id: Some(message_id),
+        });
+
+        assert!(turn.replay().is_empty());
+    }
+
+    #[test]
+    fn frames_outside_a_turn_are_not_replayed() {
+        let mut turn = LiveTurn::default();
+        turn.record(&ServerMessage::Status {
+            message: "Searching the web...".to_string(),
+        });
+        turn.record(&ServerMessage::MessageSaved {
+            message_id: Uuid::new_v4(),
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            metadata: None,
+        });
+
+        assert!(
+            turn.replay().is_empty(),
+            "the chat a joining connection loads already has these"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_connection_on_a_chat_sees_the_same_frames() {
+        let stream = ChatStream::of(Uuid::new_v4());
+        let (_, mut first) = stream.join().await;
+        let message_id = Uuid::new_v4();
+        publish(&stream, started(message_id)).await;
+        publish(&stream, chunk("Half ", 0)).await;
+
+        // A second connection arrives mid-turn.
+        let (replay, mut second) = stream.join().await;
+        publish(&stream, chunk("a reply", 1)).await;
+
+        assert_eq!(replay.len(), 2, "{replay:?}");
+        assert!(
+            matches!(&replay[1], ServerMessage::Chunk { content, .. } if content == "Half "),
+            "{replay:?}"
+        );
+        assert!(matches!(
+            second.recv().await,
+            Ok(ServerMessage::Chunk { .. })
+        ));
+        assert!(
+            second.try_recv().is_err(),
+            "the joining connection gets what it missed once, not twice"
+        );
+        assert!(matches!(
+            first.recv().await,
+            Ok(ServerMessage::MessageStart { resumed: false, .. })
+        ));
+        for expected in ["Half ", "a reply"] {
+            match first.recv().await {
+                Ok(ServerMessage::Chunk { content, .. }) => assert_eq!(content, expected),
+                other => panic!("expected a chunk, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chat_stream_lives_as_long_as_someone_holds_it() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        assert!(
+            Arc::ptr_eq(&stream, &ChatStream::of(chat_id)),
+            "a reconnecting client joins the stream the generation is publishing to"
+        );
+
+        drop(stream);
+        assert!(
+            !CHAT_STREAMS.contains_key(&chat_id),
+            "the last holder leaving frees the chat's frames"
+        );
+    }
 
     #[test]
     fn queued_generation_cannot_replace_the_active_approval_gate() {
@@ -2960,10 +3268,26 @@ mod tests {
         let msg = ServerMessage::MessageStart {
             message_id: Uuid::new_v4(),
             role: "assistant".to_string(),
+            resumed: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"message_start\""));
         assert!(json.contains("\"role\":\"assistant\""));
+        assert!(
+            !json.contains("resumed"),
+            "a fresh start stays on the wire it had: {json}"
+        );
+    }
+
+    #[test]
+    fn resumed_start_tells_the_client_to_revive_the_message() {
+        let msg = ServerMessage::MessageStart {
+            message_id: Uuid::new_v4(),
+            role: "assistant".to_string(),
+            resumed: true,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"resumed\":true"), "{json}");
     }
 
     #[test]

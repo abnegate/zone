@@ -473,6 +473,78 @@ test.describe('Chat regressions', () => {
     await page.screenshot({ path: testInfo.outputPath('reconnect.png'), fullPage: true });
   });
 
+  test('a dropped socket rejoins the reply instead of ending it', async ({ page }, testInfo) => {
+    await mockChatRoutes(page, []);
+    await page.reload();
+    await page.click('a[href="/chats"]');
+    await openChat(page);
+
+    socket.setOnSend(async () => {
+      await socket.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
+      await socket.emit({ type: 'chunk', content: 'Half a', index: 0 });
+      await socket.emit({
+        type: 'tool_call',
+        message_id: 'a1',
+        tool_call_id: 'tool',
+        name: 'read_file',
+        arguments: '{}',
+      });
+    });
+
+    await page.fill('.message-form textarea', 'Read something');
+    await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByText('Running…')).toBeVisible();
+
+    await socket.disconnect();
+    await page.waitForFunction(() => {
+      const sockets =
+        (window as Window & { __chatSockets?: Array<{ readyState: number }> }).__chatSockets ?? [];
+      return sockets.some((candidate) => candidate.readyState === 1);
+    });
+
+    // What the server replays to a connection that joins a turn in flight.
+    await socket.emit({
+      type: 'message_start',
+      message_id: 'a1',
+      role: 'assistant',
+      resumed: true,
+    });
+    await socket.emit({ type: 'chunk', content: 'Half a', index: 0 });
+    await socket.emit({
+      type: 'tool_call',
+      message_id: 'a1',
+      tool_call_id: 'tool',
+      name: 'read_file',
+      arguments: '{}',
+    });
+    await expect(page.getByText('Running…')).toBeVisible();
+    await expect(page.getByText('Did not finish')).toHaveCount(0);
+
+    await socket.emit({
+      type: 'tool_result',
+      message_id: 'a1',
+      tool_call_id: 'tool',
+      name: 'read_file',
+      success: true,
+      detail: 'Read 20 lines',
+      duration_ms: 12,
+    });
+    await socket.emit({ type: 'chunk', content: ' reply, finished after the drop.', index: 1 });
+    await socket.emit({
+      type: 'message_end',
+      message_id: 'a1',
+      content: 'Half a reply, finished after the drop.',
+    });
+
+    await expect(page.getByText('Half a reply, finished after the drop.')).toBeVisible();
+    await expect(page.getByText('Read 20 lines')).toBeVisible();
+    await expect(page.getByText('[Stopped before answering]')).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath('resumes-after-drop.png'),
+      fullPage: true,
+    });
+  });
+
   test('a stored partial assistant reply is still visible after reload', async ({ page }, testInfo) => {
     await mockChatRoutes(page, [
       userMessage,

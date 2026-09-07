@@ -257,7 +257,6 @@ describe('Client', () => {
       archived: false,
       agent_enabled: false,
       auto_approve: false,
-      reasoning_effort: 'auto',
     };
 
     const mockMessage = {
@@ -268,6 +267,12 @@ describe('Client', () => {
       created_at: '2024-01-01T00:00:00Z',
     };
 
+    // A chat the server sends without a thinking depth reads back as 'auto'.
+    const parsed = <T extends typeof mockChat>(chat: T) => ({
+      ...chat,
+      reasoning_effort: 'auto',
+    });
+
     it('getChats fetches all chats', async () => {
       const mockChats = { chats: [mockChat] };
       mockFetch.mockResolvedValueOnce({
@@ -277,7 +282,7 @@ describe('Client', () => {
 
       const result = await client.getChats(testWorkspaceId);
 
-      expect(result).toEqual(mockChats.chats);
+      expect(result).toEqual(mockChats.chats.map(parsed));
     });
 
     it('getChats with archived filter', async () => {
@@ -303,7 +308,7 @@ describe('Client', () => {
 
       const result = await client.getChat('1');
 
-      expect(result).toEqual(mockChatWithMessages.chat);
+      expect(result).toEqual(parsed(mockChatWithMessages.chat));
     });
 
     it('createChat creates new chat', async () => {
@@ -315,7 +320,7 @@ describe('Client', () => {
 
       const result = await client.createChat({ model_name: 'llama2' });
 
-      expect(result).toEqual(mockChatWithMessages.chat);
+      expect(result).toEqual(parsed(mockChatWithMessages.chat));
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/chats',
         expect.objectContaining({
