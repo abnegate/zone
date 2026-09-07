@@ -1,13 +1,14 @@
-# ComfyUI, FLUX.1 Schnell, and Wan 2.2 TI2V
+# ComfyUI, FLUX.1 Schnell, Wan 2.2 TI2V, and ACE-Step v1
 
-Zone supports a pinned ComfyUI runtime with FLUX.1 Schnell FP8 for images and
-Wan 2.2 TI2V 5B for text-to-video and image-to-video. The runtime is native on
-Apple Silicon and an optional NVIDIA Compose profile on Linux.
+Zone supports a pinned ComfyUI runtime with FLUX.1 Schnell FP8 for images,
+Wan 2.2 TI2V 5B for text-to-video and image-to-video, and ACE-Step v1 3.5B for
+text-to-audio. The runtime is native on Apple Silicon and an optional NVIDIA
+Compose profile on Linux.
 
 Weights are **not** downloaded during a build or normal startup. Model setup is
 an explicit operation and verifies both the exact byte count and SHA-256 before
-a file is accepted. Image and video weights are separate bundles so operators
-can install only what they need.
+a file is accepted. Image, video, and audio weights are separate bundles so
+operators can install only what they need.
 
 ## Pinned artifacts
 
@@ -32,6 +33,15 @@ can install only what they need.
 - Model license: Apache-2.0
 - Default output: 832×480, 49 frames (~2s at 24 fps), WebM VP9
 
+### ACE-Step v1 3.5B (audio)
+
+- Model repository: `Comfy-Org/ACE-Step_ComfyUI_repackaged`
+- Model revision: `7db52aef8610c6a1574392422e7fd20046a62c11`
+- Checkpoint: `ace_step_v1_3.5b.safetensors` (`7,699,743,341` bytes), installed
+  into `models/checkpoints/`
+- Size: approximately 7.7 GB
+- Model license: Apache-2.0
+
 The machine-readable source of truth is `comfyui/model-manifest.json`.
 Third-party attribution is in `comfyui/NOTICE.md`.
 Python dependencies are fully resolved and hash-verified in the platform
@@ -44,8 +54,8 @@ specific `comfyui/requirements*.lock` files.
 - Apple Silicon (arm64); Intel Macs are not supported by this installer
 - Python 3.11 through 3.13, running as arm64
 - Git / Xcode Command Line Tools
-- At least 25 GB free disk space for the image checkpoint, or about 45 GB if
-  also downloading the video bundle
+- At least 25 GB free disk space for the image checkpoint, about 45 GB with
+  the video bundle, or about 53 GB with the audio checkpoint too
 - 32 GB unified memory recommended; 24 GB may work with memory pressure and
   substantially lower resolutions. Video generation needs the higher figure.
 
@@ -67,12 +77,19 @@ Download the video weights only when ready:
 ./scripts/setup-comfyui-macos.sh --download-video-model
 ```
 
+Download the audio weights only when ready:
+
+```bash
+./scripts/setup-comfyui-macos.sh --download-audio-model
+```
+
 An interrupted download is retained as a `.part` file and resumes on the next
 run. Verify an existing checkpoint without network access:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --verify-model
 ./scripts/setup-comfyui-macos.sh --verify-video-model
+./scripts/setup-comfyui-macos.sh --verify-audio-model
 ```
 
 Start the pinned runtime:
@@ -139,8 +156,8 @@ Use the same overrides for later verification and startup.
 - Current NVIDIA driver compatible with CUDA 13
 - NVIDIA Container Toolkit configured for Docker
 - At least 24 GB VRAM recommended
-- At least 25 GB free Docker volume storage for the image checkpoint, or about
-  45 GB if also downloading the video bundle
+- At least 25 GB free Docker volume storage for the image checkpoint, about
+  45 GB with the video bundle, or about 53 GB with the audio checkpoint too
 
 Set the manager's internal endpoint in `.env`:
 
@@ -162,6 +179,13 @@ Video weights are a separate bundle:
 ```bash
 make setup-comfyui-video-model
 make verify-comfyui-video-model
+```
+
+Audio weights are a separate bundle:
+
+```bash
+make setup-comfyui-audio-model
+make verify-comfyui-audio-model
 ```
 
 If verification reports that an existing final file is invalid, inspect the
@@ -217,8 +241,9 @@ those directories, so a catalog on disk replaces the packaged catalog. To bake
 a new graph into the manager binary (no bind mounts), also add the filename to
 `packaged_workflow` in `runner/zone_server/src/services/comfy_recipe.rs`.
 
-Video (Wan) still uses the graphs in [Video workflow contract](#video-workflow-contract);
-it is not in the image catalog yet.
+Video (Wan) still uses the graphs in [Video workflow contract](#video-workflow-contract)
+and audio (ACE-Step) the graph in [Audio workflow contract](#audio-workflow-contract);
+neither is in the image catalog yet.
 
 ## Workflow contract
 
@@ -294,6 +319,27 @@ Unlike the image workflows, video uses ComfyUI's built-in `SaveWEBM` node,
 which writes WebM VP9 into ComfyUI's **output** folder rather than temp.
 Zone copies that file into the protected artifact store and clears the ComfyUI
 history entry. Chat can force this path with `metadata.video_generation: true`.
+
+## Audio workflow contract
+
+`comfyui/workflows/ace-step-v1-3.5b-api.json` is the text-to-audio API-format
+workflow. It uses only built-in ComfyUI nodes: `CheckpointLoaderSimple`,
+`ModelSamplingSD3`, `LatentOperationTonemapReinhard`,
+`LatentApplyOperationCFG`, `TextEncodeAceStepAudio`, `ConditioningZeroOut`,
+`EmptyAceStepLatentAudio`, `KSampler`, `VAEDecodeAudio`, and `PreviewAudio`.
+Integration code may replace only these inputs:
+
+- the checkpoint filename from trusted server configuration (`model_audio` /
+  `COMFYUI_AUDIO_CHECKPOINT`)
+- the positive prompt text, written to the `tags` input of
+  `TextEncodeAceStepAudio`
+- the seed
+
+Sampler, steps, CFG, tonemap multiplier, clip duration, and the lyrics input
+stay packaged and are never taken from untrusted request data. The output node
+must be `PreviewAudio` so ComfyUI writes into its temporary directory rather
+than its persistent output directory. Zone copies successful output into the
+protected artifact store and clears the ComfyUI history entry.
 
 ## Troubleshooting
 

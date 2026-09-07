@@ -120,15 +120,15 @@ For production, regenerate secrets for security.
 
 ---
 
-## 🎨 ComfyUI Image and Video Generation
+## 🎨 ComfyUI Image, Video, and Audio Generation
 
 See [COMFYUI.md](COMFYUI.md) for model setup, hardware requirements, checksum
 details, and native macOS / bundled NVIDIA instructions.
 
 ### `COMFYUI_ENABLED`
 - **Default**: `false`
-- **Description**: Enables automatic image- and video-intent routing and direct
-  ComfyUI generation
+- **Description**: Enables automatic image-, video-, and audio-intent routing
+  and direct ComfyUI generation
 - **Set to `true`** only after the runtime and verified checkpoint are ready
 
 ### `COMFYUI_BASE_URL`
@@ -188,6 +188,22 @@ details, and native macOS / bundled NVIDIA instructions.
 ### `COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS`
 - **Default**: `600`
 - **Description**: Wall-clock timeout for a single video generation job
+
+### `COMFYUI_AUDIO_WORKFLOW_PATH`
+- **Default**: `/app/comfyui/workflows/ace-step-v1-3.5b-api.json`
+- **Description**: In-container path to the versioned ACE-Step v1 3.5B
+  text-to-audio API workflow. When the file is missing, the manager falls back
+  to the graph compiled into the binary.
+
+### `COMFYUI_AUDIO_CHECKPOINT`
+- **Default**: `ace_step_v1_3.5b.safetensors`
+- **Description**: Fallback ACE-Step checkpoint when org/workspace AI settings
+  do not set `model_audio`. Path separators and traversal are rejected. Chat
+  audio generation uses the effective `model_audio` setting when present.
+
+### `COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS`
+- **Default**: `600` (range 10–3600, clamped)
+- **Description**: Wall-clock timeout for a single audio generation job
 
 ### `COMFYUI_COMMIT`
 - **Default**: `30bdda1ef13a3a34fce2cd2fec633f15d832122a`
@@ -489,10 +505,12 @@ Need to find a specific config? Quick lookup:
 - **Domains**: DOMAIN_HOST_WEBUI
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED
-- **Image and video generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
+- **Image, video, and audio generation**: COMFYUI_ENABLED, COMFYUI_BASE_URL,
   COMFYUI_WORKFLOW_PATH, COMFYUI_CHECKPOINT, COMFYUI_VIDEO_WORKFLOW_PATH,
   COMFYUI_VIDEO_UNET, COMFYUI_VIDEO_CLIP, COMFYUI_VIDEO_VAE,
-  COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS, COMFYUI_COMMIT
+  COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS, COMFYUI_AUDIO_WORKFLOW_PATH,
+  COMFYUI_AUDIO_CHECKPOINT, COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS,
+  COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
 - **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS
