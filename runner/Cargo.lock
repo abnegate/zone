@@ -9645,6 +9645,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
+name = "zone_chat"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+ "wiremock",
+ "zone_core",
+]
+
+[[package]]
 name = "zone_cli"
 version = "0.1.0"
 dependencies = [
@@ -9885,6 +9905,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "wiremock",
+ "zone_chat",
  "zone_comfy",
  "zone_context",
  "zone_core",

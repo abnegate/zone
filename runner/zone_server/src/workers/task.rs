@@ -15,12 +15,10 @@ use zone_core::tools::ToolResult;
 
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget};
 use crate::db::tasks;
-use crate::services::chat::{
-    capacity::Resolver,
-    session::{self, RunContext},
-};
+use crate::services::chat::session::{self, RunContext};
 use crate::state::AppState;
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
+use zone_chat::capacity::Resolver;
 
 // Max concurrent task executions
 const MAX_CONCURRENT_TASKS: usize = 5;

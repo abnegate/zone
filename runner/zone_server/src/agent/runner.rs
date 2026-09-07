@@ -18,12 +18,10 @@ use super::approval::{ApprovalPolicy, requires_approval};
 use super::citations;
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
-use crate::services::chat::{
-    history::{NewEntry, ReplayMessage},
-    session::RunContext,
-};
+use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
 use zone_core::llm::{RequestOptions, Usage};
 

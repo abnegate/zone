@@ -271,7 +271,7 @@ impl Harness {
             .id
     }
 
-    pub async fn history(&self) -> zone_server::services::chat::history::History {
+    pub async fn history(&self) -> zone_chat::history::History {
         self.store().load().await.unwrap()
     }
 
@@ -435,8 +435,8 @@ pub fn pairs(request: &Value) -> usize {
 }
 
 pub async fn seed_evidence(harness: &Harness, count: usize) -> Vec<String> {
+    use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
     use zone_core::llm::{FunctionCall, Message, ToolCall};
-    use zone_server::services::chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
 
     let store = harness.store();
     let lease = store

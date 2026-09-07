@@ -240,7 +240,7 @@ async fn consumed_active_turn_group_compacts_atomically_while_new_result_and_use
             .entries
             .contains(history.latest_user.as_ref().unwrap())
     );
-    zone_server::services::chat::history::validate(&history, checkpoint).unwrap();
+    zone_chat::history::validate(&history, checkpoint).unwrap();
     let previous = checkpoint.clone();
     for _ in 0..12 {
         let response = harness.preview("", None).await;

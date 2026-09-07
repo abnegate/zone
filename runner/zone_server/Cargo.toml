@@ -82,6 +82,7 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
 # Internal
+zone_chat = { path = "../zone_chat" }
 zone_comfy = { path = "../zone_comfy" }
 zone_email = { path = "../zone_email" }
 zone_search = { path = "../zone_search" }
@@ -90,6 +91,7 @@ zone_core = { path = "../zone_core" }
 zone_context = { path = "../zone_context" }
 
 [dev-dependencies]
+zone_chat = { path = "../zone_chat" }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 http-body-util = "=0.1.5"
 tower = { workspace = true, features = ["util"] }

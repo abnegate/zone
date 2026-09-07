@@ -1,25 +1,25 @@
 //! Fenced, transactional conversation persistence. No transaction spans model inference.
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool, Row};
 use std::collections::HashSet;
 use std::time::Duration;
-use thiserror::Error;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 use zone_core::llm::{Message, Role};
 
-use crate::db::chats::MessageRow;
-use crate::services::chat::history::{
-    self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary,
-};
+use zone_chat::history::{self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary};
+use zone_chat::store;
 
-const PAGE_CHARS: u64 = 8_000;
+pub use zone_chat::store::{Guard, Lease, StoredMessage};
 
-#[derive(Debug, Error)]
+/// Postgres failures the conversation store can hit.
+///
+/// Richer than [`store::Error`] on purpose: the queries below keep `?` and the
+/// sqlx detail, and the [`store::ContextStore`] implementation flattens it at
+/// the boundary so callers of the trait never see a database type.
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("This chat already has an active response")]
     Busy,
@@ -37,50 +37,21 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Clone)]
-pub struct Lease {
-    pub chat_id: Uuid,
-    pub owner: Uuid,
-    pub fence: i64,
-    pub expires_at: DateTime<Utc>,
-}
-
-/// An independently scheduled renewal, unaffected by blocked websocket sends or tools.
-/// Dropping the guard stops renewal; callers release explicitly after durable completion.
-pub struct Guard {
-    lease: Lease,
-    lost: watch::Receiver<bool>,
-    task: Option<JoinHandle<()>>,
-}
-
-impl Guard {
-    pub async fn stop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-            let _ = task.await;
-        }
-    }
-    pub fn lease(&self) -> &Lease {
-        &self.lease
-    }
-    pub fn is_lost(&self) -> bool {
-        *self.lost.borrow()
-    }
-    pub async fn lost(&mut self) {
-        if self.is_lost() {
-            return;
-        }
-        let _ = self.lost.wait_for(|lost| *lost).await;
-    }
-}
-
-impl Drop for Guard {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
+impl From<Error> for store::Error {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Busy => store::Error::Busy,
+            Error::LeaseLost => store::Error::LeaseLost,
+            Error::Conflict => store::Error::Conflict,
+            Error::Integrity(detail) => store::Error::Integrity(detail),
+            Error::NotFound => store::Error::NotFound,
+            Error::Database(error) => store::Error::Backend(error.to_string()),
+            Error::Json(error) => store::Error::Backend(error.to_string()),
         }
     }
 }
+
+const PAGE_CHARS: u64 = 8_000;
 
 #[derive(Clone)]
 pub struct Store {
@@ -139,30 +110,8 @@ impl Store {
     }
 
     pub fn keep_alive(&self, lease: Lease, lifetime: Duration) -> Result<Guard, Error> {
-        self.identity(&lease)?;
-        milliseconds(lifetime)?;
-        let store = self.clone();
-        let renewal = lease.clone();
-        let (sender, lost) = watch::channel(false);
-        let period = lifetime / 3;
-        let task = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(period).await;
-                // A blocked connection pool or database must wake cancellation before expiry.
-                match tokio::time::timeout(period, store.renew(&renewal, lifetime)).await {
-                    Ok(Ok(_)) => (),
-                    _ => {
-                        let _ = sender.send(true);
-                        break;
-                    }
-                }
-            }
-        });
-        Ok(Guard {
-            lease,
-            lost,
-            task: Some(task),
-        })
+        store::keep_alive(std::sync::Arc::new(self.clone()), lease, lifetime)
+            .map_err(|error| Error::Integrity(error.to_string()))
     }
 
     pub async fn assert_current(&self, lease: &Lease) -> Result<(), Error> {
@@ -199,7 +148,7 @@ impl Store {
         content: &str,
         metadata: Option<Value>,
         message: ReplayMessage,
-    ) -> Result<MessageRow, Error> {
+    ) -> Result<StoredMessage, Error> {
         if message.role != Role::User
             || message.content.as_deref() != Some(content)
             || message.tool_calls.is_some()
@@ -274,7 +223,7 @@ impl Store {
         role: &str,
         content: &str,
         metadata: Option<Value>,
-    ) -> Result<MessageRow, Error> {
+    ) -> Result<StoredMessage, Error> {
         let mut message = match role {
             "user" => Message::user(content),
             "assistant" => Message::assistant(content),
@@ -404,7 +353,7 @@ impl Store {
         turn_id: Uuid,
         content: &str,
         metadata: Option<Value>,
-    ) -> Result<MessageRow, Error> {
+    ) -> Result<StoredMessage, Error> {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
         self.turn(&mut transaction, lease, turn_id).await?;
@@ -441,7 +390,7 @@ impl Store {
         turn_id: Uuid,
         content: &str,
         metadata: Option<Value>,
-    ) -> Result<MessageRow, Error> {
+    ) -> Result<StoredMessage, Error> {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
         self.turn(&mut transaction, lease, turn_id).await?;
@@ -469,7 +418,7 @@ impl Store {
         metadata: Option<Value>,
         interrupted: bool,
         partial: Option<&ReplayMessage>,
-    ) -> Result<MessageRow, Error> {
+    ) -> Result<StoredMessage, Error> {
         if !interrupted && partial.is_none() {
             return self.complete(lease, turn_id, content, metadata).await;
         }
@@ -880,7 +829,7 @@ impl Store {
         content: &str,
         metadata: Option<Value>,
         title_claimed: bool,
-    ) -> Result<MessageRow, Error> {
+    ) -> Result<StoredMessage, Error> {
         let created_at: Option<NaiveDateTime> = sqlx::query_scalar(
             "INSERT INTO messages (id, chat_id, role, content, metadata) \
              VALUES ($1, $2, $3, $4, $5) \
@@ -896,7 +845,7 @@ impl Store {
         .fetch_optional(connection)
         .await?
         .ok_or_else(|| Error::Integrity("Visible message does not belong to this chat".into()))?;
-        Ok(MessageRow {
+        Ok(StoredMessage {
             title_claimed,
             id,
             chat_id: self.chat_id,
@@ -1013,6 +962,169 @@ fn legacy_incomplete(message: &ReplayMessage) -> bool {
         .content
         .as_deref()
         .is_some_and(|content| content.contains("[Incomplete legacy tool history:"))
+}
+
+/// Postgres behind the storage-agnostic conversation interface. Every method
+/// is the inherent one with its database error flattened at the boundary.
+#[async_trait::async_trait]
+impl store::ContextStore for Store {
+    async fn acquire(&self, owner: Uuid, lifetime: Duration) -> Result<Lease, store::Error> {
+        Store::acquire(self, owner, lifetime)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn renew(&self, lease: &Lease, lifetime: Duration) -> Result<Lease, store::Error> {
+        Store::renew(self, lease, lifetime)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn assert_current(&self, lease: &Lease) -> Result<(), store::Error> {
+        Store::assert_current(self, lease).await.map_err(Into::into)
+    }
+
+    async fn release(&self, lease: &Lease) -> Result<bool, store::Error> {
+        Store::release(self, lease).await.map_err(Into::into)
+    }
+
+    async fn begin(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        user_message_id: Uuid,
+        content: &str,
+        metadata: Option<Value>,
+        message: ReplayMessage,
+    ) -> Result<StoredMessage, store::Error> {
+        Store::begin(
+            self,
+            lease,
+            turn_id,
+            user_message_id,
+            content,
+            metadata,
+            message,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn append(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        entries: &[NewEntry],
+    ) -> Result<(), store::Error> {
+        Store::append(self, lease, turn_id, entries)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn create_message(
+        &self,
+        lease: &Lease,
+        role: &str,
+        content: &str,
+        metadata: Option<Value>,
+    ) -> Result<StoredMessage, store::Error> {
+        Store::create_message(self, lease, role, content, metadata)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, store::Error> {
+        Store::delete_message(self, lease, id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn consumed(&self, lease: &Lease, ids: &[String]) -> Result<(), store::Error> {
+        Store::consumed(self, lease, ids).await.map_err(Into::into)
+    }
+
+    async fn complete(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        content: &str,
+        metadata: Option<Value>,
+    ) -> Result<StoredMessage, store::Error> {
+        Store::complete(self, lease, turn_id, content, metadata)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn publish(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        content: &str,
+        metadata: Option<Value>,
+    ) -> Result<StoredMessage, store::Error> {
+        Store::publish(self, lease, turn_id, content, metadata)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn finish(
+        &self,
+        lease: &Lease,
+        turn_id: Uuid,
+        content: &str,
+        metadata: Option<Value>,
+        interrupted: bool,
+        partial: Option<&ReplayMessage>,
+    ) -> Result<StoredMessage, store::Error> {
+        Store::finish(
+            self,
+            lease,
+            turn_id,
+            content,
+            metadata,
+            interrupted,
+            partial,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn interrupt(&self, lease: &Lease, turn_id: Uuid) -> Result<(), store::Error> {
+        Store::interrupt(self, lease, turn_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn recover(&self, lease: &Lease) -> Result<usize, store::Error> {
+        Store::recover(self, lease).await.map_err(Into::into)
+    }
+
+    async fn load(&self) -> Result<History, store::Error> {
+        Store::load(self).await.map_err(Into::into)
+    }
+
+    async fn checkpoint(
+        &self,
+        lease: &Lease,
+        expected: Option<&Summary>,
+        proposed: &Summary,
+    ) -> Result<(), store::Error> {
+        Store::checkpoint(self, lease, expected, proposed)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn evidence(&self, id: &str, offset: u64, limit: u64) -> Result<Evidence, store::Error> {
+        Store::evidence(self, id, offset, limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn catalog(&self, offset: u64, limit: u64) -> Result<Evidence, store::Error> {
+        Store::catalog(self, offset, limit)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]

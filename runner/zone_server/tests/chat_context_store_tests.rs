@@ -6,10 +6,10 @@ use serde_json::json;
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
+use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
 use zone_core::llm::{FunctionCall, Message, Role, ToolCall};
 use zone_server::db::chats;
 use zone_server::db::context::{Error, Lease, Store};
-use zone_server::services::chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
 
 const LIFETIME: Duration = Duration::from_secs(30);
 
