@@ -120,6 +120,18 @@
       "size_bytes": 175997641,
       "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
       "license": "Apache-2.0"
+    },
+    {
+      "id": "real-esrgan-x4plus",
+      "bundle": "upscale",
+      "filename": "RealESRGAN_x4plus.safetensors",
+      "relative_path": "upscale_models/RealESRGAN_x4plus.safetensors",
+      "source_repository": "Comfy-Org/Real-ESRGAN_repackaged",
+      "source_revision": "ea19b4cd14f85a5b914eee8aa7ff77bc371039a0",
+      "url": "https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged/resolve/ea19b4cd14f85a5b914eee8aa7ff77bc371039a0/RealESRGAN_x4plus.safetensors",
+      "size_bytes": 66857836,
+      "sha256": "37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb",
+      "license": "BSD-3-Clause"
     }
   ]
 }

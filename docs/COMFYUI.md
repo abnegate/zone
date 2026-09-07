@@ -1,14 +1,15 @@
 # ComfyUI, FLUX.1 Schnell, Wan 2.2 TI2V, and ACE-Step v1
 
 Zone supports a pinned ComfyUI runtime with FLUX.1 Schnell FP8 for images,
-Wan 2.2 TI2V 5B for text-to-video and image-to-video, and ACE-Step v1 3.5B for
-text-to-audio. The runtime is native on Apple Silicon and an optional NVIDIA
-Compose profile on Linux.
+Wan 2.2 TI2V 5B for text-to-video and image-to-video, ACE-Step v1 3.5B for
+text-to-audio, and Real-ESRGAN x4plus for upscaling a picture or a clip. The
+runtime is native on Apple Silicon and an optional NVIDIA Compose profile on
+Linux.
 
 Weights are **not** downloaded during a build or normal startup. Model setup is
 an explicit operation and verifies both the exact byte count and SHA-256 before
-a file is accepted. Image, image-edit, video, and audio weights are separate
-bundles so operators can install only what they need.
+a file is accepted. Image, image-edit, video, audio, and upscale weights are
+separate bundles so operators can install only what they need.
 
 LoRA training lives in `comfyui/custom_nodes/zone_lora/` (identity defaults in
 `train_config.json`). The macOS installer copies that folder after the pinned
@@ -61,6 +62,18 @@ Comfy checkout so core files stay unmodified:
   into `models/checkpoints/`
 - Size: approximately 7.17 GiB / 7.70 GB
 - Model license: Apache-2.0
+
+### Real-ESRGAN x4plus (upscale)
+
+- Model repository: `Comfy-Org/Real-ESRGAN_repackaged`
+- Model revision: `ea19b4cd14f85a5b914eee8aa7ff77bc371039a0`
+- File: `RealESRGAN_x4plus.safetensors` (`66,857,836` bytes, approximately
+  63.8 MiB)
+- SHA-256: `37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb`
+- Model license: BSD-3-Clause
+- Architecture: RRDBNet, 4x, loaded by the base `spandrel` registry that
+  ComfyUI's `UpscaleModelLoader` uses
+- Installs to `models/upscale_models/`
 
 The machine-readable source of truth is `comfyui/model-manifest.json`.
 Third-party attribution is in `comfyui/NOTICE.md`.
@@ -618,10 +631,53 @@ directory. Zone copies successful output into the protected artifact store and
 clears the ComfyUI history entry. Chat can force this path with
 `metadata.audio_generation: true`.
 
+## Upscale workflow contract
+
+`comfyui/workflows/upscale-image-api.json` upscales one image, and
+`comfyui/workflows/upscale-video-api.json` upscales every frame of a clip and
+re-encodes it. Both use only built-in ComfyUI nodes, and integration code may
+replace only these inputs:
+
+- image graph, node `1`: uploaded source filename on `LoadImage`
+- image graph, node `2`: upscale model filename (`COMFYUI_UPSCALE_MODEL`)
+- video graph, node `1`: uploaded source filename on `LoadVideo`
+- video graph, node `3`: upscale model filename
+
+The video graph takes its frame rate from `GetVideoComponents` rather than a
+fixed number, so an upscaled clip keeps the timing of its source. `SaveWEBM`
+carries no audio track, so a source clip's audio is dropped; Wan output has
+none to begin with.
+
+`LoadVideo` reports the clip it loaded as a preview output living under
+`input`. Collecting media from every node in the history would take that
+uploaded source for the result, so the upscale graphs collect only from their
+declared output node.
+
+Chat routes here when the request names an upscale and points at media that
+already exists — an attachment on the turn, or the newest matching media on the
+thread. Naming a kind ("upscale the video") searches the thread for that kind
+before falling back, so a screenshot attached to the same turn does not hide the
+clip.
+
+A resolution word alone never routes here. Either the request names the act
+("upscale this", "hi-res version of this"), or it pairs an enlarging verb with a
+resolution and introduces nothing new. So "make a 4k video" generates a clip,
+"make it a 4k wallpaper" generates a picture, "make this a watercolor at 4k"
+edits, "is this 4k" answers — and only "make this 4k" and "make this video 4k"
+upscale. Chat can force the path with `metadata.upscale: true` and suppress it
+with `false`; turning every generator off still wins over either.
+
+Upscaling is GPU-bound per frame. A short 832×480 Wan clip is roughly 49 frames
+at 4x, so raise `COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECS` past its 600 second
+default before upscaling anything longer.
+
 ## Troubleshooting
 
 - **Model verification fails immediately:** the named volume or macOS model
   directory is empty. Run the explicit model setup command.
+- **Upscaling reports that ComfyUI could not load the model:** the upscale
+  bundle is not installed. Run `make setup-comfyui-upscale-model`, or point
+  `COMFYUI_UPSCALE_MODEL` at a model already in `models/upscale_models/`.
 - **CUDA device unavailable:** confirm `nvidia-smi` works on the host and
   `docker run --rm --gpus all nvidia/cuda:13.0.2-base-ubuntu24.04 nvidia-smi`
   works before starting the profile.

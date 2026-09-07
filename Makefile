@@ -2,7 +2,8 @@
 	pull-models clean clean-volumes backup restore \
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
 	setup-comfyui-video-model setup-comfyui-audio-model setup-vision-model \
-	verify-comfyui-model verify-comfyui-video-model verify-comfyui-audio-model validate test \
+	setup-comfyui-upscale-model verify-comfyui-model verify-comfyui-video-model \
+	verify-comfyui-audio-model verify-comfyui-upscale-model validate test \
 	up-vpn up-monitoring up-comfyui up-all dev rebuild update \
 	shell-ollama shell-litellm shell-manager shell-console \
 	shell-postgres shell-valkey db-shell db-migrate \
@@ -57,6 +58,14 @@ setup-comfyui-image-edit-model: ## Explicitly download Qwen Image Edit 2511 weig
 		--bundle image-edit \
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
+setup-comfyui-upscale-model: ## Explicitly download Real-ESRGAN x4plus upscale weights (~64 MiB)
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle upscale \
+		$(if $(filter 1 true yes,$(FORCE)),--force,)
+
 setup-comfyui-video-model: ## Explicitly download Wan 2.2 TI2V 5B video weights (~16.9 GB)
 	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
@@ -95,6 +104,14 @@ verify-comfyui-image-edit-model: ## Verify the installed Qwen Image Edit 2511 si
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
 		--bundle image-edit \
+		--verify-only
+
+verify-comfyui-upscale-model: ## Verify the installed Real-ESRGAN x4plus size and SHA-256
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle upscale \
 		--verify-only
 
 verify-comfyui-video-model: ## Verify the installed Wan 2.2 TI2V 5B size and SHA-256
