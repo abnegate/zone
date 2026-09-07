@@ -153,22 +153,9 @@ async fn test_create_source_triggers_auto_index() {
     let source = response.json_value();
     let source_id = Uuid::parse_str(source["source"]["id"].as_str().unwrap()).unwrap();
 
-    // Wait for background indexing to be queued
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    let gatherings = wait_for_gatherings(&pool, source_id, 1).await;
 
-    // Check that a gathering was created
-    let gathering_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM context_gatherings WHERE $1 = ANY(source_ids))",
-    )
-    .bind(source_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert!(
-        gathering_exists,
-        "Gathering should be created automatically"
-    );
+    assert!(gatherings >= 1, "Gathering should be created automatically");
 }
 
 #[tokio::test]
@@ -195,15 +182,11 @@ async fn test_update_config_triggers_reindex() {
     let source = response.json_value();
     let source_id = Uuid::parse_str(source["source"]["id"].as_str().unwrap()).unwrap();
 
-    // Wait for initial index
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    let initial_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
-            .bind(source_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let initial_count = wait_for_gatherings(&pool, source_id, 1).await;
+    assert!(
+        initial_count >= 1,
+        "initial index should complete before updating config"
+    );
 
     // Update config
     client
@@ -219,15 +202,7 @@ async fn test_update_config_triggers_reindex() {
         .await
         .assert_status(StatusCode::OK);
 
-    // Wait for re-index
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    let final_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
-            .bind(source_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let final_count = wait_for_gatherings(&pool, source_id, initial_count + 1).await;
 
     assert!(final_count > initial_count, "Re-index should be triggered");
 }
@@ -307,10 +282,11 @@ async fn test_manual_reindex_endpoint() {
 
     let source_value = response.json_value();
     let source_id = source_value["source"]["id"].as_str().unwrap();
+    let source_uuid = Uuid::parse_str(source_id).unwrap();
 
-    // Creating a source starts indexing. Wait until that run is no longer
-    // in-progress so manual reindex returns 202 instead of 409.
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    // Creating a source starts indexing. Wait for that run to reach a terminal
+    // status so manual reindex returns 202 instead of 409.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let status_response = client
             .get_auth(
@@ -321,21 +297,20 @@ async fn test_manual_reindex_endpoint() {
         status_response.assert_status(StatusCode::OK);
         let status_body = status_response.json_value();
         let index_status = status_body["source"]["index_status"].as_str().unwrap_or("");
-        if index_status != "indexing" {
+        if index_status == "indexed" || index_status == "failed" {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("create-source indexing did not finish before reindex");
+            panic!("create-source indexing did not finish before reindex, status: {index_status}");
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let initial_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
-            .bind(Uuid::parse_str(source_id).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let initial_count = gathering_count(&pool, source_uuid).await;
+    assert!(
+        initial_count >= 1,
+        "create-source indexing should have created a gathering"
+    );
 
     // Trigger manual reindex
     let reindex_response = client
@@ -354,14 +329,7 @@ async fn test_manual_reindex_endpoint() {
     let body = reindex_response.json_value();
     assert_eq!(body["message"], "Re-indexing started");
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    let final_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
-            .bind(Uuid::parse_str(source_id).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let final_count = wait_for_gatherings(&pool, source_uuid, initial_count + 1).await;
 
     assert!(
         final_count > initial_count,
