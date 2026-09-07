@@ -1756,6 +1756,7 @@ async fn prepare_message(
         crate::services::image_intent::GenerationIntent::Video => Routing::Video(image_config),
         crate::services::image_intent::GenerationIntent::Image => Routing::Image(image_config),
         crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
+        crate::services::image_intent::GenerationIntent::Audio => Routing::Chat(chat),
     })
 }
 
