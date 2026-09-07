@@ -94,6 +94,12 @@ async fn automatic_title_rest_and_websocket_summarize_only_first_message() {
             .mount(&provider).await;
         let mut config = test_config();
         config.litellm_host = provider.uri();
+        // The summariser resolves its own model, and the default classifier is
+        // "auto", so it only lands on one when the Ollama catalog happens to
+        // list the chat's model. Unpinned, an unreachable Ollama resolves to
+        // "auto", the summary is skipped and the title silently falls back to
+        // the first seven words of the message.
+        config.comfyui.classifier_model = "llama3.2:3b".to_string();
         let pool = create_test_pool().await;
         let client = TestClient::new(create_test_router(create_test_state(
             config.clone(),
@@ -2580,16 +2586,34 @@ async fn test_streamed_chunks_are_visible_on_reload_before_the_turn_finishes() {
             _ => {}
         }
     }
-    let reloaded = client
-        .get_auth(&format!("/api/chats/{chat_id}"), &token)
-        .await
-        .json_value();
-    let saved = reloaded["chat"]["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|message| message["id"] == assistant)
-        .expect("streamed chunk must already be a visible message");
+    // The chunk frame is broadcast before the snapshot reaches the database, so
+    // the reload has to wait for the write. The deadline stays well inside the
+    // two seconds the provider holds the closing chunk for, which is what keeps
+    // the content assertion below proof that the row was visible mid-turn.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let saved = loop {
+        let reloaded = client
+            .get_auth(&format!("/api/chats/{chat_id}"), &token)
+            .await
+            .json_value();
+        let found = reloaded["chat"]["messages"]
+            .as_array()
+            .expect("chat.messages")
+            .iter()
+            .find(|message| message["id"] == assistant)
+            .cloned();
+
+        if let Some(message) = found {
+            break message;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "streamed chunk must become a visible message before the turn ends, saw {}",
+            reloaded["chat"]["messages"]
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(saved["content"], "partial reply");
     service.abort();
     let _ = service.await;
