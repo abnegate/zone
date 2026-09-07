@@ -1,0 +1,63 @@
+name: ComfyUI Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'comfyui/**'
+      - 'scripts/setup-comfyui-macos.sh'
+      - '.github/workflows/comfyui-tests.yml'
+  pull_request:
+    paths:
+      - 'comfyui/**'
+      - 'scripts/setup-comfyui-macos.sh'
+      - '.github/workflows/comfyui-tests.yml'
+
+jobs:
+  tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Read pinned ComfyUI commit
+        id: comfyui
+        run: |
+          commit=$(sed -n 's/^COMFYUI_COMMIT="\(.*\)"$/\1/p' scripts/setup-comfyui-macos.sh)
+          test -n "$commit" || { echo "COMFYUI_COMMIT not found" >&2; exit 1; }
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Cache ComfyUI checkout
+        id: comfyui-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .comfyui-runtime
+          key: comfyui-${{ steps.comfyui.outputs.commit }}
+
+      - name: Fetch ComfyUI
+        if: steps.comfyui-cache.outputs.cache-hit != 'true'
+        run: |
+          git init .comfyui-runtime
+          git -C .comfyui-runtime remote add origin https://github.com/comfyanonymous/ComfyUI.git
+          git -C .comfyui-runtime fetch --depth 1 origin ${{ steps.comfyui.outputs.commit }}
+          git -C .comfyui-runtime checkout FETCH_HEAD
+
+      - name: Install CPU PyTorch
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
+
+      - name: Install ComfyUI requirements
+        run: pip install -r .comfyui-runtime/requirements.txt
+
+      - name: Run tests
+        env:
+          COMFYUI_INSTALL_DIR: ${{ github.workspace }}/.comfyui-runtime
+        run: python -m unittest discover -s tests -v
+        working-directory: comfyui

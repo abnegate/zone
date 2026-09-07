@@ -36,6 +36,9 @@ async fn main() {
 
     tracing::info!("Starting Zone server...");
 
+    zone_comfy::observe_requests(zone_server::metrics::record_comfyui);
+    zone_search::observe_searches(zone_server::metrics::record_searxng);
+
     // Load config
     let config = Config::from_env().expect("Failed to load configuration");
 
@@ -135,7 +138,7 @@ async fn main() {
     };
 
     // Try to initialize email service
-    let email_service = match zone_server::services::email::EmailService::from_env() {
+    let email_service = match zone_email::EmailService::from_env() {
         Ok(service) => {
             tracing::info!("Email service initialized successfully");
             Some(Arc::new(service))

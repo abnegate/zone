@@ -411,6 +411,15 @@ zone/
 │   │   ├── src/tools/       # Agent tools
 │   │   ├── src/session/     # Session management
 │   │   └── src/types/       # Shared domain types
+│   ├── zone_comfy/          # ComfyUI generation, model inventory, LoRA training
+│   │   ├── src/client.rs    # Image and video generation
+│   │   ├── src/recipe.rs    # Workflow recipes and catalog
+│   │   ├── src/inventory.rs # Installed weights on disk
+│   │   ├── src/lora.rs      # LoRA training jobs
+│   │   └── src/caption.rs   # Vision captioning for training sets
+│   ├── zone_email/          # Transactional email over SMTP
+│   ├── zone_search/         # SearXNG web search client
+│   ├── zone_vcs/            # Local git operations and GitHub pull requests
 │   ├── zone_server/         # HTTP/WS server
 │   │   ├── src/routes/      # API endpoints
 │   │   ├── src/db/          # Database queries (sqlx)

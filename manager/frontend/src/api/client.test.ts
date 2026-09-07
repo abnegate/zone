@@ -257,6 +257,7 @@ describe('Client', () => {
       archived: false,
       agent_enabled: false,
       auto_approve: false,
+      reasoning_effort: 'auto',
     };
 
     const mockMessage = {

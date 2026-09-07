@@ -7,6 +7,9 @@ export interface InstalledModel {
   size: number;
   modified_at: string;
   details?: ModelDetails;
+  ready?: boolean | null;
+  recipe_id?: string | null;
+  required_files?: string[] | null;
 }
 
 export interface ModelDetails {
@@ -59,6 +62,9 @@ export interface BrowseModel {
   sizes?: ModelSizeOption[] | null;
   details?: ModelDetails | null;
   source?: ModelSource;
+  ready?: boolean | null;
+  recipe_id?: string | null;
+  required_files?: string[] | null;
 }
 
 export type ModelSource = 'ollama' | 'huggingface';
@@ -83,6 +89,7 @@ export type ModelMediumFilter =
   | 'all'
   | 'text'
   | 'image'
+  | 'image_generation'
   | 'video'
   | 'audio'
   | 'tools'
@@ -136,6 +143,7 @@ export const MODEL_MEDIUM_FILTERS: Array<{ value: ModelMediumFilter; label: stri
   { value: 'all', label: 'All mediums' },
   { value: 'text', label: 'Text' },
   { value: 'image', label: 'Image' },
+  { value: 'image_generation', label: 'Image generation' },
   { value: 'video', label: 'Video' },
   { value: 'audio', label: 'Audio' },
   { value: 'tools', label: 'Tools' },

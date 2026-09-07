@@ -39,6 +39,27 @@ pub struct Pull {
     pub model: String,
     #[serde(default)]
     pub cancel: bool,
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub recipe_id: Option<String>,
+    #[serde(default)]
+    pub hf_base: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ComfyPull {
+    pub models_dir: std::path::PathBuf,
+    pub recipe_id: Option<String>,
+    pub hf_base: Option<String>,
+    pub hub_origin: String,
+}
+
+#[derive(Clone)]
+pub struct PullStart {
+    pub model: String,
+    pub ollama_host: String,
+    pub comfy: Option<ComfyPull>,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +125,15 @@ impl PullRegistry {
     }
 
     pub fn start_or_attach(&self, host: String, model: String) -> Subscription {
+        self.start(PullStart {
+            model,
+            ollama_host: host,
+            comfy: None,
+        })
+    }
+
+    pub fn start(&self, request: PullStart) -> Subscription {
+        let model = request.model.clone();
         if let Some(existing) = self.jobs.get(&model)
             && existing
                 .snapshot
@@ -121,7 +151,7 @@ impl PullRegistry {
         let running = job.clone();
         let key = model.clone();
         tokio::spawn(async move {
-            run_job(host, key.clone(), running.clone()).await;
+            run_job(request, running.clone()).await;
             tokio::time::sleep(JOB_TTL).await;
             jobs.remove_if(&key, |_, current| Arc::ptr_eq(current, &running));
         });
@@ -272,6 +302,7 @@ impl Job {
 fn retryable(message: &str) -> bool {
     message.starts_with("Model download interrupted")
         || message.starts_with("Could not connect to Ollama")
+        || message.starts_with("Could not download image weights")
 }
 
 fn missing_manifest(model: &str, message: String) -> String {
@@ -284,7 +315,13 @@ fn missing_manifest(model: &str, message: String) -> String {
     }
 }
 
-async fn run_job(host: String, model: String, job: Arc<Job>) {
+async fn run_job(request: PullStart, job: Arc<Job>) {
+    if let Some(comfy) = request.comfy.clone() {
+        download_comfy(&request.model, &comfy, &job).await;
+        return;
+    }
+    let host = request.ollama_host;
+    let model = request.model;
     for backoff in RETRY_BACKOFF.into_iter().map(Some).chain([None]) {
         if job.is_cancelled() {
             job.publish(Event::Error {
@@ -322,6 +359,155 @@ async fn run_job(host: String, model: String, job: Arc<Job>) {
             }
         }
     }
+}
+
+fn parse_comfy_ref(model: &str) -> Result<(String, String), String> {
+    let trimmed = model.trim();
+    let (repo, filename) = trimmed
+        .rsplit_once(':')
+        .ok_or_else(|| "Image weights need owner/repo:filename.safetensors".to_string())?;
+    if repo.is_empty()
+        || filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains("..")
+        || repo.contains("..")
+        || repo.contains('\\')
+        || !filename.ends_with(".safetensors")
+    {
+        return Err("Invalid image weight filename".to_string());
+    }
+    if repo.split('/').count() != 2
+        || repo
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("Image weights need an owner/repo HuggingFace id".to_string());
+    }
+    Ok((repo.to_string(), filename.to_string()))
+}
+
+async fn download_comfy(model: &str, comfy: &ComfyPull, job: &Job) {
+    let (repo, filename) = match parse_comfy_ref(model) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            job.publish(Event::Error { message });
+            return;
+        }
+    };
+    job.publish(Event::Step {
+        status: "downloading image weights".to_string(),
+    });
+    let directory = comfy.models_dir.join("loras");
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        job.publish(Event::Error {
+            message: format!("Could not create loras directory: {error}"),
+        });
+        return;
+    }
+    let target = directory.join(&filename);
+    let partial = directory.join(format!("{filename}.part"));
+    let origin = comfy.hub_origin.trim_end_matches('/');
+    let url = format!("{origin}/{repo}/resolve/main/{filename}");
+    match download_file(&url, &partial, job).await {
+        Ok(()) => {
+            if let Err(error) = std::fs::rename(&partial, &target) {
+                job.publish(Event::Error {
+                    message: format!("Could not store image weights: {error}"),
+                });
+                return;
+            }
+            if let Some(recipe_id) = comfy.recipe_id.as_deref() {
+                let sidecar = serde_json::json!({
+                    "recipe_id": recipe_id,
+                    "hf_base": comfy.hf_base,
+                });
+                let _ = std::fs::write(
+                    directory.join(format!("{filename}.zone.json")),
+                    sidecar.to_string(),
+                );
+            }
+            job.publish(Event::Complete {
+                success: true,
+                message: "Model installed successfully",
+            });
+        }
+        Err(message) => {
+            job.publish(Event::Error { message });
+        }
+    }
+}
+
+async fn download_file(url: &str, dest: &std::path::Path, job: &Job) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .user_agent("ZoneManager/1.0")
+        .build()
+        .map_err(|error| format!("Could not download image weights: {error}"))?;
+    let mut existing = std::fs::metadata(dest).map(|meta| meta.len()).unwrap_or(0);
+    let mut request = client.get(url);
+    if existing > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={existing}-"));
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Could not download image weights: {error}"))?;
+    if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        return Ok(());
+    }
+    if response.status() == reqwest::StatusCode::OK {
+        existing = 0;
+        let _ = std::fs::remove_file(dest);
+    } else if !response.status().is_success()
+        && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+    {
+        return Err(format!(
+            "Could not download image weights: HTTP {}",
+            response.status()
+        ));
+    }
+    let total = response
+        .content_length()
+        .map(|length| length + existing)
+        .unwrap_or(0);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(existing > 0)
+        .write(true)
+        .truncate(existing == 0)
+        .open(dest)
+        .map_err(|error| format!("Could not store image weights: {error}"))?;
+    let mut stream = response.bytes_stream();
+    let mut completed = existing;
+    loop {
+        tokio::select! {
+            () = job.cancelled() => return Err("Installation cancelled".to_string()),
+            chunk = stream.next() => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        std::io::Write::write_all(&mut file, &bytes)
+                            .map_err(|error| format!("Could not store image weights: {error}"))?;
+                        completed += bytes.len() as u64;
+                        if total > 0 {
+                            job.publish(Event::Progress {
+                                percent: (completed as f64 / total as f64 * 100.0).clamp(0.0, 100.0),
+                                completed: Some(completed),
+                                total: Some(total),
+                                digest: None,
+                            });
+                        }
+                    }
+                    Some(Err(error)) => {
+                        return Err(format!("Could not download image weights: {error}"));
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn download_once(host: &str, model: &str, job: &Job) -> Result<(), String> {
@@ -429,6 +615,22 @@ fn process(job: &Job, line: &[u8]) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::{Event, retryable};
+
+    #[test]
+    fn parses_owner_repo_safetensors_refs() {
+        assert_eq!(
+            super::parse_comfy_ref(
+                "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora:qwen-image-edit-plus-nsfw-lora.safetensors"
+            )
+            .unwrap(),
+            (
+                "ScottzillaSystems/qwen-image-edit-plus-nsfw-lora".into(),
+                "qwen-image-edit-plus-nsfw-lora.safetensors".into()
+            )
+        );
+        assert!(super::parse_comfy_ref("llama3.2:3b").is_err());
+        assert!(super::parse_comfy_ref("../evil:model.safetensors").is_err());
+    }
 
     #[test]
     fn retries_interrupted_layer_streams() {

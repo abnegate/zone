@@ -10,9 +10,9 @@ use std::time::Duration;
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, truncate};
-use crate::config::WebSearchConfig;
-use crate::services::searxng::{SearxngClient, format_search_context, sanitize_query};
 use crate::utils::url::validate_public_url;
+use zone_search::WebSearchConfig;
+use zone_search::client::{SearxngClient, format_search_context, sanitize_query};
 
 const MAX_FETCH_BYTES: usize = 1_048_576;
 const MAX_FETCH_CHARS: usize = 8_000;

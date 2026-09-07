@@ -25,6 +25,8 @@ mock.module('../hooks/usePull', () => ({
 mock.module('../../../api/models', () => ({
   modelsApi: {
     getModelInfo: mockGetModelInfo,
+    trainBases: mock(() => Promise.resolve([])),
+    train: mock(),
   },
 }));
 
@@ -477,6 +479,19 @@ describe('ModelsPage', () => {
   });
 
   describe('browse tab', () => {
+    it('switches to train tab', async () => {
+      renderModelsPage();
+
+      const tab = screen.getByRole('tab', { name: 'Train' });
+      fireEvent.mouseDown(tab);
+      fireEvent.mouseUp(tab);
+      fireEvent.click(tab);
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'Train a LoRA' })).toBeInTheDocument();
+      });
+    });
+
     it('switches to browse tab', async () => {
       renderModelsPage();
 

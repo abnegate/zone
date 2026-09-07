@@ -17,6 +17,9 @@ import type {
 } from '../types';
 import { mergeCitations } from '../utils/citations';
 
+// How many frames to hold while the chat they belong to is still loading.
+const MAX_HELD_FRAMES = 1000;
+
 // The server saves the user message and streams the assistant reply over
 // /ws/chats/:id. Posting to /api/chats/:id/messages only stores the user's
 // message, so sending over the socket is what produces a reply.
@@ -109,6 +112,11 @@ export function useChat(
   contextModel.current = chat?.id === chatId ? chat.model_name : null;
   const previewSequence = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
+  // The chat the socket handlers have to write into. Until the fetch lands
+  // there is nowhere to put a frame, so the socket effect holds them.
+  const loadedChat = useRef<string | null>(null);
+  loadedChat.current = chat?.id ?? null;
+  const drainFrames = useRef<(() => void) | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
   const supersededPendingIdsRef = useRef<Set<string>>(new Set());
@@ -543,8 +551,236 @@ export function useChat(
       });
     };
 
+    // Frames can beat the chat they belong to onto the wire, and every
+    // case below writes to a chat that is not there yet, so hold them.
+    const held: ServerMessage[] = [];
+    let overflowed = false;
+    const loaded = () => loadedChat.current === chatId;
+
+    const apply = (payload: ServerMessage) => {
+      if (payload.type !== 'chunk') {
+        flushChunksNow();
+      }
+
+      switch (payload.type) {
+        case 'context': {
+          if (payload.chat_id !== chatId) break;
+          if (
+            payload.message_id === null
+              ? generationSeen || activeGenerationRef.current
+              : payload.message_id !== assistantId
+          )
+            break;
+          const parsed = ContextUsageSchema.safeParse(payload.usage);
+          if (!parsed.success || parsed.data.model !== contextModel.current) break;
+          contextEpoch.current += 1;
+          setContext(parsed.data);
+          setContextError(null);
+          setPreviewing(false);
+          break;
+        }
+        case 'title_updated':
+          if (payload.chat_id === chatId && !renamed.current.has(payload.chat_id)) {
+            applyTitle(payload.chat_id, payload.title);
+            titleCallback.current?.(payload.chat_id, payload.title);
+          }
+          break;
+        case 'message_saved':
+          if (payload.role === 'user') {
+            applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
+          } else {
+            upsertMessage(payload.message_id, payload.role, payload.content, payload.metadata);
+          }
+          break;
+        case 'status':
+          setStatus(payload.message);
+          break;
+        case 'message_start': {
+          // A dropped socket settles the turn locally, because from here it
+          // cannot tell a reply that died from one still being written. The
+          // replay says it is still being written, so take it back up.
+          const settled = completed.has(payload.message_id);
+          if (payload.resumed) completed.delete(payload.message_id);
+          else if (settled || assistantId === payload.message_id) break;
+          activeGenerationRef.current = true;
+          setStreaming(true);
+          generationSeen = true;
+          contextEpoch.current += 1;
+          setStatus(null);
+          setError(null);
+          assistantId = payload.message_id;
+          assistantContent = '';
+          assistantMetadata = undefined;
+          // Replayed frames rebuild the reply from the start of the turn, so
+          // only a locally settled row needs its stopped placeholder cleared.
+          if (settled) upsertMessage(payload.message_id, payload.role, '');
+          else startAssistant(payload.message_id, payload.role);
+          break;
+        }
+        case 'chunk':
+          if (assistantId) {
+            assistantContent += payload.content;
+            scheduleChunks();
+          }
+          break;
+        case 'reasoning':
+          if (assistantId) {
+            assistantMetadata = {
+              ...assistantMetadata,
+              reasoning: `${assistantMetadata?.reasoning ?? ''}${payload.content}`,
+            };
+            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+          }
+          break;
+        case 'tool_call': {
+          const preceding = payload.reasoning ?? assistantMetadata?.reasoning;
+          if (preceding) {
+            assistantMetadata = { ...assistantMetadata, reasoning: undefined };
+          }
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            name: payload.name,
+            arguments: payload.arguments,
+            detail: 'Running…',
+            pending: true,
+            reasoning: preceding,
+          });
+          if (assistantId === payload.message_id) {
+            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+          }
+          break;
+        }
+        case 'tool_approval_required':
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            name: payload.name,
+            arguments: payload.arguments,
+            detail: 'Waiting for approval…',
+            pending: true,
+            approval: 'pending',
+          });
+          break;
+        case 'tool_result':
+          patchToolCall(payload.message_id, payload.tool_call_id, {
+            name: payload.name,
+            success: payload.success,
+            detail: payload.detail,
+            duration_ms: payload.duration_ms,
+            pending: false,
+          });
+          if (payload.citations?.length) {
+            appendCitations(payload.message_id, payload.citations);
+          }
+          break;
+        case 'action_receipt':
+          appendReceipt(payload.message_id, payload.receipt);
+          break;
+        case 'image':
+        case 'video':
+        case 'audio':
+          if (assistantId === payload.message_id) {
+            const attachments = assistantMetadata?.attachments ?? [];
+            assistantMetadata = {
+              ...assistantMetadata,
+              attachments: [
+                ...attachments.filter((attachment) => attachment.url !== payload.attachment.url),
+                payload.attachment,
+              ],
+            };
+            upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
+          }
+          break;
+        case 'message_end':
+          if (
+            completed.has(payload.message_id) ||
+            (assistantId !== null && payload.message_id !== assistantId)
+          )
+            break;
+          completed.add(payload.message_id);
+          contextEpoch.current += 1;
+          setStatus(null);
+          setError(payload.error ?? null);
+          upsertMessage(
+            payload.message_id,
+            'assistant',
+            payload.content,
+            payload.metadata ?? assistantMetadata
+          );
+          assistantId = null;
+          assistantContent = '';
+          assistantMetadata = undefined;
+          activeGenerationRef.current = false;
+          setStreaming(false);
+          break;
+        case 'cancelled': {
+          if (
+            payload.message_id === null
+              ? assistantId !== null
+              : completed.has(payload.message_id) ||
+                (assistantId !== null && payload.message_id !== assistantId)
+          )
+            break;
+          if (payload.message_id !== null) completed.add(payload.message_id);
+          settleStoppedAssistant(assistantId ?? payload.message_id);
+          assistantId = null;
+          contextEpoch.current += 1;
+          const pendingId = pendingUserIdRef.current;
+          pendingUserIdRef.current = null;
+          if (pendingId) {
+            supersededPendingIdsRef.current.add(pendingId);
+            setChat((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    messages: prev.messages.filter((message) => message.id !== pendingId),
+                  }
+                : prev
+            );
+          }
+          setStatus(null);
+          activeGenerationRef.current = false;
+          setStreaming(false);
+          break;
+        }
+        case 'error':
+          settleStoppedAssistant(assistantId);
+          if (assistantId !== null) completed.add(assistantId);
+          assistantId = null;
+          contextEpoch.current += 1;
+          setStatus(null);
+          setError(payload.message);
+          activeGenerationRef.current = false;
+          setStreaming(false);
+          break;
+        default:
+          break;
+      }
+    };
+
+    const receive = (payload: ServerMessage) => {
+      if (loaded()) {
+        apply(payload);
+        return;
+      }
+      if (overflowed) return;
+      if (held.length >= MAX_HELD_FRAMES) {
+        // A reply this long with no chat to put it in cannot be
+        // reassembled; message_end still carries the finished turn.
+        overflowed = true;
+        held.length = 0;
+        return;
+      }
+      held.push(payload);
+    };
+
+    drainFrames.current = () => {
+      if (!loaded()) return;
+      overflowed = false;
+      for (const payload of held.splice(0)) apply(payload);
+    };
+
     const bindSocket = (socket: WebSocket) => {
       socketRef.current = socket;
+      held.length = 0;
+      overflowed = false;
       socket.onopen = () => {
         reconnectAttempt = 0;
         const token = chatsApi.chatAccessToken();
@@ -561,202 +797,7 @@ export function useChat(
         } catch {
           return;
         }
-
-        if (payload.type !== 'chunk') {
-          flushChunksNow();
-        }
-
-        switch (payload.type) {
-          case 'context': {
-            if (payload.chat_id !== chatId) break;
-            if (
-              payload.message_id === null
-                ? generationSeen || activeGenerationRef.current
-                : payload.message_id !== assistantId
-            )
-              break;
-            const parsed = ContextUsageSchema.safeParse(payload.usage);
-            if (!parsed.success || parsed.data.model !== contextModel.current) break;
-            contextEpoch.current += 1;
-            setContext(parsed.data);
-            setContextError(null);
-            setPreviewing(false);
-            break;
-          }
-          case 'title_updated':
-            if (payload.chat_id === chatId && !renamed.current.has(payload.chat_id)) {
-              applyTitle(payload.chat_id, payload.title);
-              titleCallback.current?.(payload.chat_id, payload.title);
-            }
-            break;
-          case 'message_saved':
-            if (payload.role === 'user') {
-              applySavedUserMessage(payload.message_id, payload.content, payload.metadata);
-            } else {
-              upsertMessage(payload.message_id, payload.role, payload.content, payload.metadata);
-            }
-            break;
-          case 'status':
-            setStatus(payload.message);
-            break;
-          case 'message_start': {
-            // A dropped socket settles the turn locally, because from here it
-            // cannot tell a reply that died from one still being written. The
-            // replay says it is still being written, so take it back up.
-            const settled = completed.has(payload.message_id);
-            if (payload.resumed) completed.delete(payload.message_id);
-            else if (settled || assistantId === payload.message_id) break;
-            activeGenerationRef.current = true;
-            setStreaming(true);
-            generationSeen = true;
-            contextEpoch.current += 1;
-            setStatus(null);
-            setError(null);
-            assistantId = payload.message_id;
-            assistantContent = '';
-            assistantMetadata = undefined;
-            // Replayed frames rebuild the reply from the start of the turn, so
-            // only a locally settled row needs its stopped placeholder cleared.
-            if (settled) upsertMessage(payload.message_id, payload.role, '');
-            else startAssistant(payload.message_id, payload.role);
-            break;
-          }
-          case 'chunk':
-            if (assistantId) {
-              assistantContent += payload.content;
-              scheduleChunks();
-            }
-            break;
-          case 'reasoning':
-            if (assistantId) {
-              assistantMetadata = {
-                ...assistantMetadata,
-                reasoning: `${assistantMetadata?.reasoning ?? ''}${payload.content}`,
-              };
-              upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
-            }
-            break;
-          case 'tool_call': {
-            const preceding = payload.reasoning ?? assistantMetadata?.reasoning;
-            if (preceding) {
-              assistantMetadata = { ...assistantMetadata, reasoning: undefined };
-            }
-            patchToolCall(payload.message_id, payload.tool_call_id, {
-              name: payload.name,
-              arguments: payload.arguments,
-              detail: 'Running…',
-              pending: true,
-              reasoning: preceding,
-            });
-            if (assistantId === payload.message_id) {
-              upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
-            }
-            break;
-          }
-          case 'tool_approval_required':
-            patchToolCall(payload.message_id, payload.tool_call_id, {
-              name: payload.name,
-              arguments: payload.arguments,
-              detail: 'Waiting for approval…',
-              pending: true,
-              approval: 'pending',
-            });
-            break;
-          case 'tool_result':
-            patchToolCall(payload.message_id, payload.tool_call_id, {
-              name: payload.name,
-              success: payload.success,
-              detail: payload.detail,
-              duration_ms: payload.duration_ms,
-              pending: false,
-            });
-            if (payload.citations?.length) {
-              appendCitations(payload.message_id, payload.citations);
-            }
-            break;
-          case 'action_receipt':
-            appendReceipt(payload.message_id, payload.receipt);
-            break;
-          case 'image':
-          case 'video':
-          case 'audio':
-            if (assistantId === payload.message_id) {
-              const attachments = assistantMetadata?.attachments ?? [];
-              assistantMetadata = {
-                ...assistantMetadata,
-                attachments: [
-                  ...attachments.filter((attachment) => attachment.url !== payload.attachment.url),
-                  payload.attachment,
-                ],
-              };
-              upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
-            }
-            break;
-          case 'message_end':
-            if (
-              completed.has(payload.message_id) ||
-              (assistantId !== null && payload.message_id !== assistantId)
-            )
-              break;
-            completed.add(payload.message_id);
-            contextEpoch.current += 1;
-            setStatus(null);
-            setError(payload.error ?? null);
-            upsertMessage(
-              payload.message_id,
-              'assistant',
-              payload.content,
-              payload.metadata ?? assistantMetadata
-            );
-            assistantId = null;
-            assistantContent = '';
-            assistantMetadata = undefined;
-            activeGenerationRef.current = false;
-            setStreaming(false);
-            break;
-          case 'cancelled': {
-            if (
-              payload.message_id === null
-                ? assistantId !== null
-                : completed.has(payload.message_id) ||
-                  (assistantId !== null && payload.message_id !== assistantId)
-            )
-              break;
-            if (payload.message_id !== null) completed.add(payload.message_id);
-            settleStoppedAssistant(assistantId ?? payload.message_id);
-            assistantId = null;
-            contextEpoch.current += 1;
-            const pendingId = pendingUserIdRef.current;
-            pendingUserIdRef.current = null;
-            if (pendingId) {
-              supersededPendingIdsRef.current.add(pendingId);
-              setChat((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      messages: prev.messages.filter((message) => message.id !== pendingId),
-                    }
-                  : prev
-              );
-            }
-            setStatus(null);
-            activeGenerationRef.current = false;
-            setStreaming(false);
-            break;
-          }
-          case 'error':
-            settleStoppedAssistant(assistantId);
-            if (assistantId !== null) completed.add(assistantId);
-            assistantId = null;
-            contextEpoch.current += 1;
-            setStatus(null);
-            setError(payload.message);
-            activeGenerationRef.current = false;
-            setStreaming(false);
-            break;
-          default:
-            break;
-        }
+        receive(payload);
       };
 
       const invalidateContext = (): void => {
@@ -811,6 +852,7 @@ export function useChat(
 
     return () => {
       disposed = true;
+      drainFrames.current = null;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
       }
@@ -835,6 +877,13 @@ export function useChat(
     appendReceipt,
     applyTitle,
   ]);
+
+  // The socket can connect, and the server can replay a turn already in
+  // flight, before the chat those frames belong to has finished loading.
+  useEffect(() => {
+    if (!chat?.id) return;
+    drainFrames.current?.();
+  }, [chat?.id]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     // Numeric readyState values stay valid for test doubles that do not

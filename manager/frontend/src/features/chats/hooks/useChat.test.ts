@@ -1137,6 +1137,79 @@ describe('useChat', () => {
     });
   });
 
+  it('applies frames that arrived before the chat finished loading', async () => {
+    let resolve: (chat: ChatWithMessages) => void = () => {};
+    mockGetChat.mockImplementation(
+      () =>
+        new Promise<ChatWithMessages>((done) => {
+          resolve = done;
+        })
+    );
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    // The socket connects, and the server replays the turn in flight, while
+    // the chat those frames belong to is still being fetched.
+    act(() => {
+      lastSocket?.emit({
+        type: 'message_start',
+        message_id: 'live',
+        role: 'assistant',
+        resumed: true,
+      });
+      lastSocket?.emit({ type: 'chunk', content: 'Half a reply', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'live',
+        tool_call_id: 'call-1',
+        name: 'read_file',
+        arguments: '{}',
+      });
+    });
+
+    await act(async () => {
+      resolve(mockChat);
+    });
+
+    await waitFor(() => {
+      const live = result.current.chat?.messages.find((message) => message.id === 'live');
+      expect(live?.content).toBe('Half a reply');
+      expect(live?.metadata?.tool_calls?.[0]?.detail).toBe('Running…');
+      expect(result.current.streaming).toBe(true);
+    });
+    unmount();
+  });
+
+  it('drops a held reply too long to reassemble and settles it at the end', async () => {
+    let resolve: (chat: ChatWithMessages) => void = () => {};
+    mockGetChat.mockImplementation(
+      () =>
+        new Promise<ChatWithMessages>((done) => {
+          resolve = done;
+        })
+    );
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'live', role: 'assistant' });
+      for (let index = 0; index < 1100; index += 1) {
+        lastSocket?.emit({ type: 'chunk', content: 'x', index });
+      }
+    });
+
+    await act(async () => {
+      resolve(mockChat);
+    });
+    expect(result.current.chat?.messages.find((message) => message.id === 'live')).toBeUndefined();
+
+    act(() =>
+      lastSocket?.emit({ type: 'message_end', message_id: 'live', content: 'The whole reply' })
+    );
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('The whole reply');
+    });
+    unmount();
+  });
+
   it('takes the reply back up when a dropped socket replays the turn', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });

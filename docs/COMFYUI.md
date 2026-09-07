@@ -10,6 +10,14 @@ an explicit operation and verifies both the exact byte count and SHA-256 before
 a file is accepted. Image, video, and audio weights are separate bundles so
 operators can install only what they need.
 
+LoRA training lives in `comfyui/custom_nodes/zone_lora/` (identity defaults in
+`train_config.json`). The macOS installer copies that folder after the pinned
+Comfy checkout so core files stay unmodified:
+
+```bash
+./scripts/setup-comfyui-macos.sh --apply-nodes
+```
+
 ## Pinned artifacts
 
 - ComfyUI commit: `30bdda1ef13a3a34fce2cd2fec633f15d832122a`
@@ -244,6 +252,71 @@ a new graph into the manager binary (no bind mounts), also add the filename to
 Video (Wan) still uses the graphs in [Video workflow contract](#video-workflow-contract)
 and audio (ACE-Step) the graph in [Audio workflow contract](#audio-workflow-contract);
 neither is in the image catalog yet.
+
+## LoRA training
+
+The Rust side lives in the `zone_comfy` crate, which owns generation, the recipe
+catalog, weight inventory, training, and captioning. It has no web framework,
+database, or application state, so it can be reused outside Zone; a host that
+wants request metrics installs a hook with `zone_comfy::observe_requests`.
+
+
+Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
+Defaults live in `train_config.json`: rank 8, alpha equal to rank, every
+2-D linear in the transformer blocks (304 adapters on FLUX.1 Schnell), 512px,
+and at least 400 steps.
+
+### Captions decide whether identity is learned
+
+Caption the *variable* parts of each image and let the trigger token carry the
+subject. A caption that re-describes the subject teaches the model to rebuild it
+from the description, so the trigger learns nothing and prompting the trigger
+alone renders something unrelated.
+
+```text
+good: zrkxyz, three-quarter view, standing on concrete, overcast daylight
+bad:  zrkxyz, a lime-green cube-headed robot with a red teapot body, three-quarter
+      view, standing on concrete, overcast daylight
+```
+
+Put one `.txt` beside each `.png` under `<train dir>/targets/`.
+
+Set `COMFYUI_CAPTION_MODEL` to a vision model and Zone writes those captions for
+you. One pass names the subject, then each image is captioned with that subject
+excluded. Small vision models ignore "do not describe the subject", so the answer
+is filtered rather than trusted: a word that appears in a third or more of the
+descriptions cannot be describing what varies between them, so clauses carrying
+those words are dropped along with the subject phrase itself. A description that
+merely copies the format example, or repeats another image's answer verbatim, is
+discarded, and that image falls back to the trigger word alone. Captions you
+write by hand are never overwritten. The Models Train tab exposes this as
+**Auto-caption images**, so the captions can be reviewed and edited before
+training starts.
+
+### Why the residual hook exists
+
+`comfy/ldm/flux/layers.py` applies block residuals in place (`img += ...`,
+`x += ...`). That is safe for inference but not for autograd: the block also
+saves its input for the `pre_norm`/`img_norm` backward, so the in-place add
+version-bumps a tensor the backward pass still needs, and under
+`torch.utils.checkpoint` the recompute re-runs on already-mutated inputs.
+`install_out_of_place_residuals` in `inference_hooks.py` tags the `apply_mod`
+result so those adds become out-of-place while gradients are enabled, leaving
+inference untouched. Without it, training the full block set raises
+`one of the variables needed for gradient computation has been modified by an
+inplace operation`. `comfyui/tests/test_zone_lora_training.py` covers both the
+failure and the fix.
+
+### Comparing a trained LoRA
+
+```bash
+ZONE_LORA_NAME=my_lora.safetensors \
+ZONE_LORA_PROMPT='zrkxyz' \
+ZONE_LORA_COMPARE_DIR=/tmp/lora-compare \
+python3 comfyui/compare_lora.py
+```
+
+Renders the same prompt and seed with and without the adapter.
 
 ## Workflow contract
 

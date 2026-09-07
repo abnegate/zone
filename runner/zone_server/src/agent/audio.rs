@@ -8,7 +8,8 @@ use tokio::sync::{broadcast, mpsc};
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, string_arg};
-use crate::services::{artifacts::ArtifactStore, comfyui::ComfyUiClient};
+use crate::services::artifacts::ArtifactStore;
+use zone_comfy::Client as ComfyUiClient;
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     if !scope.state.config().comfyui.enabled {

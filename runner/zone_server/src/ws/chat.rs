@@ -39,10 +39,10 @@ use crate::services::chat::{
     session::{self, Session},
 };
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
-use crate::services::searxng::{SearchContext, SearxngClient, sanitize_query};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use zone_core::context::ContextUsage;
+use zone_search::client::{SearchContext, SearxngClient, sanitize_query};
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -1140,10 +1140,8 @@ async fn resolve_generation_source(
     prompt: &str,
     metadata: Option<&serde_json::Value>,
     store: &crate::services::artifacts::ArtifactStore,
-) -> Result<
-    Option<crate::services::comfyui::SourceImage>,
-    crate::services::image_source::SourceImageError,
-> {
+) -> Result<Option<zone_comfy::client::SourceImage>, crate::services::image_source::SourceImageError>
+{
     use crate::services::image_source::{
         has_image_attachment, resolve_source_image, resolve_source_image_from,
     };
@@ -1233,10 +1231,8 @@ async fn handle_image_generation(
     generation: &mut Generation,
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::services::{
-        artifacts::ArtifactStore,
-        comfyui::{ComfyUiClient, ComfyUiError},
-    };
+    use crate::services::artifacts::ArtifactStore;
+    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;
@@ -1284,7 +1280,9 @@ async fn handle_image_generation(
         },
     )
     .await;
-    let generation_prompt = if source.is_some() {
+    let generation_prompt = if source.is_some()
+        && client.prompt_mode() != zone_comfy::recipe::PromptMode::EditInstruction
+    {
         crate::services::image_intent::ImageIntentClassifier::new(
             image_config.clone(),
             state.config().litellm_host.clone(),
@@ -1486,10 +1484,8 @@ async fn handle_video_generation(
     generation: &mut Generation,
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::services::{
-        artifacts::ArtifactStore,
-        comfyui::{ComfyUiClient, ComfyUiError},
-    };
+    use crate::services::artifacts::ArtifactStore;
+    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;
@@ -1719,10 +1715,8 @@ async fn handle_audio_generation(
     generation: &mut Generation,
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::services::{
-        artifacts::ArtifactStore,
-        comfyui::{ComfyUiClient, ComfyUiError},
-    };
+    use crate::services::artifacts::ArtifactStore;
+    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;

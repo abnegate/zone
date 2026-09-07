@@ -14,8 +14,8 @@ use crate::db::context::{Error, Guard, Lease, Store};
 use crate::services::artifacts::ArtifactStore;
 use crate::services::chat::{capacity, history};
 use crate::services::completion_tokens::merge_stops;
-use crate::services::searxng::SearchContext;
 use crate::state::AppState;
+use zone_search::client::SearchContext;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 const SEARCH: &str = "supplement:search";

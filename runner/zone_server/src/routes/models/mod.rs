@@ -7,7 +7,7 @@ mod types;
 
 pub use providers::{
     DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider, MAX_PAGE_SIZE, ModelProvider,
-    ProviderError, get_provider, get_provider_with_proxy,
+    ProviderError, get_provider, get_provider_with_proxy, huggingface_hub_origin,
 };
 pub use types::{
     BrowseQuery, BrowseResponse, DiskUsage, ErrorResponse, ListModelsQuery, ModelDetails,
@@ -27,6 +27,9 @@ use std::time::Duration;
 use crate::auth::AuthUser;
 use crate::state::AppState;
 use types::ModelCapability;
+use zone_comfy::caption::{CaptionRequest, Captioner, data_url};
+use zone_comfy::lora::{self, TrainRequest};
+use zone_comfy::recipe::RecipeCatalog;
 
 // Constants
 
@@ -87,10 +90,10 @@ pub async fn list(
                     Err(e) => e.into_response(),
                 }
             } else {
-                // List locally installed models
-                list_ollama_models(state).await
+                list_installed_models(state).await
             }
         }
+        "comfy" => Json(list_comfy_models(&state)).into_response(),
         "gpt4all" => {
             let provider = match Gpt4AllProvider::with_proxy(
                 state.config().gpt4all_models_url.clone(),
@@ -112,7 +115,8 @@ pub async fn list(
                 Ok(provider) => provider,
                 Err(error) => return error.into_response(),
             };
-            match provider.search(query.to_browse_query(limit)).await {
+            let opts = query.to_browse_query(limit);
+            match browse_huggingface(&provider, &state, opts).await {
                 Ok(response) => Json(response).into_response(),
                 Err(e) => e.into_response(),
             }
@@ -132,8 +136,86 @@ pub async fn list(
     }
 }
 
+async fn browse_huggingface(
+    provider: &HuggingFaceProvider,
+    state: &AppState,
+    opts: BrowseQuery<'_>,
+) -> Result<BrowseResponse, ProviderError> {
+    let include_adapters = opts.medium == ModelMediumFilter::ImageGeneration
+        || (opts.medium == ModelMediumFilter::All
+            && opts
+                .query
+                .map(str::trim)
+                .is_some_and(|query| !query.is_empty()));
+    let mut response = provider.search(opts).await?;
+    if include_adapters {
+        let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
+            .unwrap_or_else(|_| RecipeCatalog::packaged().expect("packaged recipes"));
+        let adapters = provider.search_adapters(opts, &catalog.hf_bases()).await?;
+        if opts.medium == ModelMediumFilter::ImageGeneration {
+            response.models = adapters;
+            response.next_cursor = None;
+        } else {
+            let mut combined = adapters;
+            combined.extend(response.models);
+            response.models = combined;
+        }
+    }
+    Ok(response)
+}
+
+async fn list_installed_models(state: AppState) -> axum::response::Response {
+    let comfy = list_comfy_models(&state);
+    match list_ollama_model_rows(&state).await {
+        Ok(mut models) => {
+            models.extend(comfy);
+            Json(models).into_response()
+        }
+        Err(error) => {
+            if comfy.is_empty() {
+                *error
+            } else {
+                Json(comfy).into_response()
+            }
+        }
+    }
+}
+
+fn list_comfy_models(state: &AppState) -> Vec<ModelResponse> {
+    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
+        .or_else(|_| RecipeCatalog::packaged())
+        .ok();
+    let Some(catalog) = catalog else {
+        return Vec::new();
+    };
+    zone_comfy::inventory::scan(&state.config().comfyui.models_dir, &catalog)
+        .into_iter()
+        .map(|item| ModelResponse {
+            name: item.filename,
+            completion: Some(false),
+            size: Some(item.size),
+            modified_at: item
+                .modified_at
+                .or_else(|| Some(chrono::Utc::now().to_rfc3339())),
+            description: Some(item.label),
+            capabilities: Some(vec![ModelCapability::ImageGeneration]),
+            details: Some(ModelDetails {
+                format: Some(item.kind),
+                family: Some(item.recipe_id.clone()),
+                ..Default::default()
+            }),
+            ready: Some(item.ready),
+            recipe_id: Some(item.recipe_id),
+            required_files: Some(item.required_files),
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// List models from local Ollama installation
-async fn list_ollama_models(state: AppState) -> axum::response::Response {
+async fn list_ollama_model_rows(
+    state: &AppState,
+) -> Result<Vec<ModelResponse>, Box<axum::response::Response>> {
     let ollama_host = &state.config().ollama_host;
 
     // Try to fetch from Ollama API
@@ -174,33 +256,39 @@ async fn list_ollama_models(state: AppState) -> axum::response::Response {
                             model.needs_character = Some(profile.needs_character);
                         }))
                         .await;
-                        Json(models).into_response()
+                        Ok(models)
                     }
-                    Err(e) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new(format!(
-                            "Failed to parse response: {}",
-                            e
-                        ))),
-                    )
-                        .into_response(),
+                    Err(e) => Err(Box::new(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse::new(format!(
+                                "Failed to parse response: {}",
+                                e
+                            ))),
+                        )
+                            .into_response(),
+                    )),
                 }
             } else {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ErrorResponse::new("Ollama service unavailable")),
-                )
-                    .into_response()
+                Err(Box::new(
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(ErrorResponse::new("Ollama service unavailable")),
+                    )
+                        .into_response(),
+                ))
             }
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorResponse::new(format!(
-                "Failed to connect to Ollama: {}",
-                e
-            ))),
-        )
-            .into_response(),
+        Err(e) => Err(Box::new(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse::new(format!(
+                    "Failed to connect to Ollama: {}",
+                    e
+                ))),
+            )
+                .into_response(),
+        )),
     }
 }
 
@@ -354,6 +442,10 @@ pub async fn delete(
         name: String,
     }
 
+    if delete_comfy_weight(&state, &name) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     match OLLAMA_HTTP_CLIENT
         .delete(&url)
         .json(&DeleteRequest { name: name.clone() })
@@ -388,6 +480,97 @@ pub async fn delete(
     }
 }
 
+/// GET /api/models/train/bases
+pub async fn train_bases(State(state): State<AppState>, _auth: AuthUser) -> impl IntoResponse {
+    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
+        .or_else(|_| RecipeCatalog::packaged());
+    match catalog {
+        Ok(catalog) => Json(lora::available_bases(
+            &catalog,
+            &state.config().comfyui.models_dir,
+        ))
+        .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("recipe catalog is not readable")),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/models/train/captions
+pub async fn captions(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    Json(request): Json<CaptionRequest>,
+) -> impl IntoResponse {
+    let config = state.config();
+    let captioner = Captioner::new(
+        &config.comfyui,
+        config.litellm_host.clone(),
+        config.litellm_key.clone(),
+    );
+    if !captioner.available() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse::new(
+                "set COMFYUI_CAPTION_MODEL to a vision model to auto-caption training images",
+            )),
+        )
+            .into_response();
+    }
+    let mut drafts: Vec<(String, String)> = request
+        .images
+        .iter()
+        .map(|image| {
+            (
+                data_url(&image.filename, &image.bytes_base64),
+                image.caption.clone(),
+            )
+        })
+        .collect();
+    let trigger = request.trigger.unwrap_or_default();
+    captioner.fill(&mut drafts, trigger.trim()).await;
+    Json(serde_json::json!({
+        "captions": drafts.into_iter().map(|(_, caption)| caption).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// POST /api/models/train
+pub async fn train(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+    Json(request): Json<TrainRequest>,
+) -> impl IntoResponse {
+    match lora::train(
+        &state.config().comfyui,
+        state.config().litellm_host.clone(),
+        state.config().litellm_key.clone(),
+        request,
+    )
+    .await
+    {
+        Ok(path) => Json(serde_json::json!({
+            "filename": path.file_name().and_then(|name| name.to_str()),
+        }))
+        .into_response(),
+        Err(lora::TrainError::Disabled) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse::new(
+                "LoRA training is not configured on this server",
+            )),
+        )
+            .into_response(),
+        Err(lora::TrainError::Invalid(message)) => {
+            (StatusCode::BAD_REQUEST, Json(ErrorResponse::new(message))).into_response()
+        }
+        Err(lora::TrainError::Failed(message)) => {
+            (StatusCode::BAD_GATEWAY, Json(ErrorResponse::new(message))).into_response()
+        }
+    }
+}
+
 /// GET /api/models/disk
 pub async fn disk(_auth: AuthUser) -> impl IntoResponse {
     let path = std::env::var("ZONE_DISK_PATH").unwrap_or_else(|_| "/".to_string());
@@ -399,6 +582,32 @@ pub async fn disk(_auth: AuthUser) -> impl IntoResponse {
         )
             .into_response(),
     }
+}
+
+fn delete_comfy_weight(state: &AppState, name: &str) -> bool {
+    let Ok(filename) = zone_comfy::recipe::sanitize_weight_filename(name) else {
+        return false;
+    };
+    let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
+        .or_else(|_| RecipeCatalog::packaged())
+        .ok();
+    let Some(catalog) = catalog else {
+        return false;
+    };
+    let items = zone_comfy::inventory::scan(&state.config().comfyui.models_dir, &catalog);
+    let Some(item) = zone_comfy::inventory::find(&items, &filename) else {
+        return false;
+    };
+    let path = state
+        .config()
+        .comfyui
+        .models_dir
+        .join(&item.directory)
+        .join(&item.filename);
+    let sidecar = path.with_file_name(format!("{}.zone.json", item.filename));
+    let removed = std::fs::remove_file(&path).is_ok();
+    let _ = std::fs::remove_file(sidecar);
+    removed
 }
 
 pub(crate) fn filesystem_usage(path: &str) -> Option<DiskUsage> {

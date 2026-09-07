@@ -6,9 +6,9 @@ use serde_json::json;
 use uuid::Uuid;
 use zone_core::context;
 use zone_core::llm::Role;
+use zone_search::client::{SearchContext, SearchHit};
 use zone_server::db::chats;
 use zone_server::services::chat::session::{self, Mode};
-use zone_server::services::searxng::{SearchContext, SearchHit};
 
 #[tokio::test]
 async fn static_search_supplement_has_identical_preview_and_send_costs() {

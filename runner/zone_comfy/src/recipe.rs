@@ -8,25 +8,43 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::comfyui::ComfyUiError;
+use crate::client::Error;
 
-const PACKAGED_CATALOG: &str = include_str!("../../../../comfyui/recipes/catalog.json");
+const PACKAGED_CATALOG: &str = include_str!("../../../comfyui/recipes/catalog.json");
 
 fn packaged_workflow(name: &str) -> Option<&'static str> {
     match name {
         "flux1-schnell-fp8-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/flux1-schnell-fp8-api.json"
+            "../../../comfyui/workflows/flux1-schnell-fp8-api.json"
         )),
         "flux1-schnell-fp8-img2img-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/flux1-schnell-fp8-img2img-api.json"
+            "../../../comfyui/workflows/flux1-schnell-fp8-img2img-api.json"
         )),
-        "sd15-api.json" => Some(include_str!("../../../../comfyui/workflows/sd15-api.json")),
+        "sd15-api.json" => Some(include_str!("../../../comfyui/workflows/sd15-api.json")),
         "sd15-img2img-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/sd15-img2img-api.json"
+            "../../../comfyui/workflows/sd15-img2img-api.json"
         )),
-        "sdxl-api.json" => Some(include_str!("../../../../comfyui/workflows/sdxl-api.json")),
+        "sdxl-api.json" => Some(include_str!("../../../comfyui/workflows/sdxl-api.json")),
         "sdxl-img2img-api.json" => Some(include_str!(
-            "../../../../comfyui/workflows/sdxl-img2img-api.json"
+            "../../../comfyui/workflows/sdxl-img2img-api.json"
+        )),
+        "flux1-schnell-fp8-adapter-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-schnell-fp8-adapter-api.json"
+        )),
+        "flux1-schnell-fp8-adapter-img2img-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-schnell-fp8-adapter-img2img-api.json"
+        )),
+        "qwen-image-edit-2511-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/qwen-image-edit-2511-api.json"
+        )),
+        "qwen-image-edit-2511-edit-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/qwen-image-edit-2511-edit-api.json"
+        )),
+        "qwen-image-edit-2511-adapter-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/qwen-image-edit-2511-adapter-api.json"
+        )),
+        "qwen-image-edit-2511-adapter-edit-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/qwen-image-edit-2511-adapter-edit-api.json"
         )),
         _ => None,
     }
@@ -45,11 +63,30 @@ pub enum RecipeOutput {
     PreviewImage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMode {
+    #[default]
+    ClipScene,
+    EditInstruction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RequiredFile {
+    pub filename: String,
+    pub directory: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Recipe {
     pub id: String,
     pub kind: MediaKind,
     pub label: String,
+    pub adapter: bool,
+    pub prompt_mode: PromptMode,
+    pub defaults: HashMap<String, String>,
+    pub hf_bases: Vec<String>,
+    pub required_files: Vec<RequiredFile>,
     bare: Value,
     with_source: Option<Value>,
     slots: RecipeSlots,
@@ -95,6 +132,16 @@ struct CatalogRecipe {
     base_models: Vec<String>,
     #[serde(default)]
     filename_hints: Vec<String>,
+    #[serde(default)]
+    adapter: bool,
+    #[serde(default)]
+    prompt_mode: PromptMode,
+    #[serde(default)]
+    defaults: HashMap<String, String>,
+    #[serde(default)]
+    hf_bases: Vec<String>,
+    #[serde(default)]
+    required_files: Vec<RequiredFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,14 +162,14 @@ pub struct RecipeCatalog {
 }
 
 impl RecipeCatalog {
-    pub fn packaged() -> Result<Self, ComfyUiError> {
+    pub fn packaged() -> Result<Self, Error> {
         Self::from_json(PACKAGED_CATALOG, None)
     }
 
     /// Load recipes from disk when `recipes/catalog.json` sits beside the
     /// workflow directory; otherwise use the packaged catalog. Graphs of the
     /// same filename in that workflow directory overlay the baked-in copies.
-    pub fn load(workflow_path: Option<&Path>) -> Result<Self, ComfyUiError> {
+    pub fn load(workflow_path: Option<&Path>) -> Result<Self, Error> {
         let dir = workflow_path.and_then(Path::parent);
         if let Some(contents) = read_overlay_catalog(dir)? {
             Self::from_json(&contents, dir)
@@ -131,13 +178,11 @@ impl RecipeCatalog {
         }
     }
 
-    fn from_json(json: &str, workflow_dir: Option<&Path>) -> Result<Self, ComfyUiError> {
+    fn from_json(json: &str, workflow_dir: Option<&Path>) -> Result<Self, Error> {
         let file: CatalogFile = serde_json::from_str(json)
-            .map_err(|_| ComfyUiError::Configuration("recipe catalog is not valid JSON"))?;
+            .map_err(|_| Error::Configuration("recipe catalog is not valid JSON"))?;
         if file.schema_version != 1 {
-            return Err(ComfyUiError::Configuration(
-                "unsupported recipe catalog schema",
-            ));
+            return Err(Error::Configuration("unsupported recipe catalog schema"));
         }
 
         let mut recipes = Vec::with_capacity(file.recipes.len());
@@ -176,6 +221,11 @@ impl RecipeCatalog {
                 id: spec.id,
                 kind: spec.kind,
                 label: spec.label,
+                adapter: spec.adapter,
+                prompt_mode: spec.prompt_mode,
+                defaults: spec.defaults,
+                hf_bases: spec.hf_bases,
+                required_files: spec.required_files,
                 bare,
                 with_source,
                 slots,
@@ -186,7 +236,7 @@ impl RecipeCatalog {
             .iter()
             .any(|recipe| recipe.id == file.default_image && recipe.kind == MediaKind::Image)
         {
-            return Err(ComfyUiError::Configuration(
+            return Err(Error::Configuration(
                 "recipe catalog default_image is missing",
             ));
         }
@@ -203,13 +253,25 @@ impl RecipeCatalog {
         self.recipes.iter().find(|recipe| recipe.id == id)
     }
 
-    pub fn image_recipe_for(&self, checkpoint: &str) -> Result<&Recipe, ComfyUiError> {
+    pub fn image_recipe_for(&self, checkpoint: &str) -> Result<&Recipe, Error> {
+        let trimmed = checkpoint.trim();
+        if trimmed.to_ascii_lowercase().contains("lora")
+            && let Some(adapter) = self.adapter_recipe_for_filename(trimmed)
+        {
+            return Ok(adapter);
+        }
         let id = self.resolve_image_id(checkpoint);
         self.get(id)
             .filter(|recipe| recipe.kind == MediaKind::Image)
-            .ok_or(ComfyUiError::Configuration(
+            .ok_or(Error::Configuration(
                 "no image recipe matches this checkpoint",
             ))
+    }
+
+    pub fn is_explicit_image_match(&self, filename: &str) -> bool {
+        let trimmed = filename.trim();
+        self.files.contains_key(trimmed)
+            || self.resolve_image_id(trimmed) != self.default_image.as_str()
     }
 
     fn resolve_image_id(&self, checkpoint: &str) -> &str {
@@ -228,17 +290,76 @@ impl RecipeCatalog {
         }
         best_id.unwrap_or(self.default_image.as_str())
     }
+
+    pub fn image_recipes(&self) -> impl Iterator<Item = &Recipe> {
+        self.recipes
+            .iter()
+            .filter(|recipe| recipe.kind == MediaKind::Image)
+    }
+
+    pub fn hf_bases(&self) -> Vec<String> {
+        let mut bases = Vec::new();
+        for recipe in self.image_recipes() {
+            for base in &recipe.hf_bases {
+                if !bases.iter().any(|existing| existing == base) {
+                    bases.push(base.clone());
+                }
+            }
+        }
+        bases
+    }
+
+    pub fn adapter_recipe_for_base(&self, hf_base: &str) -> Option<&Recipe> {
+        self.recipes.iter().find(|recipe| {
+            recipe.kind == MediaKind::Image
+                && recipe.adapter
+                && recipe
+                    .hf_bases
+                    .iter()
+                    .any(|base| base.eq_ignore_ascii_case(hf_base))
+        })
+    }
+
+    pub fn adapter_recipe_for_filename(&self, filename: &str) -> Option<&Recipe> {
+        let lower = filename.to_ascii_lowercase();
+        if lower.contains("qwen") {
+            return self.get("qwen-image-edit-adapter");
+        }
+        self.get("flux-schnell-adapter")
+    }
 }
 
 impl Recipe {
-    pub fn apply(&self, fill: Fill<'_>) -> Result<Value, ComfyUiError> {
+    pub fn has_lora_slot(&self) -> bool {
+        self.slots.weights.contains_key("lora")
+    }
+
+    pub fn weight_map(&self, selected: &str) -> Result<HashMap<String, String>, Error> {
+        let selected = sanitize_weight_filename(selected)?;
+        let mut weights = self.defaults.clone();
+        if self.has_lora_slot() {
+            weights.insert("lora".to_string(), selected);
+        } else if self.slots.weights.contains_key("checkpoint") {
+            weights.insert("checkpoint".to_string(), selected);
+        } else if self.slots.weights.contains_key("unet") {
+            weights.insert("unet".to_string(), selected);
+        }
+        for name in self.slots.weights.keys() {
+            if !weights.contains_key(name) {
+                return Err(Error::Configuration("recipe weight is missing"));
+            }
+        }
+        Ok(weights)
+    }
+
+    pub fn apply(&self, fill: Fill<'_>) -> Result<Value, Error> {
         if fill.prompt.trim().is_empty() || fill.prompt.len() > 100_000 {
-            return Err(ComfyUiError::Configuration("prompt is empty or too long"));
+            return Err(Error::Configuration("prompt is empty or too long"));
         }
         let mut workflow = if fill.source.is_some() {
-            self.with_source.clone().ok_or(ComfyUiError::Configuration(
-                "recipe has no source-image graph",
-            ))?
+            self.with_source
+                .clone()
+                .ok_or(Error::Configuration("recipe has no source-image graph"))?
         } else {
             self.bare.clone()
         };
@@ -249,7 +370,7 @@ impl Recipe {
                 .weights
                 .get(name.as_str())
                 .copied()
-                .ok_or(ComfyUiError::Configuration("recipe weight is missing"))?;
+                .ok_or(Error::Configuration("recipe weight is missing"))?;
             let filename = sanitize_weight_filename(filename)?;
             set_pointer(&mut workflow, pointer, json!(filename))?;
         }
@@ -258,16 +379,14 @@ impl Recipe {
                 .slots
                 .source
                 .as_deref()
-                .ok_or(ComfyUiError::Configuration(
-                    "recipe has no source-image slot",
-                ))?;
+                .ok_or(Error::Configuration("recipe has no source-image slot"))?;
             set_pointer(&mut workflow, pointer, json!(sanitize_upload_name(source)?))?;
         }
         Ok(workflow)
     }
 }
 
-fn read_overlay_catalog(workflow_dir: Option<&Path>) -> Result<Option<String>, ComfyUiError> {
+fn read_overlay_catalog(workflow_dir: Option<&Path>) -> Result<Option<String>, Error> {
     let Some(path) = workflow_dir
         .and_then(Path::parent)
         .map(|root| root.join("recipes").join("catalog.json"))
@@ -277,40 +396,36 @@ fn read_overlay_catalog(workflow_dir: Option<&Path>) -> Result<Option<String>, C
     };
     std::fs::read_to_string(path)
         .map(Some)
-        .map_err(|_| ComfyUiError::Configuration("recipe catalog is not readable"))
+        .map_err(|_| Error::Configuration("recipe catalog is not readable"))
 }
 
-fn load_graph(dir: Option<&Path>, filename: &str) -> Result<Value, ComfyUiError> {
+fn load_graph(dir: Option<&Path>, filename: &str) -> Result<Value, Error> {
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
-        return Err(ComfyUiError::Configuration("invalid workflow filename"));
+        return Err(Error::Configuration("invalid workflow filename"));
     }
     if let Some(path) = dir
         .map(|dir| dir.join(filename))
         .filter(|path| path.is_file())
     {
         let contents = std::fs::read_to_string(path)
-            .map_err(|_| ComfyUiError::Configuration("workflow file is not readable"))?;
+            .map_err(|_| Error::Configuration("workflow file is not readable"))?;
         return serde_json::from_str(&contents)
-            .map_err(|_| ComfyUiError::Configuration("workflow file is not valid JSON"));
+            .map_err(|_| Error::Configuration("workflow file is not valid JSON"));
     }
-    let packaged = packaged_workflow(filename)
-        .ok_or(ComfyUiError::Configuration("packaged workflow is missing"))?;
+    let packaged =
+        packaged_workflow(filename).ok_or(Error::Configuration("packaged workflow is missing"))?;
     serde_json::from_str(packaged)
-        .map_err(|_| ComfyUiError::Configuration("packaged workflow is not valid JSON"))
+        .map_err(|_| Error::Configuration("packaged workflow is not valid JSON"))
 }
 
-fn validate_graph(
-    workflow: &Value,
-    slots: &RecipeSlots,
-    with_source: bool,
-) -> Result<(), ComfyUiError> {
+fn validate_graph(workflow: &Value, slots: &RecipeSlots, with_source: bool) -> Result<(), Error> {
     require_pointer(workflow, &slots.prompt)?;
     require_pointer(workflow, &slots.seed)?;
     for pointer in slots.weights.values() {
         require_pointer(workflow, pointer)?;
     }
     if with_source {
-        let source = slots.source.as_deref().ok_or(ComfyUiError::Configuration(
+        let source = slots.source.as_deref().ok_or(Error::Configuration(
             "source recipe is missing a source slot",
         ))?;
         require_pointer(workflow, source)?;
@@ -319,7 +434,7 @@ fn validate_graph(
             .and_then(Value::as_str)
             != Some("LoadImage")
         {
-            return Err(ComfyUiError::Configuration(
+            return Err(Error::Configuration(
                 "source graph must load a source image",
             ));
         }
@@ -328,7 +443,7 @@ fn validate_graph(
     match slots.output {
         RecipeOutput::PreviewImage => {
             if workflow.pointer(&output_class).and_then(Value::as_str) != Some("PreviewImage") {
-                return Err(ComfyUiError::Configuration(
+                return Err(Error::Configuration(
                     "workflow output must use temporary PreviewImage storage",
                 ));
             }
@@ -344,52 +459,52 @@ fn source_class_pointer(source_slot: &str) -> String {
     }
 }
 
-fn require_pointer(workflow: &Value, pointer: &str) -> Result<(), ComfyUiError> {
+fn require_pointer(workflow: &Value, pointer: &str) -> Result<(), Error> {
     if workflow.pointer(pointer).is_none() {
-        return Err(ComfyUiError::Configuration(
+        return Err(Error::Configuration(
             "workflow does not match the recipe slot contract",
         ));
     }
     Ok(())
 }
 
-fn set_pointer(root: &mut Value, pointer: &str, value: Value) -> Result<(), ComfyUiError> {
+fn set_pointer(root: &mut Value, pointer: &str, value: Value) -> Result<(), Error> {
     if !pointer.starts_with('/') || pointer.len() < 2 || pointer.contains("//") {
-        return Err(ComfyUiError::Configuration("invalid recipe slot pointer"));
+        return Err(Error::Configuration("invalid recipe slot pointer"));
     }
     let mut current = root;
     let parts: Vec<&str> = pointer[1..].split('/').collect();
     for (index, part) in parts.iter().enumerate() {
         if part.is_empty() {
-            return Err(ComfyUiError::Configuration("invalid recipe slot pointer"));
+            return Err(Error::Configuration("invalid recipe slot pointer"));
         }
         if index + 1 == parts.len() {
-            let object = current.as_object_mut().ok_or(ComfyUiError::Configuration(
-                "recipe slot pointer is not an object",
-            ))?;
+            let object = current
+                .as_object_mut()
+                .ok_or(Error::Configuration("recipe slot pointer is not an object"))?;
             object.insert((*part).to_string(), value);
             return Ok(());
         }
-        current = current.get_mut(*part).ok_or(ComfyUiError::Configuration(
+        current = current.get_mut(*part).ok_or(Error::Configuration(
             "workflow does not match the recipe slot contract",
         ))?;
     }
-    Err(ComfyUiError::Configuration("invalid recipe slot pointer"))
+    Err(Error::Configuration("invalid recipe slot pointer"))
 }
 
-pub fn sanitize_weight_filename(name: &str) -> Result<String, ComfyUiError> {
+pub fn sanitize_weight_filename(name: &str) -> Result<String, Error> {
     if name.is_empty()
         || name.len() > 256
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
     {
-        return Err(ComfyUiError::Configuration("invalid checkpoint filename"));
+        return Err(Error::Configuration("invalid checkpoint filename"));
     }
     Ok(name.to_string())
 }
 
-pub fn sanitize_upload_name(name: &str) -> Result<String, ComfyUiError> {
+pub fn sanitize_upload_name(name: &str) -> Result<String, Error> {
     if name.is_empty()
         || name.len() > 128
         || name.contains('/')
@@ -399,7 +514,7 @@ pub fn sanitize_upload_name(name: &str) -> Result<String, ComfyUiError> {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
     {
-        return Err(ComfyUiError::Configuration("invalid source image filename"));
+        return Err(Error::Configuration("invalid source image filename"));
     }
     Ok(name.to_string())
 }
@@ -416,8 +531,11 @@ mod tests {
     fn packaged_catalog_validates_every_graph() {
         let catalog = catalog();
         assert!(catalog.get("flux-schnell").is_some());
+        assert!(catalog.get("flux-schnell-adapter").is_some());
         assert!(catalog.get("sd15").is_some());
         assert!(catalog.get("sdxl").is_some());
+        assert!(catalog.get("qwen-image-edit").is_some());
+        assert!(catalog.get("qwen-image-edit-adapter").is_some());
         for name in [
             "flux1-schnell-fp8-api.json",
             "flux1-schnell-fp8-img2img-api.json",
@@ -425,6 +543,12 @@ mod tests {
             "sd15-img2img-api.json",
             "sdxl-api.json",
             "sdxl-img2img-api.json",
+            "flux1-schnell-fp8-adapter-api.json",
+            "flux1-schnell-fp8-adapter-img2img-api.json",
+            "qwen-image-edit-2511-api.json",
+            "qwen-image-edit-2511-edit-api.json",
+            "qwen-image-edit-2511-adapter-api.json",
+            "qwen-image-edit-2511-adapter-edit-api.json",
         ] {
             assert!(packaged_workflow(name).is_some(), "{name}");
         }
@@ -453,6 +577,13 @@ mod tests {
                 .unwrap()
                 .id,
             "flux-schnell"
+        );
+        assert_eq!(
+            catalog
+                .image_recipe_for("qwen-image-edit-plus-nsfw-lora.safetensors")
+                .unwrap()
+                .id,
+            "qwen-image-edit-adapter"
         );
         assert_eq!(
             catalog
@@ -643,6 +774,94 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("PreviewImage")
+        );
+    }
+
+    #[test]
+    fn qwen_edit_recipe_uses_instruction_prompt_slot() {
+        let catalog = catalog();
+        let recipe = catalog
+            .image_recipe_for("qwen_image_edit_2511_fp8mixed.safetensors")
+            .unwrap();
+        assert_eq!(recipe.id, "qwen-image-edit");
+        assert_eq!(recipe.prompt_mode, PromptMode::EditInstruction);
+        let weights = recipe
+            .weight_map("qwen_image_edit_2511_fp8mixed.safetensors")
+            .unwrap();
+        let owned: HashMap<&str, &str> = weights
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let workflow = recipe
+            .apply(Fill {
+                prompt: "remove the sign",
+                seed: 9,
+                weights: owned,
+                source: Some("zone-img2img-source.png"),
+            })
+            .unwrap();
+        assert_eq!(workflow["6"]["inputs"]["prompt"], "remove the sign");
+        assert_eq!(
+            workflow["1"]["inputs"]["unet_name"],
+            "qwen_image_edit_2511_fp8mixed.safetensors"
+        );
+        assert_eq!(workflow["10"]["inputs"]["image"], "zone-img2img-source.png");
+    }
+
+    #[test]
+    fn adapter_recipe_writes_lora_filename() {
+        let catalog = catalog();
+        let recipe = catalog.get("qwen-image-edit-adapter").unwrap();
+        let weights = recipe
+            .weight_map("qwen-image-edit-plus-nsfw-lora.safetensors")
+            .unwrap();
+        assert_eq!(
+            weights.get("lora").map(String::as_str),
+            Some("qwen-image-edit-plus-nsfw-lora.safetensors")
+        );
+        let owned: HashMap<&str, &str> = weights
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let workflow = recipe
+            .apply(Fill {
+                prompt: "nsfw",
+                seed: 1,
+                weights: owned,
+                source: Some("zone-img2img-source.png"),
+            })
+            .unwrap();
+        assert_eq!(
+            workflow["4"]["inputs"]["lora_name"],
+            "qwen-image-edit-plus-nsfw-lora.safetensors"
+        );
+        assert_eq!(workflow["3"]["inputs"]["steps"], 40);
+        assert_eq!(workflow["3"]["inputs"]["cfg"], 4);
+    }
+
+    #[test]
+    fn unknown_lora_filename_picks_family_adapter() {
+        let catalog = catalog();
+        assert_eq!(
+            catalog
+                .adapter_recipe_for_filename("qwen-image-edit-plus-nsfw-lora.safetensors")
+                .unwrap()
+                .id,
+            "qwen-image-edit-adapter"
+        );
+        assert_eq!(
+            catalog
+                .adapter_recipe_for_filename("my-style.safetensors")
+                .unwrap()
+                .id,
+            "flux-schnell-adapter"
+        );
+        assert_eq!(
+            catalog
+                .adapter_recipe_for_base("Qwen/Qwen-Image-Edit-2511")
+                .unwrap()
+                .id,
+            "qwen-image-edit-adapter"
         );
     }
 }

@@ -1,4 +1,4 @@
-.PHONY: help setup up down restart logs logs-follow ps health check \
+.PHONY: help setup up down restart logs logs-follow ps health check vision-model test-vision \
 	pull-models clean clean-volumes backup restore \
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
 	setup-comfyui-video-model setup-comfyui-audio-model \
@@ -426,6 +426,25 @@ test-runner: ## Run Rust tool runner tests
 	@echo "$(BLUE)Running tool runner tests...$(NC)"
 	cd runner && cargo test
 	@echo "$(GREEN)Tool runner tests passed!$(NC)"
+
+VISION_MODEL := runner/zone_vision/models/u2net.onnx
+VISION_MODEL_URL := https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx
+VISION_MODEL_SHA256 := 8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491
+
+vision-model: ## Download the U2-Net model zone_vision needs (~168 MiB, not vendored)
+	@echo "$(BLUE)Fetching U2-Net...$(NC)"
+	@mkdir -p $(dir $(VISION_MODEL))
+	@if [ ! -f "$(VISION_MODEL)" ]; then \
+		curl -fL --retry 3 -o "$(VISION_MODEL)" "$(VISION_MODEL_URL)"; \
+	fi
+	@echo "$(VISION_MODEL_SHA256)  $(VISION_MODEL)" | shasum -a 256 -c
+	@echo "$(GREEN)Model ready: $(VISION_MODEL)$(NC)"
+
+test-vision: vision-model ## Run zone_vision tests against the real model
+	@echo "$(BLUE)Running zone_vision tests...$(NC)"
+	cd runner && ZONE_VISION_MODEL=$(CURDIR)/$(VISION_MODEL) \
+		cargo test --package zone_vision --features saliency
+	@echo "$(GREEN)zone_vision tests passed!$(NC)"
 
 setup-runner-coverage: ## Install dependencies for Rust code coverage
 	@echo "$(BLUE)Setting up Rust code coverage tools...$(NC)"

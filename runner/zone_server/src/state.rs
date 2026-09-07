@@ -11,9 +11,9 @@ use zone_core::mcp::McpHub;
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::pull::PullRegistry;
-use crate::services::email::EmailService;
 use crate::sync::SyncRegistry;
 use crate::utils::rate_limit::{RateLimitConfig, RateLimiter};
+use zone_email::EmailService;
 
 /// Maximum concurrent indexing operations
 const MAX_CONCURRENT_INDEX: usize = 3;
@@ -291,7 +291,7 @@ pub(crate) fn test_config() -> Config {
         cors_origins: vec!["*".to_string()],
         cors_allow_credentials: false,
         app_base_url: "http://localhost:3000".to_string(),
-        web_search: crate::config::WebSearchConfig::default(),
+        web_search: zone_search::WebSearchConfig::default(),
         comfyui: Default::default(),
         source_index: Default::default(),
         monitoring: Default::default(),

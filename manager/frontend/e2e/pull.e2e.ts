@@ -34,10 +34,17 @@ test('authenticates model pulls and displays provider errors before allowing a s
   await page.goto('/models');
   const input = page.locator('.model-form input');
   const install = page.locator('.model-form button[type="submit"]');
-  const panel = page.locator('.pull-jobs-panel, .models-install-panel');
-  await expect(panel).toContainText('Ollama model:tag');
-  await expect(panel).toContainText('hf.co/owner/Model-GGUF');
-  await input.fill('qwen/qwen3.8-27b');
+  const form = page.locator('.models-install-panel');
+  // Downloads only appears once a pull starts, so it is a separate card from
+  // the Add Model form that starts one, and it lists every job rather than
+  // replacing the last.
+  const jobs = page.locator('.pull-jobs-panel');
+  const failing = 'qwen/qwen3.8-27b';
+  const succeeding = 'qwen3.8:27b';
+  const job = (model: string) => jobs.locator('.pull-job').filter({ hasText: model });
+  await expect(form).toContainText('Ollama model:tag');
+  await expect(form).toContainText('hf.co/owner/Model-GGUF');
+  await input.fill(failing);
   await install.click();
 
   const token = await page.evaluate(() => localStorage.getItem('manager_access_token'));
@@ -49,14 +56,14 @@ test('authenticates model pulls and displays provider errors before allowing a s
     .poll(() => messages)
     .toEqual([{ type: 'auth', token }, { model: 'qwen/qwen3.8-27b' }]);
   socket?.send(JSON.stringify({ type: 'step', status: 'pulling manifest' }));
-  await expect(panel.locator('.step-pending')).toHaveText('○pulling manifest');
+  await expect(job(failing).locator('.step-pending')).toHaveText('○pulling manifest');
   const message =
     'pull model manifest: file does not exist. Ollama could not find "qwen/qwen3.8-27b". Use an Ollama model:tag or hf.co/owner/GGUF-repository reference.';
   socket?.send(JSON.stringify({ type: 'error', message }));
-  await expect(panel).toContainText('Installation failed');
-  await expect(panel.locator('.result-error')).toHaveText(message);
-  await expect(panel.locator('.step-error')).toHaveText('✗pulling manifest');
-  await expect(panel.locator('.step-pending, .spinner')).toHaveCount(0);
+  await expect(job(failing)).toContainText('Installation failed');
+  await expect(job(failing).locator('.result-error')).toHaveText(message);
+  await expect(job(failing).locator('.step-error')).toHaveText('✗pulling manifest');
+  await expect(job(failing).locator('.step-pending, .spinner')).toHaveCount(0);
   await expect(install).toBeEnabled();
   await expect(input).toHaveValue('qwen/qwen3.8-27b');
   await expect(page.getByRole('heading', { name: 'Installed Models', exact: true })).toBeVisible();
@@ -67,9 +74,12 @@ test('authenticates model pulls and displays provider errors before allowing a s
     animations: 'disabled',
   });
 
-  await input.fill('qwen3.8:27b');
+  await input.fill(succeeding);
   await install.click();
-  await expect(panel.locator('.step-item, .result-message, .progress-text')).toHaveCount(0);
+  await expect(job(succeeding).locator('.step-item, .result-message, .progress-text')).toHaveCount(
+    0
+  );
+  await expect(job(failing)).toContainText('Installation failed');
   await expect.poll(() => messages.length).toBe(3);
   expect(messages[2]).toEqual({ type: 'auth', token });
   socket?.send(JSON.stringify({ type: 'authenticated' }));
@@ -77,7 +87,7 @@ test('authenticates model pulls and displays provider errors before allowing a s
   expect(messages[3]).toEqual({ model: 'qwen3.8:27b' });
   socket?.send(JSON.stringify({ type: 'step', status: 'downloading' }));
   socket?.send(JSON.stringify({ type: 'progress', percent: 50 }));
-  await expect(panel.locator('.progress-text')).toHaveText('50%');
+  await expect(job(succeeding).locator('.progress-text')).toHaveText('50%');
   const refresh = page.waitForRequest(
     (request) => new URL(request.url()).pathname === '/api/models'
   );
@@ -85,9 +95,9 @@ test('authenticates model pulls and displays provider errors before allowing a s
     JSON.stringify({ type: 'complete', success: true, message: 'Model installed successfully' })
   );
   await refresh;
-  await expect(panel).toContainText('Installation complete');
-  await expect(panel.locator('.step-success')).toHaveText('✓downloading');
-  await expect(panel.locator('.step-pending, .spinner')).toHaveCount(0);
+  await expect(job(succeeding)).toContainText('Installation complete');
+  await expect(job(succeeding).locator('.step-success')).toHaveText('✓downloading');
+  await expect(job(succeeding).locator('.step-pending, .spinner')).toHaveCount(0);
   await expect(input).toHaveValue('');
   await expect(page.getByRole('heading', { name: 'Installed Models', exact: true })).toBeVisible();
   expect(messages).toHaveLength(4);

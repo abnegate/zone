@@ -131,6 +131,55 @@ export const modelsApi = {
     return parse(DiskUsageSchema, await response.json());
   },
 
+  async captions(body: {
+    trigger?: string;
+    images: Array<{ filename: string; caption: string; bytes_base64: string }>;
+  }): Promise<{ captions: string[] }> {
+    const response = await fetch(`${API_BASE}/api/models/train/captions`, {
+      method: 'POST',
+      headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: 'Captioning failed' }));
+      throw new Error(payload.error || `Failed to caption: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  async train(body: {
+    name: string;
+    base: string;
+    trigger?: string;
+    images: Array<{
+      filename: string;
+      caption: string;
+      bytes_base64: string;
+      before_base64?: string;
+    }>;
+  }): Promise<{ filename: string | null }> {
+    const response = await fetch(`${API_BASE}/api/models/train`, {
+      method: 'POST',
+      headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: 'Training failed' }));
+      throw new Error(payload.error || `Failed to train: ${response.status}`);
+    }
+    return response.json();
+  },
+
+  async trainBases(): Promise<Array<{ id: string; label: string; edit: boolean }>> {
+    const response = await fetch(`${API_BASE}/api/models/train/bases`, {
+      headers: client.getHeaders(),
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to list training bases: ${response.status}`);
+    }
+    return response.json();
+  },
+
   /**
    * Create a WebSocket connection for pulling a model
    */

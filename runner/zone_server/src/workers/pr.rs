@@ -7,9 +7,9 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::db::{projects, tasks};
-use crate::services::git::{GitError, GitService};
-use crate::services::pr::{PrError, PrService};
 use crate::state::AppState;
+use zone_vcs::git::{GitError, GitService};
+use zone_vcs::pull_request::{PrError, PrService};
 
 /// Result of PR creation attempt
 #[derive(Debug)]

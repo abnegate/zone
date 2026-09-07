@@ -2,6 +2,10 @@
 
 use std::env;
 
+/// Settings live with the clients that consume them.
+pub use zone_comfy::Config as ComfyUiConfig;
+pub use zone_search::WebSearchConfig;
+
 /// Upstream GPT4All model catalog. Tests should override `Config::gpt4all_models_url`.
 pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
     "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
@@ -156,186 +160,6 @@ impl MonitoringConfig {
             grafana_password: env::var("MONITORING_GRAFANA_ADMIN_PASSWORD")
                 .ok()
                 .filter(|password| !password.trim().is_empty()),
-        }
-    }
-}
-
-/// Direct image generation settings loaded from `COMFYUI_*` environment variables.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ComfyUiConfig {
-    pub enabled: bool,
-    pub base_url: String,
-    pub api_token: Option<String>,
-    pub workflow_path: std::path::PathBuf,
-    pub checkpoint: String,
-    pub video_workflow_path: std::path::PathBuf,
-    pub video_unet: String,
-    pub video_clip: String,
-    pub video_vae: String,
-    pub audio_workflow_path: std::path::PathBuf,
-    pub audio_checkpoint: String,
-    pub artifact_root: std::path::PathBuf,
-    pub classifier_model: String,
-    pub classifier_timeout_secs: u64,
-    pub request_timeout_secs: u64,
-    pub generation_timeout_secs: u64,
-    pub video_generation_timeout_secs: u64,
-    pub audio_generation_timeout_secs: u64,
-    pub poll_interval_ms: u64,
-}
-
-impl Default for ComfyUiConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            base_url: "http://comfyui:8188".to_string(),
-            api_token: None,
-            workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../comfyui/workflows/flux1-schnell-fp8-api.json"),
-            checkpoint: "flux1-schnell-fp8.safetensors".to_string(),
-            video_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../comfyui/workflows/wan2.2-ti2v-5b-api.json"),
-            video_unet: "wan2.2_ti2v_5B_fp16.safetensors".to_string(),
-            video_clip: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string(),
-            video_vae: "wan2.2_vae.safetensors".to_string(),
-            audio_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../comfyui/workflows/ace-step-v1-3.5b-api.json"),
-            audio_checkpoint: "ace_step_v1_3.5b.safetensors".to_string(),
-            artifact_root: "/app/artifacts".into(),
-            classifier_model: "auto".to_string(),
-            classifier_timeout_secs: 3,
-            request_timeout_secs: 15,
-            generation_timeout_secs: 300,
-            video_generation_timeout_secs: 600,
-            audio_generation_timeout_secs: 600,
-            poll_interval_ms: 500,
-        }
-    }
-}
-
-impl ComfyUiConfig {
-    pub fn from_env() -> Self {
-        Self {
-            enabled: env_truthy("COMFYUI_ENABLED", false),
-            base_url: env::var("COMFYUI_BASE_URL")
-                .unwrap_or_else(|_| "http://comfyui:8188".to_string())
-                .trim_end_matches('/')
-                .to_string(),
-            api_token: env::var("COMFYUI_API_TOKEN")
-                .ok()
-                .filter(|token| !token.trim().is_empty()),
-            workflow_path: env::var("COMFYUI_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/flux1-schnell-fp8-api.json".to_string())
-                .into(),
-            checkpoint: env::var("COMFYUI_CHECKPOINT")
-                .unwrap_or_else(|_| "flux1-schnell-fp8.safetensors".to_string()),
-            video_workflow_path: env::var("COMFYUI_VIDEO_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/wan2.2-ti2v-5b-api.json".to_string())
-                .into(),
-            video_unet: env::var("COMFYUI_VIDEO_UNET")
-                .unwrap_or_else(|_| "wan2.2_ti2v_5B_fp16.safetensors".to_string()),
-            video_clip: env::var("COMFYUI_VIDEO_CLIP")
-                .unwrap_or_else(|_| "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string()),
-            video_vae: env::var("COMFYUI_VIDEO_VAE")
-                .unwrap_or_else(|_| "wan2.2_vae.safetensors".to_string()),
-            audio_workflow_path: env::var("COMFYUI_AUDIO_WORKFLOW_PATH")
-                .unwrap_or_else(|_| "/app/comfyui/workflows/ace-step-v1-3.5b-api.json".to_string())
-                .into(),
-            audio_checkpoint: env::var("COMFYUI_AUDIO_CHECKPOINT")
-                .unwrap_or_else(|_| "ace_step_v1_3.5b.safetensors".to_string()),
-            artifact_root: env::var("ARTIFACT_ROOT")
-                .unwrap_or_else(|_| "/app/artifacts".to_string())
-                .into(),
-            classifier_model: env::var("COMFYUI_CLASSIFIER_MODEL")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "auto".to_string()),
-            classifier_timeout_secs: env_u64("COMFYUI_CLASSIFIER_TIMEOUT_SECS", 3, 1, 30),
-            request_timeout_secs: env_u64("COMFYUI_REQUEST_TIMEOUT_SECS", 15, 1, 120),
-            generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),
-            video_generation_timeout_secs: env_u64(
-                "COMFYUI_VIDEO_GENERATION_TIMEOUT_SECS",
-                600,
-                10,
-                3600,
-            ),
-            audio_generation_timeout_secs: env_u64(
-                "COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS",
-                600,
-                10,
-                3600,
-            ),
-            poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
-        }
-    }
-}
-
-/// Default SearXNG query URL. SearXNG shares Gluetun's network namespace, so
-/// the hostname is `gluetun`, not `searxng`.
-pub const DEFAULT_SEARXNG_QUERY_URL: &str = "http://gluetun:8080/search?q=<query>&format=json";
-
-/// Zone chat web search settings loaded from `SEARCH_*` env vars.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WebSearchConfig {
-    /// Master switch. When false, chat never calls SearXNG.
-    pub enabled: bool,
-    /// Query URL template. `<query>` or `{query}` is replaced with the
-    /// URL-encoded search string.
-    pub query_url: String,
-    /// Max results injected into the prompt (1–20)
-    pub result_count: usize,
-    /// HTTP timeout for a single SearXNG request
-    pub timeout_secs: u64,
-}
-
-impl Default for WebSearchConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            query_url: DEFAULT_SEARXNG_QUERY_URL.to_string(),
-            result_count: 5,
-            timeout_secs: 15,
-        }
-    }
-}
-
-impl WebSearchConfig {
-    /// Load from `SEARCH_*` environment variables. Missing values use defaults
-    /// that match docker-compose (`SEARCH_ENABLE_WEB_SEARCH=true`
-    /// and the Gluetun SearXNG URL).
-    pub fn from_env() -> Self {
-        let result_count = env::var("SEARCH_RESULT_COUNT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5)
-            .clamp(1, 20);
-        let timeout_secs = env::var("SEARCH_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(15)
-            .clamp(1, 60);
-        Self {
-            enabled: env_truthy("SEARCH_ENABLE_WEB_SEARCH", true),
-            query_url: env::var("SEARCH_SEARXNG_QUERY_URL")
-                .unwrap_or_else(|_| DEFAULT_SEARXNG_QUERY_URL.to_string()),
-            result_count,
-            timeout_secs,
-        }
-    }
-
-    /// Whether this chat message should trigger a SearXNG lookup.
-    ///
-    /// When the server switch is on, search runs only when the message looks
-    /// like it needs current web information. A boolean `metadata.web_search`
-    /// value can force a lookup on or off for a single message.
-    pub fn requested_for(&self, content: &str, metadata: Option<&serde_json::Value>) -> bool {
-        if !self.enabled || self.query_url.trim().is_empty() {
-            return false;
-        }
-        match metadata.and_then(|m| m.get("web_search")) {
-            Some(v) if v.is_boolean() => v.as_bool() == Some(true),
-            _ => crate::services::searxng::needs_web_search(content),
         }
     }
 }
@@ -687,7 +511,7 @@ mod tests {
     fn test_web_search_default_is_off_for_tests() {
         let config = WebSearchConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.query_url, DEFAULT_SEARXNG_QUERY_URL);
+        assert_eq!(config.query_url, zone_search::DEFAULT_SEARXNG_QUERY_URL);
         assert_eq!(config.result_count, 5);
         assert!(!config.requested_for("hello", None));
     }
@@ -724,27 +548,5 @@ mod tests {
             ..WebSearchConfig::default()
         };
         assert!(!empty_url.requested_for("latest news", None));
-    }
-
-    #[test]
-    fn audio_defaults_cover_dev_and_container_paths() {
-        let development = ComfyUiConfig::default();
-        assert!(
-            development
-                .audio_workflow_path
-                .ends_with("comfyui/workflows/ace-step-v1-3.5b-api.json"),
-            "dev default must resolve the packaged graph, got {:?}",
-            development.audio_workflow_path
-        );
-        assert_eq!(development.audio_checkpoint, "ace_step_v1_3.5b.safetensors");
-        assert_eq!(development.audio_generation_timeout_secs, 600);
-
-        if env::var_os("COMFYUI_AUDIO_WORKFLOW_PATH").is_none() {
-            let container = ComfyUiConfig::from_env();
-            assert_eq!(
-                container.audio_workflow_path,
-                std::path::PathBuf::from("/app/comfyui/workflows/ace-step-v1-3.5b-api.json")
-            );
-        }
     }
 }

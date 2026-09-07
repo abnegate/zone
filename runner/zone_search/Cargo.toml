@@ -1,0 +1,20 @@
+[package]
+name = "zone_search"
+description = "SearXNG web search client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+urlencoding = "=2.1.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+wiremock = "=0.6.5"

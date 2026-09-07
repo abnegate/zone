@@ -18,10 +18,17 @@ export function modelDownload(
       reason: 'This model uses a remote API and cannot be installed through Ollama.',
     };
   }
+  if (isComfyFormat(model.details?.format)) {
+    return { name, label: 'Install', reason: null };
+  }
   const qualified = name.startsWith('hf.co/') || name.startsWith('huggingface.co/');
   return {
     name: catalog === 'huggingface' && !qualified ? `hf.co/${name}` : name,
     label: 'Install',
     reason: null,
   };
+}
+
+export function isComfyFormat(format?: string | null): boolean {
+  return format === 'lora' || format === 'checkpoint' || format === 'diffusion_model';
 }

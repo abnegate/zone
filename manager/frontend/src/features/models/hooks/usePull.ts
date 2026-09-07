@@ -251,7 +251,12 @@ export function usePullState(): PullApi {
             if (requested) return;
             requested = true;
             try {
-              socket.send(JSON.stringify({ model: runtime.name }));
+              socket.send(
+                JSON.stringify({
+                  model: runtime.name,
+                  runtime: runtime.name.includes('.safetensors') ? 'comfy' : undefined,
+                })
+              );
             } catch {
               finishJob(runtime, false, 'Connection error');
             }

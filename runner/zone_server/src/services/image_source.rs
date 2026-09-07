@@ -4,10 +4,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::services::{
-    artifacts::ArtifactStore,
-    comfyui::{ComfyUiError, SourceImage},
-};
+use crate::services::artifacts::ArtifactStore;
+use zone_comfy::{Error as ComfyUiError, SourceImage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceImageError {
@@ -143,7 +141,7 @@ fn parse_artifact_url(url: &str) -> Option<(Uuid, Uuid, Uuid, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::comfyui::MAX_SOURCE_IMAGE_BYTES;
+    use zone_comfy::client::MAX_SOURCE_IMAGE_BYTES;
 
     const PNG_1X1: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,

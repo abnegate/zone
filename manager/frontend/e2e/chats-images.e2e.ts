@@ -152,8 +152,12 @@ test.describe('Chat images', () => {
     await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
 
     await expect(page.getByRole('status')).toHaveText('Generating image…');
-    await expect(page.getByRole('timer')).toHaveText('0:00');
-    await expect(page.getByRole('timer')).not.toHaveText('0:00');
+    // Reading an exact 0:00 only holds if the check lands inside the first
+    // second, so assert the shape and that it counts up from wherever it is.
+    const timer = page.getByRole('timer');
+    await expect(timer).toHaveText(/^\d+:\d{2}$/);
+    const started = (await timer.textContent()) ?? '';
+    await expect(timer).not.toHaveText(started);
     await expect(page.locator('.generation-spinner')).toBeVisible();
     await expect(page.locator('.generation-spinner')).toHaveCSS('animation-name', 'generation-spin');
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();

@@ -2186,6 +2186,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast_image_resize"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9c50201dc184ba6553da1695aac20a042efffbe2d84542cee31917c86c3ab1e"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "fastembed"
 version = "6.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9659,6 +9671,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "zone_comfy"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "rand 0.10.2",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+ "wiremock",
+ "zone_core",
+]
+
+[[package]]
 name = "zone_context"
 version = "0.1.0"
 dependencies = [
@@ -9743,6 +9776,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zone_email"
+version = "0.1.0"
+dependencies = [
+ "lettre",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "zone_installer"
 version = "0.1.0"
 dependencies = [
@@ -9781,6 +9824,20 @@ dependencies = [
  "tool_runner",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "zone_search"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "wiremock",
 ]
 
 [[package]]
@@ -9828,8 +9885,38 @@ dependencies = [
  "urlencoding",
  "uuid",
  "wiremock",
+ "zone_comfy",
  "zone_context",
  "zone_core",
+ "zone_email",
+ "zone_search",
+ "zone_vcs",
+]
+
+[[package]]
+name = "zone_vcs"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "zone_vision"
+version = "0.1.0"
+dependencies = [
+ "fast_image_resize",
+ "image",
+ "ort",
+ "serde",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
