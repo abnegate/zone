@@ -285,10 +285,11 @@ is what LoRA recipes are written against.
 Dev is a 17.2 GB download and carries the FLUX.1-dev Non-Commercial License,
 where Schnell is Apache-2.0. Check that before shipping anything trained on it.
 
+Dev sits in its own `image-dev` bundle, so the default `image` download stays
+one file rather than fetching both bases:
+
 ```bash
-python3 comfyui/download-models.py \
-  --models-dir "$HOME/Library/Application Support/Zone/ComfyUI/models" \
-  --only flux1-dev-fp8
+./scripts/setup-comfyui-macos.sh --download-model --bundle image-dev
 ```
 
 ### Captions decide whether identity is learned

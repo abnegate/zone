@@ -15,7 +15,7 @@
     },
     {
       "id": "flux1-dev-fp8",
-      "bundle": "image",
+      "bundle": "image-dev",
       "filename": "flux1-dev-fp8.safetensors",
       "relative_path": "checkpoints/flux1-dev-fp8.safetensors",
       "source_repository": "Comfy-Org/flux1-dev",
