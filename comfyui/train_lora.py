@@ -94,6 +94,10 @@ def wait_prompt(base: str, prompt_id: str, timeout: int) -> dict:
     raise SystemExit(f'train timed out after {timeout}s')
 
 
+def learning_rate(config: dict) -> float:
+    return float(env('ZONE_TRAIN_LEARNING_RATE') or config['learning_rate'])
+
+
 def train_graph(checkpoint: str, folder: str, captions: dict[str, str], save_name: str, config: dict, steps: int) -> dict:
     return {
         '1': {
@@ -124,7 +128,7 @@ def train_graph(checkpoint: str, folder: str, captions: dict[str, str], save_nam
                 'latents': ['3', 0],
                 'positive': ['3', 1],
                 'steps': steps,
-                'learning_rate': float(config['learning_rate']),
+                'learning_rate': learning_rate(config),
                 'rank': int(config['rank']),
                 'seed': int(config['seed']),
                 'training_dtype': config['training_dtype'],

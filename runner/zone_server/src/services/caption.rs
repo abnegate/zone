@@ -8,17 +8,23 @@
 //! while excluding that subject.
 
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 use zone_core::llm::{LlmClient, LlmConfig, Message};
 
 use crate::config::ComfyUiConfig;
 
-const SUBJECT_SAMPLE: usize = 6;
-const SUBJECT_TOKENS: u32 = 60;
+const SUBJECT_TOKENS: u32 = 40;
 const DESCRIPTION_TOKENS: u32 = 80;
 const MAX_CAPTION_WORDS: usize = 18;
+/// A word in at least this share of the descriptions is invariant, so it is identity.
+/// Set low on purpose: leaking identity costs more than dropping a little context.
+const INVARIANT_SHARE: f32 = 0.34;
+/// Shown to anchor the answer format. Small models copy it verbatim, so it is
+/// also the one answer that is never accepted.
+const EXAMPLE_CAPTION: &str =
+    "close-up from the side, sitting on a wooden stool, warm indoor light";
 
 const PREAMBLES: &[&str] = &[
     "in this image,",
@@ -103,24 +109,39 @@ impl Captioner {
         if !self.available() || images.iter().all(|(_, caption)| !caption.trim().is_empty()) {
             return;
         }
-        let urls: Vec<String> = images.iter().map(|(url, _)| url.clone()).collect();
-        let subject = self.subject(&urls).await;
-        for (url, caption) in images.iter_mut() {
+        let subject = self.subject(&images[0].0).await;
+        let mut drafts: Vec<Option<String>> = Vec::with_capacity(images.len());
+        for (url, caption) in images.iter() {
+            if caption.trim().is_empty() {
+                drafts.push(self.describe(url, subject.as_deref()).await);
+            } else {
+                drafts.push(None);
+            }
+        }
+        let banned = identity_words(&drafts, subject.as_deref(), trigger);
+        let mut seen: HashSet<String> = HashSet::new();
+        for ((_, caption), draft) in images.iter_mut().zip(drafts) {
             if !caption.trim().is_empty() {
                 continue;
             }
-            let described = self.describe(url, subject.as_deref()).await;
-            *caption = compose(trigger, described.as_deref(), subject.as_deref());
+            let kept = draft
+                .map(|value| strip_words(&value, &banned))
+                .filter(|value| !value.is_empty())
+                .filter(|value| seen.insert(value.to_ascii_lowercase()));
+            *caption = match kept {
+                Some(value) if trigger.is_empty() => value,
+                Some(value) => format!("{trigger}, {value}"),
+                None => trigger.to_string(),
+            };
         }
     }
 
-    /// One noun phrase for the subject every image shares, used as an exclusion list.
-    async fn subject(&self, images: &[String]) -> Option<String> {
-        let prompt = "These images all show the same subject. Reply with one short noun phrase \
-             naming that subject and the visual traits it keeps in every image. \
-             No sentence, no trailing period, at most 20 words.";
+    /// One noun phrase naming the subject, used to seed the exclusion list.
+    async fn subject(&self, image: &str) -> Option<String> {
+        let prompt = "What is the main object in this photo? Answer with a short noun phrase, \
+             at most 12 words. Do not write a sentence.";
         let mut message = Message::user(prompt);
-        message.images = images.iter().take(SUBJECT_SAMPLE).cloned().collect();
+        message.images = vec![image.to_string()];
         let answer = self.ask(message, SUBJECT_TOKENS).await?;
         let cleaned = tidy(&answer);
         (!cleaned.is_empty()).then_some(cleaned)
@@ -129,22 +150,22 @@ impl Captioner {
     /// What varies in one image: pose, framing, setting, lighting, props.
     async fn describe(&self, image: &str, subject: Option<&str>) -> Option<String> {
         let exclusion = match subject {
-            Some(subject) => {
-                format!(" Never describe the subject itself. Do not mention: {subject}.")
-            }
+            Some(subject) => format!(" Do not name or describe the {subject} itself."),
             None => String::new(),
         };
         let prompt = format!(
-            "Describe only what changes between photos of this subject: camera angle, framing, \
-             pose or action, background or setting, lighting, and any clothing or props.{exclusion} \
-             Reply with lowercase comma-separated fragments, 4 to 14 words, no full sentence, \
-             and no leading phrase such as \"the image shows\"."
+            "Write a short caption for this photo. Say where it was taken, how it is framed, \
+             and what the lighting is like.{exclusion} Answer with lowercase phrases separated \
+             by commas.\nExample answer: {EXAMPLE_CAPTION}"
         );
         let mut message = Message::user(prompt);
         message.images = vec![image.to_string()];
         let answer = self.ask(message, DESCRIPTION_TOKENS).await?;
         let cleaned = tidy(&answer);
-        (!cleaned.is_empty()).then_some(cleaned)
+        if cleaned.is_empty() || cleaned.eq_ignore_ascii_case(EXAMPLE_CAPTION) {
+            return None;
+        }
+        Some(cleaned)
     }
 
     async fn ask(&self, message: Message, max_tokens: u32) -> Option<String> {
@@ -170,44 +191,67 @@ impl Captioner {
     }
 }
 
-/// Trigger plus the variable description, with any subject leakage removed.
-pub fn compose(trigger: &str, description: Option<&str>, subject: Option<&str>) -> String {
-    let trigger = trigger.trim();
-    let Some(description) = description.map(|value| without_subject(value, subject)) else {
-        return trigger.to_string();
-    };
-    if description.is_empty() {
-        return trigger.to_string();
+/// Words that identify the subject rather than the shot.
+///
+/// Small vision models ignore "do not describe the subject", so the subject
+/// phrase alone is not enough. A word repeated across most descriptions cannot
+/// be describing what varies between them, so it is identity too.
+fn identity_words(
+    drafts: &[Option<String>],
+    subject: Option<&str>,
+    trigger: &str,
+) -> HashSet<String> {
+    let mut banned: HashSet<String> = HashSet::new();
+    for source in subject.into_iter().chain(std::iter::once(trigger)) {
+        banned.extend(content_words(source));
     }
-    if trigger.is_empty() {
-        return description;
+    let described: Vec<HashSet<String>> = drafts
+        .iter()
+        .flatten()
+        .map(|draft| content_words(draft).collect())
+        .collect();
+    if described.len() < 3 {
+        return banned;
     }
-    format!("{trigger}, {description}")
+    let threshold = ((described.len() as f32 * INVARIANT_SHARE).ceil() as usize).max(3);
+    let mut counts: HashMap<&String, usize> = HashMap::new();
+    for words in &described {
+        for word in words {
+            *counts.entry(word).or_default() += 1;
+        }
+    }
+    banned.extend(
+        counts
+            .into_iter()
+            .filter(|(_, count)| *count >= threshold)
+            .map(|(word, _)| word.clone()),
+    );
+    banned
 }
 
-/// Drop comma clauses that name the shared subject, so an ignored instruction
-/// cannot put identity words back into the caption.
-fn without_subject(description: &str, subject: Option<&str>) -> String {
-    let banned: HashSet<String> = subject
-        .map(|subject| {
-            subject
-                .split(|character: char| !character.is_alphanumeric())
-                .map(str::to_ascii_lowercase)
-                .filter(|word| word.len() > 2 && !STOPWORDS.contains(&word.as_str()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let kept: Vec<&str> = description
-        .split(',')
-        .map(str::trim)
-        .filter(|clause| !clause.is_empty())
-        .filter(|clause| {
-            !clause
-                .split(|character: char| !character.is_alphanumeric())
-                .any(|word| banned.contains(&word.to_ascii_lowercase()))
-        })
-        .collect();
-    truncate_words(&kept.join(", "), MAX_CAPTION_WORDS)
+fn content_words(value: &str) -> impl Iterator<Item = String> + '_ {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|word| word.len() > 2 && !STOPWORDS.contains(&word.as_str()))
+}
+
+/// Drop the comma clauses that carry identity, keeping the ones about the shot.
+fn strip_words(description: &str, banned: &HashSet<String>) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut budget = MAX_CAPTION_WORDS;
+    for clause in description.split(',').map(str::trim) {
+        if clause.is_empty() || content_words(clause).any(|word| banned.contains(&word)) {
+            continue;
+        }
+        let length = clause.split_whitespace().count();
+        if length > budget {
+            break;
+        }
+        budget -= length;
+        kept.push(clause);
+    }
+    kept.join(", ")
 }
 
 /// Strip model chatter, markdown, and preambles from a raw answer.
@@ -235,14 +279,6 @@ fn tidy(answer: &str) -> String {
         .trim_start_matches(['-', ':'])
         .trim()
         .to_string()
-}
-
-fn truncate_words(value: &str, limit: usize) -> String {
-    let words: Vec<&str> = value.split_whitespace().collect();
-    if words.len() <= limit {
-        return value.trim_end_matches(',').to_string();
-    }
-    words[..limit].join(" ").trim_end_matches(',').to_string()
 }
 
 #[cfg(test)]
@@ -291,34 +327,48 @@ mod tests {
 
     #[test]
     fn subject_words_are_removed_from_captions() {
-        let subject = "a lime-green cube-headed robot with a glossy red teapot body";
-        let description = "lime-green cube-headed robot, three-quarter view, standing on concrete";
+        let banned = identity_words(&[], Some("a glossy red teapot robot"), "zrkxyz");
         assert_eq!(
-            without_subject(description, Some(subject)),
+            strip_words(
+                "teapot robot on a plinth, three-quarter view, standing on concrete",
+                &banned
+            ),
             "three-quarter view, standing on concrete"
         );
     }
 
+    /// A small vision model ignores "do not describe the subject" and names it in
+    /// every answer, so words repeated across the set are identity as well.
     #[test]
-    fn caption_keeps_only_the_trigger_when_every_clause_leaks() {
-        let subject = "a red teapot robot";
-        let caption = compose(
-            "zrkxyz",
-            Some("a red teapot robot, teapot robot closeup"),
-            Some(subject),
+    fn words_repeated_across_the_set_are_treated_as_identity() {
+        let drafts: Vec<Option<String>> = [
+            "toy robot with a camera head, with a steam train in the background",
+            "whimsical robot on a city street, under a gray sky",
+            "3d model of a whimsical robot, the background is neutral",
+            "toy robot with a camera head, posed on a white surface",
+        ]
+        .iter()
+        .map(|value| Some(value.to_string()))
+        .collect();
+        let banned = identity_words(&drafts, Some("robot tea kettle"), "zrkxyz");
+        assert!(banned.contains("robot"), "robot is in every description");
+        assert!(!banned.contains("street"), "street varies between shots");
+        assert_eq!(
+            strip_words(drafts[0].as_deref().unwrap(), &banned),
+            "with a steam train in the background"
         );
-        assert_eq!(caption, "zrkxyz");
     }
 
     #[test]
-    fn caption_prefixes_trigger_and_caps_length() {
-        let long = (0..40)
-            .map(|index| format!("word{index}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let caption = compose("zrkxyz", Some(&long), None);
-        assert!(caption.starts_with("zrkxyz, "));
-        assert_eq!(caption.split_whitespace().count(), MAX_CAPTION_WORDS + 1);
+    fn captions_are_capped_without_cutting_a_clause_in_half() {
+        let clause = "standing on a wooden stool in a warehouse under warm light";
+        let description = format!("{clause}, {clause}");
+        let capped = strip_words(&description, &HashSet::new());
+        assert_eq!(
+            capped, clause,
+            "a clause that does not fit is dropped whole"
+        );
+        assert!(capped.split_whitespace().count() <= MAX_CAPTION_WORDS);
     }
 
     #[tokio::test]
@@ -326,7 +376,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .and(body_string_contains("all show the same subject"))
+            .and(body_string_contains("main object in this photo"))
             .respond_with(ResponseTemplate::new(200).set_body_json(answer(
                 "a lime-green cube-headed robot with a glossy red teapot body",
             )))
@@ -334,7 +384,7 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .and(body_string_contains("what changes between photos"))
+            .and(body_string_contains("Write a short caption"))
             .respond_with(ResponseTemplate::new(200).set_body_json(answer(
                 "The image shows a lime-green teapot robot, three-quarter view, standing on concrete.",
             )))
@@ -361,6 +411,38 @@ mod tests {
             generated.contains("concrete"),
             "context dropped from {generated}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_model_that_repeats_one_answer_falls_back_to_the_trigger() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_string_contains("main object in this photo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer("a teapot robot")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_string_contains("Write a short caption"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer(
+                "camera angle, framing, pose or action, background or setting, lighting",
+            )))
+            .mount(&server)
+            .await;
+        let captioner = Captioner::new(&config("vision"), server.uri(), "key".into());
+        let mut images = vec![
+            ("data:image/png;base64,aaa".to_string(), String::new()),
+            ("data:image/png;base64,bbb".to_string(), String::new()),
+            ("data:image/png;base64,ccc".to_string(), String::new()),
+        ];
+        captioner.fill(&mut images, "zrkxyz").await;
+        for (index, (_, caption)) in images.iter().enumerate() {
+            assert_eq!(
+                caption, "zrkxyz",
+                "image {index}: one answer repeated for every image describes nothing that varies"
+            );
+        }
     }
 
     #[tokio::test]

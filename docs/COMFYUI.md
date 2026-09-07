@@ -251,10 +251,16 @@ bad:  zrkxyz, a lime-green cube-headed robot with a red teapot body, three-quart
 Put one `.txt` beside each `.png` under `<train dir>/targets/`.
 
 Set `COMFYUI_CAPTION_MODEL` to a vision model and Zone writes those captions for
-you: one pass names the subject every image shares, then each image is described
-with that subject excluded, and clauses that name it anyway are dropped. The
-Models Train tab exposes the same thing as **Auto-caption images**. Captions you
-write by hand are never overwritten.
+you. One pass names the subject, then each image is captioned with that subject
+excluded. Small vision models ignore "do not describe the subject", so the answer
+is filtered rather than trusted: a word that appears in a third or more of the
+descriptions cannot be describing what varies between them, so clauses carrying
+those words are dropped along with the subject phrase itself. A description that
+merely copies the format example, or repeats another image's answer verbatim, is
+discarded, and that image falls back to the trigger word alone. Captions you
+write by hand are never overwritten. The Models Train tab exposes this as
+**Auto-caption images**, so the captions can be reviewed and edited before
+training starts.
 
 ### Why the residual hook exists
 
