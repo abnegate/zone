@@ -20,9 +20,7 @@ describe('Reasoning', () => {
   });
 
   it('does not nest a markdown quote inside the thinking disclosure', () => {
-    const { container } = render(
-      <Reasoning content={'> Search the workspace first.'} open />
-    );
+    const { container } = render(<Reasoning content={'> Search the workspace first.'} open />);
 
     expect(screen.getByText('Search the workspace first.')).toBeInTheDocument();
     expect(container.querySelector('blockquote')).toBeNull();
