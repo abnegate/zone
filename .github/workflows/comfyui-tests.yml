@@ -27,6 +27,7 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
+          cache-dependency-path: comfyui/requirements.lock
 
       - name: Read pinned ComfyUI commit
         id: comfyui
