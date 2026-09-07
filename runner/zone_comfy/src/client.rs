@@ -401,9 +401,6 @@ impl Client {
         let audio_workflow = self.audio_workflow()?;
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.config.audio_generation_timeout_secs);
-        if prompt.trim().is_empty() {
-            return Err(Error::Configuration("prompt is empty or too long"));
-        }
         let workflow = configure_ace_step_workflow(
             audio_workflow,
             prompt,
@@ -848,7 +845,7 @@ fn validate_audio_workflow(workflow: &Value) -> Result<(), Error> {
     for pointer in [
         "/1/inputs/ckpt_name",
         "/5/inputs/tags",
-        "/7/inputs/seconds",
+        "/5/inputs/lyrics",
         "/8/inputs/seed",
         "/10/inputs/audio",
     ] {
@@ -858,10 +855,23 @@ fn validate_audio_workflow(workflow: &Value) -> Result<(), Error> {
             ));
         }
     }
+    // Node 5 is where the caller's prompt lands, so pin its class as tightly as
+    // the output node: any other node type with a `tags` input would otherwise
+    // pass and receive the prompt.
+    if workflow.pointer("/5/class_type").and_then(Value::as_str) != Some("TextEncodeAceStepAudio") {
+        return Err(Error::Configuration(
+            "audio workflow must encode the prompt with TextEncodeAceStepAudio",
+        ));
+    }
     if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("EmptyAceStepLatentAudio")
     {
         return Err(Error::Configuration(
             "audio workflow must use EmptyAceStepLatentAudio",
+        ));
+    }
+    if workflow.pointer("/9/class_type").and_then(Value::as_str) != Some("VAEDecodeAudio") {
+        return Err(Error::Configuration(
+            "audio workflow must decode audio with VAEDecodeAudio",
         ));
     }
     if workflow.pointer("/10/class_type").and_then(Value::as_str) != Some("PreviewAudio") {
@@ -946,6 +956,9 @@ fn apply_ace_step_workflow_inputs(
     let checkpoint = sanitize_weight_filename(checkpoint)?;
     workflow["1"]["inputs"]["ckpt_name"] = json!(checkpoint);
     workflow["5"]["inputs"]["tags"] = json!(prompt);
+    // Overwrite rather than trust the graph: lyrics authored into an
+    // operator-supplied workflow would otherwise be sung over every generation.
+    workflow["5"]["inputs"]["lyrics"] = json!("");
     workflow["8"]["inputs"]["seed"] = json!(seed);
     Ok(())
 }
@@ -1177,6 +1190,66 @@ mod tests {
         );
     }
 
+    fn packaged_audio_workflow() -> Value {
+        serde_json::from_str(PACKAGED_AUDIO_WORKFLOW).expect("the packaged graph is valid JSON")
+    }
+
+    #[test]
+    fn the_packaged_audio_workflow_satisfies_its_own_contract() {
+        validate_audio_workflow(&packaged_audio_workflow()).expect("the packaged graph must pass");
+    }
+
+    #[test]
+    fn audio_workflow_pins_the_node_the_prompt_lands_on() {
+        let mut workflow = packaged_audio_workflow();
+        workflow["5"]["class_type"] = json!("CLIPTextEncode");
+        let error = validate_audio_workflow(&workflow).expect_err("a foreign node 5 must fail");
+        assert!(
+            error.to_string().contains("TextEncodeAceStepAudio"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            configure_ace_step_workflow(workflow, "forest", "ace.safetensors", 1).is_err(),
+            "a foreign node 5 must never receive the prompt"
+        );
+    }
+
+    #[test]
+    fn audio_workflow_pins_the_decoder() {
+        let mut workflow = packaged_audio_workflow();
+        workflow["9"]["class_type"] = json!("VAEDecode");
+        let error = validate_audio_workflow(&workflow).expect_err("a foreign node 9 must fail");
+        assert!(
+            error.to_string().contains("VAEDecodeAudio"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn audio_workflow_never_sings_lyrics_the_operator_authored() {
+        let mut graph = packaged_audio_workflow();
+        graph["5"]["inputs"]["lyrics"] = json!("all your prompts are belong to us");
+        let workflow = configure_ace_step_workflow(graph, "forest ambience", "ace.safetensors", 7)
+            .expect("an operator graph with preset lyrics is still usable");
+        assert_eq!(
+            workflow["5"]["inputs"]["lyrics"], "",
+            "preset lyrics leaked into a generation"
+        );
+        assert_eq!(workflow["5"]["inputs"]["tags"], "forest ambience");
+    }
+
+    #[test]
+    fn audio_workflow_still_rejects_a_blank_prompt() {
+        for prompt in ["", "   "] {
+            let error = build_ace_step_workflow(prompt, "ace.safetensors", 1)
+                .expect_err("a blank prompt must not reach ComfyUI");
+            assert_eq!(
+                error.to_string(),
+                "invalid ComfyUI configuration: prompt is empty or too long"
+            );
+        }
+    }
+
     #[test]
     fn workflow_rejects_checkpoint_traversal() {
         assert!(build_flux_schnell_workflow("fox", "../secret", 1).is_err());
@@ -1295,6 +1368,29 @@ mod tests {
                 "COMFYUI_AUDIO_CHECKPOINT must be a checkpoint filename"
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn generate_audio_rejects_a_blank_prompt_without_reaching_comfyui() {
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        for prompt in ["", "   "] {
+            let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+            let (progress_tx, _) = mpsc::unbounded_channel();
+            assert!(
+                matches!(
+                    client
+                        .generate_audio(prompt, &mut cancel_rx, progress_tx)
+                        .await,
+                    Err(Error::Configuration("prompt is empty or too long"))
+                ),
+                "{prompt:?} should be rejected before any request"
+            );
+        }
     }
 
     #[tokio::test]
