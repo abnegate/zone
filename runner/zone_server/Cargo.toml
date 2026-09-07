@@ -82,6 +82,7 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
 # Internal
+tool_runner = { path = "../tool_runner" }
 zone_chat = { path = "../zone_chat" }
 zone_comfy = { path = "../zone_comfy" }
 zone_email = { path = "../zone_email" }

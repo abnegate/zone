@@ -9905,6 +9905,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "tool_runner",
  "tower",
  "tower-http 0.7.1",
  "tracing",

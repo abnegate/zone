@@ -22,6 +22,7 @@ use crate::db::{ai_settings, tasks, workspaces};
 use crate::services::chat::session::{self, RunContext};
 use crate::services::stages;
 use crate::state::AppState;
+use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
 use zone_chat::capacity::Resolver;
 
@@ -592,6 +593,27 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
     };
 
+    let evaluator = Evaluator::detect(
+        &workspace_path,
+        EvaluationSettings::from_process_environment(),
+    );
+    let baseline = if evaluator.is_active() {
+        record_evaluation_log(
+            state,
+            run_id,
+            LEVEL_INFO,
+            &format!(
+                "Measuring code quality with {} tool(s) before the agent starts",
+                evaluator.tools().len()
+            ),
+            None,
+        )
+        .await;
+        evaluator.baseline().await
+    } else {
+        Vec::new()
+    };
+
     let model = resolve_model(state, &task).await;
     if stages::is_auto(&model) {
         obs.set_status(RUN_FAILED);
@@ -675,6 +697,33 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
 
             if let Some(pr) = pr_info {
                 artifacts["pr"] = pr;
+            }
+
+            let evaluation = evaluator.compare(baseline).await;
+            if !evaluation.deltas.is_empty() {
+                let level = if evaluation.has_regressions() {
+                    LEVEL_WARNING
+                } else {
+                    LEVEL_INFO
+                };
+                let artifact = evaluation.artifact();
+                record_evaluation_log(
+                    state,
+                    run_id,
+                    level,
+                    &evaluation.summary,
+                    Some(artifact.clone()),
+                )
+                .await;
+                artifacts["evaluation"] = artifact;
+
+                if evaluation.verdict == Verdict::Regressed {
+                    tracing::warn!(
+                        "Task run {} regressed code quality in: {}",
+                        run_id,
+                        evaluation.regressed_tools().join(", ")
+                    );
+                }
             }
 
             if let Err(error) =
@@ -782,6 +831,35 @@ where
                 });
             }
         }
+    }
+}
+
+const EVALUATION_PHASE: &str = "evaluating";
+const EVALUATION_AGENT: &str = "evaluation";
+
+async fn record_evaluation_log(
+    state: &AppState,
+    run_id: Uuid,
+    log_level: &str,
+    message: &str,
+    metadata: Option<serde_json::Value>,
+) {
+    if let Err(error) = tasks::add_task_run_log(
+        state.db(),
+        run_id,
+        EVALUATION_PHASE,
+        EVALUATION_AGENT,
+        log_level,
+        message,
+        metadata,
+    )
+    .await
+    {
+        tracing::error!(
+            "Failed to record evaluation log for run {}: {}",
+            run_id,
+            error
+        );
     }
 }
 
