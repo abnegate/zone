@@ -1,7 +1,8 @@
 .PHONY: help setup up down restart logs logs-follow ps health check \
 	pull-models clean clean-volumes backup restore \
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
-	setup-comfyui-video-model verify-comfyui-model verify-comfyui-video-model validate test \
+	setup-comfyui-video-model setup-comfyui-audio-model \
+	verify-comfyui-model verify-comfyui-video-model verify-comfyui-audio-model validate test \
 	up-vpn up-monitoring up-comfyui up-all dev rebuild update \
 	shell-ollama shell-litellm shell-manager shell-console \
 	shell-postgres shell-valkey db-shell db-migrate \
@@ -56,6 +57,14 @@ setup-comfyui-video-model: ## Explicitly download Wan 2.2 TI2V 5B video weights 
 		--bundle video \
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
+setup-comfyui-audio-model: ## Explicitly download ACE-Step v1 3.5B audio weights (~7.7 GB)
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle audio \
+		$(if $(filter 1 true yes,$(FORCE)),--force,)
+
 verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-256
 	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
@@ -70,6 +79,14 @@ verify-comfyui-video-model: ## Verify the installed Wan 2.2 TI2V 5B size and SHA
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
 		--bundle video \
+		--verify-only
+
+verify-comfyui-audio-model: ## Verify the installed ACE-Step v1 3.5B size and SHA-256
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle audio \
 		--verify-only
 
 setup-auth: ## Generate basic auth credentials

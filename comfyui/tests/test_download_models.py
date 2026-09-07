@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -84,6 +86,7 @@ class DownloadModelsTest(unittest.TestCase):
         models = [
             {"id": "image", "bundle": "image"},
             {"id": "video", "bundle": "video"},
+            {"id": "audio", "bundle": "audio"},
             {"id": "legacy"},
         ]
         self.assertEqual(
@@ -94,7 +97,24 @@ class DownloadModelsTest(unittest.TestCase):
             [model["id"] for model in download_models.select_models(models, "video")],
             ["video"],
         )
-        self.assertEqual(len(download_models.select_models(models, "all")), 3)
+        self.assertEqual(
+            [model["id"] for model in download_models.select_models(models, "audio")],
+            ["audio"],
+        )
+        self.assertEqual(len(download_models.select_models(models, "all")), 4)
+
+    def test_parse_args_accepts_every_valid_bundle(self) -> None:
+        for bundle in [*sorted(download_models.VALID_BUNDLES), "all"]:
+            with self.subTest(bundle=bundle):
+                argv = [
+                    "download-models.py",
+                    "--models-dir",
+                    ".",
+                    "--bundle",
+                    bundle,
+                ]
+                with unittest.mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(download_models.parse_args().bundle, bundle)
 
     def test_download_resumes_partial_file(self) -> None:
         payload = b"0123456789" * 1000

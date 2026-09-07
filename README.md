@@ -143,7 +143,7 @@ OLLAMA_BASE_URL=http://ollama:11434
 | `vpn` | Gluetun, SearXNG | Full-tunnel VPN for stack internet traffic |
 | `monitoring` | Prometheus, Grafana | Metrics and dashboards |
 | `bundled-ollama` | Ollama | In-compose engine (Linux NVIDIA / CPU) |
-| `bundled-comfyui` | ComfyUI | Bundled NVIDIA image/video runtime |
+| `bundled-comfyui` | ComfyUI | Bundled NVIDIA image/video/audio runtime |
 
 Combine any of them in one command. Overlay files for `dev` and `vpn` are selected automatically:
 
