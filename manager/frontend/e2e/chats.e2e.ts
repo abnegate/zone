@@ -28,11 +28,22 @@ const generateMockMessage = (id: string, chatId: string, role: string, content: 
   created_at: new Date().toISOString(),
 });
 
-const generateMockModel = (name: string) => ({
+const generateMockModel = (name: string, capabilities: { tools?: boolean } = {}) => ({
   name,
   size: 1024 * 1024 * 100,
   modified_at: new Date().toISOString(),
+  ...capabilities,
 });
+
+// The chat header only offers agent mode for a model that can call tools.
+const mockToolCapableModels = (page: Page) =>
+  routeApi(page, '**/api/models*', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ models: [generateMockModel('llama3.2', { tools: true })] }),
+    });
+  });
 
 const openNewChatFromSidebar = (page: Page) =>
   page.getByRole('button', { name: 'New chat', exact: true }).click();
@@ -287,7 +298,8 @@ test.describe('Chats Page', () => {
       await selectTrigger.click();
 
       const options = page.getByRole('option');
-      await expect(options).toHaveCount(3);
+      await expect(options).toHaveCount(4);
+      await expect(page.getByRole('option', { name: 'Automatic' })).toBeVisible();
       await expect(page.getByRole('option', { name: 'llama3.2' })).toBeVisible();
       await expect(page.getByRole('option', { name: 'codellama' })).toBeVisible();
       await expect(page.getByRole('option', { name: 'mistral' })).toBeVisible();
@@ -336,13 +348,14 @@ test.describe('Chats Page', () => {
       await expect(page.getByRole('dialog', { name: 'New Chat' })).toHaveCount(0);
     });
 
-    test('disables create button when no model selected', async ({ page }) => {
+    test('falls back to Automatic when no model is picked', async ({ page }) => {
       await openNewChatFromSidebar(page);
+      await expect(page.getByLabel('Select Model')).toContainText('Automatic');
       await expect(
         page.getByRole('dialog', { name: 'New Chat' }).getByRole('button', {
           name: 'Create Chat',
         })
-      ).toBeDisabled();
+      ).toBeEnabled();
     });
 
     test('closes modal on cancel', async ({ page }) => {
@@ -726,6 +739,8 @@ test.describe('Chats Page', () => {
     };
 
     test('turns on agent mode without a separate access toggle', async ({ page }, testInfo) => {
+      await page.unroute('**/api/models*');
+      await mockToolCapableModels(page);
       await mockChatRoutes(page, mockChat);
       await mockChatSocket(page);
       await page.reload();
