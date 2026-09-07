@@ -1098,6 +1098,99 @@ describe('useChat', () => {
     });
   });
 
+  it('takes the reply back up when a dropped socket replays the turn', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'live', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Half a', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'live',
+        tool_call_id: 'call-1',
+        name: 'read_file',
+        arguments: '{}',
+      });
+    });
+    const dropped = lastSocket;
+    act(() => dropped?.onclose?.());
+    await waitFor(() => expect(lastSocket).not.toBe(dropped));
+
+    act(() => {
+      lastSocket?.emit({
+        type: 'message_start',
+        message_id: 'live',
+        role: 'assistant',
+        resumed: true,
+      });
+      lastSocket?.emit({ type: 'chunk', content: 'Half a reply', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'live',
+        tool_call_id: 'call-1',
+        name: 'read_file',
+        arguments: '{}',
+      });
+    });
+
+    await waitFor(() => {
+      const revived = result.current.chat?.messages.filter((message) => message.id === 'live');
+      expect(revived).toHaveLength(1);
+      expect(revived?.[0]?.content).toBe('Half a reply');
+      expect(revived?.[0]?.metadata?.tool_calls?.[0]?.detail).toBe('Running…');
+      expect(result.current.streaming).toBe(true);
+    });
+
+    act(() =>
+      lastSocket?.emit({ type: 'message_end', message_id: 'live', content: 'Half a reply, done' })
+    );
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('Half a reply, done');
+    });
+    unmount();
+  });
+
+  it('keeps the saved partial when a reload joins the turn that wrote it', async () => {
+    mockGetChat.mockResolvedValue({
+      ...mockChat,
+      messages: [
+        ...mockMessages,
+        {
+          id: 'live',
+          chat_id: '1',
+          role: 'assistant',
+          content: 'Half a',
+          created_at: '2024-01-01T00:02:00Z',
+        },
+      ],
+    });
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() =>
+      lastSocket?.emit({
+        type: 'message_start',
+        message_id: 'live',
+        role: 'assistant',
+        resumed: true,
+      })
+    );
+    expect(
+      result.current.chat?.messages.find((message) => message.id === 'live')?.content,
+      'a resumed start never blanks what was already saved'
+    ).toBe('Half a');
+
+    act(() => lastSocket?.emit({ type: 'chunk', content: 'Half a reply', index: 0 }));
+    await waitFor(() => {
+      const rows = result.current.chat?.messages.filter((message) => message.id === 'live');
+      expect(rows).toHaveLength(1);
+      expect(rows?.[0]?.content).toBe('Half a reply');
+    });
+    unmount();
+  });
+
   it('reconnects after the socket drops so a later send still works', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
