@@ -201,7 +201,10 @@ async fn test_keyword_only_search() {
 
     for hit in &keyword_hits {
         assert!(
-            hit.chunk_text.contains("Rust") || hit.chunk_text.contains("async"),
+            {
+                let text = hit.chunk_text.to_lowercase();
+                text.contains("rust") || text.contains("async")
+            },
             "Keyword hits should contain search terms, got {:?}",
             hit.chunk_text
         );

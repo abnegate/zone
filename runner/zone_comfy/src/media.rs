@@ -85,7 +85,7 @@ impl MediaType {
         lane: Lane::Audio,
         mime: "audio/ogg",
         extension: "opus",
-        aliases: &["audio/opus"],
+        aliases: &["audio/opus", "ogg"],
     };
     pub const WAV: Self = Self {
         lane: Lane::Audio,
@@ -246,5 +246,12 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn ogg_files_resolve_to_the_opus_audio_type() {
+        let media = MediaType::for_filename("clip.ogg").expect("ogg is an audio container");
+        assert_eq!(media.mime, "audio/ogg");
+        assert_eq!(media.extension, "opus");
+        assert_eq!(MediaType::for_extension("OGG"), Some(MediaType::OPUS));
     }
 }
