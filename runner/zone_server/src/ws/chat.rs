@@ -39,10 +39,10 @@ use crate::services::chat::{
     session::{self, Session},
 };
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
-use crate::services::searxng::{SearchContext, SearxngClient, sanitize_query};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use zone_core::context::ContextUsage;
+use zone_search::client::{SearchContext, SearxngClient, sanitize_query};
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;

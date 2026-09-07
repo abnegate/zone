@@ -1,6 +1,18 @@
-//! Email service for sending verification and password reset emails
+//! Transactional email over SMTP.
 //!
-//! Supports SMTP configuration via environment variables.
+//! [`EmailService`] sends the verification, password reset, and invitation
+//! messages an account flow needs.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use zone_email::EmailService;
+//!
+//! EmailService::from_env()?
+//!     .send_verification_email("person@example.com", "Sam", "https://zone.test/verify?t=abc")
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
 
 use lettre::address::AddressError;
 use lettre::message::header::ContentType;

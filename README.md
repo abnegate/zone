@@ -417,6 +417,9 @@ zone/
 │   │   ├── src/inventory.rs # Installed weights on disk
 │   │   ├── src/lora.rs      # LoRA training jobs
 │   │   └── src/caption.rs   # Vision captioning for training sets
+│   ├── zone_email/          # Transactional email over SMTP
+│   ├── zone_search/         # SearXNG web search client
+│   ├── zone_vcs/            # Local git operations and GitHub pull requests
 │   ├── zone_server/         # HTTP/WS server
 │   │   ├── src/routes/      # API endpoints
 │   │   ├── src/db/          # Database queries (sqlx)

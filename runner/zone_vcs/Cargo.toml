@@ -1,0 +1,21 @@
+[package]
+name = "zone_vcs"
+description = "Local git operations and GitHub pull requests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "=3.27.0"
+wiremock = "=0.6.5"

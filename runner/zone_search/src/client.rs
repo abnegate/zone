@@ -151,7 +151,7 @@ impl SearxngClient {
         let started = std::time::Instant::now();
         let query = sanitize_query(query);
         if query.is_empty() {
-            crate::metrics::record_searxng("empty_query", started.elapsed(), 0);
+            crate::observe::record("empty_query", started.elapsed(), 0);
             return Ok(Vec::new());
         }
 
@@ -159,20 +159,20 @@ impl SearxngClient {
         let response = match self.http.get(&url).send().await {
             Ok(response) => response,
             Err(error) => {
-                crate::metrics::record_searxng("http_error", started.elapsed(), 0);
+                crate::observe::record("http_error", started.elapsed(), 0);
                 return Err(error.into());
             }
         };
         let status = response.status();
         if !status.is_success() {
-            crate::metrics::record_searxng("status_error", started.elapsed(), 0);
+            crate::observe::record("status_error", started.elapsed(), 0);
             return Err(SearchError::Status(status.as_u16()));
         }
 
         let body: SearxngResponse = match response.json().await {
             Ok(body) => body,
             Err(error) => {
-                crate::metrics::record_searxng("http_error", started.elapsed(), 0);
+                crate::observe::record("http_error", started.elapsed(), 0);
                 return Err(error.into());
             }
         };
@@ -193,7 +193,7 @@ impl SearxngClient {
             })
             .take(self.config.result_count)
             .collect::<Vec<_>>();
-        crate::metrics::record_searxng("ok", started.elapsed(), hits.len());
+        crate::observe::record("ok", started.elapsed(), hits.len());
         Ok(hits)
     }
 }
