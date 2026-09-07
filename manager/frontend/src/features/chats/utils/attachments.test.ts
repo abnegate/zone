@@ -76,8 +76,15 @@ describe('audioAttachments', () => {
     const attachments = [
       { name: 'track.flac', mime: 'audio/flac', url: '/api/artifacts/ws/chat/msg/track.flac' },
       { name: 'track.mp3', mime: 'audio/mpeg', url: '/api/artifacts/ws/chat/msg/track.mp3' },
-      { name: 'track.opus', mime: 'audio/opus', url: '/api/artifacts/ws/chat/msg/track.opus' },
+      { name: 'track.opus', mime: 'audio/ogg', url: '/api/artifacts/ws/chat/msg/track.opus' },
       { name: 'track.wav', mime: 'audio/wav', url: '/api/artifacts/ws/chat/msg/track.wav' },
+    ];
+    expect(audioAttachments({ attachments })).toEqual(attachments);
+  });
+
+  it('keeps the audio/opus mime stored on messages from before the ogg fix', () => {
+    const attachments = [
+      { name: 'track.opus', mime: 'audio/opus', url: '/api/artifacts/ws/chat/msg/track.opus' },
     ];
     expect(audioAttachments({ attachments })).toEqual(attachments);
   });
