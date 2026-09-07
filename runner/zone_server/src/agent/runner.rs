@@ -24,6 +24,7 @@ use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
 use zone_core::llm::{RequestOptions, Usage};
+use zone_core::tools::is_vision_url;
 
 /// Maximum reason/act rounds for a chat turn. Raised now that old tool
 /// traces are compacted instead of replayed raw.
@@ -483,7 +484,12 @@ pub fn run_with_context(
                         progress |= !mutation && novel;
                     }
                     let mut message = LlmMessage::tool_result(&finished.id, &finished.output);
-                    message.images = finished.images.clone();
+                    message.images = finished
+                        .images
+                        .iter()
+                        .filter(|url| is_vision_url(url))
+                        .cloned()
+                        .collect();
                     let entry = canonical(message, Vec::new());
                     context.append(&entry);
                     yield AgentEvent::Canonical(entry);

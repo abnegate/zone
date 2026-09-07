@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,7 @@ class TrainConfigTests(unittest.TestCase):
         for name in ('diffusion_model.img_in', 'diffusion_model.final_layer.linear'):
             self.assertFalse(train_config.trains(name, config), name)
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'MPS watermarks are only applied on macOS')
     def test_mps_low_watermark_never_exceeds_high(self):
         path = MODULE_PATH.with_name('prestartup_script.py')
         spec = importlib.util.spec_from_file_location('zone_lora_prestartup', path)

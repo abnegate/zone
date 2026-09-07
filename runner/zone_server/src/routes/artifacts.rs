@@ -11,6 +11,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
+use zone_comfy::MediaType;
 
 use crate::{
     auth::AuthUser,
@@ -104,16 +105,9 @@ pub async fn get(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let mime = match filename.rsplit_once('.').map(|(_, extension)| extension) {
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("webp") => "image/webp",
-        Some("webm") => "video/webm",
-        Some("mp4") => "video/mp4",
-        _ => "image/png",
-    };
     let mut response = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_TYPE, content_type(&filename))
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, bytes.len().to_string())
         .header(
@@ -166,6 +160,14 @@ async fn readable(state: &AppState, workspace_id: Uuid, chat_id: Uuid, user_id: 
     }
 }
 
+/// Artifacts are served with `nosniff`, so this is the only thing standing
+/// between a stored clip and a browser that refuses to decode it.
+fn content_type(filename: &str) -> &'static str {
+    MediaType::for_filename(filename)
+        .unwrap_or(MediaType::PNG)
+        .mime
+}
+
 enum Requested {
     Whole,
     Partial { start: u64, end: u64 },
@@ -216,7 +218,7 @@ fn requested(header: Option<&str>, total: u64) -> Requested {
 
 #[cfg(test)]
 mod tests {
-    use super::{Requested, requested};
+    use super::*;
 
     fn resolved(header: &str, total: u64) -> Option<(u64, u64)> {
         match requested(Some(header), total) {
@@ -301,5 +303,38 @@ mod tests {
     fn the_range_unit_is_case_insensitive() {
         assert_eq!(resolved("BYTES=0-9", 100), Some((0, 9)));
         assert_eq!(resolved("Bytes=0-9", 100), Some((0, 9)));
+    }
+
+    #[test]
+    fn opus_artifacts_are_served_as_ogg() {
+        assert_eq!(
+            content_type("f47ac10b.opus"),
+            "audio/ogg",
+            "audio/opus is an RTP payload type; canPlayType returns \"\" for it"
+        );
+    }
+
+    #[test]
+    fn every_storable_extension_has_a_content_type() {
+        for (filename, expected) in [
+            ("a.png", "image/png"),
+            ("a.jpg", "image/jpeg"),
+            ("a.jpeg", "image/jpeg"),
+            ("a.webp", "image/webp"),
+            ("a.webm", "video/webm"),
+            ("a.mp4", "video/mp4"),
+            ("a.flac", "audio/flac"),
+            ("a.mp3", "audio/mpeg"),
+            ("a.opus", "audio/ogg"),
+            ("a.wav", "audio/wav"),
+        ] {
+            assert_eq!(content_type(filename), expected, "{filename}");
+        }
+    }
+
+    #[test]
+    fn unknown_and_suffixless_names_fall_back_to_png() {
+        assert_eq!(content_type("a.bin"), "image/png");
+        assert_eq!(content_type("a"), "image/png");
     }
 }

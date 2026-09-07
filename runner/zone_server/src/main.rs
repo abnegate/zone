@@ -106,6 +106,7 @@ async fn main() {
             ),
             model_image: None,
             model_video: None,
+            model_audio: None,
         };
 
         let engine = embedding_engine_from_env();

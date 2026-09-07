@@ -302,6 +302,47 @@ async fn takeover_fences_old_writes_and_recovers_uncertain_mutation_without_retr
 }
 
 #[tokio::test]
+async fn stopping_a_turn_leaves_only_the_uncertain_mutation_notice_unconsumed() {
+    let (pool, store, chat, _) = fixture().await;
+    let lease = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (turn, _) = begin(&store, &lease).await;
+    store
+        .append(&lease, turn, &[envelope("mutation", "call", true)])
+        .await
+        .unwrap();
+    store
+        .finish(&lease, turn, "Stopped.", None, true, None)
+        .await
+        .unwrap();
+    let history = store.load().await.unwrap();
+    let notice = history
+        .entries
+        .iter()
+        .find(|entry| {
+            entry
+                .message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("may have changed external state"))
+        })
+        .expect("stopping a pending mutation must record an uncertain outcome");
+    assert_eq!(notice.message.role, Role::Tool);
+    assert_eq!(notice.message.tool_call_id.as_deref(), Some("call"));
+    let unconsumed: Vec<&str> = history
+        .entries
+        .iter()
+        .filter(|entry| !entry.consumed && entry.message.role != Role::User)
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(
+        unconsumed,
+        vec![notice.id.as_str()],
+        "a stopped turn must fold away everything the model already read and retain exactly the uncertain outcome it has not, so compaction cannot summarize the warning away before the next turn repeats the mutation"
+    );
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+#[tokio::test]
 async fn renewal_runs_independently_and_loss_wakes_cancellation() {
     let (pool, store, chat, _) = fixture().await;
     let lifetime = Duration::from_millis(450);

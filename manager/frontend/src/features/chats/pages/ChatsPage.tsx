@@ -7,6 +7,7 @@ import { useModels } from '../../models';
 import { isProtectedArtifactUrl } from '../api/protectedImages';
 import {
   ActionReceipts,
+  AuthenticatedAudio,
   AuthenticatedImage,
   AuthenticatedVideo,
   Citations,
@@ -22,6 +23,7 @@ import {
   type Attachment,
   AUTO_MODEL,
   attachmentMetadata,
+  audioAttachments,
   buildMessageWithAttachments,
   chatShowsAgent,
   chatShowsCharacter,
@@ -863,6 +865,7 @@ export default function ChatsPage() {
                 displayedChat.messages.map((message) => {
                   const images = imageAttachments(message.metadata);
                   const videos = videoAttachments(message.metadata);
+                  const audios = audioAttachments(message.metadata);
                   const toolCalls = message.metadata?.tool_calls ?? [];
                   const leftoverReasoning = message.metadata?.reasoning;
                   const toolsHaveReasoning = toolCalls.some((call) =>
@@ -923,6 +926,18 @@ export default function ChatsPage() {
                               src={a.url}
                               label={a.name || `Generated video ${index + 1}`}
                               data-testid="message-video"
+                            />
+                          ))}
+                        </div>
+                      )}
+                      {audios.length > 0 && (
+                        <div className="message-audios">
+                          {audios.map((a, index) => (
+                            <AuthenticatedAudio
+                              key={a.url}
+                              src={a.url}
+                              label={a.name || `Generated audio ${index + 1}`}
+                              data-testid="message-audio"
                             />
                           ))}
                         </div>
@@ -1159,7 +1174,7 @@ export default function ChatsPage() {
                 setNewChatReasoning('auto');
               }
             }}
-            helpText="Automatic picks chat, image, or video from the message when those modules are installed. You can still pin a model."
+            helpText="Automatic picks chat, image, video, or audio from the message when those modules are installed. You can still pin a model."
             options={[
               { value: AUTO_MODEL, label: 'Automatic' },
               ...models

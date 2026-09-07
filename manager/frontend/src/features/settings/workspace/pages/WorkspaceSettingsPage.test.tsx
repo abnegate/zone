@@ -128,6 +128,7 @@ const mockAiSettings: AiSettings = {
   model_embedding: 'nomic-embed-text',
   model_image: 'flux1-schnell-fp8.safetensors',
   model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+  model_audio: 'ace_step_v1_3.5b.safetensors',
 };
 
 describe('WorkspaceSettingsPage', () => {
@@ -614,6 +615,7 @@ describe('WorkspaceSettingsPage', () => {
         model_embedding: null,
         model_image: null,
         model_video: null,
+        model_audio: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -645,6 +647,7 @@ describe('WorkspaceSettingsPage', () => {
         model_embedding: null,
         model_image: null,
         model_video: null,
+        model_audio: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -676,6 +679,7 @@ describe('WorkspaceSettingsPage', () => {
         model_embedding: null,
         model_image: null,
         model_video: null,
+        model_audio: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -713,6 +717,7 @@ describe('WorkspaceSettingsPage', () => {
         model_embedding: null,
         model_image: null,
         model_video: null,
+        model_audio: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -751,6 +756,7 @@ describe('WorkspaceSettingsPage', () => {
         model_embedding: null,
         model_image: null,
         model_video: null,
+        model_audio: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -795,6 +801,7 @@ describe('WorkspaceSettingsPage', () => {
         model_embedding: null,
         model_image: null,
         model_video: null,
+        model_audio: null,
       };
       mockClient.getWorkspaceAiSettings.mockResolvedValue(noCustomSettings);
 
@@ -840,6 +847,24 @@ describe('WorkspaceSettingsPage', () => {
           expect.any(String),
           expect.any(String),
           expect.objectContaining({ model_video: '' })
+        );
+      });
+    });
+
+    it('sends an empty audio model to resume organization inheritance', async () => {
+      const user = userEvent.setup();
+      render(<WorkspaceSettingsPage />);
+      await openAiTab(user);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Audio Model')).toHaveValue('ace_step_v1_3.5b.safetensors');
+      });
+      await user.selectOptions(screen.getByLabelText('Audio Model'), '');
+      await user.click(screen.getByRole('button', { name: 'Save Changes' }));
+      await waitFor(() => {
+        expect(mockClient.updateWorkspaceAiSettings).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.any(String),
+          expect.objectContaining({ model_audio: '' })
         );
       });
     });
