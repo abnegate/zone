@@ -124,9 +124,19 @@ pub fn merge(existing: &mut Vec<Citation>, incoming: impl IntoIterator<Item = Ci
     }
 }
 
+/// Citations a tool emitted in its own output.
+///
+/// A tool cannot certify itself: MCP servers are third-party processes and the
+/// rest carry model-influenced text, so provenance is forced to advisory here
+/// whatever the payload claims or omits. Only the constructors in this module,
+/// which run after the server made the observation, mint an authoritative one.
 fn parse_citations(value: &Value) -> Option<Vec<Citation>> {
     let parsed: Vec<Citation> = serde_json::from_value(value.clone()).ok()?;
-    let finished = finish(parsed);
+    let asserted = parsed.into_iter().map(|mut citation| {
+        citation.provenance = Provenance::ModelAsserted;
+        citation
+    });
+    let finished = finish(asserted.collect());
     (!finished.is_empty()).then_some(finished)
 }
 
@@ -899,8 +909,8 @@ mod tests {
     }
 
     #[test]
-    fn stored_citations_without_provenance_stay_server_proven() {
-        let stored = citations(
+    fn a_tool_that_omits_provenance_cannot_certify_itself() {
+        let supplied = citations(
             "search_knowledge",
             json!({
                 "citations": [{
@@ -915,12 +925,29 @@ mod tests {
         )
         .remove(0);
 
+        assert_eq!(supplied.provenance, Provenance::ModelAsserted);
+        assert_eq!(supplied.outcome, CitationOutcome::Observed);
+        assert!(!supplied.passing());
+
+        let wire = serde_json::to_value(&supplied).expect("a citation serializes");
+        assert_eq!(wire["kind"], "github_build");
+        assert_eq!(wire["provenance"], "model_asserted");
+        assert_eq!(wire["outcome"], "observed");
+    }
+
+    #[test]
+    fn a_stored_citation_without_provenance_stays_server_proven() {
+        let stored: Citation = serde_json::from_value(json!({
+            "kind": "github_build",
+            "title": "repository main@aaaaaaa",
+            "url": "https://github.com/owner/repository/commit/aaa",
+            "observed_at": OBSERVED,
+            "complete": true,
+            "outcome": "success"
+        }))
+        .expect("a stored citation deserializes");
+
         assert_eq!(stored.provenance, Provenance::ServerExecution);
         assert!(stored.passing());
-
-        let wire = serde_json::to_value(&stored).expect("a citation serializes");
-        assert_eq!(wire["kind"], "github_build");
-        assert_eq!(wire["provenance"], "server_execution");
-        assert_eq!(wire["outcome"], "success");
     }
 }
