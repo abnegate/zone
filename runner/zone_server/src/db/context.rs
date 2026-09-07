@@ -427,7 +427,7 @@ impl Store {
             .await?;
         sqlx::query("UPDATE chat_turns SET status = 'completed', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
             .bind(self.chat_id).bind(turn_id).execute(&mut *transaction).await?;
-        self.consume_turn_in(&mut transaction, turn_id).await?;
+        self.consume_turn_in(&mut transaction, turn_id, &[]).await?;
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
         Ok(row)
@@ -476,8 +476,8 @@ impl Store {
         let mut transaction = self.pool.begin().await?;
         self.lock(&mut transaction, lease).await?;
         self.turn(&mut transaction, lease, turn_id).await?;
-        if interrupted {
-            self.interrupt_in(&mut transaction, turn_id).await?;
+        let recovery = if interrupted {
+            self.interrupt_in(&mut transaction, turn_id).await?
         } else {
             let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chat_calls WHERE chat_id=$1 AND turn_id=$2 AND result_id IS NULL)").bind(self.chat_id).bind(turn_id).fetch_one(&mut *transaction).await?;
             if pending {
@@ -486,7 +486,8 @@ impl Store {
                 ));
             }
             sqlx::query("UPDATE chat_turns SET status='completed',completed_at=clock_timestamp() WHERE chat_id=$1 AND id=$2").bind(self.chat_id).bind(turn_id).execute(&mut *transaction).await?;
-        }
+            Vec::new()
+        };
         if let Some(partial) = partial {
             self.append_in(
                 &mut transaction,
@@ -509,7 +510,8 @@ impl Store {
                 false,
             )
             .await?;
-        self.consume_turn_in(&mut transaction, turn_id).await?;
+        self.consume_turn_in(&mut transaction, turn_id, &recovery)
+            .await?;
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
         Ok(row)
@@ -826,13 +828,15 @@ impl Store {
         Ok(ids.len())
     }
 
+    /// Returns the recovery entries it appended, which the model has not seen yet.
     async fn interrupt_in(
         &self,
         connection: &mut PgConnection,
         turn_id: Uuid,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<String>, Error> {
         let pending = sqlx::query("SELECT id, mutating FROM chat_calls WHERE chat_id = $1 AND turn_id = $2 AND result_id IS NULL ORDER BY envelope_id, id")
             .bind(self.chat_id).bind(turn_id).fetch_all(&mut *connection).await?;
+        let mut recovery: Vec<String> = Vec::with_capacity(pending.len());
         for row in pending {
             let call: String = row.get("id");
             let content = if row.get::<bool, _>("mutating") {
@@ -840,33 +844,34 @@ impl Store {
             } else {
                 "Error: execution was interrupted before a result was durably recorded. No result is available."
             };
-            self.append_in(
-                connection,
-                turn_id,
-                &NewEntry {
-                    id: Uuid::new_v4().to_string(),
-                    message: ReplayMessage::from(&Message::tool_result(call, content)),
-                    mutations: Vec::new(),
-                },
-            )
-            .await?;
+            let entry = NewEntry {
+                id: Uuid::new_v4().to_string(),
+                message: ReplayMessage::from(&Message::tool_result(call, content)),
+                mutations: Vec::new(),
+            };
+            self.append_in(connection, turn_id, &entry).await?;
+            recovery.push(entry.id);
         }
         sqlx::query("UPDATE chat_turns SET status = 'interrupted', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
             .bind(self.chat_id).bind(turn_id).execute(&mut *connection).await?;
-        self.consume_turn_in(connection, turn_id).await?;
-        Ok(())
+        self.consume_turn_in(connection, turn_id, &recovery).await?;
+        Ok(recovery)
     }
 
+    /// Retained entries stay unconsumed so the next run replays them verbatim and
+    /// compaction cannot summarize them away before the model has read them.
     async fn consume_turn_in(
         &self,
         connection: &mut PgConnection,
         turn_id: Uuid,
+        retain: &[String],
     ) -> Result<(), Error> {
         sqlx::query(
-            "UPDATE chat_entries SET consumed = TRUE WHERE chat_id = $1 AND turn_id = $2 AND consumed = FALSE",
+            "UPDATE chat_entries SET consumed = TRUE WHERE chat_id = $1 AND turn_id = $2 AND consumed = FALSE AND id <> ALL($3)",
         )
         .bind(self.chat_id)
         .bind(turn_id)
+        .bind(retain)
         .execute(connection)
         .await?;
         Ok(())
