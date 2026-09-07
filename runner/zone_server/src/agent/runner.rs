@@ -287,8 +287,12 @@ pub fn run_with_context(
                     }
                 }
                 for image in &choice.delta.generated_images {
-                    images.push(image.image_url.url.clone());
-                    yield AgentEvent::Image(image.image_url.url.clone());
+                    let url = image.image_url.url.clone();
+                    if images.iter().any(|existing| existing == &url) {
+                        continue;
+                    }
+                    images.push(url.clone());
+                    yield AgentEvent::Image(url);
                 }
                 if let Some(deltas) = &choice.delta.tool_calls {
                     pending.merge(deltas);
@@ -348,6 +352,11 @@ pub fn run_with_context(
                     "The model could not finish without requesting more tools.".into(),
                 );
                 return;
+            }
+            if let Some(content) = replay.as_ref()
+                && streamed < content.len()
+            {
+                yield AgentEvent::Chunk(content[streamed..].to_string());
             }
             unique_identifiers(&mut requested, &mut identifiers);
             let signatures = requested.iter().map(signature).collect::<Vec<_>>();
@@ -575,10 +584,23 @@ fn thinking_block_text(block: &serde_json::Value) -> Option<String> {
 /// rather than the visible answer. Conservative: once it cannot, stream it.
 fn might_be_tool_text(text: &str) -> bool {
     let trimmed = text.trim_start();
-    trimmed.is_empty()
-        || trimmed.starts_with('{')
-        || trimmed.starts_with('[')
-        || trimmed.starts_with('`')
+    if trimmed.is_empty() || trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return true;
+    }
+    let Some(fence) = trimmed.strip_prefix("```") else {
+        return false;
+    };
+    let fence = fence.trim_start();
+    if fence.is_empty() || fence.starts_with('{') || fence.starts_with('[') {
+        return true;
+    }
+    let Some(after) = fence.strip_prefix("json") else {
+        return false;
+    };
+    after.is_empty()
+        || after.starts_with(|character: char| character.is_whitespace())
+        || after.starts_with('{')
+        || after.starts_with('[')
 }
 
 /// Match semantic arguments even when a provider changes JSON key ordering.
@@ -1306,10 +1328,15 @@ mod tests {
         assert!(might_be_tool_text("{\"name\""));
         assert!(might_be_tool_text(" [{\"name\""));
         assert!(might_be_tool_text("```json"));
+        assert!(might_be_tool_text("```"));
+        assert!(might_be_tool_text("```\n{"));
         assert!(!might_be_tool_text("Hello"));
         assert!(!might_be_tool_text(
             "Here is an example: {\"name\":\"read_file\"}"
         ));
+        assert!(!might_be_tool_text("```rust\nfn main() {}"));
+        assert!(!might_be_tool_text("`read_file` is the tool to use"));
+        assert!(!might_be_tool_text("```javascript"));
     }
 
     #[test]

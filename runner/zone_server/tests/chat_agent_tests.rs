@@ -639,6 +639,27 @@ async fn reasoning_tokens_are_streamed_and_distinct_thinking_blocks_accumulate()
 }
 
 #[tokio::test]
+async fn prose_emitted_after_native_tool_deltas_is_still_streamed() {
+    let first = vec![
+        json!({"tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"read_file","arguments":"{}"}}]}),
+        json!({"content": "Looking at the file."}),
+    ];
+    let (events, _) = exercise(vec![first, text("A path is required.")]).await;
+    let visible: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Chunk(content) => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        visible.contains("Looking at the file."),
+        "preamble was dropped: {visible:?}"
+    );
+    assert_eq!(answer(&events), "Looking at the file.A path is required.");
+}
+
+#[tokio::test]
 async fn reasoning_is_emitted_before_and_after_a_tool_round() {
     let mut first = vec![json!({"reasoning_content": "Need the file."})];
     first.extend(native(Some("call_0")));

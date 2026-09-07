@@ -37,6 +37,11 @@ export function AuthenticatedVideo({
           return;
         }
         objectUrl = URL.createObjectURL(blob);
+        if (controller.signal.aborted) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+          return;
+        }
         setLoadedVideo({ source: src, objectUrl });
         setFailedSource(null);
       })

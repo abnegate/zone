@@ -1521,10 +1521,38 @@ describe('context freshness', () => {
       });
       lastSocket?.emit({ type: 'cancelled', message_id: 'evidence' });
     });
-    expect(
-      result.current.chat?.messages.find((message) => message.id === 'evidence')?.metadata
-        ?.tool_calls
-    ).toHaveLength(1);
+    const evidence = result.current.chat?.messages.find((message) => message.id === 'evidence');
+    expect(evidence?.metadata?.tool_calls).toHaveLength(1);
+    expect(evidence?.metadata?.tool_calls?.[0]?.pending).toBe(false);
+    expect(evidence?.metadata?.tool_calls?.[0]?.detail).toBe('Did not finish');
+    expect(evidence?.content).toBe('[Stopped before answering]');
+    unmount();
+  });
+
+  it('reuses the pending user row when a send fails before it is saved', async () => {
+    const { result, unmount } = renderHook(() => useChat('context'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    await act(async () => {
+      await result.current.sendMessage({ content: 'First try' });
+    });
+    act(() => lastSocket?.emit({ type: 'error', message: 'Rate limit exceeded' }));
+    await waitFor(() => {
+      expect(result.current.error).toBe('Rate limit exceeded');
+    });
+    expect(result.current.chat?.messages.filter((message) => message.role === 'user')).toHaveLength(
+      1
+    );
+
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Second try' });
+    });
+    const users = result.current.chat?.messages.filter((message) => message.role === 'user') ?? [];
+    expect(users).toHaveLength(1);
+    expect(users.at(-1)?.content).toBe('Second try');
     unmount();
   });
   it('removes disconnected empty placeholders while flushing partial text and preserving images', async () => {

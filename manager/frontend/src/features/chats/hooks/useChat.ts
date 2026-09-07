@@ -481,6 +481,41 @@ export function useChat(
       );
     };
 
+    const settleStoppedAssistant = (identifier: string | null): void => {
+      discardEmptyAssistant(identifier);
+      if (!identifier) return;
+      setChat((previous) => {
+        if (!previous) return previous;
+        return {
+          ...previous,
+          messages: previous.messages.map((message) => {
+            if (message.id !== identifier) return message;
+            const tools = message.metadata?.tool_calls;
+            const stopped = tools?.map((call) =>
+              call.pending
+                ? {
+                    ...call,
+                    pending: false,
+                    success: false,
+                    approval: call.approval === 'pending' ? ('denied' as const) : call.approval,
+                    detail: 'Did not finish',
+                  }
+                : call
+            );
+            const hasMedia = Boolean(message.metadata?.attachments?.length);
+            const content =
+              message.content.trim() ||
+              (stopped?.length || hasMedia ? '[Stopped before answering]' : message.content);
+            return {
+              ...message,
+              content,
+              metadata: stopped ? { ...message.metadata, tool_calls: stopped } : message.metadata,
+            };
+          }),
+        };
+      });
+    };
+
     socket.onopen = () => {
       const token = chatsApi.chatAccessToken();
       if (token) {
@@ -647,7 +682,7 @@ export function useChat(
           )
             break;
           if (payload.message_id !== null) completed.add(payload.message_id);
-          discardEmptyAssistant(assistantId ?? payload.message_id);
+          settleStoppedAssistant(assistantId ?? payload.message_id);
           assistantId = null;
           contextEpoch.current += 1;
           const pendingId = pendingUserIdRef.current;
@@ -666,7 +701,7 @@ export function useChat(
           break;
         }
         case 'error':
-          discardEmptyAssistant(assistantId);
+          settleStoppedAssistant(assistantId);
           if (assistantId !== null) completed.add(assistantId);
           assistantId = null;
           contextEpoch.current += 1;
@@ -681,7 +716,7 @@ export function useChat(
     };
 
     const invalidateContext = (): void => {
-      discardEmptyAssistant(assistantId);
+      settleStoppedAssistant(assistantId);
       if (assistantId !== null) completed.add(assistantId);
       const interrupted = activeGenerationRef.current;
       setContext((previous) =>
@@ -777,7 +812,7 @@ export function useChat(
       throw new Error('Wait for the current response to finish');
     }
     setError(null);
-    const pendingId = `pending-${crypto.randomUUID()}`;
+    const pendingId = pendingUserIdRef.current ?? `pending-${crypto.randomUUID()}`;
     pendingUserIdRef.current = pendingId;
     activeGenerationRef.current = true;
     contextEpoch.current += 1;

@@ -129,6 +129,8 @@ export default function ChatsPage() {
   } = useChatSearch();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
 
   // Only render a conversation that matches the current selection so a
   // previous chat never flashes in the main pane while the next one loads.
@@ -156,13 +158,32 @@ export default function ChatsPage() {
       : false;
 
   const scrollToBottom = useCallback(() => {
+    if (!stickToBottom.current) {
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
+  const handleMessagesScroll = () => {
+    const node = messagesContainerRef.current;
+    if (!node) {
+      return;
+    }
+    stickToBottom.current =
+      node.scrollHeight - node.scrollTop - node.clientHeight <= 80;
+  };
+
+  useEffect(() => {
+    stickToBottom.current = true;
+  }, [selectedChatId]);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages and generation feedback visible
   useEffect(() => {
+    if (linkedMessageId) {
+      return;
+    }
     scrollToBottom();
-  }, [activeChat?.messages, chatError, chatStatus, streaming, scrollToBottom]);
+  }, [activeChat?.messages, chatError, chatStatus, streaming, linkedMessageId, scrollToBottom]);
 
   useEffect(() => {
     if (!linkedMessageId || !displayedChat) return;
@@ -368,6 +389,7 @@ export default function ChatsPage() {
 
     setSending(true);
     setOperationError(null);
+    stickToBottom.current = true;
     try {
       await sendMessageFn({
         content: buildMessageWithAttachments(messageInput.trim(), sendable),
@@ -375,12 +397,15 @@ export default function ChatsPage() {
       });
       setMessageInput('');
       setAttachments([]);
-      // Refresh chat list to update last message time
-      await refreshChats();
     } catch (err) {
       setOperationError(err instanceof Error ? err.message : 'Failed to send message');
     } finally {
       setSending(false);
+    }
+    try {
+      await refreshChats();
+    } catch {
+      // The message already left; a stale sidebar is not a failed send.
     }
   };
 
@@ -826,7 +851,11 @@ export default function ChatsPage() {
               </div>
             </div>
 
-            <div className="messages-container">
+            <div
+              className="messages-container"
+              ref={messagesContainerRef}
+              onScroll={handleMessagesScroll}
+            >
               {displayedChat.messages.length === 0 ? (
                 <div className="messages-empty">
                   <p>No messages yet. Start a conversation!</p>

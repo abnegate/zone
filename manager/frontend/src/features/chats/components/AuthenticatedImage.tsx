@@ -44,6 +44,11 @@ export function AuthenticatedImage({
           return;
         }
         objectUrl = URL.createObjectURL(blob);
+        if (controller.signal.aborted) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+          return;
+        }
         setLoadedImage({ source: src, objectUrl });
         setFailedSource(null);
       })
