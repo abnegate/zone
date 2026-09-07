@@ -95,7 +95,10 @@ pub fn from_tool_at(name: &str, output: &str, observed_at: &str) -> Vec<Citation
     let Ok(value) = serde_json::from_str::<Value>(output) else {
         return Vec::new();
     };
-    if let Some(existing) = value.get("citations").and_then(parse_citations) {
+    if let Some(existing) = value
+        .get("citations")
+        .and_then(|citations| parse_citations(citations, provenance_of(name)))
+    {
         return existing;
     }
     let citations = match name {
@@ -124,19 +127,40 @@ pub fn merge(existing: &mut Vec<Citation>, incoming: impl IntoIterator<Item = Ci
     }
 }
 
+/// Built-in tools whose citations record an observation the server itself made
+/// against an immutable ref. Anything absent — an MCP server, which is a
+/// third-party process, or a tool added later — is advisory until it is
+/// deliberately added here.
+const SERVER_OBSERVED_TOOLS: &[&str] = &[
+    "assess_pull_requests",
+    "get_build_status",
+    "list_deployments",
+    "list_documents",
+    "list_issues",
+    "read_document",
+    "read_repository_file",
+];
+
+fn provenance_of(name: &str) -> Provenance {
+    if SERVER_OBSERVED_TOOLS.contains(&name) {
+        Provenance::ServerExecution
+    } else {
+        Provenance::ModelAsserted
+    }
+}
+
 /// Citations a tool emitted in its own output.
 ///
-/// A tool cannot certify itself: MCP servers are third-party processes and the
-/// rest carry model-influenced text, so provenance is forced to advisory here
-/// whatever the payload claims or omits. Only the constructors in this module,
-/// which run after the server made the observation, mint an authoritative one.
-fn parse_citations(value: &Value) -> Option<Vec<Citation>> {
+/// A tool cannot certify itself, so provenance comes from which tool ran, never
+/// from the payload: an unrecognised tool is advisory whatever it claims or
+/// omits.
+fn parse_citations(value: &Value, provenance: Provenance) -> Option<Vec<Citation>> {
     let parsed: Vec<Citation> = serde_json::from_value(value.clone()).ok()?;
-    let asserted = parsed.into_iter().map(|mut citation| {
-        citation.provenance = Provenance::ModelAsserted;
+    let attributed = parsed.into_iter().map(|mut citation| {
+        citation.provenance = provenance;
         citation
     });
-    let finished = finish(asserted.collect());
+    let finished = finish(attributed.collect());
     (!finished.is_empty()).then_some(finished)
 }
 
@@ -909,9 +933,9 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_that_omits_provenance_cannot_certify_itself() {
+    fn an_unrecognised_tool_cannot_certify_itself() {
         let supplied = citations(
-            "search_knowledge",
+            "magents_spawn_session",
             json!({
                 "citations": [{
                     "kind": "github_build",
@@ -933,6 +957,27 @@ mod tests {
         assert_eq!(wire["kind"], "github_build");
         assert_eq!(wire["provenance"], "model_asserted");
         assert_eq!(wire["outcome"], "observed");
+    }
+
+    #[test]
+    fn a_built_in_tool_keeps_its_server_observation() {
+        let observed = citations(
+            "assess_pull_requests",
+            json!({
+                "citations": [{
+                    "kind": "github_build",
+                    "title": "repository main@aaaaaaa",
+                    "url": "https://github.com/owner/repository/commit/aaa",
+                    "observed_at": OBSERVED,
+                    "complete": true,
+                    "outcome": "success"
+                }]
+            }),
+        )
+        .remove(0);
+
+        assert_eq!(observed.provenance, Provenance::ServerExecution);
+        assert!(observed.passing());
     }
 
     #[test]
