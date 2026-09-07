@@ -1,0 +1,18 @@
+{
+  "steps_per_image": 50,
+  "min_steps": 400,
+  "max_steps": 800,
+  "rank": 8,
+  "learning_rate": 0.00005,
+  "lora_dtype": "bf16",
+  "training_dtype": "none",
+  "resolution": 512,
+  "alpha_equals_rank": true,
+  "train_blocks": "all",
+  "bypass_mode": true,
+  "gradient_checkpointing": true,
+  "checkpoint_depth": 2,
+  "seed": 42,
+  "batch_size": 1,
+  "min_adapters": 16
+}

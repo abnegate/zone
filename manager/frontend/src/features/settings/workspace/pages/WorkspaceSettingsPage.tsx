@@ -70,6 +70,19 @@ const modelOptions = {
 const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
 const VIDEO_MODEL_OPTIONS = ['wan2.2_ti2v_5B_fp16.safetensors'];
 
+function comfyImageOptions(
+  installed: Array<{ name: string; details?: { format?: string | null } | null }>,
+  current: string
+) {
+  const fromDisk = installed
+    .filter((model) => {
+      const format = model.details?.format;
+      return format === 'lora' || format === 'checkpoint' || format === 'diffusion_model';
+    })
+    .map((model) => model.name);
+  return Array.from(new Set([...IMAGE_MODEL_OPTIONS, ...fromDisk, current].filter(Boolean)));
+}
+
 const awsRegions = ['us-east-1', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-northeast-1'];
 
 export default function WorkspaceSettingsPage() {
@@ -992,13 +1005,16 @@ export default function WorkspaceSettingsPage() {
                           className="form-select"
                         >
                           <option value="">Use organization / server default</option>
-                          {Array.from(
-                            new Set([...IMAGE_MODEL_OPTIONS, modelImage].filter(Boolean))
-                          ).map((model) => (
-                            <option key={model} value={model}>
-                              {model}
-                            </option>
-                          ))}
+                          {comfyImageOptions(installedModels, modelImage).map((model) => {
+                            const row = installedModels.find((item) => item.name === model);
+                            return (
+                              <option key={model} value={model} disabled={row?.ready === false}>
+                                {row?.ready === false
+                                  ? `${model} (requires ${row.required_files?.[0] || 'base'})`
+                                  : model}
+                              </option>
+                            );
+                          })}
                         </select>
                         <p className="form-hint">
                           ComfyUI checkpoint used when a message asks for an image. Attach a photo

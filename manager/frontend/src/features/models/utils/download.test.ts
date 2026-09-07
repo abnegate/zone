@@ -56,4 +56,19 @@ describe('modelDownload', () => {
   it('does not invent local names for remote APIs', () => {
     expect(modelDownload({ name: 'qwen/qwen3.8-27b', details: { format: 'api' } }).name).toBeNull();
   });
+
+  it('does not prefix HuggingFace LoRAs for Ollama', () => {
+    expect(
+      modelDownload(
+        {
+          name: 'ScottzillaSystems/qwen-image-edit-plus-nsfw-lora',
+          source: 'huggingface',
+          details: { format: 'lora' },
+        },
+        'ScottzillaSystems/qwen-image-edit-plus-nsfw-lora:qwen-image-edit-plus-nsfw-lora.safetensors'
+      ).name
+    ).toBe(
+      'ScottzillaSystems/qwen-image-edit-plus-nsfw-lora:qwen-image-edit-plus-nsfw-lora.safetensors'
+    );
+  });
 });

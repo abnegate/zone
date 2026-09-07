@@ -178,6 +178,7 @@ services:
     volumes:
       - comfyui_models:/workspace/ComfyUI/models:ro
       - comfyui_output:/workspace/ComfyUI/output
+      - ./comfyui/custom_nodes/zone_lora:/workspace/ComfyUI/custom_nodes/zone_lora:ro
     networks:
       - internal
     deploy:
@@ -333,6 +334,9 @@ services:
       - COMFYUI_API_TOKEN=${COMFYUI_API_TOKEN:-}
       - COMFYUI_WORKFLOW_PATH=${COMFYUI_WORKFLOW_PATH:-/app/comfyui/workflows/flux1-schnell-fp8-api.json}
       - COMFYUI_CHECKPOINT=${COMFYUI_CHECKPOINT:-flux1-schnell-fp8.safetensors}
+      - COMFYUI_MODELS_DIR=${COMFYUI_MODELS_DIR:-/app/comfyui/models}
+      - COMFYUI_TRAIN_COMMAND=${COMFYUI_TRAIN_COMMAND:-}
+      - COMFYUI_TRAIN_TIMEOUT_SECS=${COMFYUI_TRAIN_TIMEOUT_SECS:-3600}
       - COMFYUI_VIDEO_WORKFLOW_PATH=${COMFYUI_VIDEO_WORKFLOW_PATH:-/app/comfyui/workflows/wan2.2-ti2v-5b-api.json}
       - COMFYUI_VIDEO_UNET=${COMFYUI_VIDEO_UNET:-wan2.2_ti2v_5B_fp16.safetensors}
       - COMFYUI_VIDEO_CLIP=${COMFYUI_VIDEO_CLIP:-umt5_xxl_fp8_e4m3fn_scaled.safetensors}
@@ -357,6 +361,7 @@ services:
       - manager_repos:/tmp/repos
       - manager_artifacts:/app/artifacts
       - manager_embed_cache:/app/embed-cache
+      - comfyui_models:/app/comfyui/models
       - ./comfyui/workflows:/app/comfyui/workflows:ro
       - ./comfyui/recipes:/app/comfyui/recipes:ro
     extra_hosts:

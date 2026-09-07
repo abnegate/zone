@@ -175,10 +175,19 @@ pub struct ComfyUiConfig {
     pub artifact_root: std::path::PathBuf,
     pub classifier_model: String,
     pub classifier_timeout_secs: u64,
+    /// Vision model that captions LoRA training images. Empty disables captioning.
+    pub caption_model: String,
+    pub caption_timeout_secs: u64,
     pub request_timeout_secs: u64,
     pub generation_timeout_secs: u64,
     pub video_generation_timeout_secs: u64,
     pub poll_interval_ms: u64,
+    /// ComfyUI models root (`checkpoints/`, `loras/`, `diffusion_models/`, ...).
+    pub models_dir: std::path::PathBuf,
+    /// Optional command used to train a LoRA. Empty uses ComfyUI ZoneTrainLoRA.
+    pub train_command: Option<String>,
+    /// Wall clock budget for a ComfyUI train job.
+    pub train_timeout_secs: u64,
 }
 
 impl Default for ComfyUiConfig {
@@ -198,10 +207,15 @@ impl Default for ComfyUiConfig {
             artifact_root: "/app/artifacts".into(),
             classifier_model: "auto".to_string(),
             classifier_timeout_secs: 3,
+            caption_model: String::new(),
+            caption_timeout_secs: 60,
             request_timeout_secs: 15,
             generation_timeout_secs: 300,
             video_generation_timeout_secs: 600,
             poll_interval_ms: 500,
+            models_dir: std::path::PathBuf::from("/app/comfyui/models"),
+            train_command: None,
+            train_timeout_secs: 3600,
         }
     }
 }
@@ -240,6 +254,12 @@ impl ComfyUiConfig {
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "auto".to_string()),
             classifier_timeout_secs: env_u64("COMFYUI_CLASSIFIER_TIMEOUT_SECS", 3, 1, 30),
+            caption_model: env::var("COMFYUI_CAPTION_MODEL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default(),
+            caption_timeout_secs: env_u64("COMFYUI_CAPTION_TIMEOUT_SECS", 60, 5, 600),
             request_timeout_secs: env_u64("COMFYUI_REQUEST_TIMEOUT_SECS", 15, 1, 120),
             generation_timeout_secs: env_u64("COMFYUI_GENERATION_TIMEOUT_SECS", 300, 10, 3600),
             video_generation_timeout_secs: env_u64(
@@ -249,6 +269,14 @@ impl ComfyUiConfig {
                 3600,
             ),
             poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
+            models_dir: env::var("COMFYUI_MODELS_DIR")
+                .unwrap_or_else(|_| "/app/comfyui/models".to_string())
+                .into(),
+            train_command: env::var("COMFYUI_TRAIN_COMMAND")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            train_timeout_secs: env_u64("COMFYUI_TRAIN_TIMEOUT_SECS", 3600, 60, 14400),
         }
     }
 }

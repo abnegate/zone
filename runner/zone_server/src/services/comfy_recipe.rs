@@ -28,6 +28,24 @@ fn packaged_workflow(name: &str) -> Option<&'static str> {
         "sdxl-img2img-api.json" => Some(include_str!(
             "../../../../comfyui/workflows/sdxl-img2img-api.json"
         )),
+        "flux1-schnell-fp8-adapter-api.json" => Some(include_str!(
+            "../../../../comfyui/workflows/flux1-schnell-fp8-adapter-api.json"
+        )),
+        "flux1-schnell-fp8-adapter-img2img-api.json" => Some(include_str!(
+            "../../../../comfyui/workflows/flux1-schnell-fp8-adapter-img2img-api.json"
+        )),
+        "qwen-image-edit-2511-api.json" => Some(include_str!(
+            "../../../../comfyui/workflows/qwen-image-edit-2511-api.json"
+        )),
+        "qwen-image-edit-2511-edit-api.json" => Some(include_str!(
+            "../../../../comfyui/workflows/qwen-image-edit-2511-edit-api.json"
+        )),
+        "qwen-image-edit-2511-adapter-api.json" => Some(include_str!(
+            "../../../../comfyui/workflows/qwen-image-edit-2511-adapter-api.json"
+        )),
+        "qwen-image-edit-2511-adapter-edit-api.json" => Some(include_str!(
+            "../../../../comfyui/workflows/qwen-image-edit-2511-adapter-edit-api.json"
+        )),
         _ => None,
     }
 }
@@ -45,11 +63,30 @@ pub enum RecipeOutput {
     PreviewImage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMode {
+    #[default]
+    ClipScene,
+    EditInstruction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RequiredFile {
+    pub filename: String,
+    pub directory: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Recipe {
     pub id: String,
     pub kind: MediaKind,
     pub label: String,
+    pub adapter: bool,
+    pub prompt_mode: PromptMode,
+    pub defaults: HashMap<String, String>,
+    pub hf_bases: Vec<String>,
+    pub required_files: Vec<RequiredFile>,
     bare: Value,
     with_source: Option<Value>,
     slots: RecipeSlots,
@@ -95,6 +132,16 @@ struct CatalogRecipe {
     base_models: Vec<String>,
     #[serde(default)]
     filename_hints: Vec<String>,
+    #[serde(default)]
+    adapter: bool,
+    #[serde(default)]
+    prompt_mode: PromptMode,
+    #[serde(default)]
+    defaults: HashMap<String, String>,
+    #[serde(default)]
+    hf_bases: Vec<String>,
+    #[serde(default)]
+    required_files: Vec<RequiredFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +223,11 @@ impl RecipeCatalog {
                 id: spec.id,
                 kind: spec.kind,
                 label: spec.label,
+                adapter: spec.adapter,
+                prompt_mode: spec.prompt_mode,
+                defaults: spec.defaults,
+                hf_bases: spec.hf_bases,
+                required_files: spec.required_files,
                 bare,
                 with_source,
                 slots,
@@ -204,12 +256,24 @@ impl RecipeCatalog {
     }
 
     pub fn image_recipe_for(&self, checkpoint: &str) -> Result<&Recipe, ComfyUiError> {
+        let trimmed = checkpoint.trim();
+        if trimmed.to_ascii_lowercase().contains("lora")
+            && let Some(adapter) = self.adapter_recipe_for_filename(trimmed)
+        {
+            return Ok(adapter);
+        }
         let id = self.resolve_image_id(checkpoint);
         self.get(id)
             .filter(|recipe| recipe.kind == MediaKind::Image)
             .ok_or(ComfyUiError::Configuration(
                 "no image recipe matches this checkpoint",
             ))
+    }
+
+    pub fn is_explicit_image_match(&self, filename: &str) -> bool {
+        let trimmed = filename.trim();
+        self.files.contains_key(trimmed)
+            || self.resolve_image_id(trimmed) != self.default_image.as_str()
     }
 
     fn resolve_image_id(&self, checkpoint: &str) -> &str {
@@ -228,9 +292,68 @@ impl RecipeCatalog {
         }
         best_id.unwrap_or(self.default_image.as_str())
     }
+
+    pub fn image_recipes(&self) -> impl Iterator<Item = &Recipe> {
+        self.recipes
+            .iter()
+            .filter(|recipe| recipe.kind == MediaKind::Image)
+    }
+
+    pub fn hf_bases(&self) -> Vec<String> {
+        let mut bases = Vec::new();
+        for recipe in self.image_recipes() {
+            for base in &recipe.hf_bases {
+                if !bases.iter().any(|existing| existing == base) {
+                    bases.push(base.clone());
+                }
+            }
+        }
+        bases
+    }
+
+    pub fn adapter_recipe_for_base(&self, hf_base: &str) -> Option<&Recipe> {
+        self.recipes.iter().find(|recipe| {
+            recipe.kind == MediaKind::Image
+                && recipe.adapter
+                && recipe
+                    .hf_bases
+                    .iter()
+                    .any(|base| base.eq_ignore_ascii_case(hf_base))
+        })
+    }
+
+    pub fn adapter_recipe_for_filename(&self, filename: &str) -> Option<&Recipe> {
+        let lower = filename.to_ascii_lowercase();
+        if lower.contains("qwen") {
+            return self.get("qwen-image-edit-adapter");
+        }
+        self.get("flux-schnell-adapter")
+    }
 }
 
 impl Recipe {
+    pub fn has_lora_slot(&self) -> bool {
+        self.slots.weights.contains_key("lora")
+    }
+
+    pub fn weight_map(&self, selected: &str) -> Result<HashMap<String, String>, ComfyUiError> {
+        let selected = sanitize_weight_filename(selected)?;
+        let mut weights = self.defaults.clone();
+        if self.has_lora_slot() {
+            weights.insert("lora".to_string(), selected);
+        } else if self.slots.weights.contains_key("checkpoint") {
+            weights.insert("checkpoint".to_string(), selected);
+        } else if self.slots.weights.contains_key("unet") {
+            weights.insert("unet".to_string(), selected);
+        }
+        for name in self.slots.weights.keys() {
+            if !weights.contains_key(name) {
+                return Err(ComfyUiError::Configuration("recipe weight is missing"));
+            }
+        }
+        Ok(weights)
+    }
+
     pub fn apply(&self, fill: Fill<'_>) -> Result<Value, ComfyUiError> {
         if fill.prompt.trim().is_empty() || fill.prompt.len() > 100_000 {
             return Err(ComfyUiError::Configuration("prompt is empty or too long"));
@@ -416,8 +539,11 @@ mod tests {
     fn packaged_catalog_validates_every_graph() {
         let catalog = catalog();
         assert!(catalog.get("flux-schnell").is_some());
+        assert!(catalog.get("flux-schnell-adapter").is_some());
         assert!(catalog.get("sd15").is_some());
         assert!(catalog.get("sdxl").is_some());
+        assert!(catalog.get("qwen-image-edit").is_some());
+        assert!(catalog.get("qwen-image-edit-adapter").is_some());
         for name in [
             "flux1-schnell-fp8-api.json",
             "flux1-schnell-fp8-img2img-api.json",
@@ -425,6 +551,12 @@ mod tests {
             "sd15-img2img-api.json",
             "sdxl-api.json",
             "sdxl-img2img-api.json",
+            "flux1-schnell-fp8-adapter-api.json",
+            "flux1-schnell-fp8-adapter-img2img-api.json",
+            "qwen-image-edit-2511-api.json",
+            "qwen-image-edit-2511-edit-api.json",
+            "qwen-image-edit-2511-adapter-api.json",
+            "qwen-image-edit-2511-adapter-edit-api.json",
         ] {
             assert!(packaged_workflow(name).is_some(), "{name}");
         }
@@ -453,6 +585,13 @@ mod tests {
                 .unwrap()
                 .id,
             "flux-schnell"
+        );
+        assert_eq!(
+            catalog
+                .image_recipe_for("qwen-image-edit-plus-nsfw-lora.safetensors")
+                .unwrap()
+                .id,
+            "qwen-image-edit-adapter"
         );
         assert_eq!(
             catalog
@@ -643,6 +782,94 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("PreviewImage")
+        );
+    }
+
+    #[test]
+    fn qwen_edit_recipe_uses_instruction_prompt_slot() {
+        let catalog = catalog();
+        let recipe = catalog
+            .image_recipe_for("qwen_image_edit_2511_fp8mixed.safetensors")
+            .unwrap();
+        assert_eq!(recipe.id, "qwen-image-edit");
+        assert_eq!(recipe.prompt_mode, PromptMode::EditInstruction);
+        let weights = recipe
+            .weight_map("qwen_image_edit_2511_fp8mixed.safetensors")
+            .unwrap();
+        let owned: HashMap<&str, &str> = weights
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let workflow = recipe
+            .apply(Fill {
+                prompt: "remove the sign",
+                seed: 9,
+                weights: owned,
+                source: Some("zone-img2img-source.png"),
+            })
+            .unwrap();
+        assert_eq!(workflow["6"]["inputs"]["prompt"], "remove the sign");
+        assert_eq!(
+            workflow["1"]["inputs"]["unet_name"],
+            "qwen_image_edit_2511_fp8mixed.safetensors"
+        );
+        assert_eq!(workflow["10"]["inputs"]["image"], "zone-img2img-source.png");
+    }
+
+    #[test]
+    fn adapter_recipe_writes_lora_filename() {
+        let catalog = catalog();
+        let recipe = catalog.get("qwen-image-edit-adapter").unwrap();
+        let weights = recipe
+            .weight_map("qwen-image-edit-plus-nsfw-lora.safetensors")
+            .unwrap();
+        assert_eq!(
+            weights.get("lora").map(String::as_str),
+            Some("qwen-image-edit-plus-nsfw-lora.safetensors")
+        );
+        let owned: HashMap<&str, &str> = weights
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let workflow = recipe
+            .apply(Fill {
+                prompt: "nsfw",
+                seed: 1,
+                weights: owned,
+                source: Some("zone-img2img-source.png"),
+            })
+            .unwrap();
+        assert_eq!(
+            workflow["4"]["inputs"]["lora_name"],
+            "qwen-image-edit-plus-nsfw-lora.safetensors"
+        );
+        assert_eq!(workflow["3"]["inputs"]["steps"], 40);
+        assert_eq!(workflow["3"]["inputs"]["cfg"], 4);
+    }
+
+    #[test]
+    fn unknown_lora_filename_picks_family_adapter() {
+        let catalog = catalog();
+        assert_eq!(
+            catalog
+                .adapter_recipe_for_filename("qwen-image-edit-plus-nsfw-lora.safetensors")
+                .unwrap()
+                .id,
+            "qwen-image-edit-adapter"
+        );
+        assert_eq!(
+            catalog
+                .adapter_recipe_for_filename("my-style.safetensors")
+                .unwrap()
+                .id,
+            "flux-schnell-adapter"
+        );
+        assert_eq!(
+            catalog
+                .adapter_recipe_for_base("Qwen/Qwen-Image-Edit-2511")
+                .unwrap()
+                .id,
+            "qwen-image-edit-adapter"
         );
     }
 }

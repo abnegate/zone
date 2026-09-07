@@ -65,6 +65,13 @@ pub struct ModelResponse {
     pub sizes: Option<Vec<ModelSize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<ModelDetails>,
+    /// Whether a Comfy adapter's required base files are present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_files: Option<Vec<String>>,
 }
 
 /// Exact capabilities advertised by a catalogue provider.
@@ -160,6 +167,7 @@ pub enum ModelMediumFilter {
     All,
     Text,
     Image,
+    ImageGeneration,
     Video,
     Audio,
     Tools,

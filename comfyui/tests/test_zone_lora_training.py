@@ -1,0 +1,214 @@
+from __future__ import annotations
+
+import importlib.util
+import os
+import sys
+import types
+import unittest
+from contextlib import contextmanager
+from pathlib import Path
+
+NODE_DIR = Path(__file__).parents[1] / 'custom_nodes' / 'zone_lora'
+COMFY_DIR = Path(
+    os.environ.get(
+        'COMFYUI_INSTALL_DIR',
+        Path.home() / 'Library' / 'Application Support' / 'Zone' / 'ComfyUI',
+    )
+)
+
+HIDDEN = 64
+HEADS = 4
+MLP_RATIO = 4.0
+RANK = 4
+
+
+def load_hooks():
+    package = types.ModuleType('zone_lora_under_test')
+    package.__path__ = [str(NODE_DIR)]
+    sys.modules['zone_lora_under_test'] = package
+    spec = importlib.util.spec_from_file_location(
+        'zone_lora_under_test.inference_hooks', NODE_DIR / 'inference_hooks.py'
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def comfy_available() -> bool:
+    if not (COMFY_DIR / 'comfy' / 'ldm' / 'flux' / 'layers.py').is_file():
+        return False
+    if str(COMFY_DIR) not in sys.path:
+        sys.path.insert(0, str(COMFY_DIR))
+    sys.argv = ['main.py', '--cpu']
+    try:
+        import comfy.ldm.flux.layers  # noqa: F401
+        import comfy.ops  # noqa: F401
+        import torch  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+AVAILABLE = comfy_available()
+
+
+@unittest.skipUnless(AVAILABLE, f'ComfyUI runtime not installed at {COMFY_DIR}')
+class FluxTrainingGradientTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import comfy.model_management
+        import torch
+
+        cls.torch = torch
+        comfy.model_management.get_torch_device = lambda: torch.device('cpu')
+        comfy.model_management.in_training = True
+        cls.hooks = load_hooks()
+        cls.hooks.install_out_of_place_residuals()
+
+    @contextmanager
+    def upstream_apply_mod(self):
+        import comfy.ldm.flux.layers as layers
+
+        patched = layers.apply_mod
+        self.assertTrue(
+            getattr(patched, '_zone_patched', False), 'out-of-place hook is not installed'
+        )
+        layers.apply_mod = patched.__wrapped__
+        try:
+            yield
+        finally:
+            layers.apply_mod = patched
+
+    def build_blocks(self):
+        import comfy.ops
+        import torch
+        from comfy.ldm.flux.layers import DoubleStreamBlock, SingleStreamBlock
+
+        operations = comfy.ops.disable_weight_init
+        torch.manual_seed(0)
+        double = DoubleStreamBlock(
+            HIDDEN, HEADS, MLP_RATIO, qkv_bias=True,
+            dtype=torch.float32, device='cpu', operations=operations,
+        )
+        single = SingleStreamBlock(
+            HIDDEN, HEADS, MLP_RATIO,
+            dtype=torch.float32, device='cpu', operations=operations,
+        )
+        blocks = torch.nn.ModuleDict({'double_blocks': double, 'single_blocks': single})
+        with torch.no_grad():
+            for parameter in blocks.parameters():
+                parameter.normal_(0.0, 0.02)
+            for _, buffer in blocks.named_buffers():
+                buffer.normal_(0.0, 0.02)
+        blocks.requires_grad_(False).train()
+        return blocks
+
+    def attach_adapters(self, blocks):
+        from comfy.weight_adapter import adapter_maps
+        from comfy.weight_adapter.bypass import BypassInjectionManager
+
+        manager = BypassInjectionManager()
+        adapters = []
+        for name, module in blocks.named_modules():
+            weight = getattr(module, 'weight', None)
+            if not hasattr(module, 'weight_function') or weight is None or weight.ndim < 2:
+                continue
+            adapter = adapter_maps['LoRA'].create_train(weight, rank=RANK, alpha=float(RANK))
+            adapters.append(adapter.train().requires_grad_(True))
+            manager.add_adapter(f'{name}.weight', adapters[-1], strength=1.0)
+        manager.create_injections(blocks)
+        for hook in manager.hooks:
+            hook.inject()
+        return adapters
+
+    def train_step(self, checkpointing: bool = False):
+        import torch
+        from comfy.ldm.flux.layers import EmbedND
+
+        blocks = self.build_blocks()
+        adapters = self.attach_adapters(blocks)
+        double = blocks['double_blocks']
+        single = blocks['single_blocks']
+
+        if checkpointing:
+            for block in (double, single):
+                original = block.forward
+
+                def call(args, kwargs, original=original):
+                    return original(*args, **kwargs)
+
+                def checkpointed(*args, call=call, **kwargs):
+                    return torch.utils.checkpoint.checkpoint(
+                        call, args, kwargs, use_reentrant=False
+                    )
+
+                block.forward = checkpointed
+
+        image_tokens, text_tokens = 8, 4
+        image = torch.randn(1, image_tokens, HIDDEN)
+        text = torch.randn(1, text_tokens, HIDDEN)
+        vector = torch.randn(1, HIDDEN)
+        head_dim = HIDDEN // HEADS
+        positions = torch.arange(image_tokens + text_tokens).float()
+        embedding = EmbedND(dim=head_dim, theta=10000, axes_dim=[head_dim])
+        pe = embedding(positions.reshape(1, image_tokens + text_tokens, 1))
+
+        image, text = double(img=image, txt=text, vec=vector, pe=pe)
+        hidden = torch.cat((text, image), dim=1)
+        hidden = single(hidden, vec=vector, pe=pe)
+        loss = hidden.float().pow(2).mean()
+        loss.backward()
+        gradients = [adapter.lora_down.weight.grad for adapter in adapters]
+        return float(loss.detach()), hidden.detach(), gradients
+
+    def test_upstream_in_place_residuals_break_training(self):
+        with self.upstream_apply_mod():
+            with self.assertRaises(RuntimeError) as raised:
+                self.train_step()
+        self.assertIn('inplace operation', str(raised.exception))
+
+    def test_hook_restores_finite_gradients_for_every_adapter(self):
+        torch = self.torch
+        _, output, gradients = self.train_step()
+        self.assertTrue(bool(torch.isfinite(output).all()), 'block output must stay finite')
+        self.assertGreater(len(gradients), 0, 'expected at least one LoRA adapter')
+        for index, gradient in enumerate(gradients):
+            self.assertIsNotNone(gradient, f'adapter {index} received no gradient')
+            self.assertTrue(
+                bool(torch.isfinite(gradient).all()), f'adapter {index} gradient is not finite'
+            )
+            self.assertGreater(
+                float(gradient.abs().sum()), 0.0, f'adapter {index} gradient is zero'
+            )
+
+    def test_inference_path_is_untouched(self):
+        import comfy.ldm.flux.layers as layers
+        import torch
+
+        tensor = torch.randn(1, 4, HIDDEN)
+        multiplier = torch.randn(1, 1, HIDDEN)
+        shift = torch.randn(1, 1, HIDDEN)
+        with torch.no_grad():
+            hooked = layers.apply_mod(tensor, multiplier, shift, None)
+            with self.upstream_apply_mod():
+                expected = layers.apply_mod(tensor, multiplier, shift, None)
+        self.assertIs(type(hooked), torch.Tensor, 'inference must not see the residual subclass')
+        self.assertTrue(bool(torch.equal(hooked, expected)))
+
+    def test_gradient_checkpointing_matches_plain_backward(self):
+        torch = self.torch
+        plain_loss, _, plain_gradients = self.train_step(checkpointing=False)
+        checkpoint_loss, _, checkpoint_gradients = self.train_step(checkpointing=True)
+        self.assertAlmostEqual(plain_loss, checkpoint_loss, places=6)
+        self.assertEqual(len(plain_gradients), len(checkpoint_gradients))
+        for index, (expected, actual) in enumerate(zip(plain_gradients, checkpoint_gradients)):
+            self.assertTrue(
+                bool(torch.allclose(expected, actual, rtol=1e-5, atol=1e-7)),
+                f'adapter {index} gradient differs under gradient checkpointing',
+            )
+
+
+if __name__ == '__main__':
+    unittest.main()

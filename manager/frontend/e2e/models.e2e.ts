@@ -16,6 +16,17 @@ const mockInstalledModels = [
     modified_at: '2024-01-10T08:00:00Z',
     details: { family: 'mistral', description: 'Mistral 7B' },
   },
+  {
+    name: 'qwen-image-edit-plus-nsfw-lora.safetensors',
+    size: 590058864,
+    modified_at: '2024-01-16T10:30:00Z',
+    completion: false,
+    capabilities: ['image_generation'],
+    details: { format: 'lora', family: 'qwen-image-edit-adapter' },
+    ready: false,
+    recipe_id: 'qwen-image-edit-adapter',
+    required_files: ['qwen_image_edit_2511_fp8mixed.safetensors'],
+  },
 ];
 
 const mockBrowseModels = [
@@ -35,6 +46,14 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
     const method = route.request().method();
 
     if (method === 'GET') {
+      if (url.includes('/api/models/train/bases')) {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify([{ id: 'flux-schnell', label: 'FLUX.1 Schnell', edit: false }]),
+        });
+        return;
+      }
       if (url.includes('/api/models/disk')) {
         route.fulfill({
           status: 200,
@@ -146,10 +165,61 @@ test.describe('Models Page', () => {
     await expect(page.locator('.models-list')).toBeVisible({ timeout: 10000 });
   });
 
+  test('browses HuggingFace image-generation adapters', async ({ page }) => {
+    await page.getByRole('tab', { name: 'Browse' }).click();
+    await page.getByRole('tab', { name: 'HuggingFace' }).click();
+    await page.unroute('**/api/models**');
+    await routeApi(page, '**/api/models**', (route) => {
+      const url = route.request().url();
+      if (url.includes('medium=image_generation')) {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            models: [
+              {
+                name: 'ScottzillaSystems/qwen-image-edit-plus-nsfw-lora',
+                downloads: 121588,
+                details: { format: 'lora' },
+                sizes: [
+                  {
+                    name: 'ScottzillaSystems/qwen-image-edit-plus-nsfw-lora:qwen-image-edit-plus-nsfw-lora.safetensors',
+                    label: 'qwen-image-edit-plus-nsfw-lora.safetensors',
+                    size: 590058864,
+                  },
+                ],
+              },
+            ],
+            next_cursor: null,
+          }),
+        });
+        return;
+      }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ models: mockBrowseModels, next_cursor: null }),
+      });
+    });
+    await page.getByRole('button', { name: 'Image generation' }).click();
+    await expect(page.locator('.browse-name').first()).toHaveText(
+      'ScottzillaSystems/qwen-image-edit-plus-nsfw-lora'
+    );
+  });
+
+  test('shows the train tab and a simple LoRA form', async ({ page }) => {
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await expect(page.getByRole('heading', { name: 'Train a LoRA' })).toBeVisible();
+    await expect(page.getByText('Drop images, pick an installed base')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Train' })).toBeVisible();
+  });
+
   test('displays installed models', async ({ page }) => {
-    await expect(page.locator('.model-item')).toHaveCount(2);
+    await expect(page.locator('.model-item')).toHaveCount(3);
     await expect(page.locator('.model-name').first()).toHaveText('llama3.2:latest');
     await expect(page.locator('.model-name').nth(1)).toHaveText('mistral:7b');
+    await expect(page.locator('.model-item').nth(2)).toContainText('adapter');
+    await expect(page.locator('.model-item').nth(2)).toContainText('Requires');
   });
 
   test('shows model size formatted correctly', async ({ page }) => {
@@ -387,7 +457,7 @@ test.describe('Models Page', () => {
   });
 
   test('shows used disk space on the models screen', async ({ page }) => {
-    await expect(page.getByLabelText('Disk space used')).toBeVisible();
+    await expect(page.getByRole('progressbar', { name: 'Disk space used' })).toBeVisible();
     await expect(page.locator('.models-disk-value')).toHaveText('40%');
   });
 
@@ -422,7 +492,7 @@ test.describe('Models Page', () => {
 
     await page.click('button:has-text("Cancel")');
     await expect(page.getByRole('heading', { name: 'Delete Model' })).toHaveCount(0);
-    await expect(page.locator('.model-item')).toHaveCount(2);
+    await expect(page.locator('.model-item')).toHaveCount(3);
   });
 
   test('deletes model on confirmation', async ({ page }) => {

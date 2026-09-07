@@ -1,4 +1,4 @@
-export { modelDownload } from './download';
+export { isComfyFormat, modelDownload } from './download';
 export type { DownloadOptionRow } from './formatters';
 export {
   defaultDownloadName,
@@ -13,5 +13,5 @@ export {
   quantizationFromLabel,
 } from './formatters';
 export { sortBrowseModels } from './sortModels';
-export { mergeStageOptions } from './stageOptions';
 export { modelSourceUrl } from './sourceUrl';
+export { mergeStageOptions } from './stageOptions';

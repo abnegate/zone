@@ -30,6 +30,7 @@ COPY runner/.sqlx ./.sqlx
 # Packaged recipes and workflows are compiled into zone_server via include_str!
 COPY comfyui/workflows /build/comfyui/workflows
 COPY comfyui/recipes /build/comfyui/recipes
+COPY comfyui/custom_nodes /build/comfyui/custom_nodes
 
 ENV SQLX_OFFLINE=true
 # Source mtimes can precede cached artifacts after a checkout or file restore.
@@ -60,6 +61,8 @@ COPY --from=builder /build/bin/zone-runner /app/zone-runner
 COPY --from=builder /build/runner/zone_server/migrations /app/migrations
 COPY --from=builder /build/comfyui/workflows /app/comfyui/workflows
 COPY --from=builder /build/comfyui/recipes /app/comfyui/recipes
+COPY comfyui/train_lora.py /app/comfyui/train_lora.py
+COPY comfyui/custom_nodes/zone_lora/train_config.json /app/comfyui/custom_nodes/zone_lora/train_config.json
 
 RUN chmod +x /app/zone-server /app/zone-runner
 

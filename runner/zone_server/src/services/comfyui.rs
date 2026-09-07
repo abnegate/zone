@@ -10,7 +10,10 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
-use super::comfy_recipe::{Fill, RecipeCatalog, sanitize_upload_name, sanitize_weight_filename};
+use super::comfy_inventory;
+use super::comfy_recipe::{
+    Fill, PromptMode, Recipe, RecipeCatalog, sanitize_upload_name, sanitize_weight_filename,
+};
 use crate::config::ComfyUiConfig;
 
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -194,6 +197,25 @@ impl ComfyUiClient {
         })
     }
 
+    pub fn prompt_mode(&self) -> PromptMode {
+        self.image_recipe()
+            .map(|recipe| recipe.prompt_mode)
+            .unwrap_or(PromptMode::ClipScene)
+    }
+
+    fn image_recipe(&self) -> Result<&Recipe, ComfyUiError> {
+        let selected = self.config.checkpoint.as_str();
+        if self.config.models_dir.is_dir() {
+            let items = comfy_inventory::scan(&self.config.models_dir, &self.catalog);
+            if let Some(item) = comfy_inventory::find(&items, selected)
+                && let Some(recipe) = self.catalog.get(&item.recipe_id)
+            {
+                return Ok(recipe);
+            }
+        }
+        self.catalog.image_recipe_for(selected)
+    }
+
     fn video_workflows(&self) -> Result<(Value, Value), ComfyUiError> {
         for (value, message) in [
             (
@@ -245,21 +267,26 @@ impl ComfyUiClient {
         } else {
             prompt
         };
-        let recipe = self.catalog.image_recipe_for(&self.config.checkpoint)?;
+        let recipe = self.image_recipe()?;
+        let weights = recipe.weight_map(&self.config.checkpoint)?;
+        let fill_weights: HashMap<&str, &str> = weights
+            .iter()
+            .map(|(name, filename)| (name.as_str(), filename.as_str()))
+            .collect();
         let workflow = if let Some(source) = source {
             let _ = progress.send("Uploading source image...".to_string());
             let uploaded = self.upload_source(source, cancel, deadline).await?;
             recipe.apply(Fill {
                 prompt,
                 seed: rand::random::<u64>() & i64::MAX as u64,
-                weights: HashMap::from([("checkpoint", self.config.checkpoint.as_str())]),
+                weights: fill_weights,
                 source: Some(uploaded.as_str()),
             })?
         } else {
             recipe.apply(Fill {
                 prompt,
                 seed: rand::random::<u64>() & i64::MAX as u64,
-                weights: HashMap::from([("checkpoint", self.config.checkpoint.as_str())]),
+                weights: fill_weights,
                 source: None,
             })?
         };
@@ -1081,6 +1108,61 @@ mod tests {
         assert_eq!(images[0].bytes.as_ref(), &[1, 2, 3]);
         assert_eq!(images[0].filename, "zone.png");
         assert_eq!(progress_rx.recv().await.as_deref(), Some("Image queued..."));
+    }
+
+    #[tokio::test]
+    async fn adapter_generate_loads_lora_and_keeps_instruction_prompt() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains(
+                "LoraLoaderModelOnly",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "qwen-image-edit-plus-nsfw-lora.safetensors",
+            ))
+            .and(wiremock::matchers::body_string_contains("remove the sign"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "lora"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/lora"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "lora": {"status": {"status_str": "success"}, "outputs": {
+                    "9": {"images": [{"filename": "edited.png", "subfolder": "", "type": "temp"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![9, 8, 7]),
+            )
+            .mount(&server)
+            .await;
+        let client = ComfyUiClient::new(ComfyUiConfig {
+            enabled: true,
+            base_url: server.uri(),
+            checkpoint: "qwen-image-edit-plus-nsfw-lora.safetensors".into(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            client.prompt_mode(),
+            crate::services::comfy_recipe::PromptMode::EditInstruction
+        );
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        let images = client
+            .generate("remove the sign", None, &mut cancel_rx, progress_tx)
+            .await
+            .unwrap();
+        assert_eq!(images[0].bytes.as_ref(), &[9, 8, 7]);
     }
 
     #[tokio::test]

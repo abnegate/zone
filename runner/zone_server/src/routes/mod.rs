@@ -245,6 +245,9 @@ pub fn create_router(state: AppState) -> Router {
         // Models
         .route("/api/models", get(models::list))
         .route("/api/models/disk", get(models::disk))
+        .route("/api/models/train", post(models::train))
+        .route("/api/models/train/bases", get(models::train_bases))
+        .route("/api/models/train/captions", post(models::captions))
         .route(
             "/api/models/{name}",
             get(models::get).delete(models::delete),

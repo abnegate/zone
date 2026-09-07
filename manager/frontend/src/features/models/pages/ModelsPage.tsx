@@ -5,6 +5,7 @@ import { modelsApi } from '../../../api/models';
 import Capabilities from '../components/Capabilities';
 import DownloadOptions from '../components/DownloadOptions';
 import PullJobs from '../components/PullJobs';
+import TrainPanel from '../components/TrainPanel';
 import VirtualBrowseList from '../components/VirtualBrowseList';
 import { useBrowse } from '../hooks/useBrowse';
 import { useModels } from '../hooks/useModels';
@@ -29,7 +30,7 @@ import {
 } from '../utils';
 import './ModelsPage.css';
 
-type Tab = 'installed' | 'browse';
+type Tab = 'installed' | 'browse' | 'train';
 
 export default function ModelsPage() {
   const {
@@ -173,7 +174,7 @@ export default function ModelsPage() {
       <header className="models-header">
         <div className="models-header-copy">
           <h1>Models</h1>
-          <p>Manage your Ollama models</p>
+          <p>Manage local chat models and image adapters</p>
         </div>
         {disk && (
           <div
@@ -210,6 +211,7 @@ export default function ModelsPage() {
               {models.length > 0 && <Badge variant="secondary">{models.length}</Badge>}
             </TabsTrigger>
             <TabsTrigger value="browse">Browse</TabsTrigger>
+            <TabsTrigger value="train">Train</TabsTrigger>
           </TabsList>
         </Tabs>
       </header>
@@ -348,6 +350,12 @@ export default function ModelsPage() {
                     >
                       <div className="model-info">
                         <span className="model-name">{model.name}</span>
+                        {model.details?.format === 'lora' && <span className="tag">adapter</span>}
+                        {model.ready === false && (
+                          <span className="tag">
+                            Requires {model.required_files?.[0] || 'base model'}
+                          </span>
+                        )}
                         <span className="model-meta">
                           {[
                             formatBytes(model.size),
@@ -507,6 +515,8 @@ export default function ModelsPage() {
             )}
           </section>
         )}
+
+        {activeTab === 'train' && <TrainPanel onTrained={refresh} />}
       </div>
 
       {/* Delete Confirmation Modal */}

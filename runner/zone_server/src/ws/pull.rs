@@ -14,7 +14,8 @@ use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use crate::auth::validate_token;
-use crate::pull::{Event, Pull, PullRegistry};
+use crate::pull::{ComfyPull, Event, Pull, PullRegistry, PullStart};
+use crate::services::comfy_recipe::RecipeCatalog;
 use crate::state::AppState;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -126,20 +127,55 @@ async fn handle(socket: WebSocket, state: AppState) {
         &mut sender,
         &mut receiver,
         registry,
-        state.config().ollama_host.clone(),
-        request.model,
+        pull_start(&state, request),
     )
     .await;
+}
+
+fn pull_start(state: &AppState, request: Pull) -> PullStart {
+    let comfy = is_comfy_pull(&request).then(|| {
+        let catalog = RecipeCatalog::load(Some(state.config().comfyui.workflow_path.as_path()))
+            .or_else(|_| RecipeCatalog::packaged())
+            .ok();
+        let recipe_id = request.recipe_id.clone().or_else(|| {
+            request.hf_base.as_deref().and_then(|base| {
+                catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.adapter_recipe_for_base(base))
+                    .map(|recipe| recipe.id.clone())
+            })
+        });
+        ComfyPull {
+            models_dir: state.config().comfyui.models_dir.clone(),
+            recipe_id,
+            hf_base: request.hf_base.clone(),
+            hub_origin: crate::routes::models::huggingface_hub_origin(
+                &state.config().huggingface_models_url,
+            ),
+        }
+    });
+    PullStart {
+        model: request.model,
+        ollama_host: state.config().ollama_host.clone(),
+        comfy,
+    }
+}
+
+fn is_comfy_pull(request: &Pull) -> bool {
+    request
+        .runtime
+        .as_deref()
+        .is_some_and(|runtime| runtime.eq_ignore_ascii_case("comfy"))
+        || request.model.contains(".safetensors")
 }
 
 async fn subscribe(
     sender: &mut Sender,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     registry: &PullRegistry,
-    host: String,
-    model: String,
+    request: PullStart,
 ) {
-    let mut subscription = registry.start_or_attach(host, model.clone());
+    let mut subscription = registry.start(request);
     for event in subscription.replay() {
         if emit_event(sender, &event).await.is_err() {
             return;

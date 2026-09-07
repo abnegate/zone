@@ -21,6 +21,9 @@ export const InstalledModelSchema = z.object({
   size: z.number(),
   modified_at: z.string(),
   details: ModelDetailsSchema.optional(),
+  ready: z.boolean().nullable().optional(),
+  recipe_id: z.string().nullable().optional(),
+  required_files: z.array(z.string()).nullable().optional(),
 });
 
 export const ModelSizeOptionSchema = z.object({
@@ -46,6 +49,9 @@ export const BrowseModelSchema = z.object({
   sizes: z.array(ModelSizeOptionSchema).nullable().optional(),
   details: ModelDetailsSchema.nullable().optional(),
   source: z.enum(['ollama', 'huggingface']).optional(),
+  ready: z.boolean().nullable().optional(),
+  recipe_id: z.string().nullable().optional(),
+  required_files: z.array(z.string()).nullable().optional(),
 });
 
 export const ModelSourceSchema = z.enum(['ollama', 'huggingface']);

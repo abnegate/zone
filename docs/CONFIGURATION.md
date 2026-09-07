@@ -155,6 +155,44 @@ details, and native macOS / bundled NVIDIA instructions.
 - **Description**: Fallback ComfyUI checkpoint when org/workspace AI settings
   do not set `model_image`. Path separators and traversal are rejected.
   Chat image generation uses the effective `model_image` setting when present.
+  The filename may also be a LoRA in `models/loras/`; the matching adapter
+  recipe is selected automatically.
+
+### `COMFYUI_MODELS_DIR`
+- **Default**: `/app/comfyui/models`
+- **Description**: ComfyUI models root scanned for checkpoints, diffusion
+  models, and LoRAs. HuggingFace adapter installs and Train output land in
+  `loras/` under this directory.
+
+### `COMFYUI_TRAIN_COMMAND`
+- **Default**: empty (uses packaged `ZoneTrainLoRA` on the configured ComfyUI)
+- **Description**: Optional shell command used by the Models Train tab. When
+  empty and `COMFYUI_ENABLED` is true, Zone posts a `ZoneTrainLoRA` graph to
+  ComfyUI. The command still receives `ZONE_TRAIN_NAME`, `ZONE_TRAIN_BASE`,
+  `ZONE_TRAIN_DIR`, `ZONE_TRAIN_OUTPUT`, `ZONE_TRAIN_TRIGGER`,
+  `ZONE_TRAIN_CHECKPOINT`, and `COMFYUI_BASE_URL` if you override it. Must
+  write the LoRA to `ZONE_TRAIN_OUTPUT`. Identity defaults live in
+  `comfyui/custom_nodes/zone_lora/train_config.json` (rank 8, alpha=rank, all
+  transformer blocks, 512px, at least 400 steps). macOS apply:
+  `./scripts/setup-comfyui-macos.sh --apply-nodes`. The NVIDIA image copies the
+  same folder; Compose bind-mounts it over the container custom node.
+
+### `COMFYUI_CAPTION_MODEL`
+- **Default**: empty (auto-captioning disabled)
+- **Description**: Vision model used to caption LoRA training images that have
+  no caption. Zone first asks the model to name the subject shared by every
+  image, then describes each image while excluding that subject, so the trigger
+  word carries the identity. Captions typed by hand are never overwritten. Must
+  be a model that accepts images; leave empty to caption manually.
+
+### `COMFYUI_CAPTION_TIMEOUT_SECS`
+- **Default**: `60`
+- **Description**: Per-request budget for one captioning call. A timeout leaves
+  the caption as the trigger word alone rather than failing the training job.
+
+### `COMFYUI_TRAIN_TIMEOUT_SECS`
+- **Default**: `3600`
+- **Description**: Wall-clock budget for a ComfyUI train job.
 
 ### `COMFYUI_CLASSIFIER_MODEL`
 - **Default**: empty (`auto`)

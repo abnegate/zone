@@ -59,12 +59,14 @@ RUN apt-get update \
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder --chown=comfy:comfy /opt/ComfyUI /workspace/ComfyUI
 COPY --chown=comfy:comfy model-manifest.json download-models.py /opt/zone/
+COPY --chown=comfy:comfy custom_nodes/zone_lora /workspace/ComfyUI/custom_nodes/zone_lora
 
 RUN mkdir -p \
         /workspace/ComfyUI/models/checkpoints \
         /workspace/ComfyUI/models/diffusion_models \
         /workspace/ComfyUI/models/text_encoders \
         /workspace/ComfyUI/models/vae \
+        /workspace/ComfyUI/models/loras \
         /workspace/ComfyUI/output \
         /workspace/ComfyUI/temp \
         /workspace/ComfyUI/user \

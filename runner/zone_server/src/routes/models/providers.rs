@@ -260,6 +260,7 @@ fn ollama_medium_category(medium: ModelMediumFilter) -> Option<&'static str> {
         ModelMediumFilter::Reasoning => Some("thinking"),
         ModelMediumFilter::All
         | ModelMediumFilter::Text
+        | ModelMediumFilter::ImageGeneration
         | ModelMediumFilter::Video
         | ModelMediumFilter::Audio => None,
     }
@@ -669,6 +670,12 @@ impl ModelProvider for HuggingFaceProvider {
     }
 
     async fn search(&self, opts: BrowseQuery<'_>) -> Result<BrowseResponse, ProviderError> {
+        if opts.medium == ModelMediumFilter::ImageGeneration {
+            return Ok(BrowseResponse {
+                models: Vec::new(),
+                next_cursor: None,
+            });
+        }
         if !huggingface_uses_local_window(&opts) {
             let (models, next_cursor) = fetch_huggingface_page(
                 &self.catalog_url,
@@ -787,6 +794,7 @@ fn huggingface_uses_local_window(opts: &BrowseQuery<'_>) -> bool {
 fn huggingface_medium_tag(medium: ModelMediumFilter) -> Option<&'static str> {
     match medium {
         ModelMediumFilter::Image => Some("image-text-to-text"),
+        ModelMediumFilter::ImageGeneration => None,
         ModelMediumFilter::Video => Some("video-text-to-text"),
         ModelMediumFilter::Audio => Some("automatic-speech-recognition"),
         ModelMediumFilter::Embeddings => Some("feature-extraction"),
@@ -944,6 +952,8 @@ struct HuggingFaceCardData {
     license: Option<String>,
     #[serde(rename = "pipeline_tag", default)]
     pipeline_tag: Option<String>,
+    #[serde(default, rename = "base_model")]
+    base_model: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -998,13 +1008,30 @@ fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
         .clone()
         .or_else(|| model_id.split_once('/').map(|(owner, _)| owner.to_string()));
     let description = huggingface_description(&m, pipeline.as_deref(), family.as_deref());
+    let format = huggingface_weight_format(&m, &tags);
+    let size = if format == "gguf" {
+        size
+    } else {
+        safetensors_size(m.siblings.as_deref().unwrap_or(&[]))
+    };
+    let sizes = if format == "gguf" {
+        huggingface_size_variants(&model_id, m.siblings.as_deref().unwrap_or(&[]))
+    } else {
+        huggingface_safetensors_variants(&model_id, m.siblings.as_deref().unwrap_or(&[]))
+    };
     let use_cases = nonempty_vec(use_cases_from_pipeline(pipeline.as_deref(), &tags));
-    let capabilities = declared_capabilities(
+    let mut capabilities = declared_capabilities(
         pipeline
             .as_deref()
             .into_iter()
             .chain(tags.iter().map(String::as_str)),
     );
+    if format == "lora" {
+        capabilities = Some(vec![
+            ModelCapability::ImageGeneration,
+            ModelCapability::ImageInput,
+        ]);
+    }
     let public_tags = nonempty_vec(
         tags.into_iter()
             .filter(|t| {
@@ -1019,8 +1046,6 @@ fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
             .take(8)
             .collect(),
     );
-    let sizes = huggingface_size_variants(&model_id, m.siblings.as_deref().unwrap_or(&[]));
-
     ModelResponse {
         name: model_id.clone(),
         size,
@@ -1036,7 +1061,7 @@ fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
         capabilities,
         sizes,
         details: Some(ModelDetails {
-            format: Some("gguf".to_string()),
+            format: Some(format),
             family,
             parameter_size: param_size,
             context_length,
@@ -1045,6 +1070,190 @@ fn huggingface_to_model(m: HuggingFaceModel) -> ModelResponse {
         }),
         ..Default::default()
     }
+}
+
+fn huggingface_weight_format(model: &HuggingFaceModel, tags: &[String]) -> String {
+    if model.gguf.is_some() {
+        return "gguf".to_string();
+    }
+    let tagged = tags.iter().any(|tag| {
+        let lower = tag.to_lowercase();
+        lower.contains("lora")
+            || lower == "peft"
+            || lower.starts_with("base_model:adapter:")
+            || lower.starts_with("adapter:")
+    });
+    if tagged {
+        "lora".to_string()
+    } else {
+        "checkpoint".to_string()
+    }
+}
+
+fn is_safetensors_weight(filename: &str) -> bool {
+    let name = filename.to_ascii_lowercase();
+    name.ends_with(".safetensors") && !name.contains("mmproj")
+}
+
+fn safetensors_size(siblings: &[HuggingFaceSibling]) -> Option<u64> {
+    siblings
+        .iter()
+        .filter(|sibling| is_safetensors_weight(&sibling.rfilename))
+        .filter_map(|sibling| sibling.size)
+        .max()
+}
+
+fn huggingface_safetensors_variants(
+    model_id: &str,
+    siblings: &[HuggingFaceSibling],
+) -> Option<Vec<ModelSize>> {
+    let mut sizes: Vec<ModelSize> = siblings
+        .iter()
+        .filter(|sibling| is_safetensors_weight(&sibling.rfilename))
+        .map(|sibling| {
+            let filename = sibling
+                .rfilename
+                .rsplit('/')
+                .next()
+                .unwrap_or(&sibling.rfilename);
+            ModelSize {
+                name: format!("{model_id}:{filename}"),
+                label: filename.to_string(),
+                size: sibling.size,
+            }
+        })
+        .collect();
+    sizes.sort_by(|left, right| left.label.cmp(&right.label));
+    sizes.dedup_by(|left, right| left.name == right.name);
+    (!sizes.is_empty()).then_some(sizes)
+}
+
+impl HuggingFaceProvider {
+    pub async fn search_adapters(
+        &self,
+        opts: BrowseQuery<'_>,
+        bases: &[String],
+    ) -> Result<Vec<ModelResponse>, ProviderError> {
+        if bases.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut models = Vec::new();
+        for base in bases {
+            let page = fetch_huggingface_adapter_page(
+                &self.catalog_url,
+                &self.client,
+                opts.query,
+                base,
+                opts.limit.max(1),
+            )
+            .await?;
+            models.extend(page);
+        }
+        models.sort_by(|left, right| {
+            right
+                .downloads
+                .unwrap_or(0)
+                .cmp(&left.downloads.unwrap_or(0))
+        });
+        models.dedup_by(|left, right| left.name == right.name);
+        Ok(refine_models(models, &opts))
+    }
+}
+
+async fn fetch_huggingface_adapter_page(
+    catalog_url: &str,
+    client: &Client,
+    query: Option<&str>,
+    base: &str,
+    limit: usize,
+) -> Result<Vec<ModelResponse>, ProviderError> {
+    let mut url = format!(
+        "{catalog_url}?filter={}&sort=downloads&direction=-1&limit={limit}",
+        urlencoding::encode(&format!("base_model:adapter:{base}"))
+    );
+    for field in [
+        "cardData",
+        "downloads",
+        "likes",
+        "tags",
+        "pipeline_tag",
+        "createdAt",
+        "author",
+        "lastModified",
+        "siblings",
+    ] {
+        url.push_str("&expand%5B%5D=");
+        url.push_str(field);
+    }
+    if let Some(q) = query.map(str::trim).filter(|value| !value.is_empty()) {
+        url.push_str(&format!("&search={}", urlencoding::encode(q)));
+    }
+    let response = client.get(&url).send().await?;
+    if !response.status().is_success() {
+        return Err(ProviderError::Unavailable(format!(
+            "HuggingFace API returned status: {}",
+            response.status()
+        )));
+    }
+    let body = response.text().await?;
+    let hf_models: Vec<HuggingFaceModel> = serde_json::from_str(&body)
+        .map_err(|error| ProviderError::ParseError(format!("{error}")))?;
+    Ok(hf_models
+        .into_iter()
+        .filter(|model| adapter_matches_base(model, base))
+        .map(|model| {
+            let mut mapped = huggingface_to_model(model);
+            if mapped
+                .details
+                .as_ref()
+                .and_then(|details| details.format.as_deref())
+                == Some("gguf")
+            {
+                return mapped;
+            }
+            if let Some(details) = mapped.details.as_mut() {
+                details.format = Some("lora".to_string());
+            }
+            mapped
+        })
+        .filter(|model| {
+            model
+                .details
+                .as_ref()
+                .and_then(|details| details.format.as_deref())
+                == Some("lora")
+        })
+        .collect())
+}
+
+fn adapter_matches_base(model: &HuggingFaceModel, base: &str) -> bool {
+    let expected = format!("base_model:adapter:{base}");
+    let tags = model.tags.as_deref().unwrap_or(&[]);
+    if tags.iter().any(|tag| tag.eq_ignore_ascii_case(&expected)) {
+        return true;
+    }
+    match model
+        .card_data
+        .as_ref()
+        .and_then(|card| card.base_model.as_ref())
+    {
+        Some(serde_json::Value::String(value)) => value.eq_ignore_ascii_case(base),
+        Some(serde_json::Value::Array(values)) => values.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case(base))
+        }),
+        _ => false,
+    }
+}
+
+pub fn huggingface_hub_origin(catalog_url: &str) -> String {
+    catalog_url
+        .trim_end_matches('/')
+        .strip_suffix("/api/models")
+        .unwrap_or(catalog_url)
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn huggingface_description(
@@ -1645,6 +1854,7 @@ fn model_matches_medium(model: &ModelResponse, medium: ModelMediumFilter) -> boo
             };
         }
         ModelMediumFilter::Image => &[ImageInput, ImageGeneration],
+        ModelMediumFilter::ImageGeneration => &[ImageGeneration],
         ModelMediumFilter::Video => &[VideoInput, VideoGeneration],
         ModelMediumFilter::Audio => &[Audio, AudioInput, AudioGeneration],
         ModelMediumFilter::Tools => &[Tools],
@@ -2912,6 +3122,56 @@ mod tests {
         assert_eq!(
             extract_quantization("model-Q4_K_M-00001-of-00002.gguf"),
             Some("Q4_K_M".to_string())
+        );
+    }
+
+    #[test]
+    fn huggingface_hub_origin_strips_models_api() {
+        assert_eq!(
+            huggingface_hub_origin("https://huggingface.co/api/models"),
+            "https://huggingface.co"
+        );
+        assert_eq!(
+            huggingface_hub_origin("http://127.0.0.1:9/api/models"),
+            "http://127.0.0.1:9"
+        );
+    }
+
+    #[test]
+    fn huggingface_adapter_maps_safetensors_not_gguf() {
+        let model = HuggingFaceModel {
+            id: Some("owner/qwen-edit-lora".into()),
+            model_id: Some("owner/qwen-edit-lora".into()),
+            sha: None,
+            last_modified: None,
+            created_at: None,
+            tags: Some(vec![
+                "lora".into(),
+                "base_model:adapter:Qwen/Qwen-Image-Edit-2511".into(),
+            ]),
+            downloads: Some(12),
+            likes: Some(1),
+            author: Some("owner".into()),
+            pipeline_tag: Some("image-to-image".into()),
+            card_data: None,
+            gguf: None,
+            siblings: Some(vec![sibling(
+                "qwen-image-edit-plus-nsfw-lora.safetensors",
+                Some(563_000_000),
+            )]),
+        };
+        let mapped = huggingface_to_model(model);
+        assert_eq!(
+            mapped
+                .details
+                .as_ref()
+                .and_then(|details| details.format.as_deref()),
+            Some("lora")
+        );
+        assert_eq!(mapped.size, Some(563_000_000));
+        assert_eq!(
+            mapped.sizes.as_ref().unwrap()[0].name,
+            "owner/qwen-edit-lora:qwen-image-edit-plus-nsfw-lora.safetensors"
         );
     }
 

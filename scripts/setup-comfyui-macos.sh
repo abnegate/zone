@@ -11,14 +11,16 @@ MODELS_DIR=${COMFYUI_MODELS_DIR:-"$INSTALL_DIR/models"}
 PYTHON=${PYTHON_BIN:-python3}
 MODEL_ACTION=none
 MODEL_BUNDLE=image
+APPLY_NODES_ONLY=0
 
 usage() {
     cat <<EOF
-Usage: $0 [--download-model | --download-video-model | --verify-model | --verify-video-model] [--force-model]
+Usage: $0 [--download-model | --download-video-model | --verify-model | --verify-video-model | --apply-nodes] [--force-model]
 
 Install the pinned native Apple Silicon ComfyUI runtime. Image weights are
 downloaded only when --download-model is supplied. Video weights are a
-separate explicit download.
+separate explicit download. --apply-nodes copies the packaged Zone LoRA
+custom node onto an existing checkout without fetching ComfyUI again.
 
 Environment:
   COMFYUI_INSTALL_DIR  Runtime directory (default: $INSTALL_DIR)
@@ -33,6 +35,7 @@ while [ "$#" -gt 0 ]; do
         --download-video-model) MODEL_ACTION=download; MODEL_BUNDLE=video ;;
         --verify-model) MODEL_ACTION=verify; MODEL_BUNDLE=image ;;
         --verify-video-model) MODEL_ACTION=verify; MODEL_BUNDLE=video ;;
+        --apply-nodes) APPLY_NODES_ONLY=1 ;;
         --force-model) MODEL_FORCE=1 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -49,6 +52,29 @@ if ! command -v git >/dev/null 2>&1; then
     echo "git is required. Install the Xcode Command Line Tools first." >&2
     exit 1
 fi
+
+apply_zone_nodes() {
+    mkdir -p "$INSTALL_DIR/custom_nodes"
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        git -C "$INSTALL_DIR" checkout HEAD -- \
+            comfy_extras/nodes_train.py \
+            comfy/weight_adapter/bypass.py \
+            >/dev/null 2>&1 || true
+    fi
+    rm -rf "$INSTALL_DIR/custom_nodes/zone_lora"
+    cp -R "$PROJECT_DIR/comfyui/custom_nodes/zone_lora" "$INSTALL_DIR/custom_nodes/zone_lora"
+    echo "Applied Zone LoRA nodes to $INSTALL_DIR/custom_nodes/zone_lora"
+}
+
+if [ "$APPLY_NODES_ONLY" = "1" ]; then
+    if [ ! -d "$INSTALL_DIR" ]; then
+        echo "ComfyUI is not installed at $INSTALL_DIR" >&2
+        exit 1
+    fi
+    apply_zone_nodes
+    exit 0
+fi
+
 if ! command -v "$PYTHON" >/dev/null 2>&1; then
     echo "$PYTHON was not found. Install Python 3.11-3.13." >&2
     exit 1
@@ -100,10 +126,13 @@ mkdir -p \
     "$MODELS_DIR/diffusion_models" \
     "$MODELS_DIR/text_encoders" \
     "$MODELS_DIR/vae" \
+    "$MODELS_DIR/loras" \
     "$INSTALL_DIR/models" \
-    "$INSTALL_DIR/output"
+    "$INSTALL_DIR/output" \
+    "$INSTALL_DIR/custom_nodes"
+apply_zone_nodes
 if [ "$MODELS_DIR" != "$INSTALL_DIR/models" ]; then
-    for folder in checkpoints diffusion_models text_encoders vae; do
+    for folder in checkpoints diffusion_models text_encoders vae loras; do
         LINK="$INSTALL_DIR/models/$folder"
         if [ -d "$LINK" ] && [ ! -L "$LINK" ] \
             && [ -n "$(ls -A "$LINK" 2>/dev/null)" ]; then

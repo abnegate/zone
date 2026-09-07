@@ -1264,7 +1264,9 @@ async fn handle_image_generation(
         },
     )
     .await;
-    let generation_prompt = if source.is_some() {
+    let generation_prompt = if source.is_some()
+        && client.prompt_mode() != crate::services::comfy_recipe::PromptMode::EditInstruction
+    {
         crate::services::image_intent::ImageIntentClassifier::new(
             image_config.clone(),
             state.config().litellm_host.clone(),
