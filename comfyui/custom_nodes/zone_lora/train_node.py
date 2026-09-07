@@ -34,9 +34,9 @@ import comfy.model_management
 
 from .inference_hooks import install_all, prepare_frozen_weights, wrap_early_frozen
 from .train_config import (
-    is_transformer_block,
     load_config,
     lora_alpha,
+    trains,
 )
 
 
@@ -91,7 +91,7 @@ def setup_identity_lora(mp, existing_weights, algorithm, lora_dtype, rank):
     trained = []
     bypass_manager = BypassInjectionManager()
     for name, module in mp.model.named_modules():
-        if not is_transformer_block(name):
+        if not trains(name, settings):
             continue
         if not hasattr(module, 'weight_function') or module.weight is None:
             continue

@@ -8,7 +8,7 @@
   "training_dtype": "none",
   "resolution": 512,
   "alpha_equals_rank": true,
-  "train_blocks": "all",
+  "train_modulation": false,
   "bypass_mode": true,
   "gradient_checkpointing": true,
   "checkpoint_depth": 2,

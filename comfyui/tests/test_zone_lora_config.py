@@ -29,7 +29,6 @@ class TrainConfigTests(unittest.TestCase):
         self.assertGreaterEqual(int(config['min_steps']), 400)
         self.assertEqual(int(config['steps_per_image']), 50)
         self.assertEqual(train_config.train_steps(8, config), 400)
-        self.assertEqual(config['train_blocks'], 'all')
         self.assertEqual(int(config['resolution']), 512)
         self.assertEqual(config['lora_dtype'], 'bf16')
 
@@ -45,6 +44,34 @@ class TrainConfigTests(unittest.TestCase):
         )
         self.assertFalse(train_config.is_transformer_block('diffusion_model.img_in'))
         self.assertTrue(train_config.is_output_module('diffusion_model.final_layer.linear'))
+
+    def test_modulation_layers_are_left_alone_by_default(self):
+        config = train_config.load_config()
+        self.assertFalse(config['train_modulation'])
+        for name in (
+            'diffusion_model.double_blocks.0.img_mod.lin',
+            'diffusion_model.double_blocks.0.txt_mod.lin',
+            'diffusion_model.single_blocks.7.modulation.lin',
+        ):
+            self.assertTrue(train_config.is_modulation(name), name)
+            self.assertFalse(train_config.trains(name, config), name)
+        for name in (
+            'diffusion_model.double_blocks.0.img_attn.qkv',
+            'diffusion_model.double_blocks.0.img_mlp.0',
+            'diffusion_model.single_blocks.7.linear1',
+        ):
+            self.assertTrue(train_config.trains(name, config), name)
+
+    def test_modulation_can_be_opted_into(self):
+        config = dict(train_config.load_config(), train_modulation=True)
+        self.assertTrue(
+            train_config.trains('diffusion_model.double_blocks.0.img_mod.lin', config)
+        )
+
+    def test_non_transformer_modules_never_train(self):
+        config = train_config.load_config()
+        for name in ('diffusion_model.img_in', 'diffusion_model.final_layer.linear'):
+            self.assertFalse(train_config.trains(name, config), name)
 
     def test_mps_low_watermark_never_exceeds_high(self):
         path = MODULE_PATH.with_name('prestartup_script.py')

@@ -377,7 +377,7 @@ mod tests {
     fn packaged_config_keeps_the_keys_the_train_node_reads() {
         let raw: Value = serde_json::from_str(PACKAGED_TRAIN_CONFIG).unwrap();
         assert_eq!(raw["alpha_equals_rank"], true);
-        assert_eq!(raw["train_blocks"], "all");
+        assert_eq!(raw["train_modulation"], false);
         assert!(raw["min_adapters"].as_u64().is_some());
         assert!(raw["batch_size"].as_u64().is_some());
     }
