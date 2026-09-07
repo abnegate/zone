@@ -6,8 +6,8 @@ Apple Silicon and an optional NVIDIA Compose profile on Linux.
 
 Weights are **not** downloaded during a build or normal startup. Model setup is
 an explicit operation and verifies both the exact byte count and SHA-256 before
-a file is accepted. Image and video weights are separate bundles so operators
-can install only what they need.
+a file is accepted. Image, image-edit, and video weights are separate bundles
+so operators can install only what they need.
 
 LoRA training lives in `comfyui/custom_nodes/zone_lora/` (identity defaults in
 `train_config.json`). The macOS installer copies that folder after the pinned
@@ -64,8 +64,8 @@ specific `comfyui/requirements*.lock` files.
 - Apple Silicon (arm64); Intel Macs are not supported by this installer
 - Python 3.11 through 3.13, running as arm64
 - Git / Xcode Command Line Tools
-- At least 25 GB free disk space for the image checkpoint, or about 45 GB if
-  also downloading the video bundle
+- At least 25 GB free disk space for the image checkpoint, about 45 GB if also
+  downloading the video bundle, and a further 30 GB for the image-edit bundle
 - 32 GB unified memory recommended; 24 GB may work with memory pressure and
   substantially lower resolutions. Video generation needs the higher figure.
 
@@ -75,25 +75,30 @@ Install the pinned runtime without downloading model weights:
 make setup-comfyui-macos
 ```
 
-Download the checkpoint only when ready:
+Download a bundle only when ready. `--bundle` takes any bundle declared in
+`comfyui/model-manifest.json` and defaults to `image`:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --download-model
+./scripts/setup-comfyui-macos.sh --download-model --bundle image-edit
+./scripts/setup-comfyui-macos.sh --download-model --bundle video
 ```
 
-Download the video weights only when ready:
-
-```bash
-./scripts/setup-comfyui-macos.sh --download-video-model
-```
+`--download-video-model` stays an alias for `--download-model --bundle video`,
+and `--verify-video-model` for the verification equivalent. Bundles are applied
+left to right, so the last of `--bundle` and any alias wins.
 
 An interrupted download is retained as a `.part` file and resumes on the next
-run. Verify an existing checkpoint without network access:
+run. Verify an installed bundle without network access:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --verify-model
-./scripts/setup-comfyui-macos.sh --verify-video-model
+./scripts/setup-comfyui-macos.sh --verify-model --bundle image-edit
+./scripts/setup-comfyui-macos.sh --verify-model --bundle video
 ```
+
+`./scripts/setup-comfyui-macos.sh --help` lists the bundles the manifest
+declares.
 
 Start the pinned runtime:
 
@@ -146,7 +151,7 @@ Override installation paths when necessary:
 ```bash
 COMFYUI_INSTALL_DIR="$HOME/Applications/ComfyUI-Zone" \
 COMFYUI_MODELS_DIR="/Volumes/Models/ComfyUI/models" \
-./scripts/setup-comfyui-macos.sh --download-model
+./scripts/setup-comfyui-macos.sh --download-model --bundle image-edit
 ```
 
 Use the same overrides for later verification and startup.
