@@ -75,6 +75,11 @@ type ServerMessage =
       attachment: NonNullable<MessageMetadata['attachments']>[number];
     }
   | {
+      type: 'audio';
+      message_id: string;
+      attachment: NonNullable<MessageMetadata['attachments']>[number];
+    }
+  | {
       type: 'message_end';
       message_id: string;
       content: string;
@@ -643,6 +648,7 @@ export function useChat(
           break;
         case 'image':
         case 'video':
+        case 'audio':
           if (assistantId === payload.message_id) {
             const attachments = assistantMetadata?.attachments ?? [];
             assistantMetadata = {

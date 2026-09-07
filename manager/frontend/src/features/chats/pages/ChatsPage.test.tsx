@@ -1772,6 +1772,45 @@ describe('ChatsPage', () => {
       });
     });
 
+    it('renders generated assistant audio with playback controls', async () => {
+      mockClient.getChat.mockResolvedValueOnce({
+        ...mockChatWithMessages,
+        messages: [
+          {
+            id: 'msg-generated-audio',
+            chat_id: 'chat-1',
+            role: 'assistant',
+            content: 'Generated audio.',
+            created_at: '2024-01-01T00:00:00Z',
+            metadata: {
+              attachments: [
+                {
+                  name: 'generated-audio-1.flac',
+                  mime: 'audio/flac',
+                  url: 'data:audio/flac;base64,generated',
+                },
+              ],
+            },
+          },
+        ],
+      });
+
+      renderChatsPage();
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByText('Chat 1'));
+
+      await waitFor(() => {
+        const audio = screen.getByTestId('message-audio');
+        expect(audio.tagName).toBe('AUDIO');
+        expect(audio).toHaveAttribute('aria-label', 'generated-audio-1.flac');
+        expect(audio).toHaveAttribute('src', 'data:audio/flac;base64,generated');
+        expect(audio).toHaveAttribute('controls');
+        expect(screen.getByText('Generated audio.')).toBeInTheDocument();
+      });
+    });
+
     it('reuses a thread image as the next starting image', async () => {
       mockClient.getChat.mockResolvedValueOnce({
         ...mockChatWithMessages,
