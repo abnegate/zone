@@ -430,8 +430,13 @@ async fn parallel_socket_generations_serialize_before_persistence_and_allow_imme
             .iter()
             .any(|entry| { entry.message.content.as_deref() == Some("Queued second user") })
     );
+    // Every socket on a chat subscribes to the same broadcast, so both
+    // generations land on `first` too. Reading one of them off `second` would
+    // return whichever frame happened to be buffered there rather than waiting
+    // for the queued turn, and the followup would then race an unfinished
+    // generation.
     successful(&finish(&mut first).await);
-    successful(&finish(&mut second).await);
+    successful(&finish(&mut first).await);
     send(
         &mut first,
         json!({"type":"send","content":"Accepted immediate followup"}),
@@ -440,7 +445,23 @@ async fn parallel_socket_generations_serialize_before_persistence_and_allow_imme
     successful(&finish(&mut first).await);
     let requests = harness.requests().await;
     let requests = ordinary(&requests);
-    assert_eq!(requests.len(), 3);
+    let sent: Vec<String> = requests
+        .iter()
+        .map(|request| {
+            request["messages"]
+                .as_array()
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .filter(|message| message["role"] == "user")
+                        .filter_map(|message| message["content"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(requests.len(), 3, "streaming requests were {sent:#?}");
     let messages = requests[1]["messages"].as_array().unwrap();
     let completed = messages
         .iter()
