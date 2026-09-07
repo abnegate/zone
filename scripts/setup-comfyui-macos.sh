@@ -6,23 +6,72 @@ PIP_VERSION="25.3"
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname "$SCRIPT_DIR")
+MANIFEST="$PROJECT_DIR/comfyui/model-manifest.json"
 INSTALL_DIR=${COMFYUI_INSTALL_DIR:-"$HOME/Library/Application Support/Zone/ComfyUI"}
 MODELS_DIR=${COMFYUI_MODELS_DIR:-"$INSTALL_DIR/models"}
 PYTHON=${PYTHON_BIN:-python3}
 MODEL_ACTION=none
 MODEL_BUNDLE=image
+MANIFEST_BUNDLES=
 APPLY_NODES_ONLY=0
 
-usage() {
-    cat <<EOF
-Usage: $0 [--download-model | --download-video-model | --download-audio-model |
-          --verify-model | --verify-video-model | --verify-audio-model |
-          --apply-nodes] [--force-model]
+require_python() {
+    if ! command -v "$PYTHON" >/dev/null 2>&1; then
+        echo "$PYTHON was not found. Install Python 3.11-3.13." >&2
+        exit 1
+    fi
+}
 
-Install the pinned native Apple Silicon ComfyUI runtime. Image weights are
-downloaded only when --download-model is supplied. Video and audio weights
-are separate explicit downloads. --apply-nodes copies the packaged Zone LoRA
-custom node onto an existing checkout without fetching ComfyUI again.
+load_bundles() {
+    if [ -z "$MANIFEST_BUNDLES" ]; then
+        require_python
+        MANIFEST_BUNDLES=$("$PYTHON" - "$MANIFEST" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    models = json.load(handle)["models"]
+print(" ".join(dict.fromkeys(model.get("bundle") or "image" for model in models)))
+PY
+)
+    fi
+}
+
+select_bundle() {
+    load_bundles
+    for bundle in $MANIFEST_BUNDLES; do
+        if [ "$bundle" = "$1" ]; then
+            MODEL_BUNDLE=$1
+            return 0
+        fi
+    done
+    echo "Unknown bundle: $1" >&2
+    echo "Valid bundles: $MANIFEST_BUNDLES" >&2
+    exit 2
+}
+
+usage() {
+    load_bundles
+    cat <<EOF
+Usage: $0 [--download-model | --verify-model] [--bundle NAME] [--force-model]
+       $0 --apply-nodes
+
+Install the pinned native Apple Silicon ComfyUI runtime. Weights are downloaded
+only when --download-model is supplied, and only for the selected bundle.
+--apply-nodes copies the packaged Zone LoRA custom node onto an existing
+checkout without fetching ComfyUI again.
+
+Options:
+  --bundle NAME           Bundle to act on: $MANIFEST_BUNDLES
+  --download-model        Download the selected bundle (default: image)
+  --verify-model          Verify the selected bundle without downloading
+  --download-video-model  Alias for --download-model --bundle video
+  --verify-video-model    Alias for --verify-model --bundle video
+  --force-model           Replace an installed file that fails verification
+  --apply-nodes           Copy the Zone LoRA node onto an existing checkout
+
+Bundles are selected left to right, so the last of --bundle and any bundle
+alias on the command line wins.
 
 Environment:
   COMFYUI_INSTALL_DIR  Runtime directory (default: $INSTALL_DIR)
@@ -35,10 +84,17 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --download-model) MODEL_ACTION=download; MODEL_BUNDLE=image ;;
         --download-video-model) MODEL_ACTION=download; MODEL_BUNDLE=video ;;
-        --download-audio-model) MODEL_ACTION=download; MODEL_BUNDLE=audio ;;
         --verify-model) MODEL_ACTION=verify; MODEL_BUNDLE=image ;;
         --verify-video-model) MODEL_ACTION=verify; MODEL_BUNDLE=video ;;
-        --verify-audio-model) MODEL_ACTION=verify; MODEL_BUNDLE=audio ;;
+        --bundle)
+            if [ "$#" -lt 2 ]; then
+                echo "--bundle requires a bundle name." >&2
+                usage >&2
+                exit 2
+            fi
+            select_bundle "$2"
+            shift
+            ;;
         --apply-nodes) APPLY_NODES_ONLY=1 ;;
         --force-model) MODEL_FORCE=1 ;;
         --help|-h) usage; exit 0 ;;
@@ -79,10 +135,7 @@ if [ "$APPLY_NODES_ONLY" = "1" ]; then
     exit 0
 fi
 
-if ! command -v "$PYTHON" >/dev/null 2>&1; then
-    echo "$PYTHON was not found. Install Python 3.11-3.13." >&2
-    exit 1
-fi
+require_python
 
 "$PYTHON" - <<'PY'
 import platform

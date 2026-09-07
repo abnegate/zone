@@ -75,13 +75,22 @@ async fn fresh_seven_large_results_and_errors_survive_restart_and_text_agent_tra
     let requests = ordinary(&requests);
     assert_eq!(requests.len(), 4);
     assert_eq!(pairs(requests[2]), 7);
+    // read_file pages at FILE_PAGE_CHARS, so a fresh result carries the first
+    // page rather than the whole file. What matters is that the page reaches
+    // the model intact, not compacted away or replaced by a reference.
+    let paged = |value: &str| value.chars().take(8_000).collect::<String>();
     for body in &bodies {
         assert!(
             requests[2]["messages"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|message| message["role"] == "tool" && message["content"] == *body),
+                .any(|message| {
+                    message["role"] == "tool"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.starts_with(&paged(body)))
+                }),
             "fresh evidence truncated"
         );
     }
@@ -178,7 +187,7 @@ async fn fresh_seven_large_results_and_errors_survive_restart_and_text_agent_tra
 #[tokio::test]
 async fn consumed_active_turn_group_compacts_atomically_while_new_result_and_user_remain_verbatim()
 {
-    let harness = Harness::new(Some(100_000), true, vec![]).await;
+    let harness = Harness::new(Some(16_000), true, vec![]).await;
     let first = format!("FIRST_ORIGINAL\n{}\nFIRST_TAIL", "a".repeat(80_000));
     let second = format!("SECOND_ORIGINAL\n{}\nSECOND_TAIL", "b".repeat(80_000));
     let first_path = harness.file("first.txt", &first);
@@ -197,20 +206,17 @@ async fn consumed_active_turn_group_compacts_atomically_while_new_result_and_use
     let requests = harness.requests().await;
     let requests = ordinary(&requests);
     assert_eq!(requests.len(), 3);
-    assert!(
-        requests[1]["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| message["content"] == first)
-    );
-    assert!(
-        requests[2]["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|message| message["content"] == second)
-    );
+    let paged = |value: &str| value.chars().take(8_000).collect::<String>();
+    assert!(requests[1]["messages"].as_array().unwrap().iter().any(|m| {
+        m["content"]
+            .as_str()
+            .is_some_and(|c| c.starts_with(&paged(&first)))
+    }));
+    assert!(requests[2]["messages"].as_array().unwrap().iter().any(|m| {
+        m["content"]
+            .as_str()
+            .is_some_and(|c| c.starts_with(&paged(&second)))
+    }));
     assert!(
         requests[2]["messages"]
             .as_array()
@@ -223,16 +229,23 @@ async fn consumed_active_turn_group_compacts_atomically_while_new_result_and_use
         .summary
         .as_ref()
         .expect("active-turn consumed group should compact");
-    let first_result = history
-        .entries
-        .iter()
-        .find(|entry| entry.message.content.as_deref() == Some(&first))
-        .unwrap();
-    let second_result = history
-        .entries
-        .iter()
-        .find(|entry| entry.message.content.as_deref() == Some(&second))
-        .unwrap();
+    // read_file pages at FILE_PAGE_CHARS, so the durable entry holds the page
+    // the tool returned rather than the whole 80 KB file.
+    let entry_for = |head: &str| {
+        history
+            .entries
+            .iter()
+            .find(|entry| {
+                entry
+                    .message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.starts_with(head))
+            })
+            .unwrap_or_else(|| panic!("no entry starting {head:?}"))
+    };
+    let first_result = entry_for(&paged(&first));
+    let second_result = entry_for(&paged(&second));
     assert!(checkpoint.entries.contains(&first_result.id));
     assert!(!checkpoint.entries.contains(&second_result.id));
     assert!(
@@ -240,13 +253,15 @@ async fn consumed_active_turn_group_compacts_atomically_while_new_result_and_use
             .entries
             .contains(history.latest_user.as_ref().unwrap())
     );
-    zone_server::services::chat::history::validate(&history, checkpoint).unwrap();
+    zone_chat::history::validate(&history, checkpoint).unwrap();
     let previous = checkpoint.clone();
     for _ in 0..12 {
         let response = harness.preview("", None).await;
         response.assert_status(StatusCode::OK);
         assert_eq!(harness.history().await.summary.as_ref(), Some(&previous));
     }
+    // The compacted entry keeps its stored text verbatim across previews.
+    let stored = first_result.message.content.clone();
     assert_eq!(
         harness
             .history()
@@ -256,9 +271,8 @@ async fn consumed_active_turn_group_compacts_atomically_while_new_result_and_use
             .find(|entry| entry.id == first_result.id)
             .unwrap()
             .message
-            .content
-            .as_deref(),
-        Some(first.as_str())
+            .content,
+        stored
     );
 }
 

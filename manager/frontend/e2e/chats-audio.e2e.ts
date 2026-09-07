@@ -8,10 +8,7 @@ const GENERATED_AUDIO_URL =
 
 const INLINE_AUDIO_DATA_URL = 'data:audio/flac;base64,AAAA';
 
-const MOCK_FLAC_BYTES = Buffer.from(
-  'ZkxhQ4AAACIQABAAAAAAAAAACsRC8AAAAAAAAAAAAAAAAAAAAAAAAAAA',
-  'base64'
-);
+const SIGNED_AUDIO_URL = `${GENERATED_AUDIO_URL}?expires=2000&signature=abc`;
 
 const AUDIO_PROMPT = 'make a background audio track that sounds like shuffling through a forest';
 
@@ -110,16 +107,16 @@ test.describe('Chat audio', () => {
     );
   });
 
-  test('fetches a protected audio artifact with the bearer token', async ({ page }) => {
-    let artifactAuth: string | undefined;
-    let artifactUrl: string | undefined;
+  test('signs a protected audio artifact so the element fetches it directly', async ({ page }) => {
+    let signatureAuth: string | undefined;
+    let signatureUrl: string | undefined;
     await routeApi(page, '**/api/artifacts/**', (route) => {
-      artifactAuth = route.request().headers().authorization;
-      artifactUrl = route.request().url();
+      signatureAuth = route.request().headers().authorization;
+      signatureUrl = route.request().url();
       route.fulfill({
         status: 200,
-        contentType: 'audio/flac',
-        body: MOCK_FLAC_BYTES,
+        contentType: 'application/json',
+        body: JSON.stringify({ url: SIGNED_AUDIO_URL, expires_at: 2000 }),
       });
     });
 
@@ -129,9 +126,9 @@ test.describe('Chat audio', () => {
     const audio = page.getByLabel('generated-audio-1.flac');
     await expect(audio).toBeVisible();
     await expect(audio).toHaveAttribute('controls');
-    await expect(audio).toHaveAttribute('src', /^blob:/);
-    expect(artifactAuth).toMatch(/^Bearer\s.+/);
-    expect(artifactUrl).toContain(GENERATED_AUDIO_URL);
+    await expect(audio).toHaveAttribute('src', SIGNED_AUDIO_URL);
+    expect(signatureAuth).toMatch(/^Bearer\s.+/);
+    expect(signatureUrl).toContain(`${GENERATED_AUDIO_URL}/signature`);
   });
 
   test('streams generated audio after send', async ({ page }) => {

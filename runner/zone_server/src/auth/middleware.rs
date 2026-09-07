@@ -5,7 +5,7 @@
 use axum::{
     Json,
     body::Body,
-    extract::{FromRef, FromRequestParts, State},
+    extract::{FromRef, FromRequestParts, OptionalFromRequestParts, State},
     http::{Request, StatusCode, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -77,6 +77,25 @@ where
             })?;
 
         Ok(AuthUser(claims))
+    }
+}
+
+impl<S> OptionalFromRequestParts<S> for AuthUser
+where
+    S: Send + Sync,
+    AppState: FromRef<S>,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(
+            <Self as FromRequestParts<S>>::from_request_parts(parts, state)
+                .await
+                .ok(),
+        )
     }
 }
 

@@ -35,13 +35,11 @@ use crate::auth::validate_token;
 use crate::db::{ai_settings, chats, knowledge, workspace_members, workspaces};
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
-use crate::services::chat::{
-    history::ReplayMessage,
-    session::{self, Session},
-};
+use crate::services::chat::session::{self, Session};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
+use zone_chat::history::ReplayMessage;
 use zone_core::context::ContextUsage;
 use zone_search::client::{SearchContext, SearxngClient, sanitize_query};
 
@@ -2744,9 +2742,7 @@ async fn handle_chat_generation(
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
         let mut message = LlmMessage::assistant(pending_content);
         message.images = pending_images;
-        Some(crate::services::chat::history::ReplayMessage::from(
-            &message,
-        ))
+        Some(zone_chat::history::ReplayMessage::from(&message))
     } else {
         None
     };

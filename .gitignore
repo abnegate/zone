@@ -49,10 +49,12 @@ node_modules/
 /playwright/.auth/
 manager/build
 manager/coverage
+manager/frontend/coverage
 runner/target
 runner/coverage
 runner/lcov.info
 runner/coverage.json
+*.profraw
 runner/zone_desktop/gen
 runner/zone_desktop/manager
 **/playwright-report

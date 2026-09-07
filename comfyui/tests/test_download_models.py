@@ -86,6 +86,7 @@ class DownloadModelsTest(unittest.TestCase):
     def test_select_models_filters_bundle(self) -> None:
         models = [
             {"id": "image", "bundle": "image"},
+            {"id": "image-edit", "bundle": "image-edit"},
             {"id": "video", "bundle": "video"},
             {"id": "audio", "bundle": "audio"},
             {"id": "legacy"},
@@ -95,6 +96,10 @@ class DownloadModelsTest(unittest.TestCase):
             ["image", "legacy"],
         )
         self.assertEqual(
+            [model["id"] for model in download_models.select_models(models, "image-edit")],
+            ["image-edit"],
+        )
+        self.assertEqual(
             [model["id"] for model in download_models.select_models(models, "video")],
             ["video"],
         )
@@ -102,11 +107,14 @@ class DownloadModelsTest(unittest.TestCase):
             [model["id"] for model in download_models.select_models(models, "audio")],
             ["audio"],
         )
-        self.assertEqual(len(download_models.select_models(models, "all")), 4)
+        self.assertEqual(len(download_models.select_models(models, "all")), 5)
 
     def test_parse_args_accepts_every_valid_bundle(self) -> None:
-        self.assertEqual(download_models.VALID_BUNDLES, {"image", "video", "audio"})
-        for bundle in ["image", "video", "audio", "all"]:
+        self.assertEqual(
+            download_models.VALID_BUNDLES,
+            {"audio", "image", "image-dev", "image-edit", "video"},
+        )
+        for bundle in [*sorted(download_models.VALID_BUNDLES), "all"]:
             with self.subTest(bundle=bundle):
                 argv = [
                     "download-models.py",
@@ -117,6 +125,24 @@ class DownloadModelsTest(unittest.TestCase):
                 ]
                 with unittest.mock.patch.object(sys, "argv", argv):
                     self.assertEqual(download_models.parse_args().bundle, bundle)
+
+    def test_shipped_manifest_can_be_verified(self) -> None:
+        models = download_models.load_manifest(MODULE_PATH.with_name("model-manifest.json"))
+        identifiers = [model["id"] for model in models]
+        self.assertEqual(len(identifiers), len(set(identifiers)), "duplicate model id")
+        for model in models:
+            with self.subTest(model=model["id"]):
+                # verify() indexes these, so a missing one is a crash at setup.
+                self.assertIn(download_models.model_bundle(model), download_models.VALID_BUNDLES)
+                self.assertIsInstance(model["size_bytes"], int)
+                self.assertGreater(model["size_bytes"], 0)
+                self.assertRegex(str(model["sha256"]), r"^[0-9a-f]{64}$")
+                self.assertIn(model["source_revision"], model["url"])
+                self.assertTrue(str(model["url"]).startswith("https://huggingface.co/"))
+                self.assertTrue(
+                    str(model["relative_path"]).endswith(str(model["filename"])),
+                    "relative_path must land on the declared filename",
+                )
 
     def test_download_resumes_partial_file(self) -> None:
         payload = b"0123456789" * 1000
@@ -164,11 +190,11 @@ class ModelManifestTest(unittest.TestCase):
             with self.subTest(model=model.get("id")):
                 self.assertIn(
                     download_models.model_bundle(model),
-                    {"image", "video", "audio"},
+                    {"audio", "image", "image-dev", "image-edit", "video"},
                 )
 
     def test_every_bundle_selects_at_least_one_entry(self) -> None:
-        for bundle in ["image", "video", "audio"]:
+        for bundle in sorted(download_models.VALID_BUNDLES):
             with self.subTest(bundle=bundle):
                 self.assertTrue(
                     download_models.select_models(self.models, bundle),

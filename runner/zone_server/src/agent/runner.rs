@@ -18,12 +18,10 @@ use super::approval::{ApprovalPolicy, requires_approval};
 use super::citations;
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
-use crate::services::chat::{
-    history::{NewEntry, ReplayMessage},
-    session::RunContext,
-};
+use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
 use zone_core::llm::{RequestOptions, Usage};
 use zone_core::tools::is_vision_url;
@@ -431,12 +429,16 @@ pub fn run_with_context(
                 let call = &batch[0];
                 let denied =
                     if mutation && !approval.is_auto() && requires_approval(&call.function.name) {
+                        // Register before the request goes out: a client that
+                        // answers immediately would otherwise be told the call
+                        // is not waiting for approval.
+                        let pending = approval.expect_decision(&call.id);
                         yield AgentEvent::ToolApprovalRequired {
                             id: call.id.clone(),
                             name: call.function.name.clone(),
                             arguments: call.function.arguments.clone(),
                         };
-                        !approval.await_decision(&call.id).await
+                        !approval.awaited_decision(&call.id, pending).await
                     } else {
                         false
                     };

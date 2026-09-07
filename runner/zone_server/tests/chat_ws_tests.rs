@@ -144,13 +144,26 @@ async fn automatic_title_rest_and_websocket_summarize_only_first_message() {
                 break;
             }
         }
-        client
-            .post_json_auth(
-                &format!("/api/chats/{chat_id}/messages"),
-                &json!({"role":"user","content":"Another unrelated subject"}),
-                &token,
-            )
-            .await
+        // The title is summarised alongside the answer, so title_updated does not
+        // mean the turn is over: the generation still holds the chat lease for a
+        // moment and a second message is refused with 409 until it releases.
+        let mut posted = None;
+        for _ in 0..50 {
+            let response = client
+                .post_json_auth(
+                    &format!("/api/chats/{chat_id}/messages"),
+                    &json!({"role":"user","content":"Another unrelated subject"}),
+                    &token,
+                )
+                .await;
+            if response.status != axum::http::StatusCode::CONFLICT {
+                posted = Some(response);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        posted
+            .expect("second message accepted once the first generation released the chat")
             .assert_status(axum::http::StatusCode::CREATED);
         let response = client
             .get_auth(&format!("/api/chats/{chat_id}"), &token)
@@ -1856,10 +1869,12 @@ async fn test_concurrent_image_sends_are_serialized_per_chat() {
         .unwrap();
     second.send(WsMessage::Text(send.into())).await.unwrap();
 
-    let first_result = collect_generated_image(&mut first);
-    let second_result = collect_generated_image(&mut second);
-    let ((first_id, first_url), (second_id, second_url)) =
-        tokio::join!(first_result, second_result);
+    // Both sockets subscribe to the same chat broadcast, so each sees both
+    // generations. Reading one from each returns whichever arrived first,
+    // twice; the serialised pair has to be read in order off one socket.
+    let (first_id, first_url) = collect_generated_image(&mut first).await;
+    let (second_id, second_url) = collect_generated_image(&mut first).await;
+    drop(second);
     assert_ne!(first_id, second_id);
     assert!(first_url.contains(&format!("/{first_id}/")));
     assert!(second_url.contains(&format!("/{second_id}/")));

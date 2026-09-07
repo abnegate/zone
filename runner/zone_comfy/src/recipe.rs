@@ -34,6 +34,18 @@ fn packaged_workflow(name: &str) -> Option<&'static str> {
         "flux1-schnell-fp8-adapter-img2img-api.json" => Some(include_str!(
             "../../../comfyui/workflows/flux1-schnell-fp8-adapter-img2img-api.json"
         )),
+        "flux1-dev-fp8-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-dev-fp8-api.json"
+        )),
+        "flux1-dev-fp8-img2img-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-dev-fp8-img2img-api.json"
+        )),
+        "flux1-dev-fp8-adapter-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-dev-fp8-adapter-api.json"
+        )),
+        "flux1-dev-fp8-adapter-img2img-api.json" => Some(include_str!(
+            "../../../comfyui/workflows/flux1-dev-fp8-adapter-img2img-api.json"
+        )),
         "qwen-image-edit-2511-api.json" => Some(include_str!(
             "../../../comfyui/workflows/qwen-image-edit-2511-api.json"
         )),
@@ -262,7 +274,9 @@ impl RecipeCatalog {
         }
         let id = self.resolve_image_id(checkpoint);
         self.get(id)
-            .filter(|recipe| recipe.kind == MediaKind::Image)
+            // An adapter recipe drives a LoRA slot. Letting one answer for a
+            // plain checkpoint would write that checkpoint into the LoRA input.
+            .filter(|recipe| recipe.kind == MediaKind::Image && !recipe.adapter)
             .ok_or(Error::Configuration(
                 "no image recipe matches this checkpoint",
             ))
@@ -525,6 +539,45 @@ mod tests {
 
     fn catalog() -> RecipeCatalog {
         RecipeCatalog::packaged().unwrap()
+    }
+
+    /// A Dev LoRA bound to the schnell graph would sample in four steps with no
+    /// FluxGuidance and look like a training failure.
+    #[test]
+    fn dev_adapters_bind_to_the_dev_graph() {
+        let catalog = RecipeCatalog::packaged().unwrap();
+        let recipe = catalog
+            .adapter_recipe_for_base("black-forest-labs/FLUX.1-dev")
+            .expect("a dev base must resolve to an adapter recipe");
+        assert_eq!(recipe.id, "flux-dev-adapter");
+
+        let schnell = catalog
+            .adapter_recipe_for_base("black-forest-labs/FLUX.1-schnell")
+            .expect("a schnell base must resolve to an adapter recipe");
+        assert_eq!(schnell.id, "flux-schnell-adapter");
+    }
+
+    /// An adapter recipe writes into a LoRA slot, so it must never be chosen for
+    /// a plain checkpoint or the checkpoint lands in that slot.
+    #[test]
+    fn a_checkpoint_never_resolves_to_an_adapter_recipe() {
+        let catalog = RecipeCatalog::packaged().unwrap();
+        let mut checkpoints: Vec<&str> = catalog
+            .recipes
+            .iter()
+            .filter(|recipe| recipe.kind == MediaKind::Image)
+            .flat_map(|recipe| recipe.required_files.iter())
+            .map(|file| file.filename.as_str())
+            .collect();
+        checkpoints.push("some-dev-build.safetensors");
+        for checkpoint in checkpoints {
+            let recipe = catalog.image_recipe_for(checkpoint).unwrap();
+            assert!(
+                !recipe.adapter,
+                "{checkpoint} resolved to adapter recipe {}",
+                recipe.id
+            );
+        }
     }
 
     #[test]

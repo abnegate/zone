@@ -4,37 +4,34 @@ import { AuthenticatedAudio } from './AuthenticatedAudio';
 
 const originalFetch = globalThis.fetch;
 const originalCreateObjectUrl = URL.createObjectURL;
-const originalRevokeObjectUrl = URL.revokeObjectURL;
 
 const fetchMock = mock();
 const createObjectUrlMock = mock(() => 'blob:protected-audio');
-const revokeObjectUrlMock = mock();
 
 beforeEach(() => {
   fetchMock.mockReset();
   createObjectUrlMock.mockClear();
-  revokeObjectUrlMock.mockClear();
   globalThis.fetch = fetchMock;
   URL.createObjectURL = createObjectUrlMock;
-  URL.revokeObjectURL = revokeObjectUrlMock;
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   URL.createObjectURL = originalCreateObjectUrl;
-  URL.revokeObjectURL = originalRevokeObjectUrl;
 });
 
 describe('AuthenticatedAudio', () => {
-  it('fetches protected artifacts with the bearer token and plays the object URL', async () => {
-    const audioBlob = new Blob(['audio'], { type: 'audio/flac' });
+  it('plays a signed URL so the browser can range-request the media itself', async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
-      blob: async () => audioBlob,
+      json: async () => ({
+        url: '/api/artifacts/chat/track.flac?expires=2000&signature=abc',
+        expires_at: 2000,
+      }),
     } as Response);
 
-    const { unmount } = render(
+    render(
       <AuthenticatedAudio
         src="/api/artifacts/chat/track.flac"
         label="generated-audio-1.flac"
@@ -46,19 +43,19 @@ describe('AuthenticatedAudio', () => {
 
     const audio = await screen.findByLabelText('generated-audio-1.flac');
     expect(audio.tagName).toBe('AUDIO');
-    expect(audio).toHaveAttribute('src', 'blob:protected-audio');
+    expect(audio).toHaveAttribute(
+      'src',
+      '/api/artifacts/chat/track.flac?expires=2000&signature=abc'
+    );
     expect(audio).toHaveAttribute('controls');
-    expect(fetchMock).toHaveBeenCalledWith('/api/artifacts/chat/track.flac', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/artifacts/chat/track.flac/signature', {
       headers: { Authorization: 'Bearer secret-token' },
       signal: expect.any(AbortSignal),
     });
-    expect(createObjectUrlMock).toHaveBeenCalledWith(audioBlob);
-
-    unmount();
-    expect(revokeObjectUrlMock).toHaveBeenCalledWith('blob:protected-audio');
+    expect(createObjectUrlMock).not.toHaveBeenCalled();
   });
 
-  it('renders data and HTTP audio directly without fetching it', () => {
+  it('renders data and HTTP audio directly without signing it', () => {
     const { rerender } = render(
       <AuthenticatedAudio src="data:audio/flac;base64,abc" label="Inline audio" />
     );
@@ -77,14 +74,13 @@ describe('AuthenticatedAudio', () => {
       'https://audio.example.test/track.flac'
     );
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(createObjectUrlMock).not.toHaveBeenCalled();
   });
 
-  it('shows an error when protected audio cannot be loaded', async () => {
+  it('shows an error when protected audio cannot be signed', async () => {
     fetchMock.mockResolvedValue({
       ok: false,
       status: 403,
-      blob: async () => new Blob(),
+      json: async () => ({}),
     } as Response);
 
     render(
@@ -99,6 +95,5 @@ describe('AuthenticatedAudio', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('Audio unavailable');
     });
     expect(screen.queryByLabelText('Denied audio')).toBeNull();
-    expect(createObjectUrlMock).not.toHaveBeenCalled();
   });
 });

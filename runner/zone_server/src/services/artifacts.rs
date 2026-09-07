@@ -2,6 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +53,18 @@ impl ArtifactStore {
         owner_id: Uuid,
         filename: &str,
     ) -> Result<Vec<u8>, ArtifactError> {
+        let artifact = self.open(workspace_id, chat_id, owner_id, filename).await?;
+        let length = artifact.length();
+        artifact.read(0, length).await
+    }
+
+    pub async fn open(
+        &self,
+        workspace_id: Uuid,
+        chat_id: Uuid,
+        owner_id: Uuid,
+        filename: &str,
+    ) -> Result<Artifact, ArtifactError> {
         if !safe_filename(filename) {
             return Err(ArtifactError::InvalidPath);
         }
@@ -67,7 +80,9 @@ impl ArtifactStore {
         if !canonical.starts_with(root) {
             return Err(ArtifactError::InvalidPath);
         }
-        Ok(fs::read(canonical).await?)
+        let file = fs::File::open(canonical).await?;
+        let length = file.metadata().await?.len();
+        Ok(Artifact { file, length })
     }
 
     pub async fn cleanup_chat(&self, workspace_id: Uuid, chat_id: Uuid) {
@@ -115,6 +130,25 @@ impl ArtifactStore {
             .join(uuid_component(owner_id).ok()?);
         ensure_lexically_beneath(&self.root, &path).ok()?;
         Some(path)
+    }
+}
+
+#[derive(Debug)]
+pub struct Artifact {
+    file: fs::File,
+    length: u64,
+}
+
+impl Artifact {
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+
+    pub async fn read(mut self, start: u64, length: u64) -> Result<Vec<u8>, ArtifactError> {
+        self.file.seek(std::io::SeekFrom::Start(start)).await?;
+        let mut bytes = Vec::new();
+        self.file.take(length).read_to_end(&mut bytes).await?;
+        Ok(bytes)
     }
 }
 

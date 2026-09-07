@@ -7,8 +7,8 @@ Compose profile on Linux.
 
 Weights are **not** downloaded during a build or normal startup. Model setup is
 an explicit operation and verifies both the exact byte count and SHA-256 before
-a file is accepted. Image, video, and audio weights are separate bundles so
-operators can install only what they need.
+a file is accepted. Image, image-edit, video, and audio weights are separate
+bundles so operators can install only what they need.
 
 LoRA training lives in `comfyui/custom_nodes/zone_lora/` (identity defaults in
 `train_config.json`). The macOS installer copies that folder after the pinned
@@ -29,6 +29,18 @@ Comfy checkout so core files stay unmodified:
 - Model license: Apache-2.0
 - CUDA base image manifest:
   `sha256:14d94b039cb94bbd5da559f303b46bc4b0d5d6c24ab1a9d7b186e566ed3400dc`
+
+### Qwen Image Edit 2511 (image-edit)
+
+- UNET repository: `Comfy-Org/Qwen-Image-Edit_ComfyUI`
+- UNET revision: `984166f60a9b1fcede5e9b9287b7a7aebc050010`
+- UNET: `qwen_image_edit_2511_fp8mixed.safetensors` (`20,533,762,817` bytes)
+- Encoder and VAE repository: `Comfy-Org/Qwen-Image_ComfyUI`
+- Encoder and VAE revision: `7beb7b647f04469fbe64ba8adc2bb0d7e5e9f73f`
+- CLIP: `qwen_2.5_vl_7b_fp8_scaled.safetensors` (`9,384,670,680` bytes)
+- VAE: `qwen_image_vae.safetensors` (`253,806,246` bytes)
+- Combined size: approximately 28.2 GiB / 30.2 GB
+- Model license: Apache-2.0
 
 ### Wan 2.2 TI2V 5B (video)
 
@@ -62,8 +74,9 @@ specific `comfyui/requirements*.lock` files.
 - Apple Silicon (arm64); Intel Macs are not supported by this installer
 - Python 3.11 through 3.13, running as arm64
 - Git / Xcode Command Line Tools
-- At least 25 GB free disk space for the image checkpoint, about 45 GB with
-  the video bundle, or about 53 GB with the audio checkpoint too
+- At least 25 GB free disk space for the image checkpoint, about 45 GB if also
+  downloading the video bundle, a further 30 GB for the image-edit bundle, and
+  a further 8 GB for the audio bundle
 - 32 GB unified memory recommended; 24 GB may work with memory pressure and
   substantially lower resolutions. Video generation needs the higher figure.
 
@@ -73,32 +86,32 @@ Install the pinned runtime without downloading model weights:
 make setup-comfyui-macos
 ```
 
-Download the checkpoint only when ready:
+Download a bundle only when ready. `--bundle` takes any bundle declared in
+`comfyui/model-manifest.json` and defaults to `image`:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --download-model
+./scripts/setup-comfyui-macos.sh --download-model --bundle image-edit
+./scripts/setup-comfyui-macos.sh --download-model --bundle video
+./scripts/setup-comfyui-macos.sh --download-model --bundle audio
 ```
 
-Download the video weights only when ready:
-
-```bash
-./scripts/setup-comfyui-macos.sh --download-video-model
-```
-
-Download the audio weights only when ready:
-
-```bash
-./scripts/setup-comfyui-macos.sh --download-audio-model
-```
+`--download-video-model` stays an alias for `--download-model --bundle video`,
+and `--verify-video-model` for the verification equivalent. Bundles are applied
+left to right, so the last of `--bundle` and any alias wins.
 
 An interrupted download is retained as a `.part` file and resumes on the next
-run. Verify an existing checkpoint without network access:
+run. Verify an installed bundle without network access:
 
 ```bash
 ./scripts/setup-comfyui-macos.sh --verify-model
-./scripts/setup-comfyui-macos.sh --verify-video-model
-./scripts/setup-comfyui-macos.sh --verify-audio-model
+./scripts/setup-comfyui-macos.sh --verify-model --bundle image-edit
+./scripts/setup-comfyui-macos.sh --verify-model --bundle video
+./scripts/setup-comfyui-macos.sh --verify-model --bundle audio
 ```
+
+`./scripts/setup-comfyui-macos.sh --help` lists the bundles the manifest
+declares.
 
 Start the pinned runtime:
 
@@ -151,7 +164,7 @@ Override installation paths when necessary:
 ```bash
 COMFYUI_INSTALL_DIR="$HOME/Applications/ComfyUI-Zone" \
 COMFYUI_MODELS_DIR="/Volumes/Models/ComfyUI/models" \
-./scripts/setup-comfyui-macos.sh --download-model
+./scripts/setup-comfyui-macos.sh --download-model --bundle image-edit
 ```
 
 Use the same overrides for later verification and startup.
@@ -165,7 +178,8 @@ Use the same overrides for later verification and startup.
 - NVIDIA Container Toolkit configured for Docker
 - At least 24 GB VRAM recommended
 - At least 25 GB free Docker volume storage for the image checkpoint, about
-  45 GB with the video bundle, or about 53 GB with the audio checkpoint too
+  45 GB if also downloading the video bundle, a further 30 GB for the
+  image-edit bundle, and a further 8 GB for the audio bundle
 
 Set the manager's internal endpoint in `.env`:
 
@@ -182,9 +196,13 @@ make setup-comfyui-model
 make verify-comfyui-model
 ```
 
-Video weights are a separate bundle:
+Qwen Image Edit and video weights are separate bundles, each downloaded only
+when asked for:
 
 ```bash
+make setup-comfyui-image-edit-model
+make verify-comfyui-image-edit-model
+
 make setup-comfyui-video-model
 make verify-comfyui-video-model
 ```
@@ -239,15 +257,25 @@ filename. Sampler, steps, CFG, size, and negative prompt stay packaged.
 Shipped image recipes:
 
 - `flux-schnell` — FLUX.1 Schnell FP8 (default, including unknown filenames)
+- `flux-schnell-adapter` — the same graph with a LoRA slot
+- `qwen-image-edit` — Qwen Image Edit 2511, prompted as an edit instruction
+- `qwen-image-edit-adapter` — the same graph with a LoRA slot
 - `sd15` — Stable Diffusion 1.5 (512, 20 Euler steps)
 - `sdxl` — SDXL / Pony / Illustrious (1024, 25 Euler steps)
+
+`sd15` and `sdxl` carry no weights of their own: they match a checkpoint you
+supply by filename hint. The other recipes name the files they need in
+`required_files`, and the weight inventory reports a recipe as not ready until
+every one of them is on disk.
 
 To add another family, drop two API-format graphs in `comfyui/workflows/`
 (generate + edit) and list them in `comfyui/recipes/catalog.json` with slot
 pointers. Do not add settings fields or sampler controls. Compose bind-mounts
 those directories, so a catalog on disk replaces the packaged catalog. To bake
 a new graph into the manager binary (no bind mounts), also add the filename to
-`packaged_workflow` in `runner/zone_server/src/services/comfy_recipe.rs`.
+`packaged_workflow` in `runner/zone_comfy/src/recipe.rs`. To make the weights
+downloadable, add an entry to `comfyui/model-manifest.json` with a bundle,
+pinned revision, size, and SHA-256.
 
 Video (Wan) still uses the graphs in [Video workflow contract](#video-workflow-contract)
 and audio (ACE-Step) the graph in [Audio workflow contract](#audio-workflow-contract);
@@ -265,6 +293,25 @@ Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
 Defaults live in `train_config.json`: rank 8, alpha equal to rank, every
 2-D linear in the transformer blocks (304 adapters on FLUX.1 Schnell), 512px,
 and at least 400 steps.
+
+### Train on Dev, not Schnell
+
+FLUX.1 Schnell is timestep-distilled to produce an image in four steps without
+guidance. That distillation is what a LoRA has to fight: the standard denoising
+objective does not match what Schnell learned, so training pushes the model off
+its own distribution and the adapter ends up degrading it rather than teaching
+it a subject. FLUX.1 Dev is guidance-distilled but still samples normally, and
+is what LoRA recipes are written against.
+
+Dev is a 17.2 GB download and carries the FLUX.1-dev Non-Commercial License,
+where Schnell is Apache-2.0. Check that before shipping anything trained on it.
+
+Dev sits in its own `image-dev` bundle, so the default `image` download stays
+one file rather than fetching both bases:
+
+```bash
+./scripts/setup-comfyui-macos.sh --download-model --bundle image-dev
+```
 
 ### Captions decide whether identity is learned
 

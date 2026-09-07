@@ -12,9 +12,9 @@ use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
 use crate::services::artifacts::ArtifactStore;
-use crate::services::chat::{capacity, history};
 use crate::services::completion_tokens::merge_stops;
 use crate::state::AppState;
+use zone_chat::{capacity, history};
 use zone_search::client::SearchContext;
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);

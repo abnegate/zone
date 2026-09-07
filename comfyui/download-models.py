@@ -17,7 +17,7 @@ CHUNK_SIZE = 8 * 1024 * 1024
 USER_AGENT = "zone-comfyui-model-setup/1"
 
 
-VALID_BUNDLES = {"image", "video", "audio"}
+VALID_BUNDLES = {"audio", "image", "image-dev", "image-edit", "video"}
 
 
 def load_manifest(path: Path) -> list[dict[str, Any]]:
@@ -35,7 +35,15 @@ def model_bundle(model: dict[str, Any]) -> str:
     return bundle
 
 
-def select_models(models: list[dict[str, Any]], bundle: str) -> list[dict[str, Any]]:
+def select_models(
+    models: list[dict[str, Any]], bundle: str, only: str | None = None
+) -> list[dict[str, Any]]:
+    if only:
+        chosen = [model for model in models if model.get("id") == only]
+        if not chosen:
+            known = ", ".join(sorted(str(model.get("id")) for model in models))
+            raise ValueError(f"unknown model id: {only} (known: {known})")
+        return chosen
     if bundle == "all":
         return models
     if bundle not in VALID_BUNDLES:
@@ -149,6 +157,10 @@ def parse_args() -> argparse.Namespace:
         help="replace an installed file that fails verification",
     )
     parser.add_argument(
+        "--only",
+        help="download or verify a single model by id, ignoring --bundle",
+    )
+    parser.add_argument(
         "--bundle",
         choices=(*sorted(VALID_BUNDLES), "all"),
         default="image",
@@ -159,7 +171,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    models = select_models(load_manifest(args.manifest), args.bundle)
+    models = select_models(load_manifest(args.manifest), args.bundle, args.only)
     if not models:
         raise ValueError(f"no models declared for bundle {args.bundle}")
     failures = 0

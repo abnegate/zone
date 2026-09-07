@@ -38,17 +38,9 @@ pub struct ChatRow {
     pub updated_at: Option<NaiveDateTime>,
 }
 
-/// Message row from database
-#[derive(Debug, Clone)]
-pub struct MessageRow {
-    pub title_claimed: bool,
-    pub id: Uuid,
-    pub chat_id: Uuid,
-    pub role: String,
-    pub content: String,
-    pub metadata: Option<serde_json::Value>,
-    pub created_at: Option<NaiveDateTime>,
-}
+/// A stored message. The shape is the conversation store's, not Postgres's,
+/// so a row and what the trait returns cannot drift apart.
+pub use zone_chat::StoredMessage as MessageRow;
 
 /// Helper macro to map a row to ChatRow
 macro_rules! map_chat_row {

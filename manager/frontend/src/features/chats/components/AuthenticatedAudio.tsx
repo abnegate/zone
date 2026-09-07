@@ -1,5 +1,5 @@
 import { type AudioHTMLAttributes, useEffect, useState } from 'react';
-import { fetchProtectedImage, isProtectedArtifactUrl } from '../api/protectedImages';
+import { fetchSignedArtifactUrl, isProtectedArtifactUrl } from '../api/protectedImages';
 
 interface AuthenticatedAudioProps
   extends Omit<AudioHTMLAttributes<HTMLAudioElement>, 'src' | 'aria-label'> {
@@ -8,9 +8,9 @@ interface AuthenticatedAudioProps
   accessToken?: string | null;
 }
 
-interface LoadedAudio {
+interface SignedAudio {
   source: string;
-  objectUrl: string;
+  signedUrl: string;
 }
 
 export function AuthenticatedAudio({
@@ -20,7 +20,7 @@ export function AuthenticatedAudio({
   ...audioProps
 }: AuthenticatedAudioProps) {
   const protectedArtifact = isProtectedArtifactUrl(src);
-  const [loadedAudio, setLoadedAudio] = useState<LoadedAudio | null>(null);
+  const [signedAudio, setSignedAudio] = useState<SignedAudio | null>(null);
   const [failedSource, setFailedSource] = useState<string | null>(null);
 
   useEffect(() => {
@@ -29,20 +29,15 @@ export function AuthenticatedAudio({
     }
 
     const controller = new AbortController();
-    let objectUrl: string | null = null;
 
-    fetchProtectedImage(src, controller.signal, accessToken)
-      .then((blob) => {
+    // A signed URL rather than a blob: the element must fetch the media itself
+    // for the browser to issue the range requests that make it seekable.
+    fetchSignedArtifactUrl(src, controller.signal, accessToken)
+      .then((signedUrl) => {
         if (controller.signal.aborted) {
           return;
         }
-        objectUrl = URL.createObjectURL(blob);
-        if (controller.signal.aborted) {
-          URL.revokeObjectURL(objectUrl);
-          objectUrl = null;
-          return;
-        }
-        setLoadedAudio({ source: src, objectUrl });
+        setSignedAudio({ source: src, signedUrl });
         setFailedSource(null);
       })
       .catch(() => {
@@ -53,9 +48,6 @@ export function AuthenticatedAudio({
 
     return () => {
       controller.abort();
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
     };
   }, [accessToken, protectedArtifact, src]);
 
@@ -68,8 +60,8 @@ export function AuthenticatedAudio({
   }
 
   const displaySrc = protectedArtifact
-    ? loadedAudio?.source === src
-      ? loadedAudio.objectUrl
+    ? signedAudio?.source === src
+      ? signedAudio.signedUrl
       : null
     : src;
 

@@ -49,6 +49,14 @@ setup-comfyui-model: ## Explicitly download and checksum-verify FLUX.1 Schnell F
 		--bundle image \
 		$(if $(filter 1 true yes,$(FORCE)),--force,)
 
+setup-comfyui-image-edit-model: ## Explicitly download Qwen Image Edit 2511 weights (~28.2 GiB)
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle image-edit \
+		$(if $(filter 1 true yes,$(FORCE)),--force,)
+
 setup-comfyui-video-model: ## Explicitly download Wan 2.2 TI2V 5B video weights (~16.9 GB)
 	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
 		python /opt/zone/download-models.py \
@@ -71,6 +79,14 @@ verify-comfyui-model: ## Verify the installed FLUX.1 Schnell FP8 size and SHA-25
 		--manifest /opt/zone/model-manifest.json \
 		--models-dir /models \
 		--bundle image \
+		--verify-only
+
+verify-comfyui-image-edit-model: ## Verify the installed Qwen Image Edit 2511 size and SHA-256
+	@$(COMPOSE) --profile comfyui-model-setup run --rm comfyui-model-setup \
+		python /opt/zone/download-models.py \
+		--manifest /opt/zone/model-manifest.json \
+		--models-dir /models \
+		--bundle image-edit \
 		--verify-only
 
 verify-comfyui-video-model: ## Verify the installed Wan 2.2 TI2V 5B size and SHA-256
