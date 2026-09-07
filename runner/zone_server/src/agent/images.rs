@@ -10,7 +10,7 @@ use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::config::ComfyUiConfig;
 use crate::db::{ai_settings, chats};
-use crate::services::{artifacts::ArtifactStore, image_source::resolve_source_image_from};
+use crate::services::{artifacts::ArtifactStore, media_source::resolve_source_image_from};
 use zone_comfy::{Client as ComfyUiClient, SourceImage};
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {

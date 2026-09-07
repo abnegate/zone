@@ -82,6 +82,7 @@ const MAX_RESPONSE_LENGTH: usize = 100_000;
 /// Bound image output independently from text so a provider cannot make a
 /// WebSocket frame or message metadata grow without limit.
 const MAX_GENERATED_IMAGES: usize = 8;
+const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GENERATED_IMAGE_URL_LENGTH: usize = 16 * 1024 * 1024;
 
 /// Status constants
@@ -358,6 +359,7 @@ enum Routing {
     Image(crate::config::ComfyUiConfig),
     Video(crate::config::ComfyUiConfig),
     Audio(crate::config::ComfyUiConfig),
+    Upscale(crate::config::ComfyUiConfig),
     Chat(chats::ChatRow),
 }
 
@@ -1123,9 +1125,8 @@ async fn resolve_generation_source(
     prompt: &str,
     metadata: Option<&serde_json::Value>,
     store: &crate::services::artifacts::ArtifactStore,
-) -> Result<Option<zone_comfy::client::SourceImage>, crate::services::image_source::SourceImageError>
-{
-    use crate::services::image_source::{
+) -> Result<Option<zone_comfy::client::SourceImage>, crate::services::media_source::Error> {
+    use crate::services::media_source::{
         has_image_attachment, resolve_source_image, resolve_source_image_from,
     };
 
@@ -1203,6 +1204,185 @@ async fn wait_media(
     }
 }
 
+/// How a finished ComfyUI job names itself in the message it saves and in the
+/// errors it reports, so image, video, and upscale jobs deliver the same way.
+#[derive(Clone, Copy)]
+struct Delivery {
+    /// Opens every failure: "Image generation", "Audio generation", "Upscaling".
+    subject: &'static str,
+    /// What the job produced, as the failures refer to it: "image" or "video".
+    noun: &'static str,
+    /// The assistant message body once the media is stored.
+    content: &'static str,
+    /// Stored instead when ComfyUI names a format this lane does not emit.
+    fallback: MediaType,
+}
+
+/// What a generated file is stored as. Taking the extension and the announced
+/// media type from one entry keeps an artifact URL and its attachment in step,
+/// and a format outside the job's own lane falls back rather than mislabelling
+/// the file.
+fn stored_media(mime: &str, fallback: MediaType) -> MediaType {
+    MediaType::for_mime(mime)
+        .filter(|media| {
+            media.is_audio() == fallback.is_audio() && media.is_video() == fallback.is_video()
+        })
+        .unwrap_or(fallback)
+}
+
+fn comfy_failure(subject: &str, error: &zone_comfy::Error) -> String {
+    match error {
+        zone_comfy::Error::Http(error) if error.is_connect() => format!(
+            "{subject} failed: cannot reach ComfyUI. Start the image service and try again."
+        ),
+        zone_comfy::Error::Http(error) if error.is_timeout() => format!(
+            "{subject} failed: ComfyUI did not respond in time. Check the image service and try again."
+        ),
+        _ => format!("{subject} failed: {error}"),
+    }
+}
+
+/// Store what ComfyUI returned, save the assistant message, and announce both.
+async fn deliver_media(
+    stream: &Arc<ChatStream>,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    media: Vec<zone_comfy::GeneratedImage>,
+    store: &crate::services::artifacts::ArtifactStore,
+    delivery: Delivery,
+    generation: &Generation,
+    session: &mut Session,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Delivery {
+        subject,
+        noun,
+        content,
+        fallback,
+    } = delivery;
+    let assistant_message_id = generation.message_id;
+
+    let mut attachments = Vec::new();
+    let mut oversize = false;
+    for item in media.into_iter().take(MAX_GENERATED_IMAGES) {
+        if item.bytes.len() > MAX_ARTIFACT_BYTES {
+            oversize = true;
+            tracing::warn!("ComfyUI {noun} output exceeded artifact size limit");
+            continue;
+        }
+        let media = stored_media(&item.mime, fallback);
+        let url = match store
+            .persist(
+                workspace_id,
+                chat_id,
+                assistant_message_id,
+                media.extension,
+                &item.bytes,
+            )
+            .await
+        {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::error!("Failed to persist generated {noun}: {error}");
+                store
+                    .cleanup_owner(workspace_id, chat_id, assistant_message_id)
+                    .await;
+                session.close().await?;
+                publish(
+                    stream,
+                    ServerMessage::Error {
+                        message: format!("{subject} failed: could not store the {noun}"),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+        if let Some(attachment) = generated_media_attachment(&url, media.mime, attachments.len()) {
+            attachments.push(attachment);
+        }
+    }
+    if attachments.is_empty() {
+        session.close().await?;
+        let message = if oversize {
+            format!("{subject} finished, but the {noun} is too large to store")
+        } else {
+            format!("{subject} produced no usable {noun}")
+        };
+        publish(stream, ServerMessage::Error { message }).await;
+        return Ok(());
+    }
+
+    let metadata = image_metadata(&attachments);
+    let mut replay = LlmMessage::assistant(content);
+    replay.images = session::images(metadata.as_ref());
+    if let Err(error) = session
+        .store
+        .finish(
+            &session.lease,
+            session.turn,
+            content,
+            metadata.clone(),
+            false,
+            Some(&ReplayMessage::from(&replay)),
+        )
+        .await
+    {
+        tracing::error!("Failed to persist generated {noun} message: {error}");
+        store
+            .cleanup_owner(workspace_id, chat_id, assistant_message_id)
+            .await;
+        session.close().await?;
+        publish(
+            stream,
+            ServerMessage::Error {
+                message: format!("{subject} failed: could not save the message"),
+            },
+        )
+        .await;
+        return Ok(());
+    }
+    publish(
+        stream,
+        ServerMessage::MessageStart {
+            message_id: assistant_message_id,
+            role: "assistant".to_string(),
+            resumed: false,
+        },
+    )
+    .await;
+    for attachment in &attachments {
+        let message_id = assistant_message_id;
+        let attachment = attachment.clone();
+        let frame = match MediaType::for_mime(&attachment.mime) {
+            Some(media) if media.is_audio() => ServerMessage::Audio {
+                message_id,
+                attachment,
+            },
+            Some(media) if media.is_video() => ServerMessage::Video {
+                message_id,
+                attachment,
+            },
+            _ => ServerMessage::Image {
+                message_id,
+                attachment,
+            },
+        };
+        publish(stream, frame).await;
+    }
+    session.close().await?;
+    publish(
+        stream,
+        ServerMessage::MessageEnd {
+            message_id: assistant_message_id,
+            content: content.to_string(),
+            metadata,
+            error: None,
+        },
+    )
+    .await;
+    Ok(())
+}
+
 async fn handle_image_generation(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -1217,7 +1397,6 @@ async fn handle_image_generation(
     use crate::services::artifacts::ArtifactStore;
     use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
-    const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;
 
     let client = match ComfyUiClient::new(image_config.clone()) {
@@ -1326,134 +1505,29 @@ async fn handle_image_generation(
             return Ok(());
         }
         Err(error) => {
-            let message = match &error {
-                ComfyUiError::Http(error) if error.is_connect() =>
-                    "Image generation failed: cannot reach ComfyUI. Start the image service and try again.".to_string(),
-                ComfyUiError::Http(error) if error.is_timeout() =>
-                    "Image generation failed: ComfyUI did not respond in time. Check the image service and try again.".to_string(),
-                _ => format!("Image generation failed: {error}"),
-            };
+            let message = comfy_failure("Image generation", &error);
             session.close().await?;
             publish(stream, ServerMessage::Error { message }).await;
             return Ok(());
         }
     };
 
-    let mut attachments = Vec::new();
-    for image in images.into_iter().take(MAX_GENERATED_IMAGES) {
-        if image.bytes.len() > MAX_ARTIFACT_BYTES {
-            tracing::warn!("ComfyUI output exceeded artifact size limit");
-            continue;
-        }
-        let extension = match image.mime.as_str() {
-            "image/jpeg" => "jpg",
-            "image/webp" => "webp",
-            _ => "png",
-        };
-        let url = match store
-            .persist(
-                workspace_id,
-                chat_id,
-                assistant_message_id,
-                extension,
-                &image.bytes,
-            )
-            .await
-        {
-            Ok(url) => url,
-            Err(error) => {
-                tracing::error!("Failed to persist generated image: {error}");
-                store
-                    .cleanup_owner(workspace_id, chat_id, assistant_message_id)
-                    .await;
-                session.close().await?;
-                publish(
-                    stream,
-                    ServerMessage::Error {
-                        message: "Image generation failed: could not store the image".to_string(),
-                    },
-                )
-                .await;
-                return Ok(());
-            }
-        };
-        if let Some(attachment) = generated_image_attachment(&url, attachments.len()) {
-            attachments.push(attachment);
-        }
-    }
-    if attachments.is_empty() {
-        session.close().await?;
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: "Image generation completed without a usable image".to_string(),
-            },
-        )
-        .await;
-        return Ok(());
-    }
-
-    let content = "Generated image.";
-    let metadata = image_metadata(&attachments);
-    let mut replay = LlmMessage::assistant(content);
-    replay.images = session::images(metadata.as_ref());
-    if let Err(error) = session
-        .store
-        .finish(
-            &session.lease,
-            session.turn,
-            content,
-            metadata.clone(),
-            false,
-            Some(&ReplayMessage::from(&replay)),
-        )
-        .await
-    {
-        tracing::error!("Failed to persist generated image message: {error}");
-        store
-            .cleanup_owner(workspace_id, chat_id, assistant_message_id)
-            .await;
-        session.close().await?;
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: "Image generation failed: could not save the message".to_string(),
-            },
-        )
-        .await;
-        return Ok(());
-    }
-    publish(
+    deliver_media(
         stream,
-        ServerMessage::MessageStart {
-            message_id: assistant_message_id,
-            role: "assistant".to_string(),
-            resumed: false,
+        chat_id,
+        workspace_id,
+        images,
+        &store,
+        Delivery {
+            subject: "Image generation",
+            noun: "image",
+            content: "Generated image.",
+            fallback: MediaType::PNG,
         },
+        generation,
+        session,
     )
-    .await;
-    for attachment in &attachments {
-        publish(
-            stream,
-            ServerMessage::Image {
-                message_id: assistant_message_id,
-                attachment: attachment.clone(),
-            },
-        )
-        .await;
-    }
-    session.close().await?;
-    publish(
-        stream,
-        ServerMessage::MessageEnd {
-            message_id: assistant_message_id,
-            content: content.to_string(),
-            metadata,
-            error: None,
-        },
-    )
-    .await;
-    Ok(())
+    .await
 }
 
 async fn handle_video_generation(
@@ -1470,7 +1544,6 @@ async fn handle_video_generation(
     use crate::services::artifacts::ArtifactStore;
     use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
-    const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;
 
     let client = match ComfyUiClient::new(video_config.clone()) {
@@ -1560,133 +1633,240 @@ async fn handle_video_generation(
             return Ok(());
         }
         Err(error) => {
-            let message = match &error {
-                ComfyUiError::Http(error) if error.is_connect() =>
-                    "Video generation failed: cannot reach ComfyUI. Start the image service and try again.".to_string(),
-                ComfyUiError::Http(error) if error.is_timeout() =>
-                    "Video generation failed: ComfyUI did not respond in time. Check the image service and try again.".to_string(),
-                _ => format!("Video generation failed: {error}"),
-            };
+            let message = comfy_failure("Video generation", &error);
             session.close().await?;
             publish(stream, ServerMessage::Error { message }).await;
             return Ok(());
         }
     };
 
-    let mut attachments = Vec::new();
-    for video in videos.into_iter().take(MAX_GENERATED_IMAGES) {
-        if video.bytes.len() > MAX_ARTIFACT_BYTES {
-            tracing::warn!("ComfyUI video output exceeded artifact size limit");
-            continue;
-        }
-        let extension = match video.mime.as_str() {
-            "video/mp4" => "mp4",
-            _ => "webm",
-        };
-        let url = match store
-            .persist(
-                workspace_id,
-                chat_id,
-                assistant_message_id,
-                extension,
-                &video.bytes,
+    deliver_media(
+        stream,
+        chat_id,
+        workspace_id,
+        videos,
+        &store,
+        Delivery {
+            subject: "Video generation",
+            noun: "video",
+            content: "Generated video.",
+            fallback: MediaType::WEBM,
+        },
+        generation,
+        session,
+    )
+    .await
+}
+
+async fn handle_upscale(
+    state: &AppState,
+    stream: &Arc<ChatStream>,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    prompt: &str,
+    metadata: Option<&serde_json::Value>,
+    upscale_config: crate::config::ComfyUiConfig,
+    generation: &mut Generation,
+    session: &mut Session,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::services::artifacts::ArtifactStore;
+    use crate::services::media_source::{Kind, Source};
+    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
+
+    const SUBJECT: &str = "Upscaling";
+    let assistant_message_id = generation.message_id;
+
+    let client = match ComfyUiClient::new(upscale_config.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            session.close().await?;
+            publish(
+                stream,
+                ServerMessage::Error {
+                    message: format!("Upscaling is not configured: {error}"),
+                },
             )
-            .await
-        {
-            Ok(url) => url,
-            Err(error) => {
-                tracing::error!("Failed to persist generated video: {error}");
-                store
-                    .cleanup_owner(workspace_id, chat_id, assistant_message_id)
-                    .await;
-                session.close().await?;
-                publish(
-                    stream,
-                    ServerMessage::Error {
-                        message: "Video generation failed: could not store the video".to_string(),
-                    },
-                )
-                .await;
-                return Ok(());
-            }
-        };
-        if let Some(attachment) = generated_media_attachment(&url, &video.mime, attachments.len()) {
-            attachments.push(attachment);
+            .await;
+            return Ok(());
         }
-    }
-    if attachments.is_empty() {
+    };
+    let store = ArtifactStore::new(upscale_config.artifact_root.clone());
+    let source = match resolve_upscale_source(
+        state,
+        chat_id,
+        workspace_id,
+        prompt,
+        metadata,
+        &store,
+    )
+    .await
+    {
+        Ok(Some(source)) => source,
+        Ok(None) => {
+            session.close().await?;
+            publish(
+                stream,
+                ServerMessage::Error {
+                    message: "Upscaling needs an image or video: attach one or generate one first"
+                        .to_string(),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+        Err(error) => {
+            session.close().await?;
+            publish(
+                stream,
+                ServerMessage::Error {
+                    message: format!("{SUBJECT} failed: {error}"),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+    };
+    let noun = match source.kind() {
+        Kind::Image => "image",
+        Kind::Video => "video",
+    };
+    publish(
+        stream,
+        ServerMessage::Status {
+            message: format!("Preparing to upscale the {noun}..."),
+        },
+    )
+    .await;
+    let Some(_generation_permit) = wait_media(generation, session, stream).await? else {
+        return Ok(());
+    };
+
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let progress_sender = stream.clone();
+    let progress_task = tokio::spawn(async move {
+        while let Some(message) = progress_rx.recv().await {
+            publish(&progress_sender, ServerMessage::Status { message }).await;
+        }
+    });
+
+    session.store.assert_current(&session.lease).await?;
+    let result = tokio::select! {
+        biased;
+        _ = session.guard.lost() => {
+            progress_task.abort();
+            return Err("Chat generation ownership was lost".into());
+        }
+        result = async {
+            match &source {
+                Source::Image(image) => {
+                    client.upscale_image(image, &mut generation.cancel, progress_tx).await
+                }
+                Source::Video(video) => {
+                    client.upscale_video(video, &mut generation.cancel, progress_tx).await
+                }
+            }
+        } => result,
+    };
+    progress_task.abort();
+    let _ = progress_task.await;
+    if result.is_ok() && generation.cancel.try_recv().is_ok() {
         session.close().await?;
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: "Video generation completed without a usable video".to_string(),
-            },
-        )
-        .await;
+        generation.cancelled(stream).await;
         return Ok(());
     }
 
-    let content = "Generated video.";
-    let metadata = image_metadata(&attachments);
-    let mut replay = LlmMessage::assistant(content);
-    replay.images = session::images(metadata.as_ref());
-    if let Err(error) = session
-        .store
-        .finish(
-            &session.lease,
-            session.turn,
-            content,
-            metadata.clone(),
-            false,
-            Some(&ReplayMessage::from(&replay)),
-        )
-        .await
-    {
-        tracing::error!("Failed to persist generated video message: {error}");
-        store
-            .cleanup_owner(workspace_id, chat_id, assistant_message_id)
+    let media = match result {
+        Ok(media) => media,
+        Err(ComfyUiError::Cancelled) => {
+            session.close().await?;
+            publish(
+                stream,
+                ServerMessage::Cancelled {
+                    message_id: generation.started.then_some(assistant_message_id),
+                },
+            )
             .await;
-        session.close().await?;
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: "Video generation failed: could not save the message".to_string(),
-            },
-        )
-        .await;
-        return Ok(());
-    }
-    publish(
+            return Ok(());
+        }
+        Err(error) => {
+            let message = comfy_failure(SUBJECT, &error);
+            session.close().await?;
+            publish(stream, ServerMessage::Error { message }).await;
+            return Ok(());
+        }
+    };
+
+    deliver_media(
         stream,
-        ServerMessage::MessageStart {
-            message_id: assistant_message_id,
-            role: "assistant".to_string(),
-            resumed: false,
-        },
-    )
-    .await;
-    for attachment in &attachments {
-        publish(
-            stream,
-            ServerMessage::Video {
-                message_id: assistant_message_id,
-                attachment: attachment.clone(),
+        chat_id,
+        workspace_id,
+        media,
+        &store,
+        Delivery {
+            subject: SUBJECT,
+            noun,
+            content: match source.kind() {
+                Kind::Image => "Upscaled image.",
+                Kind::Video => "Upscaled video.",
             },
-        )
-        .await;
-    }
-    session.close().await?;
-    publish(
-        stream,
-        ServerMessage::MessageEnd {
-            message_id: assistant_message_id,
-            content: content.to_string(),
-            metadata,
-            error: None,
+            fallback: match source.kind() {
+                Kind::Image => MediaType::PNG,
+                Kind::Video => MediaType::WEBM,
+            },
         },
+        generation,
+        session,
     )
-    .await;
-    Ok(())
+    .await
+}
+
+/// The media an upscale request acts on: this turn's attachment when it is the
+/// kind the request named, otherwise the newest match on the thread. A turn
+/// carrying a screenshot must not hide the clip "upscale the video" asked for.
+async fn resolve_upscale_source(
+    state: &AppState,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    prompt: &str,
+    metadata: Option<&serde_json::Value>,
+    store: &crate::services::artifacts::ArtifactStore,
+) -> Result<Option<crate::services::media_source::Source>, crate::services::media_source::Error> {
+    use crate::services::media_source::{Error, resolve_source_media_from};
+
+    let wanted = crate::services::image_intent::upscale_target(prompt);
+    let attached = resolve_source_media_from(
+        std::iter::once(metadata),
+        workspace_id,
+        chat_id,
+        store,
+        wanted,
+    )
+    .await?;
+    if let Some(source) = attached
+        && wanted.is_none_or(|kind| source.kind() == kind)
+    {
+        return Ok(Some(source));
+    }
+    let history = match chats::list_messages(state.db(), chat_id).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!("Failed to load chat media for upscaling: {error}");
+            return Err(Error::Unreadable);
+        }
+    };
+    resolve_source_media_from(
+        std::iter::once(metadata).chain(
+            history
+                .iter()
+                .rev()
+                .map(|message| message.metadata.as_ref()),
+        ),
+        workspace_id,
+        chat_id,
+        store,
+        wanted,
+    )
+    .await
 }
 
 async fn handle_audio_generation(
@@ -1701,7 +1881,6 @@ async fn handle_audio_generation(
     use crate::services::artifacts::ArtifactStore;
     use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
-    const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;
 
     let client = match ComfyUiClient::new(audio_config.clone()) {
@@ -1768,133 +1947,29 @@ async fn handle_audio_generation(
             return Ok(());
         }
         Err(error) => {
-            let message = match &error {
-                ComfyUiError::Http(error) if error.is_connect() =>
-                    "Audio generation failed: cannot reach ComfyUI. Start the image service and try again.".to_string(),
-                ComfyUiError::Http(error) if error.is_timeout() =>
-                    "Audio generation failed: ComfyUI did not respond in time. Check the image service and try again.".to_string(),
-                _ => format!("Audio generation failed: {error}"),
-            };
+            let message = comfy_failure("Audio generation", &error);
             session.close().await?;
             publish(stream, ServerMessage::Error { message }).await;
             return Ok(());
         }
     };
 
-    let mut attachments = Vec::new();
-    for clip in clips.into_iter().take(MAX_GENERATED_IMAGES) {
-        if clip.bytes.len() > MAX_ARTIFACT_BYTES {
-            tracing::warn!("ComfyUI audio output exceeded artifact size limit");
-            continue;
-        }
-        let extension = MediaType::for_mime(&clip.mime)
-            .filter(MediaType::is_audio)
-            .unwrap_or(MediaType::FLAC)
-            .extension;
-        let url = match store
-            .persist(
-                workspace_id,
-                chat_id,
-                assistant_message_id,
-                extension,
-                &clip.bytes,
-            )
-            .await
-        {
-            Ok(url) => url,
-            Err(error) => {
-                tracing::error!("Failed to persist generated audio: {error}");
-                store
-                    .cleanup_owner(workspace_id, chat_id, assistant_message_id)
-                    .await;
-                session.close().await?;
-                publish(
-                    stream,
-                    ServerMessage::Error {
-                        message: "Audio generation failed: could not store the audio".to_string(),
-                    },
-                )
-                .await;
-                return Ok(());
-            }
-        };
-        if let Some(attachment) = generated_media_attachment(&url, &clip.mime, attachments.len()) {
-            attachments.push(attachment);
-        }
-    }
-    if attachments.is_empty() {
-        session.close().await?;
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: "Audio generation completed without a usable clip".to_string(),
-            },
-        )
-        .await;
-        return Ok(());
-    }
-
-    let content = "Generated audio.";
-    let metadata = image_metadata(&attachments);
-    let mut replay = LlmMessage::assistant(content);
-    replay.images = session::images(metadata.as_ref());
-    if let Err(error) = session
-        .store
-        .finish(
-            &session.lease,
-            session.turn,
-            content,
-            metadata.clone(),
-            false,
-            Some(&ReplayMessage::from(&replay)),
-        )
-        .await
-    {
-        tracing::error!("Failed to persist generated audio message: {error}");
-        store
-            .cleanup_owner(workspace_id, chat_id, assistant_message_id)
-            .await;
-        session.close().await?;
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: "Audio generation failed: could not save the message".to_string(),
-            },
-        )
-        .await;
-        return Ok(());
-    }
-    publish(
+    deliver_media(
         stream,
-        ServerMessage::MessageStart {
-            message_id: assistant_message_id,
-            role: "assistant".to_string(),
-            resumed: false,
+        chat_id,
+        workspace_id,
+        clips,
+        &store,
+        Delivery {
+            subject: "Audio generation",
+            noun: "audio",
+            content: "Generated audio.",
+            fallback: MediaType::FLAC,
         },
+        generation,
+        session,
     )
-    .await;
-    for attachment in &attachments {
-        publish(
-            stream,
-            ServerMessage::Audio {
-                message_id: assistant_message_id,
-                attachment: attachment.clone(),
-            },
-        )
-        .await;
-    }
-    session.close().await?;
-    publish(
-        stream,
-        ServerMessage::MessageEnd {
-            message_id: assistant_message_id,
-            content: content.to_string(),
-            metadata,
-            error: None,
-        },
-    )
-    .await;
-    Ok(())
+    .await
 }
 
 /// Handle a send message request
@@ -2036,6 +2111,20 @@ async fn handle_send_message(
                 )
                 .await
             }
+            Routing::Upscale(config) => {
+                handle_upscale(
+                    state,
+                    stream,
+                    chat_id,
+                    workspace_id,
+                    content,
+                    metadata.as_ref(),
+                    config,
+                    &mut request,
+                    &mut session,
+                )
+                .await
+            }
             Routing::Chat(chat) => {
                 let preparation = tokio::select! {
                     biased;
@@ -2117,6 +2206,7 @@ async fn prepare_message(
         crate::services::image_intent::GenerationIntent::Video => Routing::Video(image_config),
         crate::services::image_intent::GenerationIntent::Image => Routing::Image(image_config),
         crate::services::image_intent::GenerationIntent::Audio => Routing::Audio(image_config),
+        crate::services::image_intent::GenerationIntent::Upscale => Routing::Upscale(image_config),
         crate::services::image_intent::GenerationIntent::Chat => Routing::Chat(chat),
     })
 }
@@ -2186,7 +2276,7 @@ async fn prepare_chat(
         &prefs,
         &catalog,
         content,
-        crate::services::image_source::has_image_attachment(metadata),
+        crate::services::media_source::has_image_attachment(metadata),
         chat.agent_enabled,
     );
     if web_search_requested && !sanitize_query(content).is_empty() {

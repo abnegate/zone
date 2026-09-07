@@ -1,4 +1,4 @@
-//! Hybrid image-generation intent classification.
+//! Hybrid media-generation intent classification.
 //!
 //! High-confidence rules route immediately. Anything leftover — including
 //! informal edits of an attached photo that the word lists miss — is decided
@@ -11,12 +11,14 @@ use std::time::Duration;
 use zone_core::llm::{LlmClient, LlmConfig, Message};
 
 use crate::config::ComfyUiConfig;
+use crate::services::media_source::Kind as MediaKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleDecision {
     Image,
     Video,
     Audio,
+    Upscale,
     Chat,
     Ambiguous,
 }
@@ -53,11 +55,13 @@ pub enum GenerationIntent {
     Image,
     Video,
     Audio,
+    Upscale,
 }
 
 impl GenerationIntent {
-    /// Audio mirrors images, not video. A direct "generate a song" is one
-    /// ComfyUI job in an agent chat exactly as "generate an image" is, and the
+    /// Audio and upscaling mirror images, not video. A direct "generate a song"
+    /// is one ComfyUI job in an agent chat exactly as "generate an image" is,
+    /// and upscaling has nothing to compose with either way. The
     /// `generate_audio` / `generate_image` tools exist for the composite turns
     /// where the model decides to produce media mid-task. Video has no tool at
     /// all, so a video request falls back to chat rather than being replaced by
@@ -92,45 +96,33 @@ impl ImageIntentClassifier {
         if !self.config.enabled {
             return GenerationIntent::Chat;
         }
-        if metadata
-            .and_then(|m| m.get("video_generation"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
+        let flag = |name: &str| metadata.and_then(|m| m.get(name)).and_then(Value::as_bool);
+        if flag("upscale") == Some(true) {
+            return GenerationIntent::Upscale;
+        }
+        if flag("video_generation") == Some(true) {
             return GenerationIntent::Video;
         }
-        if metadata
-            .and_then(|m| m.get("audio_generation"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
+        if flag("audio_generation") == Some(true) {
             return GenerationIntent::Audio;
         }
-        if metadata
-            .and_then(|m| m.get("image_generation"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
+        if flag("image_generation") == Some(true) {
             return GenerationIntent::Image;
         }
-        let skip_video = metadata
-            .and_then(|m| m.get("video_generation"))
-            .and_then(Value::as_bool)
-            == Some(false);
-        let skip_audio = metadata
-            .and_then(|m| m.get("audio_generation"))
-            .and_then(Value::as_bool)
-            == Some(false);
-        let skip_image = metadata
-            .and_then(|m| m.get("image_generation"))
-            .and_then(Value::as_bool)
-            == Some(false);
+        let skip_video = flag("video_generation") == Some(false);
+        let skip_audio = flag("audio_generation") == Some(false);
+        let skip_image = flag("image_generation") == Some(false);
+        let skip_upscale = flag("upscale") == Some(false);
+        // Turning every generator off means "produce no media", which upscaling
+        // would violate; `upscale: false` on its own only suppresses this path.
         if skip_video && skip_audio && skip_image {
             return GenerationIntent::Chat;
         }
 
-        let has_source_image = crate::services::image_source::has_image_attachment(metadata);
-        match deterministic_decision(content, has_source_image) {
+        let has_source_image = crate::services::media_source::has_image_attachment(metadata);
+        let has_source_media = crate::services::media_source::has_media_attachment(metadata);
+        match deterministic_decision(content, has_source_image, has_source_media) {
+            RuleDecision::Upscale if !skip_upscale => GenerationIntent::Upscale,
             RuleDecision::Video if !skip_video => GenerationIntent::Video,
             RuleDecision::Audio if !skip_audio => GenerationIntent::Audio,
             RuleDecision::Image if !skip_image => GenerationIntent::Image,
@@ -255,6 +247,7 @@ const IMAGE_ACTIONS: &[&str] = &[
     "illustrate",
     "sketch",
 ];
+
 const VISUAL_NOUNS: &[&str] = &[
     "image",
     "images",
@@ -276,7 +269,56 @@ const VISUAL_NOUNS: &[&str] = &[
 ];
 const VISUAL_IMPERATIVES: &[&str] = &["draw", "paint", "illustrate", "sketch"];
 
-fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision {
+const VIDEO_NOUNS: &[&str] = &[
+    "video",
+    "videos",
+    "clip",
+    "clips",
+    "animation",
+    "animations",
+    "footage",
+];
+
+/// True when the words ask for a picture that does not exist yet, which is what
+/// separates "make a 4k wallpaper" from "make this 4k".
+fn asks_for_a_new_image(tokens: &[String]) -> bool {
+    names_after_action(tokens, VISUAL_NOUNS, false)
+}
+
+/// The same across pictures and clips, except that a noun the request points
+/// back at names something that already exists: "make a 4k video" wants a new
+/// clip, "make this video 4k" wants the one already here, enlarged.
+fn asks_for_new_media(tokens: &[String]) -> bool {
+    names_after_action(tokens, VISUAL_NOUNS, true) || names_after_action(tokens, VIDEO_NOUNS, true)
+}
+
+fn names_after_action(tokens: &[String], nouns: &[&str], only_new: bool) -> bool {
+    tokens.iter().enumerate().any(|(index, token)| {
+        IMAGE_ACTIONS.contains(&token.as_str())
+            && tokens
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .take(7)
+                .any(|(at, candidate)| {
+                    nouns.contains(&candidate.as_str()) && !(only_new && points_back(tokens, at))
+                })
+    })
+}
+
+fn points_back(tokens: &[String], noun: usize) -> bool {
+    noun > 0
+        && matches!(
+            tokens[noun - 1].as_str(),
+            "this" | "that" | "these" | "those" | "the" | "its" | "my" | "your"
+        )
+}
+
+fn deterministic_decision(
+    content: &str,
+    has_source_image: bool,
+    has_source_media: bool,
+) -> RuleDecision {
     let tokens = tokenize(content);
     if tokens.is_empty() {
         return RuleDecision::Chat;
@@ -328,6 +370,10 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         return RuleDecision::Chat;
     }
 
+    if is_upscale_request(&tokens, &has_phrase, has_source_media) {
+        return RuleDecision::Upscale;
+    }
+
     if is_video_request(&tokens, &has_phrase) {
         return RuleDecision::Video;
     }
@@ -343,14 +389,7 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         return RuleDecision::Image;
     }
 
-    let explicit = tokens.iter().enumerate().any(|(index, token)| {
-        IMAGE_ACTIONS.contains(&token.as_str())
-            && tokens
-                .iter()
-                .skip(index + 1)
-                .take(7)
-                .any(|candidate| VISUAL_NOUNS.contains(&candidate.as_str()))
-    });
+    let explicit = asks_for_a_new_image(&tokens);
     let visual_imperative = tokens
         .iter()
         .take(4)
@@ -384,13 +423,41 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
 pub fn should_reuse_thread_image(content: &str) -> bool {
     let tokens = tokenize(content);
     let has_phrase = |phrase: &[&str]| phrase_in(&tokens, phrase);
-    match deterministic_decision(content, false) {
+    match deterministic_decision(content, false, false) {
+        RuleDecision::Upscale => true,
         RuleDecision::Image | RuleDecision::Video => {
             refers_to_existing_image(&tokens, &has_phrase)
                 || is_animate_existing(&tokens, &has_phrase)
         }
         _ => false,
     }
+}
+
+/// The media an upscale request names, when it names one. The first noun wins,
+/// so "the screenshot from the video" is about the screenshot. `None` leaves the
+/// choice to whatever the thread offers most recently.
+pub fn upscale_target(content: &str) -> Option<MediaKind> {
+    const IMAGE_NOUNS: &[&str] = &[
+        "image",
+        "images",
+        "picture",
+        "pictures",
+        "photo",
+        "photos",
+        "photograph",
+        "photographs",
+        "screenshot",
+        "screenshots",
+    ];
+    tokenize(content).iter().find_map(|token| {
+        if VIDEO_NOUNS.contains(&token.as_str()) {
+            Some(MediaKind::Video)
+        } else if IMAGE_NOUNS.contains(&token.as_str()) {
+            Some(MediaKind::Image)
+        } else {
+            None
+        }
+    })
 }
 
 fn tokenize(content: &str) -> Vec<String> {
@@ -412,17 +479,162 @@ fn phrase_end(tokens: &[String], phrase: &[&str]) -> Option<usize> {
         .map(|start| start + phrase.len() - 1)
 }
 
+/// Upscaling is the one media request that cannot invent its subject, so a
+/// resolution word is never enough on its own. Either the request names the act
+/// ("upscale this", "hi-res version"), or it pairs an enlarging verb with a
+/// resolution and introduces nothing new — "make this 4k" enlarges, while
+/// "make it a 4k wallpaper" and "make a 4k video" are asking for a new picture
+/// and a new clip.
+fn is_upscale_request(
+    tokens: &[String],
+    has_phrase: &impl Fn(&[&str]) -> bool,
+    has_source_media: bool,
+) -> bool {
+    let has = |word: &str| tokens.iter().any(|token| token == word);
+    let verb = [
+        "upscale",
+        "upscales",
+        "upscaled",
+        "upscaling",
+        "upres",
+        "upsize",
+        "upsample",
+        "upsampled",
+        "upsampling",
+    ]
+    .iter()
+    .any(|word| has(word));
+    let named = verb
+        || has("hires")
+        || has("highres")
+        || has_phrase(&["hi", "res"])
+        || has_phrase(&["high", "res"])
+        || has_phrase(&["super", "resolution"]);
+
+    let resolution = ["4k", "8k", "1080p", "1440p", "2160p", "4320p", "uhd"]
+        .iter()
+        .any(|word| has(word))
+        || ((has("resolution") || has("res") || has("dpi") || has("pixels"))
+            && [
+                "increase",
+                "increased",
+                "raise",
+                "boost",
+                "improve",
+                "enhance",
+                "double",
+                "quadruple",
+                "higher",
+                "high",
+                "bigger",
+                "larger",
+                "more",
+                "better",
+                "full",
+            ]
+            .iter()
+            .any(|word| has(word)));
+    let bigger = resolution
+        && ENLARGE_ACTIONS.iter().any(|word| has(word))
+        && !produces_something_new(tokens);
+
+    if !named && !bigger {
+        return false;
+    }
+    // Only naming the act outright survives a request for something new, so
+    // "make it a hi-res poster" is still a poster.
+    if !verb && produces_something_new(tokens) {
+        return false;
+    }
+    // "is this 4k", "what resolution is the photo" — asking about a picture is
+    // not asking for a bigger one. An enlarging verb makes it a request again.
+    if !bigger && asks_about_media(tokens) {
+        return false;
+    }
+    names_existing_media(tokens, has_phrase)
+        || ["it", "this", "that", "these", "those", "them"]
+            .iter()
+            .any(|word| has(word))
+        || has_source_media
+}
+
+const ENLARGE_ACTIONS: &[&str] = &[
+    "make",
+    "get",
+    "render",
+    "convert",
+    "bump",
+    "scale",
+    "resize",
+    "enlarge",
+    "expand",
+    "upgrade",
+    "increase",
+    "raise",
+    "boost",
+    "improve",
+    "enhance",
+    "double",
+    "quadruple",
+];
+
+/// An article after the verb introduces something that does not exist yet, which
+/// separates "make this 4k" from "make it a 4k wallpaper".
+fn produces_something_new(tokens: &[String]) -> bool {
+    let Some(verb) = tokens.iter().position(|token| {
+        ENLARGE_ACTIONS.contains(&token.as_str()) || IMAGE_ACTIONS.contains(&token.as_str())
+    }) else {
+        return false;
+    };
+    tokens
+        .iter()
+        .skip(verb + 1)
+        .take(7)
+        .any(|token| token == "a" || token == "an")
+        || asks_for_new_media(tokens)
+}
+
+fn asks_about_media(tokens: &[String]) -> bool {
+    tokens.iter().take(3).any(|token| {
+        matches!(
+            token.as_str(),
+            "what"
+                | "whats"
+                | "why"
+                | "when"
+                | "where"
+                | "which"
+                | "who"
+                | "is"
+                | "are"
+                | "was"
+                | "were"
+                | "do"
+                | "does"
+                | "did"
+        )
+    })
+}
+
+fn names_existing_media(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
+    refers_to_existing_image(tokens, has_phrase)
+        || has_phrase(&["this", "video"])
+        || has_phrase(&["the", "video"])
+        || has_phrase(&["that", "video"])
+        || has_phrase(&["this", "clip"])
+        || has_phrase(&["the", "clip"])
+        || has_phrase(&["that", "clip"])
+        || has_phrase(&["this", "animation"])
+        || has_phrase(&["the", "animation"])
+        || has_phrase(&["this", "footage"])
+        || has_phrase(&["the", "footage"])
+        || has_phrase(&["this", "one"])
+        || has_phrase(&["of", "this"])
+        || has_phrase(&["of", "it"])
+}
+
 fn is_video_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
     const ACTIONS: &[&str] = &["generate", "create", "make", "render", "animate"];
-    const VIDEO_NOUNS: &[&str] = &[
-        "video",
-        "videos",
-        "clip",
-        "clips",
-        "animation",
-        "animations",
-        "footage",
-    ];
     let animate = tokens
         .iter()
         .take(4)
@@ -775,6 +987,16 @@ mod tests {
         matchers::{method, path},
     };
 
+    /// An attached image is attached media too, so the two source flags the
+    /// rules read only ever disagree when a clip is the attachment.
+    fn decide(content: &str, has_source_image: bool) -> RuleDecision {
+        deterministic_decision(content, has_source_image, has_source_image)
+    }
+
+    fn decide_with_video(content: &str) -> RuleDecision {
+        deterministic_decision(content, false, true)
+    }
+
     #[test]
     fn agent_mode_keeps_images_and_yields_video_to_chat() {
         assert_eq!(
@@ -815,14 +1037,10 @@ mod tests {
             "generate an image of a beat-up truck",
             "create an image with noise texture",
         ] {
-            assert_eq!(
-                deterministic_decision(image, false),
-                RuleDecision::Image,
-                "{image}"
-            );
+            assert_eq!(decide(image, false), RuleDecision::Image, "{image}");
         }
         assert_eq!(
-            deterministic_decision("make a music video of a fox", false),
+            decide("make a music video of a fox", false),
             RuleDecision::Video
         );
         for not_audio in [
@@ -831,11 +1049,7 @@ mod tests {
             "make a music video of a fox",
             "keep track of the noise levels",
         ] {
-            assert_ne!(
-                deterministic_decision(not_audio, false),
-                RuleDecision::Audio,
-                "{not_audio}"
-            );
+            assert_ne!(decide(not_audio, false), RuleDecision::Audio, "{not_audio}");
         }
     }
 
@@ -855,11 +1069,7 @@ mod tests {
             "write a poem about music",
             "make a loop over the array",
         ] {
-            assert_ne!(
-                deterministic_decision(not_audio, false),
-                RuleDecision::Audio,
-                "{not_audio}"
-            );
+            assert_ne!(decide(not_audio, false), RuleDecision::Audio, "{not_audio}");
         }
 
         for chat in [
@@ -876,11 +1086,7 @@ mod tests {
             "create an endpoint that returns song metadata",
             "create a rust endpoint that streams music",
         ] {
-            assert_eq!(
-                deterministic_decision(chat, false),
-                RuleDecision::Chat,
-                "{chat}"
-            );
+            assert_eq!(decide(chat, false), RuleDecision::Chat, "{chat}");
         }
     }
 
@@ -895,15 +1101,11 @@ mod tests {
             "illustrate the endpoint of the journey",
             "generate an image of a rust covered endpoint",
         ] {
-            assert_eq!(
-                deterministic_decision(image, false),
-                RuleDecision::Image,
-                "{image}"
-            );
+            assert_eq!(decide(image, false), RuleDecision::Image, "{image}");
         }
 
         assert_eq!(
-            deterministic_decision("make a music video of a fox", false),
+            decide("make a music video of a fox", false),
             RuleDecision::Video,
         );
     }
@@ -925,11 +1127,7 @@ mod tests {
             "make a beat for the chorus",
             "text to audio of a cat purring",
         ] {
-            assert_eq!(
-                deterministic_decision(audio, false),
-                RuleDecision::Audio,
-                "{audio}"
-            );
+            assert_eq!(decide(audio, false), RuleDecision::Audio, "{audio}");
         }
     }
 
@@ -946,7 +1144,7 @@ mod tests {
             "make a playlist of songs for a party",
         ] {
             assert_eq!(
-                deterministic_decision(ambiguous, false),
+                decide(ambiguous, false),
                 RuleDecision::Ambiguous,
                 "{ambiguous}"
             );
@@ -968,11 +1166,7 @@ mod tests {
             "generate images",
             "make me an image",
         ] {
-            assert_eq!(
-                deterministic_decision(request, false),
-                RuleDecision::Image,
-                "{request}"
-            );
+            assert_eq!(decide(request, false), RuleDecision::Image, "{request}");
         }
         for video in [
             "Generate a video of a red panda",
@@ -985,7 +1179,7 @@ mod tests {
             "Make this move",
         ] {
             assert_eq!(
-                deterministic_decision(video, video.contains("this") || video.contains("photo")),
+                decide(video, video.contains("this") || video.contains("photo")),
                 RuleDecision::Video,
                 "{video}"
             );
@@ -1011,11 +1205,7 @@ mod tests {
             "Place this on a beach",
             "Put this in a snowy forest",
         ] {
-            assert_eq!(
-                deterministic_decision(edit, true),
-                RuleDecision::Image,
-                "{edit}"
-            );
+            assert_eq!(decide(edit, true), RuleDecision::Image, "{edit}");
         }
         for needs_source in [
             "Make this a watercolor",
@@ -1023,7 +1213,7 @@ mod tests {
             "Restyle this as cyberpunk",
         ] {
             assert_ne!(
-                deterministic_decision(needs_source, false),
+                decide(needs_source, false),
                 RuleDecision::Image,
                 "{needs_source}"
             );
@@ -1039,7 +1229,7 @@ mod tests {
             "Place this on a beach",
         ] {
             assert_eq!(
-                deterministic_decision(named_image, false),
+                decide(named_image, false),
                 RuleDecision::Image,
                 "{named_image}"
             );
@@ -1058,11 +1248,11 @@ mod tests {
             "Change the background to a forest"
         ));
         assert_eq!(
-            deterministic_decision("please take a look, can you fix it?", true),
+            decide("please take a look, can you fix it?", true),
             RuleDecision::Ambiguous
         );
         assert_eq!(
-            deterministic_decision("please take a look, can you fix it?", false),
+            decide("please take a look, can you fix it?", false),
             RuleDecision::Chat
         );
         assert!(should_reuse_thread_image("Animate this image"));
@@ -1072,13 +1262,10 @@ mod tests {
             "How do I add a hat to this image?"
         ));
         assert_eq!(
-            deterministic_decision("How do I add a hat to this image?", true),
+            decide("How do I add a hat to this image?", true),
             RuleDecision::Chat
         );
-        assert_eq!(
-            deterministic_decision("Add a hat", false),
-            RuleDecision::Chat
-        );
+        assert_eq!(decide("Add a hat", false), RuleDecision::Chat);
         for chat in [
             "Explain image generation code",
             "Write an image prompt for a red panda",
@@ -1089,35 +1276,201 @@ mod tests {
             "Render an image component in React",
             "What is the capital of France?",
         ] {
+            assert_eq!(decide(chat, false), RuleDecision::Chat, "{chat}");
+        }
+        assert_eq!(decide("Describe this image", true), RuleDecision::Chat);
+        assert_eq!(
+            decide("Could you design a logo for Acme?", false),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(
+            decide("the same subject at night", false),
+            RuleDecision::Chat
+        );
+        assert_eq!(
+            decide("the same subject at night", true),
+            RuleDecision::Ambiguous
+        );
+        assert_eq!(decide("without the chair", true), RuleDecision::Ambiguous);
+        assert_eq!(decide("thanks", true), RuleDecision::Ambiguous);
+    }
+
+    #[test]
+    fn upscale_rule_matrix() {
+        for request in [
+            "upscale this",
+            "Upscale this image",
+            "upscale the photo please",
+            "can you upres this",
+            "upsample this picture",
+            "make this 4k",
+            "make it 8k",
+            "render this at 1080p",
+            "make this photo higher resolution",
+            "increase the resolution of the image",
+            "enhance the resolution on this one",
+            "give me a hi-res version of this",
+            "super resolution on the attached shot",
+        ] {
+            assert_eq!(decide(request, true), RuleDecision::Upscale, "{request}");
+        }
+
+        for request in [
+            "upscale this video",
+            "upscale the clip",
+            "make this video 4k",
+            "bump the footage to 1080p",
+        ] {
             assert_eq!(
-                deterministic_decision(chat, false),
-                RuleDecision::Chat,
-                "{chat}"
+                decide_with_video(request),
+                RuleDecision::Upscale,
+                "{request}"
             );
         }
+    }
+
+    #[test]
+    fn naming_a_resolution_never_steals_a_request_for_new_media() {
+        // A clip is still a clip, even at a named resolution, and even with a
+        // photo attached to the turn.
+        for request in [
+            "make a 4k video of a sunset",
+            "generate an 8k video of a red panda",
+            "create a 1080p clip of waves",
+            "make a video of this at 1080p",
+            "animate this to 4k",
+            "render 4k video",
+        ] {
+            assert_eq!(decide(request, true), RuleDecision::Video, "{request}");
+        }
+        // A new picture wins with nothing attached and nothing on the thread,
+        // whichever way the request is phrased.
+        for request in [
+            "make it a 4k wallpaper of a mountain",
+            "make this a 4k wallpaper of a mountain",
+            "make it a high res logo of a fox",
+            "make it a hi-res poster of a wolf",
+        ] {
+            assert_eq!(decide(request, false), RuleDecision::Image, "{request}");
+        }
+        // Editing an attached photo is still an edit.
+        for request in [
+            "Change the background to a 4k mountain vista",
+            "Put this in a 4k forest scene",
+            "Make this a watercolor at 4k",
+        ] {
+            assert_eq!(decide(request, true), RuleDecision::Image, "{request}");
+        }
+        // Talking about resolution is not asking for more of it, wherever the
+        // question word falls.
+        for request in [
+            "hey is this 4k",
+            "my monitor is 4k, does this look right",
+            "so is this photo high res",
+            "tell me about 8k tvs",
+            "write a blog post about 4k monitors",
+            "summarise this 1080p spec sheet",
+        ] {
+            assert_ne!(decide(request, true), RuleDecision::Upscale, "{request}");
+        }
+        // Pointing at a clip that already exists still upscales it.
+        assert_eq!(decide("make this video 4k", true), RuleDecision::Upscale);
+    }
+
+    #[test]
+    fn a_resolution_word_alone_does_not_upscale() {
+        // Asking for a new picture wins even when a source image is attached
+        // and the request names a resolution.
+        for request in [
+            "generate a 4k wallpaper of a mountain",
+            "create a high resolution image of a cat",
+            "draw a 1080p poster for the show",
+        ] {
+            assert_ne!(decide(request, true), RuleDecision::Upscale, "{request}");
+        }
+        // Nothing to upscale: no attachment and no reference to the thread.
+        for request in [
+            "what does 4k mean",
+            "how do I increase the resolution of a photo",
+        ] {
+            assert_ne!(decide(request, false), RuleDecision::Upscale, "{request}");
+        }
+        // Asking about a picture is not asking for a bigger one, even with one
+        // attached.
+        for request in [
+            "is this 4k",
+            "what resolution is this photo",
+            "does the image have enough pixels for print",
+        ] {
+            assert_ne!(decide(request, true), RuleDecision::Upscale, "{request}");
+        }
+        // A polite imperative is still a request.
+        assert_eq!(decide("can you make this 4k", true), RuleDecision::Upscale);
+        // A plain edit stays an edit.
+        assert_eq!(decide("add a hat to this photo", true), RuleDecision::Image);
+    }
+
+    #[test]
+    fn upscaling_always_reuses_thread_media() {
+        assert!(should_reuse_thread_image("upscale it"));
+        assert!(should_reuse_thread_image("make this 4k"));
+        assert!(should_reuse_thread_image("upscale the video"));
+        assert!(!should_reuse_thread_image(
+            "generate a 4k wallpaper of a mountain"
+        ));
+        assert!(!should_reuse_thread_image("what does upscaling mean"));
+    }
+
+    #[test]
+    fn upscale_target_follows_the_noun() {
+        assert_eq!(upscale_target("upscale this video"), Some(MediaKind::Video));
+        assert_eq!(upscale_target("upscale the clip"), Some(MediaKind::Video));
+        assert_eq!(upscale_target("upscale this photo"), Some(MediaKind::Image));
+        assert_eq!(upscale_target("upscale this"), None);
         assert_eq!(
-            deterministic_decision("Describe this image", true),
-            RuleDecision::Chat
+            upscale_target("upscale the screenshot from the video"),
+            Some(MediaKind::Image)
+        );
+    }
+
+    #[tokio::test]
+    async fn upscale_metadata_flag_forces_and_skips() {
+        let config = ComfyUiConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let classifier = ImageIntentClassifier::new(config, String::new(), String::new());
+        assert_eq!(
+            classifier
+                .classify("hello", Some(&serde_json::json!({"upscale": true})))
+                .await,
+            GenerationIntent::Upscale
+        );
+        assert_ne!(
+            classifier
+                .classify("upscale this", Some(&serde_json::json!({"upscale": false})))
+                .await,
+            GenerationIntent::Upscale
         );
         assert_eq!(
-            deterministic_decision("Could you design a logo for Acme?", false),
-            RuleDecision::Ambiguous
+            classifier
+                .classify(
+                    "upscale this",
+                    Some(&serde_json::json!({
+                        "image_generation": false,
+                        "video_generation": false
+                    }))
+                )
+                .await,
+            GenerationIntent::Chat
         );
+    }
+
+    #[test]
+    fn upscaling_survives_agent_mode() {
         assert_eq!(
-            deterministic_decision("the same subject at night", false),
-            RuleDecision::Chat
-        );
-        assert_eq!(
-            deterministic_decision("the same subject at night", true),
-            RuleDecision::Ambiguous
-        );
-        assert_eq!(
-            deterministic_decision("without the chair", true),
-            RuleDecision::Ambiguous
-        );
-        assert_eq!(
-            deterministic_decision("thanks", true),
-            RuleDecision::Ambiguous
+            GenerationIntent::Upscale.yielding_to_agent(true),
+            GenerationIntent::Upscale
         );
     }
 
