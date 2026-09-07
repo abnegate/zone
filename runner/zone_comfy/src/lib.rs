@@ -8,9 +8,9 @@
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use tokio::sync::{broadcast, mpsc};
-//! use zone_comfy::{Client, ComfyUiConfig};
+//! use zone_comfy::{Client, Config};
 //!
-//! let client = Client::new(ComfyUiConfig::from_env())?;
+//! let client = Client::new(Config::from_env())?;
 //! let (_stop, mut cancel) = broadcast::channel(1);
 //! let (progress, _updates) = mpsc::unbounded_channel();
 //! let images = client
@@ -26,9 +26,9 @@
 //!
 //! ```no_run
 //! # async fn example(request: zone_comfy::TrainRequest) -> Result<(), Box<dyn std::error::Error>> {
-//! use zone_comfy::{ComfyUiConfig, lora};
+//! use zone_comfy::{Config, lora};
 //!
-//! let config = ComfyUiConfig::from_env();
+//! let config = Config::from_env();
 //! let weights = lora::train(&config, litellm_host(), litellm_key(), request).await?;
 //! # let _ = weights;
 //! # Ok(())
@@ -50,8 +50,8 @@ pub mod recipe;
 pub mod train;
 
 pub use caption::{CaptionImage, CaptionRequest, Captioner, data_url};
-pub use client::{ComfyUiClient as Client, ComfyUiError};
-pub use config::ComfyUiConfig;
+pub use client::{Client, Error, GeneratedImage, SourceImage};
+pub use config::Config;
 pub use inventory::{InventoryItem, WeightSidecar, scan};
 pub use lora::{TrainBase, TrainError, TrainImage, TrainRequest, available_bases, train};
 pub use observe::{RequestObserver, observe_requests};

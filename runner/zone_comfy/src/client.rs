@@ -1,7 +1,7 @@
 //! Direct ComfyUI API client. Graphs come from packaged recipes; chat only
 //! supplies prompt, seed, checkpoint filename, and an optional source image.
 
-use reqwest::Client;
+use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
-use crate::config::ComfyUiConfig;
+use crate::config::Config;
 use crate::recipe::{
     Fill, PromptMode, Recipe, RecipeCatalog, sanitize_upload_name, sanitize_weight_filename,
 };
@@ -22,7 +22,7 @@ const PACKAGED_I2V_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json");
 
 #[derive(Debug, thiserror::Error)]
-pub enum ComfyUiError {
+pub enum Error {
     #[error("ComfyUI is disabled")]
     Disabled,
     #[error("invalid ComfyUI configuration: {0}")]
@@ -52,13 +52,11 @@ pub struct SourceImage {
 }
 
 impl SourceImage {
-    pub fn new(bytes: impl Into<bytes::Bytes>, mime: &str) -> Result<Self, ComfyUiError> {
+    pub fn new(bytes: impl Into<bytes::Bytes>, mime: &str) -> Result<Self, Error> {
         let mime = normalize_source_mime(mime)?;
         let bytes = bytes.into();
         if bytes.is_empty() || bytes.len() > MAX_SOURCE_IMAGE_BYTES {
-            return Err(ComfyUiError::Configuration(
-                "source image is empty or too large",
-            ));
+            return Err(Error::Configuration("source image is empty or too large"));
         }
         Ok(Self {
             filename: format!(
@@ -73,9 +71,9 @@ impl SourceImage {
 }
 
 #[derive(Clone)]
-pub struct ComfyUiClient {
-    config: ComfyUiConfig,
-    client: Client,
+pub struct Client {
+    config: Config,
+    client: HttpClient,
     catalog: RecipeCatalog,
 }
 
@@ -110,7 +108,7 @@ enum OutputMode {
     Video,
 }
 
-fn collect_output_files(node: &Value, mode: OutputMode) -> Result<Vec<OutputImage>, ComfyUiError> {
+fn collect_output_files(node: &Value, mode: OutputMode) -> Result<Vec<OutputImage>, Error> {
     let keys = match mode {
         OutputMode::Image => &["images"][..],
         OutputMode::Video => &["videos", "gifs", "images"][..],
@@ -122,11 +120,11 @@ fn collect_output_files(node: &Value, mode: OutputMode) -> Result<Vec<OutputImag
         };
         for item in items {
             let file: OutputImage = serde_json::from_value(item.clone())
-                .map_err(|_| ComfyUiError::InvalidResponse("invalid media output"))?;
+                .map_err(|_| Error::InvalidResponse("invalid media output"))?;
             match mode {
                 OutputMode::Image => {
                     if file.r#type != "temp" {
-                        return Err(ComfyUiError::InvalidResponse(
+                        return Err(Error::InvalidResponse(
                             "workflow returned a non-temporary image",
                         ));
                     }
@@ -137,7 +135,7 @@ fn collect_output_files(node: &Value, mode: OutputMode) -> Result<Vec<OutputImag
                         continue;
                     }
                     if file.r#type != "temp" && file.r#type != "output" {
-                        return Err(ComfyUiError::InvalidResponse(
+                        return Err(Error::InvalidResponse(
                             "workflow returned an unsupported video location",
                         ));
                     }
@@ -153,9 +151,9 @@ fn outputs_from_history_entry(
     status: &str,
     nodes: Option<&serde_json::Map<String, Value>>,
     mode: OutputMode,
-) -> Result<Option<Vec<OutputImage>>, ComfyUiError> {
+) -> Result<Option<Vec<OutputImage>>, Error> {
     if status == "error" {
-        return Err(ComfyUiError::InvalidResponse("workflow execution failed"));
+        return Err(Error::InvalidResponse("workflow execution failed"));
     }
     let mut files = Vec::new();
     if let Some(nodes) = nodes {
@@ -165,7 +163,7 @@ fn outputs_from_history_entry(
     }
     if files.is_empty() {
         if status == "success" {
-            return Err(ComfyUiError::InvalidResponse(
+            return Err(Error::InvalidResponse(
                 "workflow completed without a usable output",
             ));
         }
@@ -174,15 +172,15 @@ fn outputs_from_history_entry(
     Ok(Some(files))
 }
 
-impl ComfyUiClient {
-    pub fn new(config: ComfyUiConfig) -> Result<Self, ComfyUiError> {
+impl Client {
+    pub fn new(config: Config) -> Result<Self, Error> {
         if config.base_url.trim().is_empty() {
-            return Err(ComfyUiError::Configuration("COMFYUI_BASE_URL is empty"));
+            return Err(Error::Configuration("COMFYUI_BASE_URL is empty"));
         }
         sanitize_weight_filename(&config.checkpoint).map_err(|_| {
-            ComfyUiError::Configuration("COMFYUI_CHECKPOINT must be a checkpoint filename")
+            Error::Configuration("COMFYUI_CHECKPOINT must be a checkpoint filename")
         })?;
-        let client = Client::builder()
+        let client = HttpClient::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(config.request_timeout_secs))
             .redirect(reqwest::redirect::Policy::none())
@@ -202,7 +200,7 @@ impl ComfyUiClient {
             .unwrap_or(PromptMode::ClipScene)
     }
 
-    fn image_recipe(&self) -> Result<&Recipe, ComfyUiError> {
+    fn image_recipe(&self) -> Result<&Recipe, Error> {
         let selected = self.config.checkpoint.as_str();
         if self.config.models_dir.is_dir() {
             let items = crate::inventory::scan(&self.config.models_dir, &self.catalog);
@@ -215,7 +213,7 @@ impl ComfyUiClient {
         self.catalog.image_recipe_for(selected)
     }
 
-    fn video_workflows(&self) -> Result<(Value, Value), ComfyUiError> {
+    fn video_workflows(&self) -> Result<(Value, Value), Error> {
         for (value, message) in [
             (
                 self.config.video_unet.as_str(),
@@ -231,7 +229,7 @@ impl ComfyUiClient {
             ),
         ] {
             if !is_model_filename(value) {
-                return Err(ComfyUiError::Configuration(message));
+                return Err(Error::Configuration(message));
             }
         }
         let video_workflow = load_video_workflow(&self.config.video_workflow_path)?;
@@ -247,13 +245,13 @@ impl ComfyUiClient {
         source: Option<&SourceImage>,
         cancel: &mut broadcast::Receiver<()>,
         progress: mpsc::UnboundedSender<String>,
-    ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
+    ) -> Result<Vec<GeneratedImage>, Error> {
         if !self.config.enabled {
-            return Err(ComfyUiError::Disabled);
+            return Err(Error::Disabled);
         }
 
         if cancel.try_recv().is_ok() {
-            return Err(ComfyUiError::Cancelled);
+            return Err(Error::Cancelled);
         }
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(self.config.generation_timeout_secs);
@@ -261,7 +259,7 @@ impl ComfyUiClient {
             if source.is_some() {
                 "edit this image"
             } else {
-                return Err(ComfyUiError::Configuration("prompt is empty or too long"));
+                return Err(Error::Configuration("prompt is empty or too long"));
             }
         } else {
             prompt
@@ -308,13 +306,13 @@ impl ComfyUiClient {
         source: Option<&SourceImage>,
         cancel: &mut broadcast::Receiver<()>,
         progress: mpsc::UnboundedSender<String>,
-    ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
+    ) -> Result<Vec<GeneratedImage>, Error> {
         if !self.config.enabled {
-            return Err(ComfyUiError::Disabled);
+            return Err(Error::Disabled);
         }
 
         if cancel.try_recv().is_ok() {
-            return Err(ComfyUiError::Cancelled);
+            return Err(Error::Cancelled);
         }
         let (video_workflow, i2v_workflow) = self.video_workflows()?;
         let deadline = tokio::time::Instant::now()
@@ -323,7 +321,7 @@ impl ComfyUiClient {
             if source.is_some() {
                 "animate this image"
             } else {
-                return Err(ComfyUiError::Configuration("prompt is empty or too long"));
+                return Err(Error::Configuration("prompt is empty or too long"));
             }
         } else {
             prompt
@@ -373,7 +371,7 @@ impl ComfyUiClient {
         generating: &str,
         saving: &str,
         mode: OutputMode,
-    ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
+    ) -> Result<Vec<GeneratedImage>, Error> {
         let started = std::time::Instant::now();
         let kind = match mode {
             OutputMode::Image => "image",
@@ -386,12 +384,12 @@ impl ComfyUiClient {
             .await;
         let status = match &result {
             Ok(_) => "ok",
-            Err(ComfyUiError::Disabled) => "disabled",
-            Err(ComfyUiError::Timeout) => "timeout",
-            Err(ComfyUiError::Cancelled) => "cancelled",
-            Err(ComfyUiError::Http(_)) => "http_error",
-            Err(ComfyUiError::Configuration(_)) => "config_error",
-            Err(ComfyUiError::InvalidResponse(_)) => "invalid_response",
+            Err(Error::Disabled) => "disabled",
+            Err(Error::Timeout) => "timeout",
+            Err(Error::Cancelled) => "cancelled",
+            Err(Error::Http(_)) => "http_error",
+            Err(Error::Configuration(_)) => "config_error",
+            Err(Error::InvalidResponse(_)) => "invalid_response",
         };
         crate::observe::record(kind, status, started.elapsed());
         result
@@ -407,7 +405,7 @@ impl ComfyUiClient {
         generating: &str,
         saving: &str,
         mode: OutputMode,
-    ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
+    ) -> Result<Vec<GeneratedImage>, Error> {
         let request = self
             .authorize(self.client.post(format!("{}/prompt", self.config.base_url)))
             .json(&json!({
@@ -433,11 +431,11 @@ impl ComfyUiClient {
                 biased;
                 _ = cancel.recv() => {
                     self.cancel(&prompt_id).await;
-                    return Err(ComfyUiError::Cancelled);
+                    return Err(Error::Cancelled);
                 }
                 _ = tokio::time::sleep_until(deadline) => {
                     self.cancel(&prompt_id).await;
-                    return Err(ComfyUiError::Timeout);
+                    return Err(Error::Timeout);
                 }
                 _ = tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)) => {
                     if !announced_generation {
@@ -449,14 +447,14 @@ impl ComfyUiClient {
                             let _ = progress.send(saving.to_string());
                             let result = self.fetch_outputs(outputs, cancel, deadline).await;
                             self.clear_history(&prompt_id).await;
-                            if matches!(result, Err(ComfyUiError::Cancelled | ComfyUiError::Timeout)) {
+                            if matches!(result, Err(Error::Cancelled | Error::Timeout)) {
                                 self.cancel(&prompt_id).await;
                             }
                             return result;
                         }
                         Ok(None) => {}
                         Err(error) => {
-                            if matches!(error, ComfyUiError::Cancelled | ComfyUiError::Timeout) {
+                            if matches!(error, Error::Cancelled | Error::Timeout) {
                                 self.cancel(&prompt_id).await;
                             }
                             return Err(error);
@@ -472,12 +470,12 @@ impl ComfyUiClient {
         source: &SourceImage,
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
-    ) -> Result<String, ComfyUiError> {
+    ) -> Result<String, Error> {
         let filename = sanitize_upload_name(&source.filename)?;
         let part = reqwest::multipart::Part::bytes(source.bytes.to_vec())
             .file_name(filename.clone())
             .mime_str(&source.mime)
-            .map_err(|_| ComfyUiError::Configuration("source image type is not supported"))?;
+            .map_err(|_| Error::Configuration("source image type is not supported"))?;
         let form = reqwest::multipart::Form::new()
             .part("image", part)
             .text("overwrite", "true")
@@ -512,15 +510,15 @@ impl ComfyUiClient {
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
         request: F,
-    ) -> Result<T, ComfyUiError>
+    ) -> Result<T, Error>
     where
         F: Future<Output = Result<T, reqwest::Error>>,
     {
         tokio::select! {
             biased;
-            _ = cancel.recv() => Err(ComfyUiError::Cancelled),
-            _ = tokio::time::sleep_until(deadline) => Err(ComfyUiError::Timeout),
-            result = request => result.map_err(ComfyUiError::Http),
+            _ = cancel.recv() => Err(Error::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(Error::Timeout),
+            result = request => result.map_err(Error::Http),
         }
     }
 
@@ -530,7 +528,7 @@ impl ComfyUiClient {
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
         mode: OutputMode,
-    ) -> Result<Option<Vec<OutputImage>>, ComfyUiError> {
+    ) -> Result<Option<Vec<OutputImage>>, Error> {
         let request = self.authorize(
             self.client
                 .get(format!("{}/history/{}", self.config.base_url, prompt_id)),
@@ -564,7 +562,7 @@ impl ComfyUiClient {
         outputs: Vec<OutputImage>,
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
-    ) -> Result<Vec<GeneratedImage>, ComfyUiError> {
+    ) -> Result<Vec<GeneratedImage>, Error> {
         let mut generated = Vec::with_capacity(outputs.len());
         for output in outputs {
             let filename = output.filename.clone();
@@ -635,7 +633,7 @@ pub fn build_flux_schnell_workflow(
     prompt: &str,
     checkpoint: &str,
     seed: u64,
-) -> Result<Value, ComfyUiError> {
+) -> Result<Value, Error> {
     RecipeCatalog::packaged()?
         .image_recipe_for("flux1-schnell-fp8.safetensors")?
         .apply(Fill {
@@ -652,7 +650,7 @@ pub fn build_flux_schnell_img2img_workflow(
     checkpoint: &str,
     seed: u64,
     image_name: &str,
-) -> Result<Value, ComfyUiError> {
+) -> Result<Value, Error> {
     RecipeCatalog::packaged()?
         .image_recipe_for("flux1-schnell-fp8.safetensors")?
         .apply(Fill {
@@ -663,34 +661,32 @@ pub fn build_flux_schnell_img2img_workflow(
         })
 }
 
-fn load_workflow_file(path: &std::path::Path) -> Result<Value, ComfyUiError> {
+fn load_workflow_file(path: &std::path::Path) -> Result<Value, Error> {
     let contents = std::fs::read_to_string(path)
-        .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not readable"))?;
+        .map_err(|_| Error::Configuration("COMFYUI_WORKFLOW_PATH is not readable"))?;
     serde_json::from_str(&contents)
-        .map_err(|_| ComfyUiError::Configuration("COMFYUI_WORKFLOW_PATH is not valid JSON"))
+        .map_err(|_| Error::Configuration("COMFYUI_WORKFLOW_PATH is not valid JSON"))
 }
 
-fn load_video_workflow(path: &std::path::Path) -> Result<Value, ComfyUiError> {
+fn load_video_workflow(path: &std::path::Path) -> Result<Value, Error> {
     if path.is_file() {
         return load_workflow_file(path)
-            .map_err(|_| ComfyUiError::Configuration("video workflow path is not readable"));
+            .map_err(|_| Error::Configuration("video workflow path is not readable"));
     }
     serde_json::from_str(PACKAGED_VIDEO_WORKFLOW)
-        .map_err(|_| ComfyUiError::Configuration("packaged video workflow is not valid JSON"))
+        .map_err(|_| Error::Configuration("packaged video workflow is not valid JSON"))
 }
 
-fn load_i2v_workflow(text_to_video_path: &std::path::Path) -> Result<Value, ComfyUiError> {
+fn load_i2v_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Error> {
     let sibling = text_to_video_path
         .parent()
         .map(|directory| directory.join("wan2.2-ti2v-5b-i2v-api.json"));
     if let Some(path) = sibling.filter(|path| path.is_file()) {
-        return load_workflow_file(&path).map_err(|_| {
-            ComfyUiError::Configuration("image-to-video workflow path is not readable")
-        });
+        return load_workflow_file(&path)
+            .map_err(|_| Error::Configuration("image-to-video workflow path is not readable"));
     }
-    serde_json::from_str(PACKAGED_I2V_WORKFLOW).map_err(|_| {
-        ComfyUiError::Configuration("packaged image-to-video workflow is not valid JSON")
-    })
+    serde_json::from_str(PACKAGED_I2V_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged image-to-video workflow is not valid JSON"))
 }
 
 /// Build the text-to-video workflow and mutate only approved inputs.
@@ -700,9 +696,9 @@ pub fn build_wan_t2v_workflow(
     clip: &str,
     vae: &str,
     seed: u64,
-) -> Result<Value, ComfyUiError> {
+) -> Result<Value, Error> {
     let workflow = serde_json::from_str(PACKAGED_VIDEO_WORKFLOW)
-        .map_err(|_| ComfyUiError::Configuration("packaged video workflow is not valid JSON"))?;
+        .map_err(|_| Error::Configuration("packaged video workflow is not valid JSON"))?;
     configure_wan_t2v_workflow(workflow, prompt, unet, clip, vae, seed)
 }
 
@@ -714,13 +710,12 @@ pub fn build_wan_i2v_workflow(
     vae: &str,
     seed: u64,
     image_name: &str,
-) -> Result<Value, ComfyUiError> {
-    let workflow = serde_json::from_str(PACKAGED_I2V_WORKFLOW).map_err(|_| {
-        ComfyUiError::Configuration("packaged image-to-video workflow is not valid JSON")
-    })?;
+) -> Result<Value, Error> {
+    let workflow = serde_json::from_str(PACKAGED_I2V_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged image-to-video workflow is not valid JSON"))?;
     configure_wan_i2v_workflow(workflow, prompt, unet, clip, vae, seed, image_name)
 }
-fn validate_video_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
+fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
     for pointer in [
         "/1/inputs/unet_name",
         "/2/inputs/clip_name",
@@ -731,34 +726,34 @@ fn validate_video_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
         "/10/inputs/images",
     ] {
         if workflow.pointer(pointer).is_none() {
-            return Err(ComfyUiError::Configuration(
+            return Err(Error::Configuration(
                 "workflow does not match the Wan TI2V contract",
             ));
         }
     }
     if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("Wan22ImageToVideoLatent")
     {
-        return Err(ComfyUiError::Configuration(
+        return Err(Error::Configuration(
             "video workflow must use Wan22ImageToVideoLatent",
         ));
     }
     if workflow.pointer("/10/class_type").and_then(Value::as_str) != Some("SaveWEBM") {
-        return Err(ComfyUiError::Configuration(
+        return Err(Error::Configuration(
             "video workflow output must use SaveWEBM",
         ));
     }
     Ok(())
 }
 
-fn validate_i2v_workflow(workflow: &Value) -> Result<(), ComfyUiError> {
+fn validate_i2v_workflow(workflow: &Value) -> Result<(), Error> {
     validate_video_workflow(workflow)?;
     if workflow.pointer("/11/class_type").and_then(Value::as_str) != Some("LoadImage") {
-        return Err(ComfyUiError::Configuration(
+        return Err(Error::Configuration(
             "image-to-video workflow must load a source image",
         ));
     }
     if workflow.pointer("/7/inputs/start_image").is_none() {
-        return Err(ComfyUiError::Configuration(
+        return Err(Error::Configuration(
             "image-to-video workflow must condition on a start image",
         ));
     }
@@ -772,7 +767,7 @@ fn configure_wan_t2v_workflow(
     clip: &str,
     vae: &str,
     seed: u64,
-) -> Result<Value, ComfyUiError> {
+) -> Result<Value, Error> {
     validate_video_workflow(&workflow)?;
     apply_wan_workflow_inputs(&mut workflow, prompt, unet, clip, vae, seed)?;
     Ok(workflow)
@@ -786,7 +781,7 @@ fn configure_wan_i2v_workflow(
     vae: &str,
     seed: u64,
     image_name: &str,
-) -> Result<Value, ComfyUiError> {
+) -> Result<Value, Error> {
     validate_i2v_workflow(&workflow)?;
     apply_wan_workflow_inputs(&mut workflow, prompt, unet, clip, vae, seed)?;
     let image_name = sanitize_upload_name(image_name)?;
@@ -801,12 +796,12 @@ fn apply_wan_workflow_inputs(
     clip: &str,
     vae: &str,
     seed: u64,
-) -> Result<(), ComfyUiError> {
+) -> Result<(), Error> {
     if prompt.trim().is_empty() || prompt.len() > 100_000 {
-        return Err(ComfyUiError::Configuration("prompt is empty or too long"));
+        return Err(Error::Configuration("prompt is empty or too long"));
     }
     if !is_model_filename(unet) || !is_model_filename(clip) || !is_model_filename(vae) {
-        return Err(ComfyUiError::Configuration("invalid video model filename"));
+        return Err(Error::Configuration("invalid video model filename"));
     }
     workflow["1"]["inputs"]["unet_name"] = json!(unet);
     workflow["2"]["inputs"]["clip_name"] = json!(clip);
@@ -816,14 +811,12 @@ fn apply_wan_workflow_inputs(
     Ok(())
 }
 
-fn normalize_source_mime(mime: &str) -> Result<String, ComfyUiError> {
+fn normalize_source_mime(mime: &str) -> Result<String, Error> {
     match mime.trim().to_ascii_lowercase().as_str() {
         "image/jpg" | "image/jpeg" => Ok("image/jpeg".to_string()),
         "image/png" => Ok("image/png".to_string()),
         "image/webp" => Ok("image/webp".to_string()),
-        _ => Err(ComfyUiError::Configuration(
-            "source image type is not supported",
-        )),
+        _ => Err(Error::Configuration("source image type is not supported")),
     }
 }
 
@@ -861,11 +854,9 @@ fn mime_for_filename(name: &str) -> String {
     }
 }
 
-fn uploaded_image_name(uploaded: &UploadResponse, fallback: &str) -> Result<String, ComfyUiError> {
+fn uploaded_image_name(uploaded: &UploadResponse, fallback: &str) -> Result<String, Error> {
     if !uploaded.subfolder.trim().is_empty() {
-        return Err(ComfyUiError::InvalidResponse(
-            "upload returned a nested path",
-        ));
+        return Err(Error::InvalidResponse("upload returned a nested path"));
     }
     let name = if uploaded.name.trim().is_empty() {
         fallback
@@ -1015,7 +1006,7 @@ mod tests {
 
     #[test]
     fn image_client_accepts_empty_video_unet() {
-        ComfyUiClient::new(ComfyUiConfig {
+        Client::new(Config {
             video_unet: String::new(),
             ..Default::default()
         })
@@ -1029,7 +1020,7 @@ mod tests {
         });
         assert!(matches!(
             outputs_from_history_entry("success", nodes.as_object(), OutputMode::Video),
-            Err(ComfyUiError::InvalidResponse(
+            Err(Error::InvalidResponse(
                 "workflow completed without a usable output"
             ))
         ));
@@ -1046,7 +1037,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_video_rejects_empty_video_unet() {
-        let client = ComfyUiClient::new(ComfyUiConfig {
+        let client = Client::new(Config {
             enabled: true,
             video_unet: String::new(),
             ..Default::default()
@@ -1058,7 +1049,7 @@ mod tests {
             client
                 .generate_video("a fox", None, &mut cancel_rx, progress_tx)
                 .await,
-            Err(ComfyUiError::Configuration(
+            Err(Error::Configuration(
                 "COMFYUI_VIDEO_UNET must be a diffusion model filename"
             ))
         ));
@@ -1090,7 +1081,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = ComfyUiClient::new(ComfyUiConfig {
+        let client = Client::new(Config {
             enabled: true,
             base_url: server.uri(),
             poll_interval_ms: 50,
@@ -1143,7 +1134,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = ComfyUiClient::new(ComfyUiConfig {
+        let client = Client::new(Config {
             enabled: true,
             base_url: server.uri(),
             checkpoint: "qwen-image-edit-plus-nsfw-lora.safetensors".into(),
@@ -1178,7 +1169,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let client = ComfyUiClient::new(ComfyUiConfig {
+        let client = Client::new(Config {
             enabled: true,
             base_url: server.uri(),
             poll_interval_ms: 5000,
@@ -1194,7 +1185,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(25)).await;
         cancel_tx.send(()).unwrap();
-        assert!(matches!(task.await.unwrap(), Err(ComfyUiError::Cancelled)));
+        assert!(matches!(task.await.unwrap(), Err(Error::Cancelled)));
         assert!(
             server
                 .received_requests()
@@ -1217,7 +1208,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = ComfyUiClient::new(ComfyUiConfig {
+        let client = Client::new(Config {
             enabled: true,
             base_url: server.uri(),
             request_timeout_secs: 60,
@@ -1233,7 +1224,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(25)).await;
         cancel_tx.send(()).unwrap();
-        assert!(matches!(task.await.unwrap(), Err(ComfyUiError::Cancelled)));
+        assert!(matches!(task.await.unwrap(), Err(Error::Cancelled)));
     }
 
     #[tokio::test]
@@ -1277,7 +1268,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = ComfyUiClient::new(ComfyUiConfig {
+        let client = Client::new(Config {
             enabled: true,
             base_url: server.uri(),
             poll_interval_ms: 50,
@@ -1327,7 +1318,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = ComfyUiClient::new(ComfyUiConfig {
+        let client = Client::new(Config {
             enabled: true,
             base_url: server.uri(),
             poll_interval_ms: 50,
@@ -1387,7 +1378,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = ComfyUiClient::new(ComfyUiConfig {
+        let client = Client::new(Config {
             enabled: true,
             base_url: server.uri(),
             poll_interval_ms: 50,

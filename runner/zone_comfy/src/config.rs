@@ -19,7 +19,7 @@ fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
 
 /// Direct image generation settings loaded from `COMFYUI_*` environment variables.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ComfyUiConfig {
+pub struct Config {
     pub enabled: bool,
     pub base_url: String,
     pub api_token: Option<String>,
@@ -47,7 +47,7 @@ pub struct ComfyUiConfig {
     pub train_timeout_secs: u64,
 }
 
-impl Default for ComfyUiConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -77,7 +77,7 @@ impl Default for ComfyUiConfig {
     }
 }
 
-impl ComfyUiConfig {
+impl Config {
     pub fn from_env() -> Self {
         Self {
             enabled: env_truthy("COMFYUI_ENABLED", false),

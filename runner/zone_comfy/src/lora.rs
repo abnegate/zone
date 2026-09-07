@@ -1,7 +1,7 @@
 //! Packaged LoRA training jobs. Default path posts ZoneTrainLoRA to ComfyUI.
 
 use crate::caption::{Captioner, data_url};
-use crate::config::ComfyUiConfig;
+use crate::config::Config;
 use crate::inventory::WeightSidecar;
 use crate::recipe::{RecipeCatalog, sanitize_weight_filename};
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ pub fn available_bases(catalog: &RecipeCatalog, models_dir: &Path) -> Vec<TrainB
 }
 
 pub async fn train(
-    config: &ComfyUiConfig,
+    config: &Config,
     litellm_host: String,
     litellm_key: String,
     mut request: TrainRequest,
@@ -246,13 +246,13 @@ fn write_decoded(path: &Path, base64: &str) -> Result<(), TrainError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ComfyUiConfig;
+    use crate::config::Config;
 
     #[tokio::test]
     async fn train_writes_adapter_with_configured_command() {
         let root = std::env::temp_dir().join(format!("zone-train-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("loras")).unwrap();
-        let config = ComfyUiConfig {
+        let config = Config {
             models_dir: root.clone(),
             train_command: Some("printf lora > \"$ZONE_TRAIN_OUTPUT\"".into()),
             ..Default::default()
@@ -302,7 +302,7 @@ mod tests {
     async fn train_rejects_missing_trigger() {
         let root = std::env::temp_dir().join(format!("zone-train-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("loras")).unwrap();
-        let config = ComfyUiConfig {
+        let config = Config {
             models_dir: root.clone(),
             train_command: Some("printf lora > \"$ZONE_TRAIN_OUTPUT\"".into()),
             ..Default::default()

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::client::ComfyUiError;
+use crate::client::Error;
 
 const PACKAGED_CATALOG: &str = include_str!("../../../comfyui/recipes/catalog.json");
 
@@ -162,14 +162,14 @@ pub struct RecipeCatalog {
 }
 
 impl RecipeCatalog {
-    pub fn packaged() -> Result<Self, ComfyUiError> {
+    pub fn packaged() -> Result<Self, Error> {
         Self::from_json(PACKAGED_CATALOG, None)
     }
 
     /// Load recipes from disk when `recipes/catalog.json` sits beside the
     /// workflow directory; otherwise use the packaged catalog. Graphs of the
     /// same filename in that workflow directory overlay the baked-in copies.
-    pub fn load(workflow_path: Option<&Path>) -> Result<Self, ComfyUiError> {
+    pub fn load(workflow_path: Option<&Path>) -> Result<Self, Error> {
         let dir = workflow_path.and_then(Path::parent);
         if let Some(contents) = read_overlay_catalog(dir)? {
             Self::from_json(&contents, dir)
@@ -178,13 +178,11 @@ impl RecipeCatalog {
         }
     }
 
-    fn from_json(json: &str, workflow_dir: Option<&Path>) -> Result<Self, ComfyUiError> {
+    fn from_json(json: &str, workflow_dir: Option<&Path>) -> Result<Self, Error> {
         let file: CatalogFile = serde_json::from_str(json)
-            .map_err(|_| ComfyUiError::Configuration("recipe catalog is not valid JSON"))?;
+            .map_err(|_| Error::Configuration("recipe catalog is not valid JSON"))?;
         if file.schema_version != 1 {
-            return Err(ComfyUiError::Configuration(
-                "unsupported recipe catalog schema",
-            ));
+            return Err(Error::Configuration("unsupported recipe catalog schema"));
         }
 
         let mut recipes = Vec::with_capacity(file.recipes.len());
@@ -238,7 +236,7 @@ impl RecipeCatalog {
             .iter()
             .any(|recipe| recipe.id == file.default_image && recipe.kind == MediaKind::Image)
         {
-            return Err(ComfyUiError::Configuration(
+            return Err(Error::Configuration(
                 "recipe catalog default_image is missing",
             ));
         }
@@ -255,7 +253,7 @@ impl RecipeCatalog {
         self.recipes.iter().find(|recipe| recipe.id == id)
     }
 
-    pub fn image_recipe_for(&self, checkpoint: &str) -> Result<&Recipe, ComfyUiError> {
+    pub fn image_recipe_for(&self, checkpoint: &str) -> Result<&Recipe, Error> {
         let trimmed = checkpoint.trim();
         if trimmed.to_ascii_lowercase().contains("lora")
             && let Some(adapter) = self.adapter_recipe_for_filename(trimmed)
@@ -265,7 +263,7 @@ impl RecipeCatalog {
         let id = self.resolve_image_id(checkpoint);
         self.get(id)
             .filter(|recipe| recipe.kind == MediaKind::Image)
-            .ok_or(ComfyUiError::Configuration(
+            .ok_or(Error::Configuration(
                 "no image recipe matches this checkpoint",
             ))
     }
@@ -336,7 +334,7 @@ impl Recipe {
         self.slots.weights.contains_key("lora")
     }
 
-    pub fn weight_map(&self, selected: &str) -> Result<HashMap<String, String>, ComfyUiError> {
+    pub fn weight_map(&self, selected: &str) -> Result<HashMap<String, String>, Error> {
         let selected = sanitize_weight_filename(selected)?;
         let mut weights = self.defaults.clone();
         if self.has_lora_slot() {
@@ -348,20 +346,20 @@ impl Recipe {
         }
         for name in self.slots.weights.keys() {
             if !weights.contains_key(name) {
-                return Err(ComfyUiError::Configuration("recipe weight is missing"));
+                return Err(Error::Configuration("recipe weight is missing"));
             }
         }
         Ok(weights)
     }
 
-    pub fn apply(&self, fill: Fill<'_>) -> Result<Value, ComfyUiError> {
+    pub fn apply(&self, fill: Fill<'_>) -> Result<Value, Error> {
         if fill.prompt.trim().is_empty() || fill.prompt.len() > 100_000 {
-            return Err(ComfyUiError::Configuration("prompt is empty or too long"));
+            return Err(Error::Configuration("prompt is empty or too long"));
         }
         let mut workflow = if fill.source.is_some() {
-            self.with_source.clone().ok_or(ComfyUiError::Configuration(
-                "recipe has no source-image graph",
-            ))?
+            self.with_source
+                .clone()
+                .ok_or(Error::Configuration("recipe has no source-image graph"))?
         } else {
             self.bare.clone()
         };
@@ -372,7 +370,7 @@ impl Recipe {
                 .weights
                 .get(name.as_str())
                 .copied()
-                .ok_or(ComfyUiError::Configuration("recipe weight is missing"))?;
+                .ok_or(Error::Configuration("recipe weight is missing"))?;
             let filename = sanitize_weight_filename(filename)?;
             set_pointer(&mut workflow, pointer, json!(filename))?;
         }
@@ -381,16 +379,14 @@ impl Recipe {
                 .slots
                 .source
                 .as_deref()
-                .ok_or(ComfyUiError::Configuration(
-                    "recipe has no source-image slot",
-                ))?;
+                .ok_or(Error::Configuration("recipe has no source-image slot"))?;
             set_pointer(&mut workflow, pointer, json!(sanitize_upload_name(source)?))?;
         }
         Ok(workflow)
     }
 }
 
-fn read_overlay_catalog(workflow_dir: Option<&Path>) -> Result<Option<String>, ComfyUiError> {
+fn read_overlay_catalog(workflow_dir: Option<&Path>) -> Result<Option<String>, Error> {
     let Some(path) = workflow_dir
         .and_then(Path::parent)
         .map(|root| root.join("recipes").join("catalog.json"))
@@ -400,40 +396,36 @@ fn read_overlay_catalog(workflow_dir: Option<&Path>) -> Result<Option<String>, C
     };
     std::fs::read_to_string(path)
         .map(Some)
-        .map_err(|_| ComfyUiError::Configuration("recipe catalog is not readable"))
+        .map_err(|_| Error::Configuration("recipe catalog is not readable"))
 }
 
-fn load_graph(dir: Option<&Path>, filename: &str) -> Result<Value, ComfyUiError> {
+fn load_graph(dir: Option<&Path>, filename: &str) -> Result<Value, Error> {
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
-        return Err(ComfyUiError::Configuration("invalid workflow filename"));
+        return Err(Error::Configuration("invalid workflow filename"));
     }
     if let Some(path) = dir
         .map(|dir| dir.join(filename))
         .filter(|path| path.is_file())
     {
         let contents = std::fs::read_to_string(path)
-            .map_err(|_| ComfyUiError::Configuration("workflow file is not readable"))?;
+            .map_err(|_| Error::Configuration("workflow file is not readable"))?;
         return serde_json::from_str(&contents)
-            .map_err(|_| ComfyUiError::Configuration("workflow file is not valid JSON"));
+            .map_err(|_| Error::Configuration("workflow file is not valid JSON"));
     }
-    let packaged = packaged_workflow(filename)
-        .ok_or(ComfyUiError::Configuration("packaged workflow is missing"))?;
+    let packaged =
+        packaged_workflow(filename).ok_or(Error::Configuration("packaged workflow is missing"))?;
     serde_json::from_str(packaged)
-        .map_err(|_| ComfyUiError::Configuration("packaged workflow is not valid JSON"))
+        .map_err(|_| Error::Configuration("packaged workflow is not valid JSON"))
 }
 
-fn validate_graph(
-    workflow: &Value,
-    slots: &RecipeSlots,
-    with_source: bool,
-) -> Result<(), ComfyUiError> {
+fn validate_graph(workflow: &Value, slots: &RecipeSlots, with_source: bool) -> Result<(), Error> {
     require_pointer(workflow, &slots.prompt)?;
     require_pointer(workflow, &slots.seed)?;
     for pointer in slots.weights.values() {
         require_pointer(workflow, pointer)?;
     }
     if with_source {
-        let source = slots.source.as_deref().ok_or(ComfyUiError::Configuration(
+        let source = slots.source.as_deref().ok_or(Error::Configuration(
             "source recipe is missing a source slot",
         ))?;
         require_pointer(workflow, source)?;
@@ -442,7 +434,7 @@ fn validate_graph(
             .and_then(Value::as_str)
             != Some("LoadImage")
         {
-            return Err(ComfyUiError::Configuration(
+            return Err(Error::Configuration(
                 "source graph must load a source image",
             ));
         }
@@ -451,7 +443,7 @@ fn validate_graph(
     match slots.output {
         RecipeOutput::PreviewImage => {
             if workflow.pointer(&output_class).and_then(Value::as_str) != Some("PreviewImage") {
-                return Err(ComfyUiError::Configuration(
+                return Err(Error::Configuration(
                     "workflow output must use temporary PreviewImage storage",
                 ));
             }
@@ -467,52 +459,52 @@ fn source_class_pointer(source_slot: &str) -> String {
     }
 }
 
-fn require_pointer(workflow: &Value, pointer: &str) -> Result<(), ComfyUiError> {
+fn require_pointer(workflow: &Value, pointer: &str) -> Result<(), Error> {
     if workflow.pointer(pointer).is_none() {
-        return Err(ComfyUiError::Configuration(
+        return Err(Error::Configuration(
             "workflow does not match the recipe slot contract",
         ));
     }
     Ok(())
 }
 
-fn set_pointer(root: &mut Value, pointer: &str, value: Value) -> Result<(), ComfyUiError> {
+fn set_pointer(root: &mut Value, pointer: &str, value: Value) -> Result<(), Error> {
     if !pointer.starts_with('/') || pointer.len() < 2 || pointer.contains("//") {
-        return Err(ComfyUiError::Configuration("invalid recipe slot pointer"));
+        return Err(Error::Configuration("invalid recipe slot pointer"));
     }
     let mut current = root;
     let parts: Vec<&str> = pointer[1..].split('/').collect();
     for (index, part) in parts.iter().enumerate() {
         if part.is_empty() {
-            return Err(ComfyUiError::Configuration("invalid recipe slot pointer"));
+            return Err(Error::Configuration("invalid recipe slot pointer"));
         }
         if index + 1 == parts.len() {
-            let object = current.as_object_mut().ok_or(ComfyUiError::Configuration(
-                "recipe slot pointer is not an object",
-            ))?;
+            let object = current
+                .as_object_mut()
+                .ok_or(Error::Configuration("recipe slot pointer is not an object"))?;
             object.insert((*part).to_string(), value);
             return Ok(());
         }
-        current = current.get_mut(*part).ok_or(ComfyUiError::Configuration(
+        current = current.get_mut(*part).ok_or(Error::Configuration(
             "workflow does not match the recipe slot contract",
         ))?;
     }
-    Err(ComfyUiError::Configuration("invalid recipe slot pointer"))
+    Err(Error::Configuration("invalid recipe slot pointer"))
 }
 
-pub fn sanitize_weight_filename(name: &str) -> Result<String, ComfyUiError> {
+pub fn sanitize_weight_filename(name: &str) -> Result<String, Error> {
     if name.is_empty()
         || name.len() > 256
         || name.contains('/')
         || name.contains('\\')
         || name.contains("..")
     {
-        return Err(ComfyUiError::Configuration("invalid checkpoint filename"));
+        return Err(Error::Configuration("invalid checkpoint filename"));
     }
     Ok(name.to_string())
 }
 
-pub fn sanitize_upload_name(name: &str) -> Result<String, ComfyUiError> {
+pub fn sanitize_upload_name(name: &str) -> Result<String, Error> {
     if name.is_empty()
         || name.len() > 128
         || name.contains('/')
@@ -522,7 +514,7 @@ pub fn sanitize_upload_name(name: &str) -> Result<String, ComfyUiError> {
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
     {
-        return Err(ComfyUiError::Configuration("invalid source image filename"));
+        return Err(Error::Configuration("invalid source image filename"));
     }
     Ok(name.to_string())
 }

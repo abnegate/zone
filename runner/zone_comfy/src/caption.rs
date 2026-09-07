@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Duration;
 use zone_core::llm::{LlmClient, LlmConfig, Message};
 
-use crate::config::ComfyUiConfig;
+use crate::config::Config;
 
 const SUBJECT_TOKENS: u32 = 40;
 const DESCRIPTION_TOKENS: u32 = 80;
@@ -91,7 +91,7 @@ pub struct Captioner {
 }
 
 impl Captioner {
-    pub fn new(config: &ComfyUiConfig, litellm_host: String, litellm_key: String) -> Self {
+    pub fn new(config: &Config, litellm_host: String, litellm_key: String) -> Self {
         Self {
             model: config.caption_model.clone(),
             timeout: Duration::from_secs(config.caption_timeout_secs),
@@ -287,8 +287,8 @@ mod tests {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn config(model: &str) -> ComfyUiConfig {
-        ComfyUiConfig {
+    fn config(model: &str) -> Config {
+        Config {
             caption_model: model.to_string(),
             caption_timeout_secs: 5,
             ..Default::default()

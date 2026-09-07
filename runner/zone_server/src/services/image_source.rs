@@ -5,7 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::services::artifacts::ArtifactStore;
-use zone_comfy::client::{ComfyUiError, SourceImage};
+use zone_comfy::{Error as ComfyUiError, SourceImage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceImageError {

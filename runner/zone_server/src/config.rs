@@ -3,7 +3,7 @@
 use std::env;
 
 /// ComfyUI settings live with the client that consumes them.
-pub use zone_comfy::ComfyUiConfig;
+pub use zone_comfy::Config as ComfyUiConfig;
 
 /// Upstream GPT4All model catalog. Tests should override `Config::gpt4all_models_url`.
 pub const DEFAULT_GPT4ALL_MODELS_URL: &str =

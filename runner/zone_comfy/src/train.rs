@@ -1,6 +1,6 @@
 //! HTTP client that runs packaged ZoneTrainLoRA graphs on ComfyUI.
 
-use crate::config::ComfyUiConfig;
+use crate::config::Config;
 use crate::lora::TrainError;
 use crate::recipe::Recipe;
 use serde::Deserialize;
@@ -59,7 +59,7 @@ impl TrainConfig {
 }
 
 pub async fn run(
-    config: &ComfyUiConfig,
+    config: &Config,
     recipe: &Recipe,
     work: &Path,
     output: &Path,
@@ -195,7 +195,7 @@ fn train_graph(
 }
 
 async fn stage_or_upload(
-    config: &ComfyUiConfig,
+    config: &Config,
     work: &Path,
     folder: &str,
 ) -> Result<HashMap<String, String>, TrainError> {
@@ -272,7 +272,7 @@ fn pngs(targets: &Path) -> Result<Vec<PathBuf>, TrainError> {
 }
 
 async fn upload_png(
-    config: &ComfyUiConfig,
+    config: &Config,
     folder: &str,
     filename: &str,
     bytes: &[u8],
@@ -303,7 +303,7 @@ async fn upload_png(
 
 async fn wait_prompt(
     client: &reqwest::Client,
-    config: &ComfyUiConfig,
+    config: &Config,
     prompt_id: &str,
     timeout: Duration,
 ) -> Result<(), TrainError> {

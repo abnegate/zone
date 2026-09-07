@@ -1212,7 +1212,7 @@ async fn handle_image_generation(
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::artifacts::ArtifactStore;
-    use zone_comfy::client::{ComfyUiClient, ComfyUiError};
+    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;
@@ -1465,7 +1465,7 @@ async fn handle_video_generation(
     session: &mut Session,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::services::artifacts::ArtifactStore;
-    use zone_comfy::client::{ComfyUiClient, ComfyUiError};
+    use zone_comfy::{Client as ComfyUiClient, Error as ComfyUiError};
 
     const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
     let assistant_message_id = generation.message_id;
