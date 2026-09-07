@@ -1098,6 +1098,45 @@ describe('useChat', () => {
     });
   });
 
+  it('adds streamed assistant audio and keeps final metadata', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+
+    const attachment = {
+      name: 'generated-audio-1.flac',
+      mime: 'audio/flac',
+      url: '/api/artifacts/ws/chat/msg/generated-audio-1.flac',
+    };
+    lastSocket?.emit({ type: 'message_start', message_id: 'm-audio', role: 'assistant' });
+    lastSocket?.emit({
+      type: 'audio',
+      message_id: 'm-audio',
+      attachment,
+    });
+
+    await waitFor(() => {
+      expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    });
+
+    lastSocket?.emit({
+      type: 'message_end',
+      message_id: 'm-audio',
+      content: 'Generated audio.',
+      metadata: { attachments: [attachment] },
+    });
+
+    await waitFor(() => {
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('Generated audio.');
+      expect(result.current.chat?.messages.at(-1)?.metadata?.attachments).toEqual([attachment]);
+    });
+  });
+
   it('reconnects after the socket drops so a later send still works', async () => {
     mockGetChat.mockResolvedValue(mockChat);
     const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });

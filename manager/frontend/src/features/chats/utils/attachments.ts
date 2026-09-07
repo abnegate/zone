@@ -184,3 +184,10 @@ export function videoAttachments(
 ) {
   return metadata?.attachments?.filter((a) => a.mime.startsWith('video/') && Boolean(a.url)) ?? [];
 }
+
+/** Audio stored on a message so the thread can play it after send. */
+export function audioAttachments(
+  metadata?: { attachments?: { name: string; mime: string; url: string }[] } | null
+) {
+  return metadata?.attachments?.filter((a) => a.mime.startsWith('audio/') && Boolean(a.url)) ?? [];
+}

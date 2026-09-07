@@ -1,4 +1,5 @@
 export { ActionReceipts } from './ActionReceipts';
+export { AuthenticatedAudio } from './AuthenticatedAudio';
 export { AuthenticatedImage } from './AuthenticatedImage';
 export { AuthenticatedVideo } from './AuthenticatedVideo';
 export { Citations } from './Citations';
