@@ -782,6 +782,7 @@ impl Store {
     ) -> Result<(), Error> {
         let pending = sqlx::query("SELECT id, mutating FROM chat_calls WHERE chat_id = $1 AND turn_id = $2 AND result_id IS NULL ORDER BY envelope_id, id")
             .bind(self.chat_id).bind(turn_id).fetch_all(&mut *connection).await?;
+        let mut recovered: Vec<String> = Vec::new();
         for row in pending {
             let call: String = row.get("id");
             let content = if row.get::<bool, _>("mutating") {
@@ -789,11 +790,13 @@ impl Store {
             } else {
                 "Error: execution was interrupted before a result was durably recorded. No result is available."
             };
+            let id = Uuid::new_v4().to_string();
+            recovered.push(id.clone());
             self.append_in(
                 connection,
                 turn_id,
                 &NewEntry {
-                    id: Uuid::new_v4().to_string(),
+                    id,
                     message: ReplayMessage::from(&Message::tool_result(call, content)),
                     mutations: Vec::new(),
                 },
@@ -802,7 +805,28 @@ impl Store {
         }
         sqlx::query("UPDATE chat_turns SET status = 'interrupted', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
             .bind(self.chat_id).bind(turn_id).execute(&mut *connection).await?;
-        self.consume_turn_in(connection, turn_id).await?;
+        // The abandoned turn folds away, but these results say a mutation may
+        // already have happened. That is the one thing the next turn has to
+        // see, so it does not get consumed with the rest.
+        self.consume_turn_except_in(connection, turn_id, &recovered)
+            .await?;
+        Ok(())
+    }
+
+    async fn consume_turn_except_in(
+        &self,
+        connection: &mut PgConnection,
+        turn_id: Uuid,
+        keep: &[String],
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "UPDATE chat_entries SET consumed = TRUE WHERE chat_id = $1 AND turn_id = $2 AND consumed = FALSE AND NOT (id = ANY($3))",
+        )
+        .bind(self.chat_id)
+        .bind(turn_id)
+        .bind(keep)
+        .execute(connection)
+        .await?;
         Ok(())
     }
 

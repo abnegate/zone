@@ -20,11 +20,10 @@ import { useChat, useChatSearch, useChats } from '../hooks';
 import { type ChatSearchResult, REASONING_EFFORT_OPTIONS, type ReasoningEffort } from '../types';
 import {
   type Attachment,
+  AUTO_MODEL,
   attachmentMetadata,
   buildMessageWithAttachments,
-  AUTO_MODEL,
   chatShowsAgent,
-  modelLabel,
   chatShowsCharacter,
   chatShowsReasoning,
   findInstalledModel,
@@ -33,6 +32,7 @@ import {
   imageAttachments,
   isSendable,
   isStartingImage,
+  modelLabel,
   parseCharacterFile,
   parseCharacterText,
   readAttachment,
