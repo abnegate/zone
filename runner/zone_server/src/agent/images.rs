@@ -8,7 +8,8 @@ use tokio::sync::{broadcast, mpsc};
 use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
-use crate::db::chats;
+use crate::config::ComfyUiConfig;
+use crate::db::{ai_settings, chats};
 use crate::services::{artifacts::ArtifactStore, image_source::resolve_source_image_from};
 use zone_comfy::{Client as ComfyUiClient, SourceImage};
 
@@ -63,7 +64,8 @@ impl Tool for GenerateImageTool {
     }
 
     async fn execute(&self, params: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
-        Ok(run_image(&self.0, params, false).await)
+        let config = effective_comfyui(&self.0).await;
+        Ok(run_image(&self.0, &config, params, false).await)
     }
 }
 
@@ -111,16 +113,30 @@ impl Tool for EditImageTool {
     }
 
     async fn execute(&self, params: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
-        Ok(run_image(&self.0, params, true).await)
+        let config = effective_comfyui(&self.0).await;
+        Ok(run_image(&self.0, &config, params, true).await)
     }
 }
 
-async fn run_image(scope: &WorkspaceScope, params: Value, edit: bool) -> ToolResult {
+async fn effective_comfyui(scope: &WorkspaceScope) -> ComfyUiConfig {
+    ai_settings::effective_comfyui(
+        scope.state.db(),
+        scope.workspace_id,
+        &scope.state.config().comfyui,
+    )
+    .await
+}
+
+async fn run_image(
+    scope: &WorkspaceScope,
+    config: &ComfyUiConfig,
+    params: Value,
+    edit: bool,
+) -> ToolResult {
     let prompt = match string_arg(&params, "prompt") {
         Ok(prompt) => prompt.to_string(),
         Err(error) => return error,
     };
-    let config = scope.state.config().comfyui.clone();
     let client = match ComfyUiClient::new(config.clone()) {
         Ok(client) => client,
         Err(error) => {
@@ -228,5 +244,88 @@ fn extension_for(mime: &str) -> &'static str {
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
         _ => "png",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{AppState, test_config};
+    use uuid::Uuid;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn scope() -> WorkspaceScope {
+        let mut config = test_config();
+        config.comfyui.enabled = true;
+        let database = sqlx::PgPool::connect_lazy("postgres://localhost/test")
+            .expect("a lazy pool needs no server");
+        WorkspaceScope {
+            state: AppState::new(config, database, None),
+            workspace_id: Uuid::new_v4(),
+            chat_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+        }
+    }
+
+    /// The organization/workspace `model_image` pin reaches ComfyUI when the
+    /// agent calls the tool, not only when the direct lane handles the message.
+    #[tokio::test]
+    async fn the_resolved_checkpoint_reaches_the_workflow() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let scope = scope();
+        let config = ComfyUiConfig {
+            base_url: server.uri(),
+            checkpoint: "org-pinned-image.safetensors".to_string(),
+            ..scope.state.config().comfyui.clone()
+        };
+        assert_ne!(
+            config.checkpoint,
+            scope.state.config().comfyui.checkpoint,
+            "the pin must differ from the process default or this proves nothing"
+        );
+
+        let result = run_image(&scope, &config, json!({"prompt": "a lighthouse"}), false).await;
+        assert!(!result.success, "the mocked ComfyUI rejects the prompt");
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("the mock server records requests");
+        let submitted: Value =
+            serde_json::from_slice(&requests[0].body).expect("ComfyUI is submitted a JSON prompt");
+        let checkpoints: Vec<String> = submitted["prompt"]
+            .as_object()
+            .expect("a node map")
+            .values()
+            .filter_map(|node| node.pointer("/inputs/ckpt_name"))
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            checkpoints,
+            vec!["org-pinned-image.safetensors".to_string()],
+            "the agent tool ignored the resolved image checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_prompt_fails_before_any_comfyui_work() {
+        let scope = scope();
+        let config = scope.state.config().comfyui.clone();
+        for params in [json!({}), json!({"prompt": "   "})] {
+            let result = run_image(&scope, &config, params.clone(), false).await;
+            assert!(!result.success, "{params} should not succeed");
+            assert!(
+                result.error.unwrap().contains("prompt"),
+                "{params} should be rejected for its prompt"
+            );
+        }
     }
 }

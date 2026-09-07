@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use uuid::Uuid;
+use zone_comfy::MediaType;
 
 use crate::{
     auth::AuthUser,
@@ -38,29 +39,16 @@ pub async fn get(
 
     let store = ArtifactStore::new(state.config().comfyui.artifact_root.clone());
     match store.read(workspace_id, chat_id, owner_id, &filename).await {
-        Ok(bytes) => {
-            let mime = match filename.rsplit_once('.').map(|(_, ext)| ext) {
-                Some("jpg" | "jpeg") => "image/jpeg",
-                Some("webp") => "image/webp",
-                Some("webm") => "video/webm",
-                Some("mp4") => "video/mp4",
-                Some("flac") => "audio/flac",
-                Some("mp3") => "audio/mpeg",
-                Some("opus") => "audio/opus",
-                Some("wav") => "audio/wav",
-                _ => "image/png",
-            };
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime)
-                .header(
-                    header::CACHE_CONTROL,
-                    "private, max-age=31536000, immutable",
-                )
-                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-                .body(Body::from(bytes))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-        }
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type(&filename))
+            .header(
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable",
+            )
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         Err(ArtifactError::InvalidPath) => StatusCode::BAD_REQUEST.into_response(),
         Err(ArtifactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             StatusCode::NOT_FOUND.into_response()
@@ -69,5 +57,51 @@ pub async fn get(
             tracing::error!("Failed to read artifact: {}", error);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+/// Artifacts are served with `nosniff`, so this is the only thing standing
+/// between a stored clip and a browser that refuses to decode it.
+fn content_type(filename: &str) -> &'static str {
+    MediaType::for_filename(filename)
+        .unwrap_or(MediaType::PNG)
+        .mime
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opus_artifacts_are_served_as_ogg() {
+        assert_eq!(
+            content_type("f47ac10b.opus"),
+            "audio/ogg",
+            "audio/opus is an RTP payload type; canPlayType returns \"\" for it"
+        );
+    }
+
+    #[test]
+    fn every_storable_extension_has_a_content_type() {
+        for (filename, expected) in [
+            ("a.png", "image/png"),
+            ("a.jpg", "image/jpeg"),
+            ("a.jpeg", "image/jpeg"),
+            ("a.webp", "image/webp"),
+            ("a.webm", "video/webm"),
+            ("a.mp4", "video/mp4"),
+            ("a.flac", "audio/flac"),
+            ("a.mp3", "audio/mpeg"),
+            ("a.opus", "audio/ogg"),
+            ("a.wav", "audio/wav"),
+        ] {
+            assert_eq!(content_type(filename), expected, "{filename}");
+        }
+    }
+
+    #[test]
+    fn unknown_and_suffixless_names_fall_back_to_png() {
+        assert_eq!(content_type("a.bin"), "image/png");
+        assert_eq!(content_type("a"), "image/png");
     }
 }
