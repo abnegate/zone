@@ -412,7 +412,7 @@ zone/
 │   │   ├── src/session/     # Session management
 │   │   └── src/types/       # Shared domain types
 │   ├── zone_comfy/          # ComfyUI generation, model inventory, LoRA training
-│   │   ├── src/client.rs    # Image and video generation
+│   │   ├── src/client.rs    # Image, video, and audio generation
 │   │   ├── src/recipe.rs    # Workflow recipes and catalog
 │   │   ├── src/inventory.rs # Installed weights on disk
 │   │   ├── src/lora.rs      # LoRA training jobs

@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).parents[1] / "download-models.py"
+MANIFEST_PATH = Path(__file__).parents[1] / "model-manifest.json"
 SPEC = importlib.util.spec_from_file_location("download_models", MODULE_PATH)
 assert SPEC and SPEC.loader
 download_models = importlib.util.module_from_spec(SPEC)
@@ -104,7 +105,8 @@ class DownloadModelsTest(unittest.TestCase):
         self.assertEqual(len(download_models.select_models(models, "all")), 4)
 
     def test_parse_args_accepts_every_valid_bundle(self) -> None:
-        for bundle in [*sorted(download_models.VALID_BUNDLES), "all"]:
+        self.assertEqual(download_models.VALID_BUNDLES, {"image", "video", "audio"})
+        for bundle in ["image", "video", "audio", "all"]:
             with self.subTest(bundle=bundle):
                 argv = [
                     "download-models.py",
@@ -139,6 +141,45 @@ class DownloadModelsTest(unittest.TestCase):
             download_models.download(model, target)
 
             self.assertEqual(target.read_bytes(), payload)
+
+
+class ModelManifestTest(unittest.TestCase):
+    REQUIRED_KEYS = (
+        "id",
+        "bundle",
+        "filename",
+        "relative_path",
+        "url",
+        "size_bytes",
+        "sha256",
+        "license",
+    )
+
+    def setUp(self) -> None:
+        self.models = download_models.load_manifest(MANIFEST_PATH)
+        self.assertTrue(self.models, f"no models declared in {MANIFEST_PATH}")
+
+    def test_every_entry_declares_a_supported_bundle(self) -> None:
+        for model in self.models:
+            with self.subTest(model=model.get("id")):
+                self.assertIn(
+                    download_models.model_bundle(model),
+                    {"image", "video", "audio"},
+                )
+
+    def test_every_bundle_selects_at_least_one_entry(self) -> None:
+        for bundle in ["image", "video", "audio"]:
+            with self.subTest(bundle=bundle):
+                self.assertTrue(
+                    download_models.select_models(self.models, bundle),
+                    f"bundle {bundle} selects no models",
+                )
+
+    def test_every_entry_declares_the_required_keys(self) -> None:
+        for model in self.models:
+            with self.subTest(model=model.get("id")):
+                missing = [key for key in self.REQUIRED_KEYS if not model.get(key)]
+                self.assertEqual(missing, [], f"missing keys: {missing}")
 
 
 if __name__ == "__main__":
