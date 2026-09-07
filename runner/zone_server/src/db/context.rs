@@ -427,6 +427,7 @@ impl Store {
             .await?;
         sqlx::query("UPDATE chat_turns SET status = 'completed', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
             .bind(self.chat_id).bind(turn_id).execute(&mut *transaction).await?;
+        self.consume_turn_in(&mut transaction, turn_id).await?;
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
         Ok(row)
@@ -481,6 +482,7 @@ impl Store {
                 false,
             )
             .await?;
+        self.consume_turn_in(&mut transaction, turn_id).await?;
         self.lock(&mut transaction, lease).await?;
         transaction.commit().await?;
         Ok(row)
@@ -823,7 +825,23 @@ impl Store {
             .await?;
         }
         sqlx::query("UPDATE chat_turns SET status = 'interrupted', completed_at = clock_timestamp() WHERE chat_id = $1 AND id = $2")
-            .bind(self.chat_id).bind(turn_id).execute(connection).await?;
+            .bind(self.chat_id).bind(turn_id).execute(&mut *connection).await?;
+        self.consume_turn_in(connection, turn_id).await?;
+        Ok(())
+    }
+
+    async fn consume_turn_in(
+        &self,
+        connection: &mut PgConnection,
+        turn_id: Uuid,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "UPDATE chat_entries SET consumed = TRUE WHERE chat_id = $1 AND turn_id = $2 AND consumed = FALSE",
+        )
+        .bind(self.chat_id)
+        .bind(turn_id)
+        .execute(connection)
+        .await?;
         Ok(())
     }
 

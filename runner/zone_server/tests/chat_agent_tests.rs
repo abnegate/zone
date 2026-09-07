@@ -473,6 +473,17 @@ async fn unsupported_tools_preserve_prefetched_web_context() {
 }
 
 #[tokio::test]
+async fn duplicate_stream_images_are_kept_once() {
+    let delta = json!({"images":[{"image_url":{"url":"data:image/png;base64,abc"}}]});
+    let (events, _) = exercise(vec![vec![delta.clone(), delta]]).await;
+    let images = events
+        .iter()
+        .filter(|event| matches!(event, AgentEvent::Image(_)))
+        .count();
+    assert_eq!(images, 1);
+}
+
+#[tokio::test]
 async fn image_only_answers_remain_valid() {
     let image = vec![
         json!({"images":[{"image_url":{"url":"data:image/png;base64,abc"},"type":"image_url","index":0}]}),

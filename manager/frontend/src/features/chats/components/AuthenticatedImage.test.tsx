@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { isProtectedArtifactUrl } from '../api/protectedImages';
 import { AuthenticatedImage } from './AuthenticatedImage';
 
@@ -49,15 +49,27 @@ describe('AuthenticatedImage', () => {
     expect(image).toHaveAttribute('src', 'blob:protected-image');
     expect(
       screen.getByRole('link', { name: 'Open Generated landscape full size' })
-    ).toHaveAttribute('href', 'blob:protected-image');
+    ).toHaveAttribute('href', '/api/artifacts/chat/image.webp');
     expect(fetchMock).toHaveBeenCalledWith('/api/artifacts/chat/image.webp', {
       headers: { Authorization: 'Bearer secret-token' },
       signal: expect.any(AbortSignal),
     });
     expect(createObjectUrlMock).toHaveBeenCalledWith(imageBlob);
 
+    const opened = { closed: false };
+    const openMock = mock(() => opened);
+    const originalOpen = window.open;
+    window.open = openMock as typeof window.open;
+    createObjectUrlMock.mockImplementationOnce(() => 'blob:full-size');
+    fireEvent.click(screen.getByRole('link', { name: 'Open Generated landscape full size' }));
+    await waitFor(() => {
+      expect(openMock).toHaveBeenCalledWith('blob:full-size', '_blank', 'noopener,noreferrer');
+    });
+    window.open = originalOpen;
+
     unmount();
     expect(revokeObjectUrlMock).toHaveBeenCalledWith('blob:protected-image');
+    expect(revokeObjectUrlMock).not.toHaveBeenCalledWith('blob:full-size');
   });
 
   it('renders data and HTTP images directly without fetching them', () => {

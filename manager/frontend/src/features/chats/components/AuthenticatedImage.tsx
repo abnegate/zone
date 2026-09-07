@@ -1,4 +1,4 @@
-import { type ImgHTMLAttributes, useEffect, useState } from 'react';
+import { type ImgHTMLAttributes, type MouseEvent, useEffect, useState } from 'react';
 import { fetchProtectedImage, isProtectedArtifactUrl } from '../api/protectedImages';
 
 interface AuthenticatedImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'src' | 'alt'> {
@@ -101,13 +101,27 @@ export function AuthenticatedImage({
     return image;
   }
 
+  const openFullSize = async (event: MouseEvent<HTMLAnchorElement>) => {
+    if (!protectedArtifact) {
+      return;
+    }
+    event.preventDefault();
+    const blob = await fetchProtectedImage(src, undefined, accessToken);
+    const url = URL.createObjectURL(blob);
+    const opened = window.open(url, '_blank', 'noopener,noreferrer');
+    if (!opened) {
+      URL.revokeObjectURL(url);
+    }
+  };
+
   return (
     <a
       className={linkClassName}
-      href={displaySrc}
+      href={protectedArtifact ? src : displaySrc}
       target="_blank"
       rel="noreferrer"
       aria-label={openLabel}
+      onClick={openFullSize}
     >
       {image}
     </a>

@@ -6,7 +6,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
-use zone_core::llm::{FunctionCall, Message, ToolCall};
+use zone_core::llm::{FunctionCall, Message, Role, ToolCall};
 use zone_server::db::chats;
 use zone_server::db::context::{Error, Lease, Store};
 use zone_server::services::chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
@@ -146,6 +146,42 @@ async fn full_envelope_and_multimodal_result_survive_without_visible_assistant_r
         vec!["/api/artifacts/immutable.png"]
     );
     assert_eq!(chats::list_messages(&pool, chat).await.unwrap().len(), 1);
+    chats::delete_chat(&pool, chat).await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupt_marks_tool_evidence_consumed() {
+    let (pool, store, chat, _) = fixture().await;
+    let lease = store.acquire(Uuid::new_v4(), LIFETIME).await.unwrap();
+    let (turn, _) = begin(&store, &lease).await;
+    store
+        .append(
+            &lease,
+            turn,
+            &[
+                envelope("envelope", "call", false),
+                result("result", "call", "file body"),
+            ],
+        )
+        .await
+        .unwrap();
+    let before = store.load().await.unwrap();
+    assert!(
+        before
+            .entries
+            .iter()
+            .any(|entry| !entry.consumed && entry.message.role == Role::Tool)
+    );
+    store.interrupt(&lease, turn).await.unwrap();
+    let after = store.load().await.unwrap();
+    assert!(
+        after
+            .entries
+            .iter()
+            .filter(|entry| entry.message.role != Role::User)
+            .all(|entry| entry.consumed),
+        "cancelled tool evidence must be consumed so the next turn can compact"
+    );
     chats::delete_chat(&pool, chat).await.unwrap();
 }
 

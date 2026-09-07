@@ -1098,6 +1098,25 @@ describe('useChat', () => {
     });
   });
 
+  it('reconnects after the socket drops so a later send still works', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+    const dropped = lastSocket;
+    act(() => dropped?.onclose?.());
+    await waitFor(() => {
+      expect(lastSocket).not.toBe(dropped);
+    });
+    await act(async () => {
+      await result.current.sendMessage({ content: 'After reconnect' });
+    });
+    expect(lastSocket?.sent.some((frame) => frame.includes('After reconnect'))).toBe(true);
+    unmount();
+  });
+
   it('should handle sending message with error', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

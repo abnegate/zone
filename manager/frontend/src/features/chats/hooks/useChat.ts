@@ -420,8 +420,9 @@ export function useChat(
       return;
     }
 
-    const socket = chatsApi.createChatWebSocket(chatId);
-    socketRef.current = socket;
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
     let assistantId: string | null = null;
     let generationSeen = false;
     const completed = new Set<string>();
@@ -516,15 +517,18 @@ export function useChat(
       });
     };
 
-    socket.onopen = () => {
-      const token = chatsApi.chatAccessToken();
-      if (token) {
-        socket.send(JSON.stringify({ type: 'auth', token }));
-      }
-    };
+    const bindSocket = (socket: WebSocket) => {
+      socketRef.current = socket;
+      socket.onopen = () => {
+        reconnectAttempt = 0;
+        const token = chatsApi.chatAccessToken();
+        if (token) {
+          socket.send(JSON.stringify({ type: 'auth', token }));
+        }
+      };
 
-    socket.onmessage = (event) => {
-      if (socket !== socketRef.current) return;
+      socket.onmessage = (event) => {
+        if (socket !== socketRef.current) return;
       let payload: ServerMessage;
       try {
         payload = JSON.parse(event.data);
@@ -734,32 +738,50 @@ export function useChat(
       setContextRefresh((value) => value + 1);
     };
 
-    socket.onerror = () => {
-      invalidateContext();
-      assistantId = null;
-      contextEpoch.current += 1;
-      setError('Chat connection failed');
-      setStatus(null);
-      activeGenerationRef.current = false;
-      setStreaming(false);
+      socket.onerror = () => {
+        if (socket !== socketRef.current) return;
+        invalidateContext();
+        assistantId = null;
+        contextEpoch.current += 1;
+        setError('Chat connection failed');
+        setStatus(null);
+        activeGenerationRef.current = false;
+        setStreaming(false);
+      };
+
+      socket.onclose = () => {
+        if (socket !== socketRef.current || disposed) return;
+        invalidateContext();
+        assistantId = null;
+        contextEpoch.current += 1;
+        setStatus(null);
+        activeGenerationRef.current = false;
+        setStreaming(false);
+        const delay = reconnectAttempt === 0 ? 0 : Math.min(500 * 2 ** (reconnectAttempt - 1), 8000);
+        reconnectAttempt += 1;
+        reconnectTimer = setTimeout(() => {
+          if (disposed) return;
+          bindSocket(chatsApi.createChatWebSocket(chatId));
+        }, delay);
+      };
     };
 
-    socket.onclose = () => {
-      invalidateContext();
-      assistantId = null;
-      contextEpoch.current += 1;
-      setStatus(null);
-      activeGenerationRef.current = false;
-      setStreaming(false);
-    };
+    bindSocket(chatsApi.createChatWebSocket(chatId));
 
     return () => {
+      disposed = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
       cancelChunkFrame();
-      socket.onopen = null;
-      socket.onmessage = null;
-      socket.onerror = null;
-      socket.onclose = null;
-      socket.close();
+      const socket = socketRef.current;
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close();
+      }
       socketRef.current = null;
     };
   }, [
