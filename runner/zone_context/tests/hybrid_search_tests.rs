@@ -172,19 +172,38 @@ async fn test_keyword_only_search() {
 
     assert!(!results.is_empty(), "Should find results for 'Rust async'");
 
-    // Verify results have keyword scores
     for result in &results {
-        assert!(
+        assert_eq!(
             result.keyword_score.is_some(),
-            "Keyword results should have keyword_score"
+            result.keyword_rank.is_some(),
+            "keyword_score and keyword_rank are paired provenance, but {} carried {:?} / {:?}",
+            result.item_uri,
+            result.keyword_score,
+            result.keyword_rank
         );
         assert!(
-            result.semantic_score.is_none(),
-            "Keyword-only results should not have semantic_score"
+            result.semantic_score.is_none() && result.semantic_rank.is_none(),
+            "Keyword-only results should not carry semantic provenance"
         );
+    }
+
+    // Same-file expansion appends neighbouring chunks as deliberately unscored
+    // context, so only the keyword leg's own hits carry a score and the query terms.
+    let keyword_hits: Vec<&_> = results
+        .iter()
+        .filter(|result| result.keyword_score.is_some())
+        .collect();
+
+    assert!(
+        !keyword_hits.is_empty(),
+        "Keyword leg should contribute at least one scored hit"
+    );
+
+    for hit in &keyword_hits {
         assert!(
-            result.chunk_text.contains("Rust") || result.chunk_text.contains("async"),
-            "Results should contain search terms"
+            hit.chunk_text.contains("Rust") || hit.chunk_text.contains("async"),
+            "Keyword hits should contain search terms, got {:?}",
+            hit.chunk_text
         );
     }
 }
