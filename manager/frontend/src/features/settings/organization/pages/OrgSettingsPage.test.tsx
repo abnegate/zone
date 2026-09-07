@@ -115,6 +115,7 @@ const mockAiSettings: AiSettings = {
   model_embedding: 'nomic-embed-text',
   model_image: 'flux1-schnell-fp8.safetensors',
   model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+  model_audio: 'ace_step_v1_3.5b.safetensors',
 };
 
 describe('OrgSettingsPage', () => {
@@ -362,6 +363,7 @@ describe('OrgSettingsPage', () => {
       mockClient.updateOrgAiSettings.mockResolvedValueOnce({
         ...mockAiSettings,
         model_video: null,
+        model_audio: null,
       });
 
       render(<OrgSettingsPage />);
@@ -376,6 +378,28 @@ describe('OrgSettingsPage', () => {
         expect(mockClient.updateOrgAiSettings).toHaveBeenCalledWith(
           expect.any(String),
           expect.objectContaining({ model_video: '' })
+        );
+      });
+    });
+
+    it('sends an empty audio model to clear the server-default override', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        model_audio: null,
+      });
+
+      render(<OrgSettingsPage />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Audio Model')).toHaveValue('ace_step_v1_3.5b.safetensors');
+      });
+
+      fireEvent.change(screen.getByLabelText('Audio Model'), { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => {
+        expect(mockClient.updateOrgAiSettings).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({ model_audio: '' })
         );
       });
     });

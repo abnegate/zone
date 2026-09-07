@@ -60,6 +60,7 @@ const modelOptions = {
 
 const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
 const VIDEO_MODEL_OPTIONS = ['wan2.2_ti2v_5B_fp16.safetensors'];
+const AUDIO_MODEL_OPTIONS = ['ace_step_v1_3.5b.safetensors'];
 
 const awsRegions = [
   'us-east-1',
@@ -100,6 +101,7 @@ export default function OrgSettingsPage() {
   const [modelEmbedding, setModelEmbedding] = useState('');
   const [modelImage, setModelImage] = useState('');
   const [modelVideo, setModelVideo] = useState('');
+  const [modelAudio, setModelAudio] = useState('');
 
   // Track which credentials are set on server
   const [hasLitellmKey, setHasLitellmKey] = useState(false);
@@ -137,6 +139,7 @@ export default function OrgSettingsPage() {
     setModelEmbedding(settings.model_embedding || '');
     setModelImage(settings.model_image || '');
     setModelVideo(settings.model_video || '');
+    setModelAudio(settings.model_audio || '');
     setHasLitellmKey(settings.has_litellm_key);
     setHasOpenaiKey(settings.has_openai_api_key);
     setHasAnthropicKey(settings.has_anthropic_api_key);
@@ -170,6 +173,7 @@ export default function OrgSettingsPage() {
         // Empty string clears the stored override so the server default resumes.
         model_image: modelImage,
         model_video: modelVideo,
+        model_audio: modelAudio,
       };
 
       // Only include credentials if they were entered
@@ -517,8 +521,8 @@ export default function OrgSettingsPage() {
                       ))}
                     </select>
                     <p className="form-hint">
-                      Harder questions. Empty picks a larger installed model when the message
-                      looks like a reasoning task.
+                      Harder questions. Empty picks a larger installed model when the message looks
+                      like a reasoning task.
                     </p>
                   </div>
                   <div className="form-group">
@@ -591,6 +595,27 @@ export default function OrgSettingsPage() {
                     <p className="form-hint">
                       ComfyUI UNET used when a message asks for a video. Leave empty to use
                       COMFYUI_VIDEO_UNET.
+                    </p>
+                  </div>
+                  <div className="form-group">
+                    <label htmlFor="model-audio">Audio Model</label>
+                    <select
+                      id="model-audio"
+                      value={modelAudio}
+                      onChange={(e) => setModelAudio(e.target.value)}
+                      className="form-select"
+                    >
+                      <option value="">Use server default</option>
+                      {Array.from(
+                        new Set([...AUDIO_MODEL_OPTIONS, modelAudio].filter(Boolean))
+                      ).map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="form-hint">
+                      ComfyUI checkpoint used when a message asks for audio.
                     </p>
                   </div>
                 </div>
