@@ -20,6 +20,7 @@ export type TrainQuality = {
   improvement: number;
   checkpoint: string;
   measured: boolean;
+  calibration: 'flux_health_bands' | 'uncalibrated';
 };
 
 export type DatasetConcern = 'too_few' | 'low_variety' | 'low_pose_variety' | 'mixed_subjects';
