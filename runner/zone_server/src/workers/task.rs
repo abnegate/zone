@@ -387,32 +387,26 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         return;
     }
 
-    let checkout = match crate::services::checkout::Checkout::prepare(
-        state.db(),
-        &task,
-        run_id,
-        owner,
-    )
-    .await
-    {
-        Ok(checkout) => checkout,
-        Err(error) => {
-            obs.set_status("failed");
-            if let Err(failure) = tasks::complete_owned_task_run(
-                state.db(),
-                run_id,
-                Some(owner),
-                "failed",
-                Some(&error),
-                None,
-            )
-            .await
-            {
-                tracing::error!(%run_id, %failure, "Failed to record checkout failure");
+    let checkout =
+        match crate::services::checkout::Checkout::prepare(state.db(), &task, execution).await {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                obs.set_status("failed");
+                if let Err(failure) = tasks::complete_owned_task_run(
+                    state.db(),
+                    run_id,
+                    Some(owner),
+                    "failed",
+                    Some(&error),
+                    None,
+                )
+                .await
+                {
+                    tracing::error!(%run_id, %failure, "Failed to record checkout failure");
+                }
+                return;
             }
-            return;
-        }
-    };
+        };
     let workspace_path = checkout.path().to_path_buf();
 
     let run = match tasks::get_task_run(state.db(), run_id).await {
@@ -544,7 +538,6 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
 
     match result {
         Ok(Ok(outcome)) => {
-            obs.set_status("completed");
             let summary = if outcome.summary.trim().is_empty() {
                 "Task completed".to_string()
             } else {
@@ -552,7 +545,7 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
             };
 
             tracing::info!(
-                "Task run {} completed: tool_calls={}",
+                "Task run {} agent loop finished: tool_calls={}",
                 run_id,
                 outcome.tool_calls
             );
@@ -564,62 +557,12 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
             ) {
                 return;
             }
-            let pr_info = match create_pr_for_task(state, execution, &workspace_path).await {
-                PrCreationResult::Created {
-                    pr_url,
-                    branch_name,
-                } => {
-                    tracing::info!("Created PR for task {}: {}", task_id, pr_url);
-                    Some(serde_json::json!({
-                        "pr_url": pr_url,
-                        "branch_name": branch_name,
-                    }))
-                }
-                PrCreationResult::NoChanges => {
-                    tracing::info!("No changes to create PR for task {}", task_id);
-                    None
-                }
-                PrCreationResult::NoRepository => {
-                    tracing::info!("No repository configured for task {}", task_id);
-                    None
-                }
-                PrCreationResult::PrAlreadyExists { pr_url } => {
-                    tracing::info!("PR already exists for task {}: {}", task_id, pr_url);
-                    Some(serde_json::json!({
-                        "pr_url": pr_url,
-                        "pr_already_existed": true,
-                    }))
-                }
-                PrCreationResult::Error(err) => {
-                    tracing::warn!("Failed to create PR for task {}: {}", task_id, err);
-                    Some(serde_json::json!({
-                        "pr_error": err,
-                    }))
-                }
-            };
-
-            // Build artifacts with PR info if available
-            let mut artifacts = serde_json::json!({
-                "tool_calls": outcome.tool_calls,
-                "summary": summary,
-            });
-
-            if let Some(pr) = pr_info {
-                artifacts["pr"] = pr;
-            }
-
-            if let Err(e) = tasks::complete_owned_task_run(
-                state.db(),
-                run_id,
-                Some(owner),
-                "completed",
-                None,
-                Some(artifacts),
-            )
-            .await
-            {
-                tracing::error!("CRITICAL: Failed to update run {} status: {}", run_id, e);
-            }
+            let publication =
+                create_pr_for_task(state, execution, &workspace_path, checkout.baseline()).await;
+            obs.set_status(
+                complete_publication(state, execution, summary, outcome.tool_calls, publication)
+                    .await,
+            );
         }
         Ok(Err(e)) => {
             obs.set_status("failed");
@@ -668,6 +611,86 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
 struct TaskOutcome {
     summary: String,
     tool_calls: usize,
+}
+
+pub(super) async fn complete_publication(
+    state: &AppState,
+    execution: tasks::Execution,
+    summary: String,
+    tool_calls: usize,
+    publication: PrCreationResult,
+) -> &'static str {
+    let failure = match &publication {
+        PrCreationResult::Error(error) => Some(error.clone()),
+        _ => None,
+    };
+    let status = if failure.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
+    let pr_info = match publication {
+        PrCreationResult::Created {
+            pr_url,
+            branch_name,
+        } => {
+            tracing::info!("Created PR for task {}: {}", execution.task, pr_url);
+            Some(serde_json::json!({
+                "pr_url": pr_url,
+                "branch_name": branch_name,
+            }))
+        }
+        PrCreationResult::NoChanges => {
+            tracing::info!("No changes to create PR for task {}", execution.task);
+            None
+        }
+        PrCreationResult::Sandbox => Some(serde_json::json!({"skipped": "legacy_sandbox"})),
+        PrCreationResult::NoRepository => {
+            tracing::info!("No repository configured for task {}", execution.task);
+            None
+        }
+        PrCreationResult::PrAlreadyExists { pr_url } => {
+            tracing::info!("PR already exists for task {}: {}", execution.task, pr_url);
+            Some(serde_json::json!({
+                "pr_url": pr_url,
+                "pr_already_existed": true,
+            }))
+        }
+        PrCreationResult::Error(err) => {
+            tracing::warn!("Failed to create PR for task {}: {}", execution.task, err);
+            Some(serde_json::json!({
+                "pr_error": err,
+            }))
+        }
+    };
+
+    // Build artifacts with PR info if available
+    let mut artifacts = serde_json::json!({
+        "tool_calls": tool_calls,
+        "summary": summary,
+    });
+
+    if let Some(pr) = pr_info {
+        artifacts["pr"] = pr;
+    }
+
+    if let Err(e) = tasks::complete_owned_task_run(
+        state.db(),
+        execution.run,
+        Some(execution.owner),
+        status,
+        failure.as_deref(),
+        Some(artifacts),
+    )
+    .await
+    {
+        tracing::error!(
+            "CRITICAL: Failed to update run {} status: {}",
+            execution.run,
+            e
+        );
+    }
+    status
 }
 
 async fn run_task_loop(

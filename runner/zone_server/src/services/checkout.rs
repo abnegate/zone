@@ -67,19 +67,76 @@ impl Repository {
     }
 }
 
+/// Immutable identity captured before any task tools can change the repository.
+#[derive(Clone, Debug)]
+pub struct Baseline {
+    pub repository: String,
+    pub branch: String,
+    pub commit: String,
+    pub base: String,
+}
+
+impl Baseline {
+    pub(crate) async fn prepare(
+        pool: &PgPool,
+        task: &TaskRow,
+        execution: tasks::Execution,
+        path: &Path,
+        repository: String,
+    ) -> Result<Self, String> {
+        if !execution
+            .authorized(pool, true)
+            .await
+            .map_err(|_| "Cannot verify checkout authority")?
+        {
+            return Err("Task checkout lost its execution lease or writer access".into());
+        }
+        let git = GitService::new();
+        let base = git
+            .revision(path, "HEAD")
+            .await
+            .map_err(|error| error.to_string())?;
+        let branch = task
+            .branch_name
+            .clone()
+            .unwrap_or_else(|| git.generate_branch_name(task.id, &task.title));
+        git.prepare_branch(path, &branch, task.pr_url.is_some())
+            .await
+            .map_err(|error| error.to_string())?;
+        let commit = git
+            .revision(path, "HEAD")
+            .await
+            .map_err(|error| error.to_string())?;
+        if !tasks::update_task_branch(pool, &execution, &branch)
+            .await
+            .map_err(|_| "Cannot record task branch")?
+        {
+            return Err("Task checkout no longer owns its branch metadata".into());
+        }
+        Ok(Self {
+            repository,
+            branch,
+            commit,
+            base,
+        })
+    }
+}
+
 pub struct Checkout {
     path: PathBuf,
+    baseline: Option<Baseline>,
 }
 
 impl Checkout {
     pub async fn prepare(
         pool: &PgPool,
         task: &TaskRow,
-        run: Uuid,
-        owner: Uuid,
+        execution: tasks::Execution,
     ) -> Result<Self, String> {
+        let tasks::Execution { run, owner, .. } = execution;
         let repository = Repository::resolve(pool, task).await?;
-        if !tasks::owns_task_run(pool, run, Some(owner))
+        if !execution
+            .authorized(pool, false)
             .await
             .map_err(|_| "Cannot verify checkout ownership")?
         {
@@ -87,7 +144,7 @@ impl Checkout {
         }
         // The run and owner are durable before a directory can exist. Recovery
         // derives names only from these identifiers, never from a stored path.
-        let checkout = Self::create(&Self::root(pool), run, owner)
+        let mut checkout = Self::create(&Self::root(pool), run, owner)
             .map_err(|_| "Cannot create task checkout".to_string())?;
         if let Some(repository) = repository {
             GitService::new()
@@ -98,6 +155,12 @@ impl Checkout {
                 )
                 .await
                 .map_err(|error| error.to_string())?;
+            if task.created_by.is_some() {
+                checkout.baseline = Some(
+                    Baseline::prepare(pool, task, execution, checkout.path(), repository.url)
+                        .await?,
+                );
+            }
         }
         Ok(checkout)
     }
@@ -165,7 +228,10 @@ impl Checkout {
         Self::validate_root(root)?;
         let path = root.join(format!("{run}.{owner}"));
         Self::directory(&path)?;
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            baseline: None,
+        })
     }
 
     /// Reap only this host's generated directories whose runs cannot execute.
@@ -256,6 +322,10 @@ impl Checkout {
             }
         }
         Ok(removed)
+    }
+
+    pub fn baseline(&self) -> Option<&Baseline> {
+        self.baseline.as_ref()
     }
 
     pub fn path(&self) -> &Path {
@@ -425,9 +495,18 @@ mod tests {
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
         assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
-        let checkout = Checkout::prepare(&pool, &task, run.id, owner)
-            .await
-            .unwrap();
+        let checkout = Checkout::prepare(
+            &pool,
+            &task,
+            tasks::Execution {
+                task: task.id,
+                run: run.id,
+                owner,
+                actor: None,
+            },
+        )
+        .await
+        .unwrap();
         std::fs::write(checkout.path().join("keep.txt"), "Live private content").unwrap();
         let removed = Checkout::recover(&other).await.unwrap();
         let preserved = checkout.path().join("keep.txt").exists();

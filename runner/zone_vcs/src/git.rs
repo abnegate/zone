@@ -223,6 +223,97 @@ impl GitService {
         Self::finish(&mut command).await
     }
 
+    /// Resume the task branch from a fresh clone without rewriting its history.
+    pub async fn prepare_branch(&self, path: &Path, branch: &str, required: bool) -> GitResult<()> {
+        let reference = format!("refs/heads/{branch}");
+        let valid =
+            Self::output(Self::network_command(None).args(["check-ref-format", &reference]))
+                .await?;
+        if !valid.status.success() || branch.starts_with('-') {
+            return Err(GitError::CommandFailed("Invalid task branch".into()));
+        }
+        let remote = format!("refs/remotes/origin/{branch}");
+        let exists = Self::output(
+            Self::network_command(None)
+                .args(["show-ref", "--verify", "--quiet", &remote])
+                .current_dir(path),
+        )
+        .await?;
+        if !exists.status.success() && (required || exists.status.code() != Some(1)) {
+            return Err(GitError::CommandFailed(
+                "Task branch is missing from the repository".into(),
+            ));
+        }
+        if self.current_branch(path).await? == branch {
+            return Ok(());
+        }
+        let mut command = Self::network_command(None);
+        command.args(["checkout", "-b", branch]);
+        if exists.status.success() {
+            command.arg(&remote);
+        }
+        command.arg("--").current_dir(path);
+        Self::finish(&mut command).await
+    }
+
+    /// Resolve a commit without reading a caller-controlled symbolic baseline later.
+    pub async fn revision(&self, path: &Path, reference: &str) -> GitResult<String> {
+        let output = Self::output(
+            Self::network_command(None)
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{reference}^{{commit}}"),
+                ])
+                .current_dir(path)
+                .stdout(Stdio::piped()),
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed("Checkout commit is missing".into()));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    pub async fn is_ancestor(&self, path: &Path, before: &str, after: &str) -> GitResult<bool> {
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["merge-base", "--is-ancestor", before, after])
+                .current_dir(path),
+        )
+        .await?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GitError::CommandFailed(
+                "Cannot verify checkout history".into(),
+            )),
+        }
+    }
+
+    /// Include changes already committed by task tools in the PR description.
+    pub async fn changed_files(&self, path: &Path, before: &str) -> GitResult<Vec<String>> {
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["diff", "--name-only", "-z", before, "HEAD", "--"])
+                .current_dir(path)
+                .stdout(Stdio::piped()),
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                "Cannot inspect task changes".into(),
+            ));
+        }
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect())
+    }
+
     /// Generate a branch name for a task
     ///
     /// Format: zone/task-{short_id}-{slug}
@@ -531,11 +622,53 @@ impl GitService {
         token: &str,
     ) -> GitResult<()> {
         let remote = Self::repository_url(remote_url)?;
+        self.push_source(path, branch_name, &remote, token, false)
+            .await
+    }
+
+    async fn push_source(
+        &self,
+        path: &Path,
+        branch_name: &str,
+        remote: &str,
+        token: &str,
+        local: bool,
+    ) -> GitResult<()> {
         let mut command = Self::network_command(Some(token));
+        if local {
+            #[cfg(test)]
+            command.env("GIT_ALLOW_PROTOCOL", "file");
+            #[cfg(not(test))]
+            return Err(GitError::CommandFailed(
+                "Local repositories are disabled".into(),
+            ));
+        }
         command
-            .args(["push", "--", &remote, branch_name])
-            .current_dir(path);
-        Self::finish(&mut command).await
+            .args([
+                "push",
+                "--porcelain",
+                "--",
+                remote,
+                &format!("HEAD:refs/heads/{branch_name}"),
+            ])
+            .current_dir(path)
+            .stdout(Stdio::piped());
+        let output = Self::output(&mut command).await?;
+        if output.status.success() {
+            return Ok(());
+        }
+        // Classify only Git's machine-readable status; never expose remote output
+        // or URLs that could contain credentials or untrusted server messages.
+        let rejected = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .any(|line| line.starts_with(b"!\t"));
+        Err(GitError::CommandFailed(if rejected {
+            "Git push rejected; remote history or policy changed. Retry from a fresh checkout"
+                .into()
+        } else {
+            "Git push failed; verify repository access".into()
+        }))
     }
 
     /// Get the default remote URL
@@ -858,5 +991,127 @@ mod process_tests {
     #[tokio::test]
     async fn timed_out_git_kills_helpers_and_preserves_unrelated_processes() {
         cancellation(true).await;
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    fn git(directory: &Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn branch_resumption_preserves_commits_and_normal_push_rejects_divergence() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        git(&source, &["init", "--initial-branch=main"]);
+        std::fs::write(source.join("initial"), "base").unwrap();
+        let service = GitService::new();
+        service.stage_all(&source).await.unwrap();
+        service.commit(&source, "initial").await.unwrap();
+        let remote = fixture.path().join("remote.git");
+        git(&source, &["clone", "--bare", ".", remote.to_str().unwrap()]);
+        let first = fixture.path().join("first");
+        service
+            .clone_source(remote.to_str().unwrap(), &first, None, true)
+            .await
+            .unwrap();
+        service
+            .prepare_branch(&first, "zone/task-test", false)
+            .await
+            .unwrap();
+        std::fs::write(first.join("first"), "first attempt").unwrap();
+        service.stage_all(&first).await.unwrap();
+        let first_commit = service.commit(&first, "first attempt").await.unwrap();
+        service
+            .push_source(
+                &first,
+                "zone/task-test",
+                remote.to_str().unwrap(),
+                "sensitive-token",
+                true,
+            )
+            .await
+            .unwrap();
+        let second = fixture.path().join("second");
+        service
+            .clone_source(remote.to_str().unwrap(), &second, None, true)
+            .await
+            .unwrap();
+        service
+            .prepare_branch(&second, "zone/task-test", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            service.revision(&second, "HEAD").await.unwrap(),
+            first_commit
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("first")).unwrap(),
+            "first attempt"
+        );
+        std::fs::write(second.join("second"), "second attempt").unwrap();
+        service.stage_all(&second).await.unwrap();
+        let second_commit = service.commit(&second, "second attempt").await.unwrap();
+        service
+            .push_source(
+                &second,
+                "zone/task-test",
+                remote.to_str().unwrap(),
+                "sensitive-token",
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            git(&remote, &["rev-parse", "zone/task-test"]),
+            second_commit
+        );
+        std::fs::write(first.join("concurrent"), "stale checkout").unwrap();
+        service.stage_all(&first).await.unwrap();
+        service.commit(&first, "concurrent attempt").await.unwrap();
+        let failure = service
+            .push_source(
+                &first,
+                "zone/task-test",
+                remote.to_str().unwrap(),
+                "sensitive-token",
+                true,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("Git push rejected"), "{failure}");
+        assert!(
+            !failure.contains("sensitive-token") && !failure.contains(remote.to_str().unwrap())
+        );
+        assert_eq!(
+            git(&remote, &["rev-parse", "zone/task-test"]),
+            second_commit
+        );
+        assert!(
+            !std::fs::read_to_string(first.join(".git/config"))
+                .unwrap()
+                .contains("sensitive-token")
+        );
+        assert!(
+            service
+                .is_ancestor(&second, &first_commit, "HEAD")
+                .await
+                .unwrap()
+        );
     }
 }
