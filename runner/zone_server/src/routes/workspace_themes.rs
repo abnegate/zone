@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{workspace_members, workspace_themes};
+use crate::db::workspace_themes;
 use crate::state::AppState;
 
 use super::common::Timestamps;
@@ -71,16 +71,22 @@ pub struct UpdateThemeRequest {
     border_radius: Option<String>,
 }
 
-/// A theme is the workspace's own branding, so it is readable by its members
-/// and writable by those who may write to it. Without this any account could
-/// rewrite or erase any tenant's branding by naming their workspace id.
-async fn authorize(
-    state: &AppState,
-    auth: &AuthUser,
-    workspace_id: Uuid,
-    write: bool,
-) -> Result<(), Box<Response>> {
-    let user_id = Uuid::parse_str(&auth.0.sub).map_err(|_| {
+impl UpdateThemeRequest {
+    fn update(&self) -> workspace_themes::Update<'_> {
+        workspace_themes::Update {
+            primary_color_light: self.primary_color_light.as_deref(),
+            secondary_color_light: self.secondary_color_light.as_deref(),
+            primary_color_dark: self.primary_color_dark.as_deref(),
+            secondary_color_dark: self.secondary_color_dark.as_deref(),
+            font_family: self.font_family.as_deref(),
+            font_size_base: self.font_size_base.as_deref(),
+            border_radius: self.border_radius.as_deref(),
+        }
+    }
+}
+
+fn caller(auth: &AuthUser) -> Result<Uuid, Box<Response>> {
+    Uuid::parse_str(&auth.0.sub).map_err(|_| {
         Box::new(
             (
                 StatusCode::UNAUTHORIZED,
@@ -88,43 +94,28 @@ async fn authorize(
             )
                 .into_response(),
         )
-    })?;
+    })
+}
 
-    let permitted = if write {
-        workspace_members::can_write(state.db(), workspace_id, user_id).await
-    } else {
-        workspace_members::is_member(state.db(), user_id, workspace_id).await
-    }
-    .map_err(|error| {
-        tracing::error!("Database error: {error}");
-        Box::new(
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
+fn access_error(error: workspace_themes::AccessError) -> Box<Response> {
+    match error {
+        workspace_themes::AccessError::Forbidden(message) => {
+            Box::new((StatusCode::FORBIDDEN, Json(ErrorResponse::new(message))).into_response())
+        }
+        workspace_themes::AccessError::NotFound(message) => {
+            Box::new((StatusCode::NOT_FOUND, Json(ErrorResponse::new(message))).into_response())
+        }
+        workspace_themes::AccessError::Database(error) => {
+            tracing::error!("Database error: {error}");
+            Box::new(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse::new("Internal server error")),
+                )
+                    .into_response(),
             )
-                .into_response(),
-        )
-    })?;
-
-    if permitted {
-        return Ok(());
+        }
     }
-
-    Err(Box::new(if write {
-        (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse::new(
-                "You do not have write access to this workspace",
-            )),
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Workspace not found")),
-        )
-            .into_response()
-    }))
 }
 
 /// GET /api/workspaces/:id/theme
@@ -138,10 +129,11 @@ pub async fn get(
     auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize(&state, &auth, workspace_id, false).await {
-        return *response;
-    }
-    match workspace_themes::get_theme(state.db(), workspace_id).await {
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match workspace_themes::get_authorized(state.db(), workspace_id, user_id).await {
         Ok(Some(theme)) => Json(SingleThemeResponse {
             theme: ThemeResponse::from(theme),
         })
@@ -151,14 +143,7 @@ pub async fn get(
             Json(ErrorResponse::new("Theme not found")),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
 
@@ -169,34 +154,17 @@ pub async fn upsert(
     Path(workspace_id): Path<Uuid>,
     Json(req): Json<UpdateThemeRequest>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize(&state, &auth, workspace_id, true).await {
-        return *response;
-    }
-    match workspace_themes::upsert_theme(
-        state.db(),
-        workspace_id,
-        req.primary_color_light.as_deref(),
-        req.secondary_color_light.as_deref(),
-        req.primary_color_dark.as_deref(),
-        req.secondary_color_dark.as_deref(),
-        req.font_family.as_deref(),
-        req.font_size_base.as_deref(),
-        req.border_radius.as_deref(),
-    )
-    .await
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match workspace_themes::upsert_authorized(state.db(), workspace_id, user_id, req.update()).await
     {
         Ok(theme) => Json(SingleThemeResponse {
             theme: ThemeResponse::from(theme),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
 
@@ -206,23 +174,17 @@ pub async fn delete(
     auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize(&state, &auth, workspace_id, true).await {
-        return *response;
-    }
-    match workspace_themes::delete_theme(state.db(), workspace_id).await {
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match workspace_themes::delete_authorized(state.db(), workspace_id, user_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Theme not found")),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }

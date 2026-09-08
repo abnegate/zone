@@ -8,16 +8,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zone_context::embeddings::providers::{
-    PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
-};
+use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
 
 use crate::auth::AuthUser;
-use crate::db::{ai_settings, organization_members, workspace_members};
+use crate::db::ai_settings;
 use crate::state::AppState;
-
-// Anthropic provider constant (not in zone_context yet)
-const PROVIDER_ANTHROPIC: &str = "anthropic";
 
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
@@ -149,9 +144,29 @@ pub struct UpdateAiSettingsRequest {
     pub model_audio: Option<String>,
 }
 
-// ============================================================================
-// Organization AI Settings Endpoints
-// ============================================================================
+impl UpdateAiSettingsRequest {
+    fn update(&self) -> ai_settings::Update<'_> {
+        ai_settings::Update {
+            provider: self.provider.as_deref(),
+            litellm_host: self.litellm_host.as_deref(),
+            litellm_key: self.litellm_key.as_deref(),
+            openai_api_key: self.openai_api_key.as_deref(),
+            openai_base_url: self.openai_base_url.as_deref(),
+            anthropic_api_key: self.anthropic_api_key.as_deref(),
+            anthropic_base_url: self.anthropic_base_url.as_deref(),
+            bedrock_region: self.bedrock_region.as_deref(),
+            bedrock_access_key: self.bedrock_access_key.as_deref(),
+            bedrock_secret_key: self.bedrock_secret_key.as_deref(),
+            bedrock_use_iam_role: self.bedrock_use_iam_role,
+            model_fast: self.model_fast.as_deref(),
+            model_reasoning: self.model_reasoning.as_deref(),
+            model_embedding: self.model_embedding.as_deref(),
+            model_image: self.model_image.as_deref(),
+            model_video: self.model_video.as_deref(),
+            model_audio: self.model_audio.as_deref(),
+        }
+    }
+}
 
 fn denied(status: StatusCode, message: &str) -> Box<Response> {
     Box::new((status, Json(ErrorResponse::new(message))).into_response())
@@ -167,59 +182,12 @@ fn caller(auth: &AuthUser) -> Result<Uuid, Box<Response>> {
         .map_err(|_| denied(StatusCode::UNAUTHORIZED, "Invalid user ID in token"))
 }
 
-/// These settings name the host every model call is sent to and hold the key
-/// sent with it, so an unscoped write here does not just corrupt a tenant's
-/// configuration -- it redirects their chat and knowledge text, and their
-/// provider key, to a host of the caller's choosing. Reading is limited to
-/// members; writing to admins, matching who may change billing.
-async fn authorize_org(
-    state: &AppState,
-    auth: &AuthUser,
-    org_id: Uuid,
-    write: bool,
-) -> Result<(), Box<Response>> {
-    let user_id = caller(auth)?;
-
-    let permitted = if write {
-        organization_members::is_admin(state.db(), org_id, user_id).await
-    } else {
-        organization_members::is_member(state.db(), org_id, user_id).await
-    }
-    .map_err(database_error)?;
-
-    if permitted {
-        Ok(())
-    } else if write {
-        Err(denied(
-            StatusCode::FORBIDDEN,
-            "Only organization admins can change AI settings",
-        ))
-    } else {
-        Err(denied(StatusCode::NOT_FOUND, "Organization not found"))
-    }
-}
-
-/// The workspace has to be checked as well as the organization: the path
-/// carries both, and nothing else ties the two together, so an admin of their
-/// own organization could otherwise name any workspace id in the world.
-async fn authorize_workspace(
-    state: &AppState,
-    auth: &AuthUser,
-    org_id: Uuid,
-    workspace_id: Uuid,
-    write: bool,
-) -> Result<(), Box<Response>> {
-    authorize_org(state, auth, org_id, write).await?;
-
-    let user_id = caller(auth)?;
-    let member = workspace_members::is_member(state.db(), user_id, workspace_id)
-        .await
-        .map_err(database_error)?;
-
-    if member {
-        Ok(())
-    } else {
-        Err(denied(StatusCode::NOT_FOUND, "Workspace not found"))
+fn access_error(error: ai_settings::AccessError) -> Box<Response> {
+    match error {
+        ai_settings::AccessError::Forbidden(message) => denied(StatusCode::FORBIDDEN, message),
+        ai_settings::AccessError::NotFound(message) => denied(StatusCode::NOT_FOUND, message),
+        ai_settings::AccessError::Invalid(message) => denied(StatusCode::BAD_REQUEST, &message),
+        ai_settings::AccessError::Database(error) => database_error(error),
     }
 }
 
@@ -229,10 +197,11 @@ pub async fn get_org(
     auth: AuthUser,
     Path(org_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_org(&state, &auth, org_id, false).await {
-        return *response;
-    }
-    match ai_settings::get_org_ai_settings(state.db(), org_id).await {
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match ai_settings::get_org_authorized(state.db(), org_id, user_id).await {
         Ok(Some(settings)) => Json(AiSettingsResponse::from(settings)).into_response(),
         Ok(None) => {
             // Return default settings if none exist
@@ -256,14 +225,7 @@ pub async fn get_org(
             })
             .into_response()
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
 
@@ -274,61 +236,13 @@ pub async fn upsert_org(
     Path(org_id): Path<Uuid>,
     Json(req): Json<UpdateAiSettingsRequest>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_org(&state, &auth, org_id, true).await {
-        return *response;
-    }
-    // Validate provider if provided
-    if let Some(ref provider) = req.provider
-        && ![
-            PROVIDER_SELF_HOSTED,
-            PROVIDER_OPENAI,
-            PROVIDER_ANTHROPIC,
-            PROVIDER_BEDROCK,
-        ]
-        .contains(&provider.as_str())
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "Invalid provider. Must be one of: {}, {}, {}, {}",
-                PROVIDER_SELF_HOSTED, PROVIDER_OPENAI, PROVIDER_ANTHROPIC, PROVIDER_BEDROCK
-            ))),
-        )
-            .into_response();
-    }
-
-    match ai_settings::upsert_org_ai_settings(
-        state.db(),
-        org_id,
-        req.provider.as_deref(),
-        req.litellm_host.as_deref(),
-        req.litellm_key.as_deref(),
-        req.openai_api_key.as_deref(),
-        req.openai_base_url.as_deref(),
-        req.anthropic_api_key.as_deref(),
-        req.anthropic_base_url.as_deref(),
-        req.bedrock_region.as_deref(),
-        req.bedrock_access_key.as_deref(),
-        req.bedrock_secret_key.as_deref(),
-        req.bedrock_use_iam_role,
-        req.model_fast.as_deref(),
-        req.model_reasoning.as_deref(),
-        req.model_embedding.as_deref(),
-        req.model_image.as_deref(),
-        req.model_video.as_deref(),
-        req.model_audio.as_deref(),
-    )
-    .await
-    {
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match ai_settings::upsert_org_authorized(state.db(), org_id, user_id, req.update()).await {
         Ok(settings) => Json(AiSettingsResponse::from(settings)).into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
 
@@ -338,30 +252,20 @@ pub async fn delete_org(
     auth: AuthUser,
     Path(org_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_org(&state, &auth, org_id, true).await {
-        return *response;
-    }
-    match ai_settings::delete_org_ai_settings(state.db(), org_id).await {
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match ai_settings::delete_org_authorized(state.db(), org_id, user_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("AI settings not found")),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
-
-// ============================================================================
-// Workspace AI Settings Endpoints
-// ============================================================================
 
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceAiSettingsPath {
@@ -375,11 +279,12 @@ pub async fn get_workspace(
     auth: AuthUser,
     Path(path): Path<WorkspaceAiSettingsPath>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_workspace(&state, &auth, path.org_id, path.ws_id, false).await
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match ai_settings::get_workspace_authorized(state.db(), path.org_id, path.ws_id, user_id).await
     {
-        return *response;
-    }
-    match ai_settings::get_workspace_ai_settings(state.db(), path.ws_id).await {
         Ok(Some(settings)) => Json(AiSettingsResponse::from(settings)).into_response(),
         Ok(None) => {
             // Return empty response indicating workspace inherits from org
@@ -403,14 +308,7 @@ pub async fn get_workspace(
             })
             .into_response()
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
 
@@ -421,61 +319,21 @@ pub async fn upsert_workspace(
     Path(path): Path<WorkspaceAiSettingsPath>,
     Json(req): Json<UpdateAiSettingsRequest>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_workspace(&state, &auth, path.org_id, path.ws_id, true).await {
-        return *response;
-    }
-    // Validate provider if provided
-    if let Some(ref provider) = req.provider
-        && ![
-            PROVIDER_SELF_HOSTED,
-            PROVIDER_OPENAI,
-            PROVIDER_ANTHROPIC,
-            PROVIDER_BEDROCK,
-        ]
-        .contains(&provider.as_str())
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse::new(format!(
-                "Invalid provider. Must be one of: {}, {}, {}, {}",
-                PROVIDER_SELF_HOSTED, PROVIDER_OPENAI, PROVIDER_ANTHROPIC, PROVIDER_BEDROCK
-            ))),
-        )
-            .into_response();
-    }
-
-    match ai_settings::upsert_workspace_ai_settings(
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match ai_settings::upsert_workspace_authorized(
         state.db(),
+        path.org_id,
         path.ws_id,
-        req.provider.as_deref(),
-        req.litellm_host.as_deref(),
-        req.litellm_key.as_deref(),
-        req.openai_api_key.as_deref(),
-        req.openai_base_url.as_deref(),
-        req.anthropic_api_key.as_deref(),
-        req.anthropic_base_url.as_deref(),
-        req.bedrock_region.as_deref(),
-        req.bedrock_access_key.as_deref(),
-        req.bedrock_secret_key.as_deref(),
-        req.bedrock_use_iam_role,
-        req.model_fast.as_deref(),
-        req.model_reasoning.as_deref(),
-        req.model_embedding.as_deref(),
-        req.model_image.as_deref(),
-        req.model_video.as_deref(),
-        req.model_audio.as_deref(),
+        user_id,
+        req.update(),
     )
     .await
     {
         Ok(settings) => Json(AiSettingsResponse::from(settings)).into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
 
@@ -485,24 +343,20 @@ pub async fn delete_workspace(
     auth: AuthUser,
     Path(path): Path<WorkspaceAiSettingsPath>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_workspace(&state, &auth, path.org_id, path.ws_id, true).await {
-        return *response;
-    }
-    match ai_settings::delete_workspace_ai_settings(state.db(), path.ws_id).await {
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match ai_settings::delete_workspace_authorized(state.db(), path.org_id, path.ws_id, user_id)
+        .await
+    {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("AI settings not found")),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
 
@@ -512,19 +366,13 @@ pub async fn get_effective(
     auth: AuthUser,
     Path(path): Path<WorkspaceAiSettingsPath>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_workspace(&state, &auth, path.org_id, path.ws_id, false).await
+    let user_id = match caller(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match ai_settings::get_effective_authorized(state.db(), path.org_id, path.ws_id, user_id).await
     {
-        return *response;
-    }
-    match ai_settings::get_effective_ai_settings(state.db(), path.org_id, path.ws_id).await {
         Ok(settings) => Json(AiSettingsResponse::from(settings)).into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *access_error(error),
     }
 }
