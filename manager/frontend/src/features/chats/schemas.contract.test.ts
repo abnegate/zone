@@ -17,12 +17,12 @@ import { CitationSchema, MessageMetadataSchema } from './schemas';
 
 const CITATIONS_RS = join(
   import.meta.dir,
-  '../../../../../runner/zone_server/src/agent/citations.rs',
+  '../../../../../runner/zone_server/src/agent/citations.rs'
 );
 
 const PROVENANCE_RS = join(
   import.meta.dir,
-  '../../../../../runner/zone_server/src/agent/verification/provenance.rs',
+  '../../../../../runner/zone_server/src/agent/verification/provenance.rs'
 );
 
 function rustVariants(source: string, enumName: string): string[] {
@@ -60,7 +60,7 @@ describe('the console mirrors the server enums', () => {
 
   test('CitationOutcome variants match', () => {
     expect(zodOptions(CitationSchema, 'outcome')).toEqual(
-      rustVariants(source, 'CitationOutcome').sort(),
+      rustVariants(source, 'CitationOutcome').sort()
     );
   });
 
@@ -71,7 +71,7 @@ describe('the console mirrors the server enums', () => {
 
     expect(rust).toEqual(['model_asserted', 'server_execution']);
     expect(CitationSchema.parse({ ...sample, provenance: 'model_asserted' }).provenance).toBe(
-      'model_asserted',
+      'model_asserted'
     );
   });
 });
@@ -82,9 +82,9 @@ describe('an unreadable provenance is never shown as proof', () => {
   });
 
   test('a value this client does not recognise is demoted to a claim', () => {
-    expect(
-      CitationSchema.parse({ ...sample, provenance: 'attested_by_vibes' }).provenance,
-    ).toBe('model_asserted');
+    expect(CitationSchema.parse({ ...sample, provenance: 'attested_by_vibes' }).provenance).toBe(
+      'model_asserted'
+    );
   });
 });
 

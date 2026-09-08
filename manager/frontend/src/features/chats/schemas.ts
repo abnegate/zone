@@ -28,14 +28,12 @@ export const ToolCallRecordSchema = z.object({
  * unopenable, since the value is persisted in messages.metadata.
  */
 function tolerantArray<T extends z.ZodTypeAny>(element: T) {
-  return z
-    .array(z.unknown())
-    .transform((items) =>
-      items
-        .map((item) => element.safeParse(item))
-        .filter((result): result is { success: true; data: z.infer<T> } => result.success)
-        .map((result) => result.data),
-    );
+  return z.array(z.unknown()).transform((items) =>
+    items
+      .map((item) => element.safeParse(item))
+      .filter((result): result is { success: true; data: z.infer<T> } => result.success)
+      .map((result) => result.data)
+  );
 }
 
 export const CitationSchema = z.object({
