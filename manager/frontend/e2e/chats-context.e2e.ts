@@ -158,6 +158,7 @@ for (const width of [1280, 390]) {
 }
 
 test('empty chat previews and context updates survive adversarial frame ordering', async ({
+  browserName,
   context,
   page,
 }) => {
@@ -193,9 +194,10 @@ test('empty chat previews and context updates survive adversarial frame ordering
   await expect(page.getByRole('region', { name: 'Context usage details' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(meter).toBeFocused();
-  await page.keyboard.press('Tab');
+  const forwardTab = browserName === 'webkit' ? 'Alt+Tab' : 'Tab';
+  await page.keyboard.press(forwardTab);
   await expect(page.getByRole('button', { name: 'Attach files' })).toBeFocused();
-  await page.keyboard.press('Tab');
+  await page.keyboard.press(forwardTab);
   await expect(input).toBeFocused();
   hold = true;
   await page.keyboard.type('First draft');
