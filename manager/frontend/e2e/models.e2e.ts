@@ -1,8 +1,34 @@
 import { test, expect } from './fixtures';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { setupAuth, blockServiceWorker, routeApi } from './test-utils';
 
-const mockInstalledModels = [
+type InstalledModel = {
+  name: string;
+  size: number;
+  modified_at: string;
+  capabilities?: string[];
+  completion?: boolean;
+  ready?: boolean;
+  recipe_id?: string;
+  required_files?: string[];
+  details?: { family?: string; description?: string; format?: string };
+};
+
+type TrainImage = {
+  filename: string;
+  caption: string;
+  bytes_base64: string;
+  before_base64?: string;
+};
+
+type TrainRequest = {
+  name: string;
+  base: string;
+  trigger?: string;
+  images: TrainImage[];
+};
+
+const mockInstalledModels: InstalledModel[] = [
   {
     name: 'llama3.2:latest',
     size: 4661224448,
@@ -29,15 +55,39 @@ const mockInstalledModels = [
   },
 ];
 
+const PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
 const mockBrowseModels = [
   { id: 'llama3.2', name: 'llama3.2', description: 'Meta Llama 3.2', downloads: 1500000, details: { family: 'llama', parameter_size: '3.2B' } },
   { id: 'mistral', name: 'mistral', description: 'Mistral AI 7B', downloads: 800000, details: { family: 'mistral', parameter_size: '7B' } },
   { id: 'codellama', name: 'codellama', description: 'Code Llama', downloads: 500000, details: { family: 'llama' } },
 ];
 
+function trainedAdapter(name: string): InstalledModel {
+  return {
+    name: `${name}.safetensors`,
+    size: 132120576,
+    modified_at: '2024-01-20T12:00:00Z',
+    capabilities: ['image_generation'],
+    ready: true,
+    details: { format: 'lora', family: 'flux-adapter' },
+  };
+}
+
+function trainRequests(page: Page): TrainRequest[] {
+  const requests: TrainRequest[] = [];
+  page.on('request', (request) => {
+    if (request.method() !== 'POST') return;
+    if (new URL(request.url()).pathname !== '/api/models/train') return;
+    requests.push(request.postDataJSON() as TrainRequest);
+  });
+  return requests;
+}
+
 // Setup API routes for models page
-async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof mockBrowseModels; installedModels?: typeof mockInstalledModels }) {
-  const installedModels = options?.installedModels ?? mockInstalledModels;
+async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof mockBrowseModels; installedModels?: InstalledModel[] }): Promise<void> {
+  const installedModels = [...(options?.installedModels ?? mockInstalledModels)];
   const browseModels = options?.browseModels ?? mockBrowseModels;
 
   // Use glob pattern that matches any URL containing /api/models
@@ -86,6 +136,24 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
           body: JSON.stringify({ models: installedModels }),
         });
       }
+    } else if (method === 'POST' && url.includes('/api/models/train/captions')) {
+      const body = route.request().postDataJSON() as { images: TrainImage[] };
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          captions: body.images.map((_, index) => `a photo, frame ${index + 1}`),
+        }),
+      });
+    } else if (method === 'POST' && url.includes('/api/models/train')) {
+      const body = route.request().postDataJSON() as TrainRequest;
+      const adapter = trainedAdapter(body.name);
+      installedModels.push(adapter);
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ filename: adapter.name }),
+      });
     } else if (method === 'DELETE') {
       route.fulfill({ status: 200, body: '' });
     } else {
@@ -133,6 +201,12 @@ async function setupModelsRoutes(page: Page, options?: { browseModels?: typeof m
       }),
     });
   });
+}
+
+function trainPanel(page: Page): Locator {
+  return page
+    .locator('.card')
+    .filter({ has: page.getByRole('heading', { name: 'Train a LoRA' }) });
 }
 
 // Helper to switch to browse tab and wait for it to load
@@ -212,6 +286,67 @@ test.describe('Models Page', () => {
     await expect(page.getByRole('heading', { name: 'Train a LoRA' })).toBeVisible();
     await expect(page.getByText('Drop images, pick an installed base')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Train' })).toBeVisible();
+  });
+
+  test('submits a LoRA and lists the trained adapter', async ({ page }) => {
+    const requests = trainRequests(page);
+    const panel = trainPanel(page);
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await expect(panel.getByLabel('Base')).toContainText('FLUX.1 Schnell');
+
+    await panel.getByLabel('Name', { exact: true }).fill('zoneface');
+    await panel.getByLabel('Trigger word').fill('zne person');
+    await panel.locator('input[type="file"]').setInputFiles({
+      name: 'portrait.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+
+    const submit = panel.getByRole('button', { name: 'Train' });
+    await expect(submit).toBeEnabled();
+    await submit.click();
+
+    await expect.poll(() => requests.length).toBe(1);
+    const [body] = requests;
+    expect(body.name).toBe('zoneface');
+    expect(body.base).toBe('flux-schnell');
+    expect(body.trigger).toBe('zne person');
+    expect(body.images).toHaveLength(1);
+    expect(body.images[0].filename).toBe('portrait.png');
+    expect(body.images[0].bytes_base64).toBe(PNG_BASE64);
+
+    await expect(panel.getByLabel('Name', { exact: true })).toHaveValue('');
+    await expect(panel.getByLabel('Caption for portrait.png')).toHaveCount(0);
+    await expect(submit).toBeDisabled();
+
+    await page.getByRole('tab', { name: 'Installed' }).click();
+    await expect(page.locator('.model-item')).toHaveCount(4);
+    await expect(page.locator('.model-name').last()).toHaveText('zoneface.safetensors');
+  });
+
+  test('refuses to train without a trigger word', async ({ page }) => {
+    const requests = trainRequests(page);
+    const panel = trainPanel(page);
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await panel.getByLabel('Name', { exact: true }).fill('zoneface');
+    await panel.locator('input[type="file"]').setInputFiles({
+      name: 'portrait.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+    await expect(panel.getByLabel('Caption for portrait.png')).toBeVisible();
+
+    const submit = panel.getByRole('button', { name: 'Train' });
+    await expect(submit).toBeDisabled();
+
+    await panel.getByLabel('Trigger word').fill('zne person');
+    await expect(submit).toBeEnabled();
+    await panel.getByLabel('Trigger word').fill('');
+    await expect(submit).toBeDisabled();
+
+    expect(requests).toHaveLength(0);
   });
 
   test('displays installed models', async ({ page }) => {
