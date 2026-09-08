@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::auth::validate_token;
-use crate::db::tasks;
+use crate::db::{tasks, workspace_members};
 use crate::state::AppState;
 
 /// Progress message sent to clients
@@ -129,6 +129,30 @@ pub async fn handle_task_ws(
     ws.on_upgrade(move |socket| handle_socket(socket, state, run_id))
 }
 
+/// Whether the bound identity may watch this run.
+///
+/// Validating the token proves who is calling and nothing about what they may
+/// see. Without this step the run id is the only credential, and any account
+/// can stream another tenant's agent logs -- which carry command output, file
+/// contents and diffs from their repository.
+async fn authorized(state: &AppState, subject: &str, run_id: Uuid) -> bool {
+    let Ok(user_id) = Uuid::parse_str(subject) else {
+        return false;
+    };
+
+    let Ok(Some(run)) = tasks::get_task_run(state.db(), run_id).await else {
+        return false;
+    };
+
+    let Ok(Some(task)) = tasks::get_task(state.db(), run.task_id).await else {
+        return false;
+    };
+
+    workspace_members::is_member(state.db(), user_id, task.workspace_id)
+        .await
+        .unwrap_or(false)
+}
+
 /// Handle the WebSocket connection
 async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
@@ -140,7 +164,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                 match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(ClientMessage::Auth { token }) => {
                         match validate_token(&token, state.config().jwt_secret()) {
-                            Ok(_claims) => true,
+                            Ok(claims) => authorized(&state, &claims.sub, run_id).await,
                             Err(e) => {
                                 let msg = ProgressMessage::Error {
                                     message: format!("Authentication failed: {}", e),

@@ -4,13 +4,13 @@ use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::workspace_themes;
+use crate::db::{workspace_members, workspace_themes};
 use crate::state::AppState;
 
 use super::common::Timestamps;
@@ -71,6 +71,62 @@ pub struct UpdateThemeRequest {
     border_radius: Option<String>,
 }
 
+/// A theme is the workspace's own branding, so it is readable by its members
+/// and writable by those who may write to it. Without this any account could
+/// rewrite or erase any tenant's branding by naming their workspace id.
+async fn authorize(
+    state: &AppState,
+    auth: &AuthUser,
+    workspace_id: Uuid,
+    write: bool,
+) -> Result<(), Box<Response>> {
+    let user_id = Uuid::parse_str(&auth.0.sub).map_err(|_| {
+        Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::new("Invalid user ID in token")),
+            )
+                .into_response(),
+        )
+    })?;
+
+    let permitted = if write {
+        workspace_members::can_write(state.db(), workspace_id, user_id).await
+    } else {
+        workspace_members::is_member(state.db(), user_id, workspace_id).await
+    }
+    .map_err(|error| {
+        tracing::error!("Database error: {error}");
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response(),
+        )
+    })?;
+
+    if permitted {
+        return Ok(());
+    }
+
+    Err(Box::new(if write {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "You do not have write access to this workspace",
+            )),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Workspace not found")),
+        )
+            .into_response()
+    }))
+}
+
 /// GET /api/workspaces/:id/theme
 #[derive(Debug, Serialize)]
 struct SingleThemeResponse {
@@ -79,9 +135,12 @@ struct SingleThemeResponse {
 
 pub async fn get(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize(&state, &auth, workspace_id, false).await {
+        return *response;
+    }
     match workspace_themes::get_theme(state.db(), workspace_id).await {
         Ok(Some(theme)) => Json(SingleThemeResponse {
             theme: ThemeResponse::from(theme),
@@ -106,10 +165,13 @@ pub async fn get(
 /// PUT /api/workspaces/:id/theme
 pub async fn upsert(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
     Json(req): Json<UpdateThemeRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize(&state, &auth, workspace_id, true).await {
+        return *response;
+    }
     match workspace_themes::upsert_theme(
         state.db(),
         workspace_id,
@@ -141,9 +203,12 @@ pub async fn upsert(
 /// DELETE /api/workspaces/:id/theme
 pub async fn delete(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize(&state, &auth, workspace_id, true).await {
+        return *response;
+    }
     match workspace_themes::delete_theme(state.db(), workspace_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (

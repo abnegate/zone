@@ -4,13 +4,13 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{sources, tasks};
+use crate::db::{sources, tasks, workspace_members};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
@@ -224,13 +224,110 @@ pub struct UpdateTaskRequest {
     project_ids: Option<Vec<Uuid>>,
 }
 
+/// Whether the caller only reads the resource or changes it.
+#[derive(Clone, Copy)]
+enum Access {
+    Read,
+    Write,
+}
+
+fn denied(status: StatusCode, message: &str) -> Box<Response> {
+    Box::new((status, Json(ErrorResponse::new(message))).into_response())
+}
+
+fn database_error(error: impl std::fmt::Display) -> Box<Response> {
+    tracing::error!("Database error: {error}");
+    denied(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+}
+
+/// Every handler in this module addresses a task, run, or workspace by an id
+/// taken straight from the request, and the queries behind them are keyed on
+/// that id alone. Without this the id is the only credential: any account can
+/// read, rewrite, delete, and start agent runs in any other tenant's
+/// workspace.
+///
+/// A caller who is not a member is told the resource does not exist, so the
+/// endpoints cannot be used to enumerate ids across tenants.
+async fn authorize_workspace(
+    state: &AppState,
+    auth: &AuthUser,
+    workspace_id: Uuid,
+    access: Access,
+    missing: &str,
+) -> Result<(), Box<Response>> {
+    let user_id = Uuid::parse_str(&auth.0.sub)
+        .map_err(|_| denied(StatusCode::UNAUTHORIZED, "Invalid user ID in token"))?;
+
+    let permitted = match access {
+        Access::Read => workspace_members::is_member(state.db(), user_id, workspace_id).await,
+        Access::Write => workspace_members::can_write(state.db(), workspace_id, user_id).await,
+    }
+    .map_err(database_error)?;
+
+    if permitted {
+        return Ok(());
+    }
+
+    match access {
+        Access::Read => Err(denied(StatusCode::NOT_FOUND, missing)),
+        Access::Write => Err(denied(
+            StatusCode::FORBIDDEN,
+            "You do not have write access to this workspace",
+        )),
+    }
+}
+
+async fn authorize_task(
+    state: &AppState,
+    auth: &AuthUser,
+    task_id: Uuid,
+    access: Access,
+) -> Result<(), Box<Response>> {
+    let task = tasks::get_task(state.db(), task_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task not found"))?;
+
+    authorize_workspace(state, auth, task.workspace_id, access, "Task not found").await
+}
+
+async fn authorize_run(
+    state: &AppState,
+    auth: &AuthUser,
+    run_id: Uuid,
+    access: Access,
+) -> Result<(), Box<Response>> {
+    let run = tasks::get_task_run(state.db(), run_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task run not found"))?;
+
+    let task = tasks::get_task(state.db(), run.task_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task run not found"))?;
+
+    authorize_workspace(state, auth, task.workspace_id, access, "Task run not found").await
+}
+
 /// GET /api/workspaces/:workspace_id/tasks
 pub async fn list(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_workspace(
+        &state,
+        &auth,
+        workspace_id,
+        Access::Read,
+        "Workspace not found",
+    )
+    .await
+    {
+        return *response;
+    }
     match tasks::list_tasks(
         state.db(),
         workspace_id,
@@ -257,10 +354,21 @@ pub async fn list(
 /// POST /api/workspaces/:workspace_id/tasks
 pub async fn create(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
     Json(request): Json<CreateTaskRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_workspace(
+        &state,
+        &auth,
+        workspace_id,
+        Access::Write,
+        "Workspace not found",
+    )
+    .await
+    {
+        return *response;
+    }
     if let Some(source_id) = request.source_id {
         match sources::get_source(state.db(), source_id, workspace_id).await {
             Ok(Some(_)) => {}
@@ -312,9 +420,12 @@ pub async fn create(
 /// GET /api/tasks/:id
 pub async fn get(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_task(&state, &auth, id, Access::Read).await {
+        return *response;
+    }
     match tasks::get_task(state.db(), id).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
         Ok(None) => (
@@ -336,10 +447,13 @@ pub async fn get(
 /// PUT /api/tasks/:id
 pub async fn update(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTaskRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_task(&state, &auth, id, Access::Write).await {
+        return *response;
+    }
     match tasks::update_task(
         state.db(),
         id,
@@ -372,9 +486,12 @@ pub async fn update(
 /// DELETE /api/tasks/:id
 pub async fn delete(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_task(&state, &auth, id, Access::Write).await {
+        return *response;
+    }
     match tasks::delete_task(state.db(), id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
@@ -396,9 +513,12 @@ pub async fn delete(
 /// POST /api/tasks/:id/queue
 pub async fn queue(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_task(&state, &auth, id, Access::Write).await {
+        return *response;
+    }
     match tasks::queue_task(state.db(), id).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
         Ok(None) => (
@@ -420,9 +540,12 @@ pub async fn queue(
 /// GET /api/tasks/:id/runs
 pub async fn list_runs(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_task(&state, &auth, id, Access::Read).await {
+        return *response;
+    }
     match tasks::list_task_runs(state.db(), id).await {
         Ok(runs) => Json(TaskRunsListResponse {
             runs: runs.into_iter().map(TaskRunData::from).collect(),
@@ -442,9 +565,12 @@ pub async fn list_runs(
 /// POST /api/tasks/:id/runs
 pub async fn create_run(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_task(&state, &auth, id, Access::Write).await {
+        return *response;
+    }
     // Check if there's already a running task run for this task
     // This prevents duplicate concurrent executions
     match tasks::list_task_runs(state.db(), id).await {
@@ -496,9 +622,12 @@ pub async fn create_run(
 /// GET /api/tasks/runs/:run_id
 pub async fn get_run(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_run(&state, &auth, run_id, Access::Read).await {
+        return *response;
+    }
     match tasks::get_task_run(state.db(), run_id).await {
         Ok(Some(run)) => Json(TaskRunResponse::from(run)).into_response(),
         Ok(None) => (
@@ -520,9 +649,12 @@ pub async fn get_run(
 /// GET /api/tasks/runs/:run_id/logs
 pub async fn get_run_logs(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_run(&state, &auth, run_id, Access::Read).await {
+        return *response;
+    }
     match tasks::get_task_run_logs(state.db(), run_id).await {
         Ok(logs) => Json(TaskRunLogsListResponse {
             logs: logs.into_iter().map(TaskRunLogData::from).collect(),

@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -13,7 +13,7 @@ use zone_context::embeddings::providers::{
 };
 
 use crate::auth::AuthUser;
-use crate::db::ai_settings;
+use crate::db::{ai_settings, organization_members, workspace_members};
 use crate::state::AppState;
 
 // Anthropic provider constant (not in zone_context yet)
@@ -153,12 +153,85 @@ pub struct UpdateAiSettingsRequest {
 // Organization AI Settings Endpoints
 // ============================================================================
 
+fn denied(status: StatusCode, message: &str) -> Box<Response> {
+    Box::new((status, Json(ErrorResponse::new(message))).into_response())
+}
+
+fn database_error(error: impl std::fmt::Display) -> Box<Response> {
+    tracing::error!("Database error: {error}");
+    denied(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+}
+
+fn caller(auth: &AuthUser) -> Result<Uuid, Box<Response>> {
+    Uuid::parse_str(&auth.0.sub)
+        .map_err(|_| denied(StatusCode::UNAUTHORIZED, "Invalid user ID in token"))
+}
+
+/// These settings name the host every model call is sent to and hold the key
+/// sent with it, so an unscoped write here does not just corrupt a tenant's
+/// configuration -- it redirects their chat and knowledge text, and their
+/// provider key, to a host of the caller's choosing. Reading is limited to
+/// members; writing to admins, matching who may change billing.
+async fn authorize_org(
+    state: &AppState,
+    auth: &AuthUser,
+    org_id: Uuid,
+    write: bool,
+) -> Result<(), Box<Response>> {
+    let user_id = caller(auth)?;
+
+    let permitted = if write {
+        organization_members::is_admin(state.db(), org_id, user_id).await
+    } else {
+        organization_members::is_member(state.db(), org_id, user_id).await
+    }
+    .map_err(database_error)?;
+
+    if permitted {
+        Ok(())
+    } else if write {
+        Err(denied(
+            StatusCode::FORBIDDEN,
+            "Only organization admins can change AI settings",
+        ))
+    } else {
+        Err(denied(StatusCode::NOT_FOUND, "Organization not found"))
+    }
+}
+
+/// The workspace has to be checked as well as the organization: the path
+/// carries both, and nothing else ties the two together, so an admin of their
+/// own organization could otherwise name any workspace id in the world.
+async fn authorize_workspace(
+    state: &AppState,
+    auth: &AuthUser,
+    org_id: Uuid,
+    workspace_id: Uuid,
+    write: bool,
+) -> Result<(), Box<Response>> {
+    authorize_org(state, auth, org_id, write).await?;
+
+    let user_id = caller(auth)?;
+    let member = workspace_members::is_member(state.db(), user_id, workspace_id)
+        .await
+        .map_err(database_error)?;
+
+    if member {
+        Ok(())
+    } else {
+        Err(denied(StatusCode::NOT_FOUND, "Workspace not found"))
+    }
+}
+
 /// GET /api/organizations/{org_id}/settings/ai
 pub async fn get_org(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(org_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_org(&state, &auth, org_id, false).await {
+        return *response;
+    }
     match ai_settings::get_org_ai_settings(state.db(), org_id).await {
         Ok(Some(settings)) => Json(AiSettingsResponse::from(settings)).into_response(),
         Ok(None) => {
@@ -197,10 +270,13 @@ pub async fn get_org(
 /// PUT /api/organizations/{org_id}/settings/ai
 pub async fn upsert_org(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(org_id): Path<Uuid>,
     Json(req): Json<UpdateAiSettingsRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_org(&state, &auth, org_id, true).await {
+        return *response;
+    }
     // Validate provider if provided
     if let Some(ref provider) = req.provider
         && ![
@@ -259,9 +335,12 @@ pub async fn upsert_org(
 /// DELETE /api/organizations/{org_id}/settings/ai
 pub async fn delete_org(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(org_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_org(&state, &auth, org_id, true).await {
+        return *response;
+    }
     match ai_settings::delete_org_ai_settings(state.db(), org_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
@@ -293,9 +372,13 @@ pub struct WorkspaceAiSettingsPath {
 /// GET /api/organizations/{org_id}/workspaces/{ws_id}/settings/ai
 pub async fn get_workspace(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(path): Path<WorkspaceAiSettingsPath>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_workspace(&state, &auth, path.org_id, path.ws_id, false).await
+    {
+        return *response;
+    }
     match ai_settings::get_workspace_ai_settings(state.db(), path.ws_id).await {
         Ok(Some(settings)) => Json(AiSettingsResponse::from(settings)).into_response(),
         Ok(None) => {
@@ -334,10 +417,13 @@ pub async fn get_workspace(
 /// PUT /api/organizations/{org_id}/workspaces/{ws_id}/settings/ai
 pub async fn upsert_workspace(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(path): Path<WorkspaceAiSettingsPath>,
     Json(req): Json<UpdateAiSettingsRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_workspace(&state, &auth, path.org_id, path.ws_id, true).await {
+        return *response;
+    }
     // Validate provider if provided
     if let Some(ref provider) = req.provider
         && ![
@@ -396,9 +482,12 @@ pub async fn upsert_workspace(
 /// DELETE /api/organizations/{org_id}/workspaces/{ws_id}/settings/ai
 pub async fn delete_workspace(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(path): Path<WorkspaceAiSettingsPath>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_workspace(&state, &auth, path.org_id, path.ws_id, true).await {
+        return *response;
+    }
     match ai_settings::delete_workspace_ai_settings(state.db(), path.ws_id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
@@ -420,9 +509,13 @@ pub async fn delete_workspace(
 /// GET /api/organizations/{org_id}/workspaces/{ws_id}/settings/ai/effective
 pub async fn get_effective(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(path): Path<WorkspaceAiSettingsPath>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_workspace(&state, &auth, path.org_id, path.ws_id, false).await
+    {
+        return *response;
+    }
     match ai_settings::get_effective_ai_settings(state.db(), path.org_id, path.ws_id).await {
         Ok(settings) => Json(AiSettingsResponse::from(settings)).into_response(),
         Err(e) => {
