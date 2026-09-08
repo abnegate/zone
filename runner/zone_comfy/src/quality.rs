@@ -9,6 +9,7 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -21,6 +22,8 @@ const MEASURE_PERCENTS: &str = "0.2,0.6,0.9";
 const PROBE_SEED: u64 = 1234;
 const MIN_WEIGHT_BYTES: usize = 10_000;
 const FINAL: &str = "final";
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 struct Settings {
@@ -84,9 +87,16 @@ pub async fn select(
     let deadline = Instant::now() + Duration::from_secs(config.train_timeout_secs);
     let sample = subsample(config, model, &run.folder, captions, RANK_IMAGES);
     let quality = selection.choose(sample.as_ref(), deadline).await;
-    discard(config, sample.as_ref());
-    selection.sweep();
-    crate::train::cleanup(config, run).await;
+    if selection.probe.cleanup.load(Ordering::Acquire) {
+        discard(config, sample.as_ref());
+        selection.sweep();
+        crate::train::cleanup(config, run).await;
+    } else {
+        tracing::warn!(
+            prompt_namespace = %run.folder,
+            "retaining LoRA inputs because an abandoned probe did not reach terminal history"
+        );
+    }
     quality
 }
 
@@ -120,7 +130,7 @@ impl<'a> Selection<'a> {
             output: output.to_path_buf(),
             adapter,
             stem: run.artifact.clone(),
-            loras: config.models_dir.join("loras"),
+            loras: models_loras(config)?,
             images: captions.len(),
         })
     }
@@ -180,7 +190,9 @@ impl<'a> Selection<'a> {
                     };
                 }
                 _ => {
-                    let _ = fs::remove_file(staged);
+                    if self.probe.cleanup.load(Ordering::Acquire) {
+                        let _ = fs::remove_file(staged);
+                    }
                 }
             }
         }
@@ -290,6 +302,8 @@ struct Probe<'a> {
     manifest: String,
     resolution: u32,
     stem: String,
+    cleanup: AtomicBool,
+    cancel_timeout: Duration,
 }
 
 impl<'a> Probe<'a> {
@@ -311,6 +325,8 @@ impl<'a> Probe<'a> {
             manifest: crate::train::manifest(model, captions)?,
             resolution,
             stem: run.artifact.clone(),
+            cleanup: AtomicBool::new(true),
+            cancel_timeout: CANCEL_TIMEOUT,
         })
     }
 
@@ -330,39 +346,42 @@ impl<'a> Probe<'a> {
             lora,
             percents,
         );
-        let queued: PromptResponse = self
-            .authorize(self.client.post(format!("{}/prompt", self.config.base_url)))
-            .json(&json!({ "prompt": graph }))
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+        let queued = self.queue(graph).await?;
         if queued.error.as_ref().is_some_and(|error| !error.is_null())
             || !queued.node_errors.is_empty()
             || !queued.number.is_finite()
             || queued.number < 0.0
         {
+            self.abandon(&queued.prompt_id, false).await;
             return None;
         }
-        self.wait(&queued.prompt_id, deadline).await
+        let entry = self.wait(&queued.prompt_id, deadline).await?;
+        let mean = report_mean(&entry);
+        if mean.is_none() {
+            self.abandon(&queued.prompt_id, true).await;
+        }
+        mean
     }
 
-    async fn wait(&self, prompt: &Uuid, deadline: Instant) -> Option<f64> {
+    async fn wait(&self, prompt: &Uuid, deadline: Instant) -> Option<Value> {
         loop {
-            let entry = self.history(prompt, deadline).await?;
+            let entry = match self.history(prompt, deadline).await {
+                Some(entry) => entry,
+                None => {
+                    self.abandon(prompt, false).await;
+                    return None;
+                }
+            };
             let Some(entry) = entry else {
                 tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)).await;
                 continue;
             };
             if failed(&entry) {
+                self.abandon(prompt, true).await;
                 return None;
             }
             if completed(&entry) {
-                return report_mean(&entry);
+                return Some(entry);
             }
             tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)).await;
         }
@@ -381,44 +400,66 @@ impl<'a> Probe<'a> {
 
     async fn stage_remote(&self, name: &str, deadline: Instant) -> Option<()> {
         artifact(name, &self.stem)?;
-        let queued: PromptResponse = self
-            .authorize(self.client.post(format!("{}/prompt", self.config.base_url)))
-            .json(&json!({
-                "prompt": {
-                    "1": {
-                        "class_type": "ZoneStageTrainingArtifact",
-                        "inputs": { "artifact": name }
-                    }
+        let queued = self
+            .queue(json!({
+                "1": {
+                    "class_type": "ZoneStageTrainingArtifact",
+                    "inputs": { "artifact": name }
                 }
             }))
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+            .await?;
         if queued.error.as_ref().is_some_and(|error| !error.is_null())
             || !queued.node_errors.is_empty()
             || !queued.number.is_finite()
             || queued.number < 0.0
         {
+            self.abandon(&queued.prompt_id, false).await;
             return None;
         }
-        loop {
-            let entry = self.history(&queued.prompt_id, deadline).await?;
-            let Some(entry) = entry else {
-                tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)).await;
-                continue;
-            };
-            if failed(&entry) {
+        self.wait(&queued.prompt_id, deadline).await.map(|_| ())
+    }
+
+    async fn queue(&self, graph: Value) -> Option<PromptResponse> {
+        let response = match self
+            .authorize(self.client.post(format!("{}/prompt", self.config.base_url)))
+            .json(&json!({ "prompt": graph }))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                self.cleanup.store(false, Ordering::Release);
                 return None;
             }
-            if completed(&entry) {
-                return Some(());
+        };
+        let response = match response.error_for_status() {
+            Ok(response) => response,
+            Err(_) => {
+                self.cleanup.store(false, Ordering::Release);
+                return None;
             }
-            tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)).await;
+        };
+        let response: Value = match response.json().await {
+            Ok(response) => response,
+            Err(_) => {
+                self.cleanup.store(false, Ordering::Release);
+                return None;
+            }
+        };
+        match serde_json::from_value(response.clone()) {
+            Ok(queued) => Some(queued),
+            Err(_) => {
+                if let Some(prompt) = response
+                    .get("prompt_id")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                {
+                    self.abandon(&prompt, false).await;
+                } else {
+                    self.cleanup.store(false, Ordering::Release);
+                }
+                None
+            }
         }
     }
 
@@ -429,7 +470,12 @@ impl<'a> Probe<'a> {
         let history: Value = self
             .authorize(
                 self.client
-                    .get(format!("{}/history/{prompt}", self.config.base_url)),
+                    .get(format!("{}/history/{prompt}", self.config.base_url))
+                    .timeout(
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(REQUEST_TIMEOUT),
+                    ),
             )
             .send()
             .await
@@ -447,6 +493,33 @@ impl<'a> Probe<'a> {
             return None;
         }
         entries.get(&prompt.to_string()).cloned().map(Some)
+    }
+
+    async fn abandon(&self, prompt: &Uuid, terminal: bool) {
+        let _ = self
+            .authorize(
+                self.client
+                    .post(format!("{}/api/jobs/{prompt}/cancel", self.config.base_url))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .send()
+            .await;
+        if terminal {
+            return;
+        }
+        let deadline = Instant::now() + self.cancel_timeout;
+        loop {
+            if Instant::now() >= deadline {
+                self.cleanup.store(false, Ordering::Release);
+                return;
+            }
+            if let Some(Some(entry)) = self.history(prompt, deadline).await
+                && terminal_history(&entry)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)).await;
+        }
     }
 
     async fn fetch(&self, name: &str) -> Option<Vec<u8>> {
@@ -512,6 +585,10 @@ fn completed(entry: &Value) -> bool {
             .pointer("/status/status_str")
             .and_then(Value::as_str)
             .is_some_and(|state| state.eq_ignore_ascii_case("success"))
+}
+
+fn terminal_history(entry: &Value) -> bool {
+    completed(entry) || failed(entry)
 }
 
 /// The adapter loader carries a fresh node id on every probe because ComfyUI
@@ -664,8 +741,7 @@ fn validate_uuid_name(name: &str, prefix: &str) -> Option<()> {
 
 fn destination(root: &Path, name: &str, stem: &str) -> Option<PathBuf> {
     artifact(name, stem)?;
-    fs::create_dir_all(root).ok()?;
-    let root = root.canonicalize().ok()?;
+    let root = real_directory(root)?;
     let path = root.join(name);
     if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return None;
@@ -682,21 +758,40 @@ fn read_regular(path: &Path) -> Option<Vec<u8>> {
 }
 
 fn produced(config: &Config) -> Option<PathBuf> {
-    let directory = config.models_dir.parent()?.join("output").join("loras");
-    let metadata = fs::symlink_metadata(&directory).ok()?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return None;
-    }
-    directory.canonicalize().ok()
+    let root = real_directory(config.models_dir.parent()?)?;
+    let output = child_directory(&root, "output")?;
+    child_directory(&output, "loras")
 }
 
 fn input(config: &Config) -> Option<PathBuf> {
-    let directory = config.models_dir.parent()?.join("input");
-    let metadata = fs::symlink_metadata(&directory).ok()?;
+    let root = real_directory(config.models_dir.parent()?)?;
+    child_directory(&root, "input")
+}
+
+fn models_loras(config: &Config) -> Option<PathBuf> {
+    let root = real_directory(config.models_dir.parent()?)?;
+    let models = real_directory(&config.models_dir)?;
+    if models.parent() != Some(root.as_path()) {
+        return None;
+    }
+    child_directory(&models, "loras")
+}
+
+fn real_directory(path: &Path) -> Option<PathBuf> {
+    let metadata = fs::symlink_metadata(path).ok()?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return None;
     }
-    directory.canonicalize().ok()
+    path.canonicalize().ok()
+}
+
+fn child_directory(root: &Path, name: &str) -> Option<PathBuf> {
+    if Path::new(name).components().count() != 1 {
+        return None;
+    }
+    let root = real_directory(root)?;
+    let child = real_directory(&root.join(name))?;
+    (child.parent() == Some(root.as_path())).then_some(child)
 }
 
 fn subsample(
@@ -711,32 +806,35 @@ fn subsample(
         return None;
     }
     let input = input(config)?;
-    let source_path = input.join(folder);
-    let source_metadata = fs::symlink_metadata(&source_path).ok()?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
-        return None;
-    }
-    let source = source_path.canonicalize().ok()?;
-    if !source.starts_with(&input) {
-        return None;
-    }
+    let source = child_directory(&input, folder)?;
     let name = format!("zone-probe-{}", Uuid::new_v4());
     let destination = input.join(&name);
+    if fs::symlink_metadata(&destination).is_ok() {
+        return None;
+    }
     fs::create_dir(&destination).ok()?;
+    let destination = real_directory(&destination)?;
+    if destination.parent() != Some(input.as_path()) {
+        return None;
+    }
     let result = (|| {
         let mut selected = HashMap::new();
         for directory in ["targets", "control_1"] {
             if directory == "control_1" && matches!(model, TrainingModel::Flux { .. }) {
                 continue;
             }
-            let source_directory = source.join(directory);
+            let source_directory = child_directory(&source, directory)?;
             let target_directory = destination.join(directory);
             fs::create_dir(&target_directory).ok()?;
+            let target_directory = real_directory(&target_directory)?;
+            if target_directory.parent() != Some(destination.as_path()) {
+                return None;
+            }
             for index in 0..limit {
                 let filename = format!("{index:04}.png");
                 let source_file = source_directory.join(&filename);
                 let bytes = read_regular(&source_file)?;
-                fs::write(target_directory.join(&filename), bytes).ok()?;
+                write_new(&target_directory.join(&filename), &bytes)?;
                 if directory == "targets" {
                     selected.insert(filename.clone(), captions.get(&filename)?.clone());
                 }
@@ -748,29 +846,57 @@ fn subsample(
         })
     })();
     if result.is_none() {
-        let _ = fs::remove_dir_all(&destination);
+        remove_namespace(&input, &name, "zone-probe-");
     }
     result
 }
 
+fn write_new(path: &Path, bytes: &[u8]) -> Option<()> {
+    use std::io::Write;
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .ok()?;
+    file.write_all(bytes).and_then(|()| file.sync_all()).ok()
+}
+
 fn discard(config: &Config, sample: Option<&Sample>) {
     let Some(sample) = sample else { return };
-    if validate_uuid_name(&sample.folder, "zone-probe-").is_none() {
+    let Some(input) = input(config) else { return };
+    remove_namespace(&input, &sample.folder, "zone-probe-");
+}
+
+fn remove_namespace(root: &Path, name: &str, prefix: &str) {
+    if validate_uuid_name(name, prefix).is_none() {
         return;
     }
-    let Some(input) = input(config) else { return };
-    let folder = input.join(&sample.folder);
-    let Ok(metadata) = fs::symlink_metadata(&folder) else {
+    let Some(root) = real_directory(root) else {
         return;
     };
-    if !metadata.file_type().is_symlink() && metadata.is_dir() {
-        let _ = fs::remove_dir_all(folder);
+    let path = root.join(name);
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return;
+    }
+    let Ok(path) = path.canonicalize() else {
+        return;
+    };
+    if path.parent() == Some(root.as_path()) {
+        let _ = fs::remove_dir_all(path);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     fn flux() -> TrainingModel {
         TrainingModel::Flux {
@@ -791,6 +917,19 @@ mod tests {
         Run {
             folder: format!("zone-train-{id}"),
             artifact: format!("zone-lora-{id}"),
+        }
+    }
+
+    fn probe<'a>(config: &'a Config, model: &'a TrainingModel, run: &Run) -> Probe<'a> {
+        Probe {
+            config,
+            model,
+            client: reqwest::Client::new(),
+            manifest: "{}".into(),
+            resolution: 512,
+            stem: run.artifact.clone(),
+            cleanup: AtomicBool::new(true),
+            cancel_timeout: Duration::from_millis(30),
         }
     }
 
@@ -957,6 +1096,280 @@ mod tests {
             assert_eq!(fs::read(victim.join("kept")).unwrap(), b"safe");
             assert!(input.join(sample.folder).is_symlink());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_paths_reject_symlinked_root_and_intermediate_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual");
+        fs::create_dir_all(actual.join("models/loras")).unwrap();
+        fs::create_dir(actual.join("input")).unwrap();
+        let linked = root.path().join("comfy");
+        symlink(&actual, &linked).unwrap();
+        let linked_config = Config {
+            models_dir: linked.join("models"),
+            ..Default::default()
+        };
+        assert!(input(&linked_config).is_none());
+        assert!(produced(&linked_config).is_none());
+        assert!(models_loras(&linked_config).is_none());
+
+        let comfy = root.path().join("safe");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(comfy.join("models/loras")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, comfy.join("input")).unwrap();
+        fs::create_dir(comfy.join("output")).unwrap();
+        symlink(&outside, comfy.join("output/loras")).unwrap();
+        let config = Config {
+            models_dir: comfy.join("models"),
+            ..Default::default()
+        };
+        assert!(input(&config).is_none());
+        assert!(produced(&config).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subsample_rejects_a_symlinked_training_image_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        let input = root.path().join("input");
+        let victim = root.path().join("victim");
+        fs::create_dir(&models).unwrap();
+        fs::create_dir(&input).unwrap();
+        fs::create_dir(&victim).unwrap();
+        let run = run();
+        let source = input.join(&run.folder);
+        fs::create_dir(&source).unwrap();
+        for index in 0..5 {
+            fs::write(victim.join(format!("{index:04}.png")), [index]).unwrap();
+        }
+        symlink(&victim, source.join("targets")).unwrap();
+        let captions = (0..5)
+            .map(|index| (format!("{index:04}.png"), format!("instruction {index}")))
+            .collect();
+        let config = Config {
+            models_dir: models,
+            ..Default::default()
+        };
+        assert!(subsample(&config, &flux(), &run.folder, &captions, 4).is_none());
+        assert_eq!(fs::read_dir(&input).unwrap().count(), 1);
+        assert_eq!(fs::read(victim.join("0000.png")).unwrap(), [0]);
+    }
+
+    #[tokio::test]
+    async fn malformed_probe_history_cancels_exact_job_and_waits_for_terminal_history() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        let unrelated = Uuid::new_v4();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sequence = calls.clone();
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(move |_request: &Request| {
+                if sequence.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                    ResponseTemplate::new(200).set_body_json(json!({ unrelated.to_string(): {} }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        prompt.to_string(): {"status": {"status_str": "error"}}
+                    }))
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/jobs/{prompt}/cancel")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"cancelled": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "prompt_id": prompt,
+                "number": 0,
+                "node_errors": {}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            base_url: server.uri(),
+            poll_interval_ms: 1,
+            ..Default::default()
+        };
+        let model = flux();
+        let run = run();
+        let probe = probe(&config, &model, &run);
+        assert!(
+            probe
+                .mean(
+                    "folder",
+                    "{}",
+                    None,
+                    RANK_PERCENT,
+                    Instant::now() + Duration::from_secs(1)
+                )
+                .await
+                .is_none()
+        );
+        assert!(probe.cleanup.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn malformed_probe_queue_response_cancels_its_recoverable_prompt() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "prompt_id": prompt,
+                "number": "not-a-number",
+                "node_errors": {}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/jobs/{prompt}/cancel")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"cancelled": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                prompt.to_string(): {"status": {"status_str": "error"}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            base_url: server.uri(),
+            poll_interval_ms: 1,
+            ..Default::default()
+        };
+        let model = flux();
+        let run = run();
+        let probe = probe(&config, &model, &run);
+        assert!(probe.queue(json!({})).await.is_none());
+        assert!(probe.cleanup.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn unverified_cancel_failure_marks_probe_cleanup_unsafe() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/jobs/{prompt}/cancel")))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            base_url: server.uri(),
+            poll_interval_ms: 1,
+            ..Default::default()
+        };
+        let model = flux();
+        let run = run();
+        let probe = probe(&config, &model, &run);
+        probe.abandon(&prompt, false).await;
+        assert!(!probe.cleanup.load(Ordering::Acquire));
+        let expected = format!("/api/jobs/{prompt}/cancel");
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path().contains("/api/jobs/"))
+                .all(|request| request.url.path() == expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_probe_error_still_sends_targeted_cancel() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                prompt.to_string(): {"status": {"status_str": "error"}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/jobs/{prompt}/cancel")))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            base_url: server.uri(),
+            poll_interval_ms: 1,
+            ..Default::default()
+        };
+        let model = flux();
+        let run = run();
+        let probe = probe(&config, &model, &run);
+        assert!(
+            probe
+                .wait(&prompt, Instant::now() + Duration::from_secs(1))
+                .await
+                .is_none()
+        );
+        assert!(probe.cleanup.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn abandoned_stage_job_uses_the_same_targeted_cancellation_gate() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "prompt_id": prompt,
+                "number": 0,
+                "node_errors": {}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/jobs/{prompt}/cancel")))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            base_url: server.uri(),
+            poll_interval_ms: 1,
+            ..Default::default()
+        };
+        let model = flux();
+        let run = run();
+        let probe = probe(&config, &model, &run);
+        assert!(
+            probe
+                .stage_remote(&format!("{}.safetensors", run.artifact), Instant::now(),)
+                .await
+                .is_none()
+        );
+        assert!(!probe.cleanup.load(Ordering::Acquire));
     }
 
     #[test]

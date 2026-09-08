@@ -7,8 +7,8 @@ use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
@@ -17,6 +17,8 @@ const PACKAGED_TRAIN_CONFIG: &str =
     include_str!("../../../comfyui/custom_nodes/zone_lora/train_config.json");
 const MIN_WEIGHT_BYTES: usize = 10_000;
 const MANIFEST_VERSION: u32 = 1;
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 pub struct TrainConfig {
@@ -103,6 +105,27 @@ struct Pair {
     instruction: String,
 }
 
+#[derive(Debug)]
+struct Failure {
+    error: TrainError,
+    cleanup: bool,
+}
+
+#[derive(Debug)]
+struct WaitFailure {
+    error: TrainError,
+    cleanup: bool,
+}
+
+impl From<TrainError> for Failure {
+    fn from(error: TrainError) -> Self {
+        Self {
+            error,
+            cleanup: true,
+        }
+    }
+}
+
 pub fn packaged_config() -> Result<TrainConfig, TrainError> {
     serde_json::from_str(PACKAGED_TRAIN_CONFIG)
         .map_err(|error| TrainError::Failed(format!("train config: {error}")))
@@ -132,11 +155,15 @@ pub async fn run(
         return Err(TrainError::Disabled);
     }
     let run = Run::new();
-    let result = execute(config, model, work, output, image_count, &run).await;
-    if result.is_err() {
-        cleanup(config, &run).await;
+    match execute(config, model, work, output, image_count, &run).await {
+        Ok(()) => Ok(run),
+        Err(failure) => {
+            if failure.cleanup {
+                cleanup(config, &run).await;
+            }
+            Err(failure.error)
+        }
     }
-    result.map(|()| run)
 }
 
 async fn execute(
@@ -146,7 +173,7 @@ async fn execute(
     output: &Path,
     image_count: usize,
     run: &Run,
-) -> Result<(), TrainError> {
+) -> Result<(), Failure> {
     run.validate()?;
     let settings = packaged_config()?;
     let client = client(config)?;
@@ -159,15 +186,28 @@ async fn execute(
         &settings,
         settings.steps(image_count),
     );
-    let prompt = queue(&client, config, graph).await?;
-    wait_prompt(
+    let prompt = queue(&client, config, graph)
+        .await
+        .map_err(|failure| Failure {
+            error: failure.error,
+            cleanup: failure.cleanup,
+        })?;
+    if let Err(failure) = wait_prompt(
         &client,
         config,
         prompt,
         Duration::from_secs(config.train_timeout_secs),
     )
-    .await?;
-    download(&client, config, run, output).await
+    .await
+    {
+        return Err(Failure {
+            error: failure.error,
+            cleanup: failure.cleanup,
+        });
+    }
+    download(&client, config, run, output)
+        .await
+        .map_err(Failure::from)
 }
 
 fn client(config: &Config) -> Result<reqwest::Client, TrainError> {
@@ -182,8 +222,8 @@ async fn queue(
     client: &reqwest::Client,
     config: &Config,
     graph: Value,
-) -> Result<Uuid, TrainError> {
-    let response = authorize(
+) -> Result<Uuid, WaitFailure> {
+    let response: Value = authorize(
         config,
         client
             .post(format!("{}/prompt", config.base_url))
@@ -191,29 +231,61 @@ async fn queue(
     )
     .send()
     .await
-    .map_err(|error| TrainError::Failed(error.to_string()))?
+    .map_err(|error| WaitFailure {
+        error: TrainError::Failed(error.to_string()),
+        cleanup: false,
+    })?
     .error_for_status()
-    .map_err(|error| TrainError::Failed(error.to_string()))?
-    .json::<PromptResponse>()
+    .map_err(|error| WaitFailure {
+        error: TrainError::Failed(error.to_string()),
+        cleanup: false,
+    })?
+    .json()
     .await
-    .map_err(|error| TrainError::Failed(format!("invalid ComfyUI prompt response: {error}")))?;
+    .map_err(|error| WaitFailure {
+        error: TrainError::Failed(format!("invalid ComfyUI prompt response: {error}")),
+        cleanup: false,
+    })?;
+    let response: PromptResponse = match serde_json::from_value(response.clone()) {
+        Ok(response) => response,
+        Err(error) => {
+            let cleanup = if let Some(prompt) = response
+                .get("prompt_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+            {
+                cancel_and_wait(client, config, prompt, false).await
+            } else {
+                false
+            };
+            return Err(WaitFailure {
+                error: TrainError::Failed(format!("invalid ComfyUI prompt response: {error}")),
+                cleanup,
+            });
+        }
+    };
     if response
         .error
         .as_ref()
         .is_some_and(|error| !error.is_null())
         || !response.node_errors.is_empty()
     {
-        return Err(TrainError::Failed(format!(
-            "ComfyUI rejected train graph: {:?}",
-            response
-                .error
-                .unwrap_or_else(|| json!(response.node_errors))
-        )));
+        let prompt = response.prompt_id;
+        let detail = response
+            .error
+            .unwrap_or_else(|| json!(response.node_errors));
+        let cleanup = cancel_and_wait(client, config, prompt, false).await;
+        return Err(WaitFailure {
+            error: TrainError::Failed(format!("ComfyUI rejected train graph: {detail:?}")),
+            cleanup,
+        });
     }
     if !response.number.is_finite() || response.number < 0.0 {
-        return Err(TrainError::Failed(
-            "ComfyUI returned an invalid queue number".into(),
-        ));
+        let cleanup = cancel_and_wait(client, config, response.prompt_id, false).await;
+        return Err(WaitFailure {
+            error: TrainError::Failed("ComfyUI returned an invalid queue number".into()),
+            cleanup,
+        });
     }
     Ok(response.prompt_id)
 }
@@ -460,11 +532,7 @@ async fn stage_or_upload(
         pairs,
     })
     .map_err(|error| TrainError::Failed(error.to_string()))?;
-    let input = config
-        .models_dir
-        .parent()
-        .map(|parent| parent.join("input"));
-    if let Some(input) = input.filter(|path| path.is_dir()) {
+    if let Some(input) = local_input(config)? {
         stage_local(work, &input, run)?;
     } else {
         stage_remote(client, config, model, work, run).await?;
@@ -535,6 +603,7 @@ fn pairs(model: &TrainingModel, work: &Path) -> Result<Vec<Pair>, TrainError> {
 }
 
 fn stage_local(work: &Path, input: &Path, run: &Run) -> Result<(), TrainError> {
+    let input = require_directory(input, "ComfyUI input directory")?;
     let destination = input.join(&run.folder);
     if fs::symlink_metadata(&destination).is_ok() {
         return Err(TrainError::Failed(
@@ -542,6 +611,7 @@ fn stage_local(work: &Path, input: &Path, run: &Run) -> Result<(), TrainError> {
         ));
     }
     fs::create_dir(&destination).map_err(|error| TrainError::Failed(error.to_string()))?;
+    let destination = require_child_directory(&input, &destination, "training namespace")?;
     let result = (|| {
         for directory in ["targets", "control_1"] {
             let source = work.join(directory);
@@ -550,18 +620,19 @@ fn stage_local(work: &Path, input: &Path, run: &Run) -> Result<(), TrainError> {
             }
             let target = destination.join(directory);
             fs::create_dir(&target).map_err(|error| TrainError::Failed(error.to_string()))?;
+            let target =
+                require_child_directory(&destination, &target, "training image directory")?;
             for source in pngs(&source)? {
                 let name = source
                     .file_name()
                     .ok_or(TrainError::Invalid("training image name is invalid"))?;
-                fs::copy(&source, target.join(name))
-                    .map_err(|error| TrainError::Failed(error.to_string()))?;
+                copy_new(&source, &target.join(name))?;
             }
         }
         Ok(())
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&destination);
+        remove_child_directory(&input, &destination);
     }
     result
 }
@@ -596,6 +667,7 @@ async fn stage_remote(
 }
 
 fn pngs(directory: &Path) -> Result<Vec<PathBuf>, TrainError> {
+    let directory = require_directory(directory, "training image directory")?;
     let mut files = Vec::new();
     for entry in fs::read_dir(directory).map_err(|error| TrainError::Failed(error.to_string()))? {
         let entry = entry.map_err(|error| TrainError::Failed(error.to_string()))?;
@@ -658,32 +730,70 @@ async fn wait_prompt(
     config: &Config,
     prompt: Uuid,
     timeout: Duration,
-) -> Result<(), TrainError> {
+) -> Result<(), WaitFailure> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if tokio::time::Instant::now() >= deadline {
-            cancel(client, config, prompt).await;
-            return Err(TrainError::Failed("training timed out".into()));
+            let cleanup = cancel_and_wait(client, config, prompt, false).await;
+            return Err(WaitFailure {
+                error: TrainError::Failed("training timed out".into()),
+                cleanup,
+            });
         }
-        let history: Value = authorize(
-            config,
-            client.get(format!("{}/history/{prompt}", config.base_url)),
-        )
-        .send()
-        .await
-        .map_err(|error| TrainError::Failed(error.to_string()))?
-        .error_for_status()
-        .map_err(|error| TrainError::Failed(error.to_string()))?
-        .json()
-        .await
-        .map_err(|error| TrainError::Failed(error.to_string()))?;
-        if let Some(entry) = exact_history(&history, prompt)?
-            && train_prompt_complete(entry)?
-        {
-            return Ok(());
+        let history = match history(client, config, prompt, deadline).await {
+            Ok(history) => history,
+            Err(error) => {
+                let cleanup = cancel_and_wait(client, config, prompt, false).await;
+                return Err(WaitFailure { error, cleanup });
+            }
+        };
+        let entry = match exact_history(&history, prompt) {
+            Ok(entry) => entry,
+            Err(error) => {
+                let cleanup = cancel_and_wait(client, config, prompt, false).await;
+                return Err(WaitFailure { error, cleanup });
+            }
+        };
+        if let Some(entry) = entry {
+            match train_prompt_complete(entry) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => {
+                    cancel_and_wait(client, config, prompt, true).await;
+                    return Err(WaitFailure {
+                        error,
+                        cleanup: true,
+                    });
+                }
+            }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+async fn history(
+    client: &reqwest::Client,
+    config: &Config,
+    prompt: Uuid,
+    deadline: tokio::time::Instant,
+) -> Result<Value, TrainError> {
+    let timeout = deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .min(REQUEST_TIMEOUT);
+    authorize(
+        config,
+        client
+            .get(format!("{}/history/{prompt}", config.base_url))
+            .timeout(timeout),
+    )
+    .send()
+    .await
+    .map_err(|error| TrainError::Failed(error.to_string()))?
+    .error_for_status()
+    .map_err(|error| TrainError::Failed(error.to_string()))?
+    .json()
+    .await
+    .map_err(|error| TrainError::Failed(error.to_string()))
 }
 
 fn exact_history(history: &Value, prompt: Uuid) -> Result<Option<&Value>, TrainError> {
@@ -717,13 +827,47 @@ fn train_prompt_complete(entry: &Value) -> Result<bool, TrainError> {
     Ok(status.completed == Some(true) || status.status_str.eq_ignore_ascii_case("success"))
 }
 
-async fn cancel(client: &reqwest::Client, config: &Config, prompt: Uuid) {
+async fn cancel_and_wait(
+    client: &reqwest::Client,
+    config: &Config,
+    prompt: Uuid,
+    terminal: bool,
+) -> bool {
     let _ = authorize(
         config,
-        client.post(format!("{}/api/jobs/{prompt}/cancel", config.base_url)),
+        client
+            .post(format!("{}/api/jobs/{prompt}/cancel", config.base_url))
+            .timeout(REQUEST_TIMEOUT),
     )
     .send()
     .await;
+    if terminal {
+        return true;
+    }
+    let deadline = tokio::time::Instant::now() + CANCEL_TIMEOUT;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        if let Ok(history) = history(client, config, prompt, deadline).await
+            && let Ok(Some(entry)) = exact_history(&history, prompt)
+            && train_prompt_terminal(entry)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(config.poll_interval_ms)).await;
+    }
+}
+
+fn train_prompt_terminal(entry: &Value) -> bool {
+    let Ok(status) =
+        serde_json::from_value::<HistoryStatus>(entry.get("status").cloned().unwrap_or(json!({})))
+    else {
+        return false;
+    };
+    status.completed == Some(true)
+        || status.status_str.eq_ignore_ascii_case("success")
+        || status.status_str.eq_ignore_ascii_case("error")
 }
 
 pub async fn cleanup(config: &Config, run: &Run) {
@@ -745,21 +889,11 @@ pub async fn cleanup(config: &Config, run: &Run) {
 }
 
 fn cleanup_local(config: &Config, run: &Run) {
-    if let Some(input) = config
-        .models_dir
-        .parent()
-        .map(|parent| parent.join("input"))
-    {
+    if let Ok(Some(input)) = local_input(config) {
         let folder = input.join(&run.folder);
-        if !fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            let _ = fs::remove_dir_all(folder);
-        }
+        remove_child_directory(&input, &folder);
     }
-    if let Some(output) = config
-        .models_dir
-        .parent()
-        .map(|parent| parent.join("output/loras"))
-    {
+    if let Some(output) = local_output(config) {
         let prefix = format!("{}-step", run.artifact);
         let final_name = format!("{}.safetensors", run.artifact);
         let Ok(entries) = fs::read_dir(output) else {
@@ -776,6 +910,91 @@ fn cleanup_local(config: &Config, run: &Run) {
                 let _ = fs::remove_file(entry.path());
             }
         }
+    }
+}
+
+fn local_input(config: &Config) -> Result<Option<PathBuf>, TrainError> {
+    let Some(root) = config.models_dir.parent() else {
+        return Ok(None);
+    };
+    let root = match fs::symlink_metadata(root) {
+        Ok(_) => require_directory(root, "ComfyUI root")?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(TrainError::Failed(error.to_string())),
+    };
+    let input = root.join("input");
+    match fs::symlink_metadata(&input) {
+        Ok(_) => require_child_directory(&root, &input, "ComfyUI input directory").map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(TrainError::Failed(error.to_string())),
+    }
+}
+
+fn local_output(config: &Config) -> Option<PathBuf> {
+    let root = require_directory(config.models_dir.parent()?, "ComfyUI root").ok()?;
+    let output = require_child_directory(&root, &root.join("output"), "ComfyUI output").ok()?;
+    require_child_directory(&output, &output.join("loras"), "ComfyUI LoRA output").ok()
+}
+
+fn require_directory(path: &Path, label: &'static str) -> Result<PathBuf, TrainError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| TrainError::Failed(format!("{label}: {error}")))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(TrainError::Invalid(label));
+    }
+    path.canonicalize()
+        .map_err(|error| TrainError::Failed(format!("{label}: {error}")))
+}
+
+fn require_child_directory(
+    root: &Path,
+    path: &Path,
+    label: &'static str,
+) -> Result<PathBuf, TrainError> {
+    let root = require_directory(root, label)?;
+    let path = require_directory(path, label)?;
+    if path.parent() != Some(root.as_path()) {
+        return Err(TrainError::Invalid(label));
+    }
+    Ok(path)
+}
+
+fn copy_new(source: &Path, destination: &Path) -> Result<(), TrainError> {
+    let metadata =
+        fs::symlink_metadata(source).map_err(|error| TrainError::Failed(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(TrainError::Invalid("training images must be regular files"));
+    }
+    let mut source = File::open(source).map_err(|error| TrainError::Failed(error.to_string()))?;
+    if !source.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return Err(TrainError::Invalid("training images must be regular files"));
+    }
+    let mut destination = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
+    io::copy(&mut source, &mut destination)
+        .and_then(|_| destination.sync_all())
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
+    Ok(())
+}
+
+fn remove_child_directory(root: &Path, path: &Path) {
+    let Ok(root) = require_directory(root, "cleanup root") else {
+        return;
+    };
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return;
+    }
+    let Ok(path) = path.canonicalize() else {
+        return;
+    };
+    if path.parent() == Some(root.as_path()) {
+        let _ = fs::remove_dir_all(path);
     }
 }
 
@@ -840,6 +1059,8 @@ fn authorize(config: &Config, request: reqwest::RequestBuilder) -> reqwest::Requ
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const DATASETS: [usize; 4] = [8, 24, 100, 300];
     const HEALTHY_PASSES: std::ops::RangeInclusive<f64> = 17.0..=19.0;
@@ -959,6 +1180,170 @@ mod tests {
             symlink(&victim, targets.join("0000.txt")).unwrap();
             assert!(pairs(&flux(), root.path()).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_staging_rejects_symlinked_root_input_and_destination() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual");
+        fs::create_dir_all(actual.join("models")).unwrap();
+        fs::create_dir(actual.join("input")).unwrap();
+        let linked_root = root.path().join("comfy");
+        symlink(&actual, &linked_root).unwrap();
+        let config = Config {
+            models_dir: linked_root.join("models"),
+            ..Default::default()
+        };
+        assert!(local_input(&config).is_err());
+
+        let safe = root.path().join("safe");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(safe.join("models")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, safe.join("input")).unwrap();
+        let config = Config {
+            models_dir: safe.join("models"),
+            ..Default::default()
+        };
+        assert!(local_input(&config).is_err());
+
+        fs::remove_file(safe.join("input")).unwrap();
+        fs::create_dir(safe.join("input")).unwrap();
+        let run = Run::new();
+        symlink(&outside, safe.join("input").join(&run.folder)).unwrap();
+        assert!(stage_local(root.path(), &safe.join("input"), &run).is_err());
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_never_follows_input_or_output_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let comfy = root.path().join("comfy");
+        let outside_input = root.path().join("outside-input");
+        let outside_output = root.path().join("outside-output");
+        fs::create_dir_all(comfy.join("models")).unwrap();
+        fs::create_dir(&outside_input).unwrap();
+        fs::create_dir(&outside_output).unwrap();
+        let run = Run::new();
+        fs::create_dir(outside_input.join(&run.folder)).unwrap();
+        fs::write(outside_input.join(&run.folder).join("kept"), b"safe").unwrap();
+        fs::write(
+            outside_output.join(format!("{}.safetensors", run.artifact)),
+            b"safe",
+        )
+        .unwrap();
+        symlink(&outside_input, comfy.join("input")).unwrap();
+        fs::create_dir(comfy.join("output")).unwrap();
+        symlink(&outside_output, comfy.join("output/loras")).unwrap();
+        cleanup_local(
+            &Config {
+                models_dir: comfy.join("models"),
+                ..Default::default()
+            },
+            &run,
+        );
+        assert_eq!(
+            fs::read(outside_input.join(&run.folder).join("kept")).unwrap(),
+            b"safe"
+        );
+        assert_eq!(
+            fs::read(outside_output.join(format!("{}.safetensors", run.artifact))).unwrap(),
+            b"safe"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_training_cancels_only_its_exact_terminal_prompt() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                prompt.to_string(): {"status": {"status_str": "error"}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/jobs/{prompt}/cancel")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"cancelled": false})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let failure = wait_prompt(
+            &reqwest::Client::new(),
+            &Config {
+                base_url: server.uri(),
+                poll_interval_ms: 1,
+                ..Default::default()
+            },
+            prompt,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(failure.cleanup);
+        let cancel = format!("/api/jobs/{prompt}/cancel");
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path().contains("/api/jobs/"))
+                .all(|request| request.url.path() == cancel)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_train_queue_response_cancels_its_recoverable_prompt() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "prompt_id": prompt,
+                "number": "not-a-number",
+                "node_errors": {}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/jobs/{prompt}/cancel")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"cancelled": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                prompt.to_string(): {"status": {"status_str": "error"}}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = Config {
+            base_url: server.uri(),
+            poll_interval_ms: 1,
+            ..Default::default()
+        };
+        let failure = queue(&reqwest::Client::new(), &config, json!({}))
+            .await
+            .unwrap_err();
+        assert!(failure.cleanup);
+        assert!(
+            failure
+                .error
+                .to_string()
+                .contains("invalid ComfyUI prompt response")
+        );
     }
 
     #[test]

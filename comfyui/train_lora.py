@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 import urllib.error
@@ -18,6 +20,8 @@ from pathlib import Path
 
 CONFIG_PATH = Path(__file__).with_name('custom_nodes') / 'zone_lora' / 'train_config.json'
 MIN_WEIGHT_BYTES = 10_000
+CANCEL_TIMEOUT = 30
+POLL_INTERVAL = 2
 RUN_PATTERN = re.compile(
     r'zone-(?:train|probe)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 )
@@ -73,6 +77,12 @@ class Run:
     def validate(self) -> None:
         if not RUN_PATTERN.fullmatch(self.folder) or not ARTIFACT_PATTERN.fullmatch(self.artifact):
             raise SystemExit('training run identity must use generated UUID names')
+
+
+class PromptFailure(SystemExit):
+    def __init__(self, message: str, cleanup: bool) -> None:
+        super().__init__(message)
+        self.cleanup = cleanup
 
 
 def load_config() -> dict:
@@ -138,6 +148,7 @@ def prompt_id(queued: dict) -> str:
         queued.get('node_errors')
         or not isinstance(number, (int, float))
         or isinstance(number, bool)
+        or not math.isfinite(number)
         or number < 0
     ):
         raise SystemExit(json.dumps(queued)[:4000])
@@ -151,10 +162,32 @@ def prompt_id(queued: dict) -> str:
     return identifier
 
 
+def queue_prompt(base: str, graph: dict) -> str:
+    try:
+        queued = post_json(f'{base}/prompt', {'prompt': graph})
+    except (OSError, SystemExit, urllib.error.URLError, ValueError) as error:
+        raise PromptFailure(str(error), False) from error
+    try:
+        return prompt_id(queued)
+    except SystemExit as error:
+        candidate = queued.get('prompt_id')
+        if valid_prompt_id(candidate):
+            cleanup = cancel_prompt(base, candidate, False)
+            raise PromptFailure(str(error), cleanup) from error
+        raise PromptFailure(str(error), False) from error
+
+
 def stage_dataset(source: Path, destination: Path, model: TrainingModel) -> tuple[int, str]:
+    comfy_root = real_directory(destination.parent.parent, 'ComfyUI root')
+    destination_root = real_child(
+        comfy_root, destination.parent, 'ComfyUI input directory'
+    )
+    if not RUN_PATTERN.fullmatch(destination.name):
+        raise SystemExit('training namespace must use a generated UUID name')
     if destination.exists() or destination.is_symlink():
         raise SystemExit(f'training namespace already exists: {destination}')
-    destination.mkdir(parents=True)
+    destination.mkdir()
+    destination = real_child(destination_root, destination, 'training namespace')
     pairs = []
     try:
         targets = images(source / 'targets')
@@ -162,24 +195,32 @@ def stage_dataset(source: Path, destination: Path, model: TrainingModel) -> tupl
         if references and len(references) != len(targets):
             raise SystemExit('Qwen edit training needs one reference for every target')
         (destination / 'targets').mkdir()
+        target_destination = real_child(
+            destination, destination / 'targets', 'training target directory'
+        )
         if model.architecture == 'qwen_edit':
             (destination / 'control_1').mkdir()
+            control_destination = real_child(
+                destination, destination / 'control_1', 'training reference directory'
+            )
+        else:
+            control_destination = None
         for index, target in enumerate(targets):
             name = f'{index:04}.png'
             if target.name != name:
                 raise SystemExit('training image names must be contiguous indices')
             instruction_path = target.with_suffix('.txt')
-            if instruction_path.is_symlink() or not instruction_path.is_file():
-                raise SystemExit(f'every target needs an instruction: {instruction_path}')
-            instruction = instruction_path.read_text().strip()
+            instruction = read_regular_text(instruction_path).strip()
             if not instruction:
                 raise SystemExit(f'every target needs an instruction: {instruction_path}')
-            copy_regular(target, destination / 'targets' / name)
+            copy_regular(target, target_destination / name)
             reference = None
             if model.architecture == 'qwen_edit':
                 if index >= len(references) or references[index].name != name:
                     raise SystemExit('Qwen edit references must use the target index')
-                copy_regular(references[index], destination / 'control_1' / name)
+                if control_destination is None:
+                    raise SystemExit('Qwen edit reference directory is missing')
+                copy_regular(references[index], control_destination / name)
                 reference = f'control_1/{name}'
             pairs.append(
                 {
@@ -190,7 +231,7 @@ def stage_dataset(source: Path, destination: Path, model: TrainingModel) -> tupl
                 }
             )
     except BaseException:
-        shutil.rmtree(destination, ignore_errors=True)
+        remove_namespace(destination_root, destination.name)
         raise
     manifest = json.dumps(
         {'schema_version': 1, 'architecture': model.architecture, 'pairs': pairs},
@@ -200,44 +241,143 @@ def stage_dataset(source: Path, destination: Path, model: TrainingModel) -> tupl
 
 
 def images(directory: Path) -> list[Path]:
-    if directory.is_symlink() or not directory.is_dir():
-        raise SystemExit(f'training image directory is missing: {directory}')
-    found = sorted(directory.glob('*.png'))
+    directory = real_directory(directory, 'training image directory')
+    found = sorted(path for path in directory.iterdir() if path.suffix == '.png')
     if not found:
         raise SystemExit(f'no pngs in {directory}')
     return found
 
 
 def copy_regular(source: Path, destination: Path) -> None:
-    if source.is_symlink() or not source.is_file():
+    try:
+        metadata = source.lstat()
+    except OSError as error:
+        raise SystemExit(f'training input is not a regular file: {source}') from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise SystemExit(f'training input is not a regular file: {source}')
-    with source.open('rb') as reader, destination.open('xb') as writer:
+    nofollow = getattr(os, 'O_NOFOLLOW', 0)
+    source_descriptor = os.open(source, os.O_RDONLY | nofollow)
+    try:
+        destination_descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+        )
+    except BaseException:
+        os.close(source_descriptor)
+        raise
+    with os.fdopen(source_descriptor, 'rb') as reader, os.fdopen(
+        destination_descriptor, 'wb'
+    ) as writer:
+        if not stat.S_ISREG(os.fstat(reader.fileno()).st_mode):
+            raise SystemExit(f'training input is not a regular file: {source}')
         shutil.copyfileobj(reader, writer)
+        writer.flush()
+        os.fsync(writer.fileno())
+
+
+def read_regular_text(source: Path) -> str:
+    try:
+        metadata = source.lstat()
+    except OSError as error:
+        raise SystemExit(f'every target needs an instruction: {source}') from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(f'every target needs an instruction: {source}')
+    descriptor = os.open(source, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    with os.fdopen(descriptor, 'r') as reader:
+        if not stat.S_ISREG(os.fstat(reader.fileno()).st_mode):
+            raise SystemExit(f'every target needs an instruction: {source}')
+        return reader.read()
+
+
+def valid_prompt_id(identifier: object) -> bool:
+    try:
+        parsed = uuid.UUID(identifier)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return parsed.version == 4 and str(parsed) == identifier
+
+
+def terminal(entry: object) -> bool:
+    if not isinstance(entry, dict) or not isinstance(entry.get('status'), dict):
+        return False
+    status = entry['status']
+    state = status.get('status_str')
+    return status.get('completed') is True or (
+        isinstance(state, str) and state.lower() in {'error', 'success'}
+    )
+
+
+def cancel_prompt(
+    base: str,
+    identifier: str,
+    terminal_observed: bool,
+    timeout: int = CANCEL_TIMEOUT,
+) -> bool:
+    if not valid_prompt_id(identifier):
+        return False
+    try:
+        with request(
+            f'{base}/api/jobs/{identifier}/cancel',
+            {},
+            timeout=min(timeout, 5) if timeout > 0 else 1,
+        ):
+            pass
+    except (OSError, SystemExit, urllib.error.URLError):
+        pass
+    if terminal_observed:
+        return True
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            history = get_json(
+                f'{base}/history/{identifier}',
+                timeout=min(max(int(deadline - time.monotonic()), 1), 5),
+            )
+            if set(history) == {identifier} and terminal(history[identifier]):
+                return True
+        except (OSError, SystemExit, urllib.error.URLError, ValueError):
+            pass
+        time.sleep(min(POLL_INTERVAL, max(deadline - time.monotonic(), 0)))
+    return False
 
 
 def wait_prompt(base: str, identifier: str, timeout: int) -> dict:
-    try:
-        parsed = uuid.UUID(identifier)
-    except (AttributeError, TypeError, ValueError) as error:
-        raise SystemExit('invalid prompt UUID') from error
-    if parsed.version != 4 or str(parsed) != identifier:
+    if not valid_prompt_id(identifier):
         raise SystemExit('invalid prompt UUID')
     expected = identifier
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        history = get_json(f'{base}/history/{expected}')
+        try:
+            history = get_json(f'{base}/history/{expected}')
+        except BaseException as error:
+            cleanup = cancel_prompt(base, expected, False)
+            raise PromptFailure(str(error), cleanup) from error
         if history and set(history) != {expected}:
-            raise SystemExit('ComfyUI history returned an unexpected prompt')
+            cleanup = cancel_prompt(base, expected, False)
+            raise PromptFailure('ComfyUI history returned an unexpected prompt', cleanup)
         entry = history.get(expected)
         if entry:
+            if not isinstance(entry, dict) or not isinstance(entry.get('status'), dict):
+                cleanup = cancel_prompt(base, expected, False)
+                raise PromptFailure('ComfyUI history status is malformed', cleanup)
             status = entry.get('status') or {}
-            state = (status.get('status_str') or '').lower()
+            raw_state = status.get('status_str')
+            completed = status.get('completed')
+            if (raw_state is not None and not isinstance(raw_state, str)) or (
+                completed is not None and not isinstance(completed, bool)
+            ):
+                cleanup = cancel_prompt(base, expected, False)
+                raise PromptFailure('ComfyUI history status is malformed', cleanup)
+            state = (raw_state or '').lower()
             if state == 'error':
-                raise SystemExit(json.dumps(status, indent=2)[:4000])
-            if status.get('completed') is True or state == 'success':
+                cancel_prompt(base, expected, True)
+                raise PromptFailure(json.dumps(status, indent=2)[:4000], True)
+            if completed is True or state == 'success':
                 return entry
-        time.sleep(2)
-    raise SystemExit(f'train timed out after {timeout}s')
+        time.sleep(POLL_INTERVAL)
+    cleanup = cancel_prompt(base, expected, False)
+    raise PromptFailure(f'train timed out after {timeout}s', cleanup)
 
 
 def trainer(
@@ -325,11 +465,55 @@ def train_graph(
 def comfy_input_dir() -> Path:
     override = env('ZONE_COMFY_INPUT')
     if override:
-        return Path(override)
-    models_dir = env('COMFYUI_MODELS_DIR')
-    if models_dir:
-        return Path(models_dir).parent / 'input'
-    raise SystemExit('ZONE_COMFY_INPUT is required so images land in ComfyUI/input')
+        directory = Path(override)
+    else:
+        models_dir = env('COMFYUI_MODELS_DIR')
+        if not models_dir:
+            raise SystemExit('ZONE_COMFY_INPUT is required so images land in ComfyUI/input')
+        directory = Path(models_dir).parent / 'input'
+    root = real_directory(directory.parent, 'ComfyUI root')
+    return real_child(root, directory, 'ComfyUI input directory')
+
+
+def real_directory(path: Path, label: str) -> Path:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise SystemExit(f'{label} is missing: {path}') from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise SystemExit(f'{label} must be a real directory: {path}')
+    return path.resolve(strict=True)
+
+
+def real_child(root: Path, child: Path, label: str) -> Path:
+    root = real_directory(root, label)
+    child = real_directory(child, label)
+    if child.parent != root:
+        raise SystemExit(f'{label} escapes its root')
+    return child
+
+
+def remove_namespace(root: Path, name: str) -> bool:
+    if not RUN_PATTERN.fullmatch(name):
+        return False
+    try:
+        root = real_directory(root, 'cleanup root')
+        descriptor = os.open(
+            root,
+            os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0),
+        )
+    except (OSError, SystemExit):
+        return False
+    try:
+        metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if not stat.S_ISDIR(metadata.st_mode):
+            return False
+        shutil.rmtree(name, dir_fd=descriptor)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
 
 
 def download(base: str, run: Run, output: Path) -> None:
@@ -357,26 +541,27 @@ def download(base: str, run: Run, output: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def cleanup(base: str, run: Run, staged: Path) -> None:
-    if staged.exists() and not staged.is_symlink():
-        shutil.rmtree(staged, ignore_errors=True)
+def cleanup(base: str, run: Run, staged: Path) -> bool:
+    run.validate()
+    remote_safe = True
     try:
-        identifier = prompt_id(
-            post_json(
-                f'{base}/prompt',
-                {
-                    'prompt': {
-                        '1': {
-                            'class_type': 'ZoneCleanupTrainingRun',
-                            'inputs': {'folder': run.folder, 'artifact': run.artifact},
-                        }
-                    }
-                },
-            )
+        identifier = queue_prompt(
+            base,
+            {
+                '1': {
+                    'class_type': 'ZoneCleanupTrainingRun',
+                    'inputs': {'folder': run.folder, 'artifact': run.artifact},
+                }
+            },
         )
         wait_prompt(base, identifier, 30)
+    except PromptFailure as error:
+        remote_safe = error.cleanup
     except (SystemExit, urllib.error.URLError):
-        pass
+        remote_safe = False
+    if remote_safe:
+        remove_namespace(staged.parent, run.folder)
+    return remote_safe
 
 
 def main() -> None:
@@ -393,22 +578,29 @@ def main() -> None:
     base = env('COMFYUI_BASE_URL', env('ZONE_COMFY_URL', 'http://127.0.0.1:8188')).rstrip('/')
     staged = comfy_input_dir() / run.folder
     succeeded = False
+    cleanup_safe = True
     try:
-        count, manifest = stage_dataset(train_dir, staged, model)
-        steps = train_steps(count, config)
-        identifier = prompt_id(
-            post_json(
-                f'{base}/prompt',
-                {'prompt': train_graph(model, run.folder, manifest, run.artifact, config, steps)},
+        try:
+            count, manifest = stage_dataset(train_dir, staged, model)
+            steps = train_steps(count, config)
+            identifier = queue_prompt(
+                base,
+                train_graph(model, run.folder, manifest, run.artifact, config, steps),
             )
-        )
-        print(f'train queued {identifier} steps={steps} images={count}', flush=True)
-        wait_prompt(base, identifier, int(env('ZONE_TRAIN_TIMEOUT', '3600')))
-        download(base, run, output)
+            print(f'train queued {identifier} steps={steps} images={count}', flush=True)
+            wait_prompt(base, identifier, int(env('ZONE_TRAIN_TIMEOUT', '3600')))
+        except PromptFailure as error:
+            cleanup_safe = error.cleanup
+            raise
+        try:
+            download(base, run, output)
+        except BaseException:
+            cancel_prompt(base, identifier, True)
+            raise
         succeeded = True
         print(f'wrote {output} {output.stat().st_size} bytes', flush=True)
     finally:
-        if not succeeded or env('ZONE_TRAIN_DEFER_CLEANUP') != '1':
+        if cleanup_safe and (not succeeded or env('ZONE_TRAIN_DEFER_CLEANUP') != '1'):
             cleanup(base, run, staged)
 
 

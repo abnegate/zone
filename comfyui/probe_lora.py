@@ -10,13 +10,16 @@ import uuid
 from pathlib import Path
 
 from train_lora import (
+    PromptFailure,
     Run,
     TrainingModel,
+    cancel_prompt,
     comfy_input_dir,
     env,
     load_config,
-    post_json,
-    prompt_id,
+    queue_prompt,
+    real_child,
+    remove_namespace,
     stage_dataset,
     wait_prompt,
 )
@@ -143,15 +146,20 @@ def gradient_graph(model: TrainingModel, folder: str, manifest: str, resolution:
 
 
 def report(base: str, nodes: dict, timeout: int) -> dict:
-    identifier = prompt_id(post_json(f'{base}/prompt', {'prompt': nodes}))
+    identifier = queue_prompt(base, nodes)
     entry = wait_prompt(base, identifier, timeout)
-    for output in (entry.get('outputs') or {}).values():
-        for value in output.values():
-            text = value[0] if isinstance(value, list) and value else value
-            if isinstance(text, str) and text.startswith('{'):
-                parsed = json.loads(text)
-                if isinstance(parsed, dict):
-                    return parsed
+    try:
+        for output in (entry.get('outputs') or {}).values():
+            for value in output.values():
+                text = value[0] if isinstance(value, list) and value else value
+                if isinstance(text, str) and text.startswith('{'):
+                    parsed = json.loads(text)
+                    if isinstance(parsed, dict):
+                        return parsed
+    except (AttributeError, json.JSONDecodeError, TypeError, ValueError) as error:
+        cancel_prompt(base, identifier, True)
+        raise SystemExit('probe report is malformed') from error
+    cancel_prompt(base, identifier, True)
     raise SystemExit(f'no probe report in {json.dumps(entry.get("outputs"))[:1000]}')
 
 
@@ -163,9 +171,8 @@ def dataset(model: TrainingModel) -> tuple[Run, str, bool]:
             raise SystemExit('ZONE_PROBE_MANIFEST is required with ZONE_PROBE_FOLDER')
         run = Run(folder=folder, artifact=f'zone-lora-{uuid.uuid4()}')
         run.validate()
-        source = comfy_input_dir() / folder
-        if source.is_symlink() or not source.is_dir():
-            raise SystemExit(f'no probe folder at {source}')
+        input_directory = comfy_input_dir()
+        source = real_child(input_directory, input_directory / folder, 'probe folder')
         parsed = json.loads(manifest)
         if parsed.get('architecture') != model.architecture:
             raise SystemExit('probe manifest architecture does not match its model')
@@ -184,6 +191,7 @@ def main() -> None:
     resolution = int(env('ZONE_PROBE_RESOLUTION') or load_config()['resolution'])
     timeout = int(env('ZONE_PROBE_TIMEOUT', '7200'))
     run, manifest, staged = dataset(model)
+    cleanup_safe = True
     try:
         if env('ZONE_PROBE_MODE', 'loss') == 'gradient':
             result = report(base, gradient_graph(model, run.folder, manifest, resolution), timeout)
@@ -207,13 +215,12 @@ def main() -> None:
                 f'{adapter:44s} mean={measured["mean"]:.5f}  '
                 f'{change:+.2f}%  {measured["by_percent"]}'
             )
+    except PromptFailure as error:
+        cleanup_safe = error.cleanup
+        raise
     finally:
-        if staged:
-            directory = comfy_input_dir() / run.folder
-            if directory.is_dir() and not directory.is_symlink():
-                import shutil
-
-                shutil.rmtree(directory)
+        if staged and cleanup_safe:
+            remove_namespace(comfy_input_dir(), run.folder)
 
 
 if __name__ == '__main__':

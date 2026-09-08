@@ -4,8 +4,10 @@ import json
 import os
 import sys
 import unittest
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 COMFYUI = Path(__file__).parents[1]
 if str(COMFYUI) not in sys.path:
@@ -78,6 +80,46 @@ class ProbeGraphTests(unittest.TestCase):
             name for name, node in second.items() if node['class_type'] == 'LoraLoaderModelOnly'
         )
         self.assertNotEqual(first_loader, second_loader)
+
+    def test_malformed_terminal_report_cancels_only_its_exact_prompt(self) -> None:
+        identifier = str(uuid.uuid4())
+        with (
+            mock.patch.object(probe_lora, 'queue_prompt', return_value=identifier),
+            mock.patch.object(
+                probe_lora,
+                'wait_prompt',
+                return_value={
+                    'status': {'completed': True, 'status_str': 'success'},
+                    'outputs': {'1': {'text': ['{not-json']}},
+                },
+            ),
+            mock.patch.object(probe_lora, 'cancel_prompt') as cancel,
+        ):
+            with self.assertRaises(SystemExit):
+                probe_lora.report('http://comfy', {}, 10)
+        cancel.assert_called_once_with('http://comfy', identifier, True)
+
+    def test_main_retains_staged_inputs_when_probe_queue_state_is_unknown(self) -> None:
+        run = probe_lora.Run.create('probe')
+        with (
+            mock.patch.object(
+                probe_lora.TrainingModel,
+                'from_environment',
+                return_value=flux(),
+            ),
+            mock.patch.object(probe_lora, 'base_url', return_value='http://comfy'),
+            mock.patch.object(probe_lora, 'load_config', return_value={'resolution': 512}),
+            mock.patch.object(probe_lora, 'dataset', return_value=(run, '{}', True)),
+            mock.patch.object(
+                probe_lora,
+                'report',
+                side_effect=probe_lora.PromptFailure('unknown', False),
+            ),
+            mock.patch.object(probe_lora, 'remove_namespace') as remove,
+        ):
+            with self.assertRaises(probe_lora.PromptFailure):
+                probe_lora.main()
+        remove.assert_not_called()
 
 
 class GradientGraphTests(unittest.TestCase):
