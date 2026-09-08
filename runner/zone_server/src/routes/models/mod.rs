@@ -36,14 +36,27 @@ use zone_comfy::video::{self, FrameRequest};
 
 const MAX_MODEL_NAME_LENGTH: usize = 256;
 
-fn busy() -> axum::response::Response {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(ErrorResponse::new(
-            "another training upload is in progress; retry when it finishes",
-        )),
-    )
-        .into_response()
+/// Holds a training permit for the whole request, refusing rather than queueing.
+///
+/// This is middleware rather than a line in each handler because a handler only
+/// runs once `Json` has already read and parsed the body: taking the permit
+/// there would bound the work but not the buffering, which is the larger half
+/// of what a training upload holds.
+pub async fn one_training_upload_at_a_time(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Ok(_permit) = state.train_semaphore().clone().try_acquire_owned() else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse::new(
+                "another training upload is in progress; retry when it finishes",
+            )),
+        )
+            .into_response();
+    };
+    next.run(request).await
 }
 
 // Shared HTTP Client for Ollama API calls
@@ -564,9 +577,6 @@ pub async fn frames(
     Json(request): Json<FrameRequest>,
 ) -> impl IntoResponse {
     use base64::Engine;
-    let Ok(_permit) = state.train_semaphore().try_acquire() else {
-        return busy();
-    };
     let config = state.config();
     let resolution = match zone_comfy::train::packaged_config() {
         Ok(settings) => settings.resolution(),
@@ -619,9 +629,6 @@ pub async fn train(
     _auth: AuthUser,
     Json(request): Json<TrainRequest>,
 ) -> impl IntoResponse {
-    let Ok(_permit) = state.train_semaphore().try_acquire() else {
-        return busy();
-    };
     match lora::train(
         &state.config().comfyui,
         state.config().litellm_host.clone(),

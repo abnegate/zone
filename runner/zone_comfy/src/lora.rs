@@ -257,14 +257,21 @@ fn caption(image: &TrainImage, trigger: Option<&str>) -> String {
     }
 }
 
-/// Whether the caption already carries the trigger as a word of its own.
+/// Whether the caption already carries the trigger as a token of its own.
 ///
-/// A substring test would read a one-letter trigger out of any caption
-/// containing that letter, and the image would train with no trigger at all.
+/// A plain substring test would read a short trigger out of any caption that
+/// happens to contain those letters, and the image would train with no trigger
+/// at all. Splitting the caption into words instead cannot match a trigger that
+/// carries punctuation — `my-style` is never a word — and would prefix it onto
+/// a caption that already names it. So the trigger is found as written and only
+/// its edges are checked.
 fn mentions(caption: &str, trigger: &str) -> bool {
-    caption
-        .split(|character: char| !character.is_alphanumeric())
-        .any(|word| word == trigger)
+    caption.match_indices(trigger).any(|(start, found)| {
+        let before = caption[..start].chars().next_back();
+        let after = caption[start + found.len()..].chars().next();
+        before.is_none_or(|edge| !edge.is_alphanumeric())
+            && after.is_none_or(|edge| !edge.is_alphanumeric())
+    })
 }
 
 /// The shot each image belongs to. Frames from a clip say which shot they came
@@ -873,6 +880,17 @@ mod tests {
             caption(&upload("zrkxyzed hair", None), Some("zrkxyz")),
             "zrkxyz, zrkxyzed hair",
             "a longer word that merely starts with the trigger is not the trigger"
+        );
+        // A trigger is not always one word. Splitting the caption into words
+        // could never match this one, and would prefix it a second time.
+        assert_eq!(
+            caption(&upload("my-style, a portrait", None), Some("my-style")),
+            "my-style, a portrait",
+            "a hyphenated trigger the caption already names is not repeated"
+        );
+        assert_eq!(
+            caption(&upload("a portrait", None), Some("my-style")),
+            "my-style, a portrait"
         );
     }
 

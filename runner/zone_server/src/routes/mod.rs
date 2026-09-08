@@ -71,6 +71,9 @@ pub fn create_router(state: AppState) -> Router {
     // rejects any set worth training on before a handler sees it.
     let uploads =
         DefaultBodyLimit::max((state.config().train_upload_limit_mb * 1024 * 1024) as usize);
+    // Runs before the body is read, so a refused upload is never buffered.
+    let one_at_a_time =
+        middleware::from_fn_with_state(state.clone(), models::one_training_upload_at_a_time);
 
     // Public routes (no auth required)
     // Note: WebSocket routes use in-message auth, not middleware
@@ -258,7 +261,12 @@ pub fn create_router(state: AppState) -> Router {
         // Models
         .route("/api/models", get(models::list))
         .route("/api/models/disk", get(models::disk))
-        .route("/api/models/train", post(models::train).layer(uploads))
+        .route(
+            "/api/models/train",
+            post(models::train)
+                .layer(uploads)
+                .layer(one_at_a_time.clone()),
+        )
         .route("/api/models/train/bases", get(models::train_bases))
         .route(
             "/api/models/train/captions",
@@ -266,7 +274,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/models/train/frames",
-            post(models::frames).layer(uploads),
+            post(models::frames).layer(uploads).layer(one_at_a_time),
         )
         .route(
             "/api/models/{name}",

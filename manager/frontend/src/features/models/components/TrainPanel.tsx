@@ -73,13 +73,19 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     const encoded = await Promise.all(
       Array.from(files).map(async (file) => ({ name: file.name, bytes: await fileToBase64(file) }))
     );
+    let unpaired = 0;
     setImages((current) => {
       const next = [...current];
       for (const file of encoded) {
         if (before) {
-          const index = next.findIndex((image) => !image.before_base64);
+          // Only a still image can take a before image. Frames pulled from a
+          // clip also have no before_base64, and pairing one with them would
+          // send the trainer an arbitrary frame as the "after" of this shot.
+          const index = next.findIndex((image) => !image.source && !image.before_base64);
           if (index >= 0) {
             next[index] = { ...next[index], before_base64: file.bytes };
+          } else {
+            unpaired += 1;
           }
         } else {
           next.push({
@@ -92,6 +98,11 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       }
       return next;
     });
+    if (unpaired > 0) {
+      setError(
+        `${unpaired} before image${unpaired === 1 ? '' : 's'} had no still image left to pair with. Video frames cannot take one.`
+      );
+    }
   };
 
   const handleVideos = async (files: FileList | null) => {
