@@ -221,7 +221,7 @@ mod tests {
 
         // Saving does not restamp a session, so the order under test comes from
         // the timestamps themselves rather than from when each one is written.
-        let mut session1 = create_test_session("Prompt 1", "Session 1");
+        let session1 = create_test_session("Prompt 1", "Session 1");
         let mut session2 = create_test_session("Prompt 2", "Session 2");
         let mut session3 = create_test_session("Prompt 3", "Session 3");
         let oldest = session1.updated_at;
