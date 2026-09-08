@@ -62,6 +62,23 @@ impl Default for GitService {
     }
 }
 
+/// The group remains separate from the server so cancellation cannot signal
+/// another task. Drop covers timeout/future cancellation, not server SIGKILL;
+/// abrupt process death requires the hosting supervisor to tear down its group.
+#[cfg(unix)]
+struct Group(nix::unistd::Pid);
+
+#[cfg(unix)]
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Err(error) = nix::sys::signal::killpg(self.0, nix::sys::signal::Signal::SIGKILL)
+            && error != nix::errno::Errno::ESRCH
+        {
+            tracing::warn!(%error, group = self.0.as_raw(), "Could not terminate Git process group");
+        }
+    }
+}
+
 impl GitService {
     /// Create a new git service
     pub fn new() -> Self {
@@ -154,19 +171,28 @@ impl GitService {
         command
     }
 
+    async fn output(command: &mut Command) -> GitResult<std::process::Output> {
+        #[cfg(unix)]
+        command.process_group(0);
+        command.kill_on_drop(true);
+        let child = command.spawn()?;
+        #[cfg(unix)]
+        let _group = Group(nix::unistd::Pid::from_raw(
+            child
+                .id()
+                .ok_or_else(|| std::io::Error::other("Git process has no ID"))? as i32,
+        ));
+        match tokio::time::timeout(Duration::from_secs(300), child.wait_with_output()).await {
+            Ok(output) => Ok(output?),
+            Err(_) => Err(GitError::CommandFailed(
+                "Git operation timed out".to_string(),
+            )),
+        }
+    }
+
     async fn finish(command: &mut Command) -> GitResult<()> {
-        // A dropped worker must not leave git running with credentials.
-        let mut child = command.spawn()?;
-        let status = match tokio::time::timeout(Duration::from_secs(300), child.wait()).await {
-            Ok(status) => status?,
-            Err(_) => {
-                let _ = child.kill().await;
-                return Err(GitError::CommandFailed(
-                    "Git operation timed out".to_string(),
-                ));
-            }
-        };
-        if !status.success() {
+        let output = Self::output(command).await?;
+        if !output.status.success() {
             return Err(GitError::CommandFailed(
                 "Git operation failed; verify repository access".to_string(),
             ));
@@ -236,27 +262,29 @@ impl GitService {
 
     /// Check if a path is a git repository
     pub async fn is_git_repo(&self, path: &Path) -> GitResult<bool> {
-        let output = Self::network_command(None)
-            .arg("rev-parse")
-            .arg("--is-inside-work-tree")
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .arg("rev-parse")
+                .arg("--is-inside-work-tree")
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         Ok(output.status.success())
     }
 
     /// Get the current branch name
     pub async fn current_branch(&self, path: &Path) -> GitResult<String> {
-        let output = Self::network_command(None)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -268,13 +296,14 @@ impl GitService {
 
     /// Check if there are uncommitted changes
     pub async fn has_changes(&self, path: &Path) -> GitResult<bool> {
-        let output = Self::network_command(None)
-            .args(["status", "--porcelain"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["status", "--porcelain"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -287,13 +316,14 @@ impl GitService {
     /// Get a summary of uncommitted changes
     pub async fn diff_summary(&self, path: &Path) -> GitResult<DiffSummary> {
         // Get list of changed files
-        let status_output = Self::network_command(None)
-            .args(["status", "--porcelain"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let status_output = Self::output(
+            Self::network_command(None)
+                .args(["status", "--porcelain"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !status_output.status.success() {
             let stderr = String::from_utf8_lossy(&status_output.stderr);
@@ -313,13 +343,14 @@ impl GitService {
             .collect();
 
         // Get diff stats
-        let diff_stat_output = Self::network_command(None)
-            .args(["diff", "--shortstat", "HEAD"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let diff_stat_output = Self::output(
+            Self::network_command(None)
+                .args(["diff", "--shortstat", "HEAD"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         let mut insertions = 0;
         let mut deletions = 0;
@@ -342,13 +373,14 @@ impl GitService {
         }
 
         // Get actual diff text (limited)
-        let diff_output = Self::network_command(None)
-            .args(["diff", "HEAD"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let diff_output = Self::output(
+            Self::network_command(None)
+                .args(["diff", "HEAD"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         let diff_text = String::from_utf8_lossy(&diff_output.stdout);
         // Limit diff text size
@@ -369,31 +401,33 @@ impl GitService {
     /// Create and checkout a new branch
     pub async fn create_branch(&self, path: &Path, branch_name: &str) -> GitResult<()> {
         // Check if branch already exists
-        let check_output = Self::network_command(None)
-            .args([
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{}", branch_name),
-            ])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let check_output = Self::output(
+            Self::network_command(None)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{}", branch_name),
+                ])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if check_output.status.success() {
             return Err(GitError::BranchExists(branch_name.to_string()));
         }
 
         // Create and checkout the branch
-        let output = Self::network_command(None)
-            .args(["checkout", "-b", branch_name])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["checkout", "-b", branch_name])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -405,13 +439,14 @@ impl GitService {
 
     /// Stage all changes
     pub async fn stage_all(&self, path: &Path) -> GitResult<()> {
-        let output = Self::network_command(None)
-            .args(["add", "-A"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["add", "-A"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -423,21 +458,22 @@ impl GitService {
 
     /// Commit staged changes
     pub async fn commit(&self, path: &Path, message: &str) -> GitResult<String> {
-        let output = Self::network_command(None)
-            .args([
-                "-c",
-                "user.name=Zone",
-                "-c",
-                "user.email=zone@localhost",
-                "commit",
-                "-m",
-                message,
-            ])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args([
+                    "-c",
+                    "user.name=Zone",
+                    "-c",
+                    "user.email=zone@localhost",
+                    "commit",
+                    "-m",
+                    message,
+                ])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -448,13 +484,14 @@ impl GitService {
         }
 
         // Get the commit SHA
-        let sha_output = Self::network_command(None)
-            .args(["rev-parse", "HEAD"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let sha_output = Self::output(
+            Self::network_command(None)
+                .args(["rev-parse", "HEAD"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         Ok(String::from_utf8_lossy(&sha_output.stdout)
             .trim()
@@ -463,13 +500,14 @@ impl GitService {
 
     /// Push branch to remote
     pub async fn push(&self, path: &Path, branch_name: &str, remote: &str) -> GitResult<()> {
-        let output = Self::network_command(None)
-            .args(["push", "-u", remote, branch_name])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["push", "-u", remote, branch_name])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -502,13 +540,14 @@ impl GitService {
 
     /// Get the default remote URL
     pub async fn get_remote_url(&self, path: &Path, remote: &str) -> GitResult<String> {
-        let output = Self::network_command(None)
-            .args(["remote", "get-url", remote])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["remote", "get-url", remote])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             return Err(GitError::NoRemote);
@@ -519,13 +558,14 @@ impl GitService {
 
     /// Checkout existing branch
     pub async fn checkout(&self, path: &Path, branch_name: &str) -> GitResult<()> {
-        let output = Self::network_command(None)
-            .args(["checkout", branch_name])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["checkout", branch_name])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -704,5 +744,119 @@ mod checkout_tests {
             String::from_utf8(author.stdout).unwrap().trim(),
             "Zone <zone@localhost>"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_tests {
+    use super::*;
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    use std::os::unix::fs::PermissionsExt;
+
+    async fn marker(directory: &Path, name: &str) -> u32 {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(directory.join(name)).await
+                    && let Ok(pid) = value.trim().parse()
+                {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture process did not start")
+    }
+
+    fn alive(pid: u32) -> bool {
+        kill(Pid::from_raw(pid as i32), None).is_ok()
+    }
+
+    async fn cancellation(timeout: bool) {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fixture.path().join("git"),
+            "#!/bin/sh\necho $$ > \"$FIXTURE/parent\"\n/bin/sh \"$FIXTURE/helper\" &\nwait\n",
+        )
+        .unwrap();
+        std::fs::write(fixture.path().join("helper"), "#!/bin/sh\necho $$ > \"$FIXTURE/helper-pid\"\nprintf '%s' \"$GIT_CONFIG_VALUE_0\" > \"$FIXTURE/credential\"\n/bin/sh \"$FIXTURE/grandchild\" &\nwait\n").unwrap();
+        std::fs::write(
+            fixture.path().join("grandchild"),
+            "#!/bin/sh\necho $$ > \"$FIXTURE/grandchild-pid\"\nexec /bin/sleep 60\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            fixture.path().join("git"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let mut unrelated = Command::new("/bin/sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut command = GitService::network_command(Some("fixture-credential"));
+        command
+            .env("PATH", fixture.path())
+            .env("FIXTURE", fixture.path());
+        let operation = tokio::spawn(async move { GitService::finish(&mut command).await });
+        let parent = marker(fixture.path(), "parent").await;
+        let helper = marker(fixture.path(), "helper-pid").await;
+        let grandchild = marker(fixture.path(), "grandchild-pid").await;
+        let credential = tokio::fs::read_to_string(fixture.path().join("credential"))
+            .await
+            .unwrap();
+        assert!(credential.starts_with("Authorization: Basic "));
+        if timeout {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(301)).await;
+            let result = operation.await.unwrap();
+            tokio::time::resume();
+            assert!(
+                matches!(result, Err(GitError::CommandFailed(ref error)) if error.contains("timed out"))
+            );
+        } else {
+            operation.abort();
+            assert!(operation.await.unwrap_err().is_cancelled());
+        }
+        let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+            while [parent, helper, grandchild].iter().any(|pid| alive(*pid)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let survivor = unrelated.try_wait().unwrap().is_none();
+        // Clean up only this fixture's known processes, including on the seen-red path.
+        for pid in [grandchild, helper, parent] {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        }
+        unrelated.kill().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while [parent, helper, grandchild].iter().any(|pid| alive(*pid)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture cleanup left a Git helper running");
+        assert!(
+            survivor,
+            "cancellation killed an unrelated process outside the Git group"
+        );
+        assert!(
+            stopped,
+            "credential-bearing helper or grandchild survived Git cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_git_future_kills_helpers_and_preserves_unrelated_processes() {
+        cancellation(false).await;
+    }
+
+    #[tokio::test]
+    async fn timed_out_git_kills_helpers_and_preserves_unrelated_processes() {
+        cancellation(true).await;
     }
 }

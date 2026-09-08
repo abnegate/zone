@@ -9919,6 +9919,7 @@ name = "zone_vcs"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "nix",
  "reqwest 0.13.4",
  "serde",
  "tempfile",
