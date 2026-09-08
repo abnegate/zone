@@ -1,7 +1,7 @@
 {
   "steps_per_image": 50,
   "min_steps": 400,
-  "checkpoint_every": 150,
+  "checkpoint_every": 50,
   "max_steps": 800,
   "rank": 32,
   "learning_rate": 0.0001,

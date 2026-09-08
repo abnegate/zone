@@ -70,6 +70,7 @@ class FluxTrainingGradientTests(unittest.TestCase):
         comfy.model_management.get_torch_device = lambda: torch.device('cpu')
         comfy.model_management.in_training = True
         cls.hooks = load_hooks()
+        cls.hooks.install_inference_safe_bypass()
         cls.hooks.install_out_of_place_residuals()
         cls.node = load_module('train_node')
 
@@ -218,6 +219,24 @@ class FluxTrainingGradientTests(unittest.TestCase):
             self.assertGreater(
                 float(gradient.abs().sum()), 0.0, f'adapter {index} gradient is zero'
             )
+
+    def test_an_ejected_hook_left_installed_still_runs_the_module(self):
+        """Nested hooks eject out of order and leave one behind with no original."""
+        import torch
+        from comfy.weight_adapter import adapter_maps
+        from comfy.weight_adapter.bypass import BypassForwardHook
+
+        blocks = self.build_blocks()
+        module = blocks['double_blocks'].img_attn.qkv
+        adapter = adapter_maps['LoRA'].create_train(module.weight, rank=RANK, alpha=float(RANK))
+        hook = BypassForwardHook(module, adapter, 1.0)
+        hook.inject()
+        expected = module.forward(torch.randn(1, 4, HIDDEN))
+        hook.original_forward = None
+        with self.assertLogs(level='WARNING'):
+            actual = module.forward(torch.randn(1, 4, HIDDEN) * 0 + 0)
+        self.assertEqual(actual.shape, expected.shape)
+        self.assertTrue(bool(torch.isfinite(actual).all()))
 
     def test_inference_path_is_untouched(self):
         import comfy.ldm.flux.layers as layers
