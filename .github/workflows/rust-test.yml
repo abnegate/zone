@@ -110,6 +110,13 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
           REDIS_URL: redis://localhost:6379
 
+      - name: Run server binary unit tests
+        run: cargo test -p zone_server --bin zone-server --no-default-features --features zone_context/test-utils
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/zone_test
+          REDIS_URL: redis://localhost:6379
+
       - name: Run integration tests
         run: cargo test --workspace --exclude zone_desktop --test '*' --no-default-features --features zone_context/test-utils
         env:
@@ -193,6 +200,9 @@ jobs:
 
       - name: Run unit tests
         run: cargo test --workspace --exclude zone_desktop --lib --no-default-features --features zone_context/test-utils
+
+      - name: Run server binary unit tests
+        run: cargo test -p zone_server --bin zone-server --no-default-features --features zone_context/test-utils
 
       - name: Run integration tests
         run: cargo test --workspace --exclude zone_desktop --test '*' --no-default-features --features zone_context/test-utils

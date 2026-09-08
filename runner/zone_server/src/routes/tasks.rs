@@ -615,12 +615,7 @@ pub async fn create_run(
                     .into_response();
             }
 
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+            database_error(e)
         }
     }
 }
