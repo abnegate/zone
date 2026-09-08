@@ -13,7 +13,7 @@ import sys
 import urllib.error
 from pathlib import Path
 
-from train_lora import comfy_input_dir, env, post_json, stage_dataset, wait_prompt
+from train_lora import comfy_input_dir, env, load_config, post_json, stage_dataset, wait_prompt
 
 CHECKPOINT = 'flux1-dev-fp8.safetensors'
 
@@ -81,7 +81,7 @@ def gradient_graph(folder: str, captions: dict[str, str], resolution: int) -> di
             'learning_rate': float(env('ZONE_PROBE_LEARNING_RATE', '0.0001')),
             'iterations': int(env('ZONE_PROBE_ITERATIONS', '40')),
             'percent': float(env('ZONE_PROBE_PERCENT', '0.5')),
-            'rank': int(env('ZONE_PROBE_RANK', '8')),
+            'rank': int(env('ZONE_PROBE_RANK') or load_config()['rank']),
             'seed': int(env('ZONE_PROBE_SEED', '1234')),
             'gradient_checkpointing': env('ZONE_PROBE_CHECKPOINTING', '1') != '0',
         },
@@ -107,7 +107,9 @@ def dataset() -> tuple[str, dict[str, str]]:
     """A probe reads the dataset the same way training does, from ComfyUI's input."""
     folder = env('ZONE_PROBE_FOLDER')
     if folder:
-        source = Path(env('ZONE_COMFY_INPUT', '')) / folder
+        source = comfy_input_dir() / folder
+        if not source.is_dir():
+            raise SystemExit(f'no probe folder at {source}')
         captions = {
             png.name: png.with_suffix('.txt').read_text().strip()
             for png in sorted(source.glob('*.png'))
@@ -123,7 +125,7 @@ def dataset() -> tuple[str, dict[str, str]]:
 
 def main() -> None:
     base = base_url()
-    resolution = int(env('ZONE_PROBE_RESOLUTION', '512'))
+    resolution = int(env('ZONE_PROBE_RESOLUTION') or load_config()['resolution'])
     timeout = int(env('ZONE_PROBE_TIMEOUT', '7200'))
     folder, captions = dataset()
     if env('ZONE_PROBE_MODE', 'loss') == 'gradient':

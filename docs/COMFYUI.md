@@ -290,9 +290,9 @@ wants request metrics installs a hook with `zone_comfy::observe_requests`.
 
 
 Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
-Defaults live in `train_config.json`: rank 8, alpha equal to rank, every 2-D
+Defaults live in `train_config.json`: rank 32, alpha equal to rank, every 2-D
 linear in the transformer blocks except the modulation layers (228 adapters on
-FLUX.1 Dev), 512px, and at least 400 steps. An adapter is written every 150
+FLUX.1 Dev), 512px, and at least 400 steps. An adapter is written every 50
 steps as well as at the end, so a long run can be judged before it finishes.
 
 ### Train on Dev, not Schnell

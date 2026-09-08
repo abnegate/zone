@@ -361,6 +361,8 @@ class ZoneTrainLoRA(io.ComfyNode):
 
             def loss_callback(loss):
                 losses.append(loss)
+                if loss != loss:
+                    raise RuntimeError('training loss became NaN')
                 if len(losses) == 1 or len(losses) % 10 == 0:
                     logging.info('Zone LoRA step %s/%s loss=%s', len(losses), steps, f'{loss:.4f}')
                 if every and len(losses) % every == 0 and len(losses) < steps:
@@ -368,8 +370,6 @@ class ZoneTrainLoRA(io.ComfyNode):
                         snapshot(lora_sd, lora_dtype_t),
                         output_dir / f'{stem}-step{len(losses)}.safetensors',
                     )
-                if loss != loss:
-                    raise RuntimeError('training loss became NaN')
 
             train_sampler = ZoneTrainSampler(
                 criterion,

@@ -90,6 +90,8 @@ class ZoneProbeLoss(io.ComfyNode):
         model = model[0]
         seed = seed[0]
         wanted = [float(part) for part in percents[0].split(',') if part.strip()]
+        if not wanted:
+            raise ValueError('percents must name at least one noise level to measure')
         latents = _process_latents_standard_mode(latents)
         positive = _process_conditioning(positive)
         dtype = torch.float16 if model.model.get_dtype() == torch.float16 else torch.bfloat16
