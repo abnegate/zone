@@ -2,6 +2,7 @@
 //! and removes it when execution completes, fails, or is cancelled. Durable run
 //! and owner identifiers also let recovery remove local directories after a crash.
 
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -12,7 +13,7 @@ use crate::db::{
     tasks::{self, TaskRow},
 };
 
-const ROOT: &str = "zone-checkouts";
+const ROOT: &str = "zone-checkouts-v1";
 
 pub struct Repository {
     pub url: String,
@@ -86,7 +87,7 @@ impl Checkout {
         }
         // The run and owner are durable before a directory can exist. Recovery
         // derives names only from these identifiers, never from a stored path.
-        let checkout = Self::create(&Self::root(), run, owner)
+        let checkout = Self::create(&Self::root(pool), run, owner)
             .map_err(|_| "Cannot create task checkout".to_string())?;
         if let Some(repository) = repository {
             GitService::new()
@@ -101,8 +102,31 @@ impl Checkout {
         Ok(checkout)
     }
 
-    fn root() -> PathBuf {
-        std::env::temp_dir().join(ROOT)
+    fn root(pool: &PgPool) -> PathBuf {
+        // Recovery may treat absent rows as deleted only within this database.
+        // Frame nonsecret connection fields so distinct identities cannot collide
+        // through delimiters. Password rotation keeps the same namespace.
+        let options = pool.connect_options();
+        let port = options.get_port().to_be_bytes();
+        let socket = options
+            .get_socket()
+            .map(|path| path.as_os_str().as_encoded_bytes())
+            .unwrap_or_default();
+        let mut digest = Sha256::new();
+        for field in [
+            options.get_host().as_bytes(),
+            &port,
+            options
+                .get_database()
+                .unwrap_or(options.get_username())
+                .as_bytes(),
+            options.get_username().as_bytes(),
+            socket,
+        ] {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field);
+        }
+        std::env::temp_dir().join(format!("{ROOT}-{}", hex::encode(digest.finalize())))
     }
 
     fn validate_root(root: &Path) -> std::io::Result<()> {
@@ -147,7 +171,7 @@ impl Checkout {
     /// Reap only this host's generated directories whose runs cannot execute.
     /// Failed removals remain discoverable and are retried on the next sweep.
     pub async fn recover(pool: &PgPool) -> Result<u64, String> {
-        Self::recover_root(pool, &Self::root()).await
+        Self::recover_root(pool, &Self::root(pool)).await
     }
 
     async fn recover_root(pool: &PgPool, root: &Path) -> Result<u64, String> {
@@ -270,7 +294,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let checkout = Checkout::create(&Checkout::root(), run.id, owner).unwrap();
+        let checkout = Checkout::create(&Checkout::root(&pool), run.id, owner).unwrap();
         let path = checkout.path().to_path_buf();
         std::fs::write(path.join("private.txt"), "Private repository content").unwrap();
         std::mem::forget(checkout);
@@ -309,6 +333,69 @@ mod tests {
             recovered,
             "production recovery must remove a checkout when Drop never ran"
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_cannot_remove_another_databases_live_checkout() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        // Database identifiers contain only this prefix and UUID hexadecimal.
+        let database = format!("checkout_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let other = PgPool::connect_with((*pool.connect_options()).clone().database(&database))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE task_runs(id uuid PRIMARY KEY, status text NOT NULL)")
+            .execute(&other)
+            .await
+            .unwrap();
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations(id,name,slug) VALUES($1,'Checkout database isolation',$1::text)").bind(organization).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Checkout isolation',$1::text)").bind(workspace).bind(organization).execute(&pool).await.unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace,
+            &[],
+            "Isolated checkout",
+            "Regression",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let owner = Uuid::new_v4();
+        assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
+        let checkout = Checkout::prepare(&pool, &task, run.id, owner)
+            .await
+            .unwrap();
+        std::fs::write(checkout.path().join("keep.txt"), "Live private content").unwrap();
+        let removed = Checkout::recover(&other).await.unwrap();
+        let preserved = checkout.path().join("keep.txt").exists();
+        drop(checkout);
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
+        other.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {database}")))
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            preserved,
+            "another database recovery deleted this database's live checkout"
+        );
+        assert_eq!(removed, 0);
     }
 
     #[test]
