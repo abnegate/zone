@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).parents[1] / "download-models.py"
+MANIFEST_PATH = Path(__file__).parents[1] / "model-manifest.json"
 SPEC = importlib.util.spec_from_file_location("download_models", MODULE_PATH)
 assert SPEC and SPEC.loader
 download_models = importlib.util.module_from_spec(SPEC)
@@ -85,6 +88,7 @@ class DownloadModelsTest(unittest.TestCase):
             {"id": "image", "bundle": "image"},
             {"id": "image-edit", "bundle": "image-edit"},
             {"id": "video", "bundle": "video"},
+            {"id": "audio", "bundle": "audio"},
             {"id": "legacy"},
         ]
         self.assertEqual(
@@ -99,7 +103,28 @@ class DownloadModelsTest(unittest.TestCase):
             [model["id"] for model in download_models.select_models(models, "video")],
             ["video"],
         )
-        self.assertEqual(len(download_models.select_models(models, "all")), 4)
+        self.assertEqual(
+            [model["id"] for model in download_models.select_models(models, "audio")],
+            ["audio"],
+        )
+        self.assertEqual(len(download_models.select_models(models, "all")), 5)
+
+    def test_parse_args_accepts_every_valid_bundle(self) -> None:
+        self.assertEqual(
+            download_models.VALID_BUNDLES,
+            {"audio", "image", "image-dev", "image-edit", "video"},
+        )
+        for bundle in [*sorted(download_models.VALID_BUNDLES), "all"]:
+            with self.subTest(bundle=bundle):
+                argv = [
+                    "download-models.py",
+                    "--models-dir",
+                    ".",
+                    "--bundle",
+                    bundle,
+                ]
+                with unittest.mock.patch.object(sys, "argv", argv):
+                    self.assertEqual(download_models.parse_args().bundle, bundle)
 
     def test_shipped_manifest_can_be_verified(self) -> None:
         models = download_models.load_manifest(MODULE_PATH.with_name("model-manifest.json"))
@@ -142,6 +167,45 @@ class DownloadModelsTest(unittest.TestCase):
             download_models.download(model, target)
 
             self.assertEqual(target.read_bytes(), payload)
+
+
+class ModelManifestTest(unittest.TestCase):
+    REQUIRED_KEYS = (
+        "id",
+        "bundle",
+        "filename",
+        "relative_path",
+        "url",
+        "size_bytes",
+        "sha256",
+        "license",
+    )
+
+    def setUp(self) -> None:
+        self.models = download_models.load_manifest(MANIFEST_PATH)
+        self.assertTrue(self.models, f"no models declared in {MANIFEST_PATH}")
+
+    def test_every_entry_declares_a_supported_bundle(self) -> None:
+        for model in self.models:
+            with self.subTest(model=model.get("id")):
+                self.assertIn(
+                    download_models.model_bundle(model),
+                    {"audio", "image", "image-dev", "image-edit", "video"},
+                )
+
+    def test_every_bundle_selects_at_least_one_entry(self) -> None:
+        for bundle in sorted(download_models.VALID_BUNDLES):
+            with self.subTest(bundle=bundle):
+                self.assertTrue(
+                    download_models.select_models(self.models, bundle),
+                    f"bundle {bundle} selects no models",
+                )
+
+    def test_every_entry_declares_the_required_keys(self) -> None:
+        for model in self.models:
+            with self.subTest(model=model.get("id")):
+                missing = [key for key in self.REQUIRED_KEYS if not model.get(key)]
+                self.assertEqual(missing, [], f"missing keys: {missing}")
 
 
 if __name__ == "__main__":

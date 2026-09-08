@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::media::MediaType;
 use crate::recipe::{
     Fill, PromptMode, Recipe, RecipeCatalog, sanitize_upload_name, sanitize_weight_filename,
 };
@@ -20,6 +21,8 @@ const PACKAGED_VIDEO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-api.json");
 const PACKAGED_I2V_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json");
+const PACKAGED_AUDIO_WORKFLOW: &str =
+    include_str!("../../../comfyui/workflows/ace-step-v1-3.5b-api.json");
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -106,12 +109,14 @@ fn default_output_type() -> String {
 enum OutputMode {
     Image,
     Video,
+    Audio,
 }
 
 fn collect_output_files(node: &Value, mode: OutputMode) -> Result<Vec<OutputImage>, Error> {
     let keys = match mode {
         OutputMode::Image => &["images"][..],
         OutputMode::Video => &["videos", "gifs", "images"][..],
+        OutputMode::Audio => &["audio"][..],
     };
     let mut files = Vec::new();
     for key in keys {
@@ -137,6 +142,17 @@ fn collect_output_files(node: &Value, mode: OutputMode) -> Result<Vec<OutputImag
                     if file.r#type != "temp" && file.r#type != "output" {
                         return Err(Error::InvalidResponse(
                             "workflow returned an unsupported video location",
+                        ));
+                    }
+                    files.push(file);
+                }
+                OutputMode::Audio => {
+                    if !is_audio_filename(&file.filename) {
+                        continue;
+                    }
+                    if file.r#type != "temp" {
+                        return Err(Error::InvalidResponse(
+                            "workflow returned a non-temporary audio file",
                         ));
                     }
                     files.push(file);
@@ -237,6 +253,15 @@ impl Client {
         let i2v_workflow = load_i2v_workflow(&self.config.video_workflow_path)?;
         validate_i2v_workflow(&i2v_workflow)?;
         Ok((video_workflow, i2v_workflow))
+    }
+
+    fn audio_workflow(&self) -> Result<Value, Error> {
+        sanitize_weight_filename(&self.config.audio_checkpoint).map_err(|_| {
+            Error::Configuration("COMFYUI_AUDIO_CHECKPOINT must be a checkpoint filename")
+        })?;
+        let workflow = load_audio_workflow(&self.config.audio_workflow_path)?;
+        validate_audio_workflow(&workflow)?;
+        Ok(workflow)
     }
 
     pub async fn generate(
@@ -361,6 +386,41 @@ impl Client {
         .await
     }
 
+    pub async fn generate_audio(
+        &self,
+        prompt: &str,
+        cancel: &mut broadcast::Receiver<()>,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<Vec<GeneratedImage>, Error> {
+        if !self.config.enabled {
+            return Err(Error::Disabled);
+        }
+
+        if cancel.try_recv().is_ok() {
+            return Err(Error::Cancelled);
+        }
+        let audio_workflow = self.audio_workflow()?;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(self.config.audio_generation_timeout_secs);
+        let workflow = configure_ace_step_workflow(
+            audio_workflow,
+            prompt,
+            &self.config.audio_checkpoint,
+            rand::random::<u64>() & i64::MAX as u64,
+        )?;
+        self.submit_and_collect(
+            workflow,
+            cancel,
+            deadline,
+            progress,
+            "Audio queued...",
+            "Generating audio...",
+            "Saving generated audio...",
+            OutputMode::Audio,
+        )
+        .await
+    }
+
     async fn submit_and_collect(
         &self,
         workflow: Value,
@@ -376,6 +436,7 @@ impl Client {
         let kind = match mode {
             OutputMode::Image => "image",
             OutputMode::Video => "video",
+            OutputMode::Audio => "audio",
         };
         let result = self
             .submit_and_collect_inner(
@@ -584,7 +645,11 @@ impl Client {
                         .and_then(|value| value.to_str().ok())
                         .and_then(|value| value.split(';').next())
                         .map(str::trim)
-                        .filter(|value| value.starts_with("image/") || value.starts_with("video/"))
+                        .filter(|value| {
+                            value.starts_with("image/")
+                                || value.starts_with("video/")
+                                || value.starts_with("audio/")
+                        })
                         .map(str::to_string)
                         .unwrap_or_else(|| mime_for_filename(&filename));
                     Ok((response.bytes().await?, mime))
@@ -689,6 +754,15 @@ fn load_i2v_workflow(text_to_video_path: &std::path::Path) -> Result<Value, Erro
         .map_err(|_| Error::Configuration("packaged image-to-video workflow is not valid JSON"))
 }
 
+fn load_audio_workflow(path: &std::path::Path) -> Result<Value, Error> {
+    if path.is_file() {
+        return load_workflow_file(path)
+            .map_err(|_| Error::Configuration("audio workflow path is not readable"));
+    }
+    serde_json::from_str(PACKAGED_AUDIO_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged audio workflow is not valid JSON"))
+}
+
 /// Build the text-to-video workflow and mutate only approved inputs.
 pub fn build_wan_t2v_workflow(
     prompt: &str,
@@ -715,6 +789,14 @@ pub fn build_wan_i2v_workflow(
         .map_err(|_| Error::Configuration("packaged image-to-video workflow is not valid JSON"))?;
     configure_wan_i2v_workflow(workflow, prompt, unet, clip, vae, seed, image_name)
 }
+
+/// Build the text-to-audio workflow and mutate only approved inputs.
+pub fn build_ace_step_workflow(prompt: &str, checkpoint: &str, seed: u64) -> Result<Value, Error> {
+    let workflow = serde_json::from_str(PACKAGED_AUDIO_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged audio workflow is not valid JSON"))?;
+    configure_ace_step_workflow(workflow, prompt, checkpoint, seed)
+}
+
 fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
     for pointer in [
         "/1/inputs/unet_name",
@@ -755,6 +837,47 @@ fn validate_i2v_workflow(workflow: &Value) -> Result<(), Error> {
     if workflow.pointer("/7/inputs/start_image").is_none() {
         return Err(Error::Configuration(
             "image-to-video workflow must condition on a start image",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_audio_workflow(workflow: &Value) -> Result<(), Error> {
+    for pointer in [
+        "/1/inputs/ckpt_name",
+        "/5/inputs/tags",
+        "/5/inputs/lyrics",
+        "/8/inputs/seed",
+        "/10/inputs/audio",
+    ] {
+        if workflow.pointer(pointer).is_none() {
+            return Err(Error::Configuration(
+                "workflow does not match the ACE-Step contract",
+            ));
+        }
+    }
+    // Node 5 is where the caller's prompt lands, so pin its class as tightly as
+    // the output node: any other node type with a `tags` input would otherwise
+    // pass and receive the prompt.
+    if workflow.pointer("/5/class_type").and_then(Value::as_str) != Some("TextEncodeAceStepAudio") {
+        return Err(Error::Configuration(
+            "audio workflow must encode the prompt with TextEncodeAceStepAudio",
+        ));
+    }
+    if workflow.pointer("/7/class_type").and_then(Value::as_str) != Some("EmptyAceStepLatentAudio")
+    {
+        return Err(Error::Configuration(
+            "audio workflow must use EmptyAceStepLatentAudio",
+        ));
+    }
+    if workflow.pointer("/9/class_type").and_then(Value::as_str) != Some("VAEDecodeAudio") {
+        return Err(Error::Configuration(
+            "audio workflow must decode audio with VAEDecodeAudio",
+        ));
+    }
+    if workflow.pointer("/10/class_type").and_then(Value::as_str) != Some("PreviewAudio") {
+        return Err(Error::Configuration(
+            "audio workflow output must use temporary PreviewAudio storage",
         ));
     }
     Ok(())
@@ -811,6 +934,36 @@ fn apply_wan_workflow_inputs(
     Ok(())
 }
 
+fn configure_ace_step_workflow(
+    mut workflow: Value,
+    prompt: &str,
+    checkpoint: &str,
+    seed: u64,
+) -> Result<Value, Error> {
+    validate_audio_workflow(&workflow)?;
+    apply_ace_step_workflow_inputs(&mut workflow, prompt, checkpoint, seed)?;
+    Ok(workflow)
+}
+
+fn apply_ace_step_workflow_inputs(
+    workflow: &mut Value,
+    prompt: &str,
+    checkpoint: &str,
+    seed: u64,
+) -> Result<(), Error> {
+    if prompt.trim().is_empty() || prompt.len() > 100_000 {
+        return Err(Error::Configuration("prompt is empty or too long"));
+    }
+    let checkpoint = sanitize_weight_filename(checkpoint)?;
+    workflow["1"]["inputs"]["ckpt_name"] = json!(checkpoint);
+    workflow["5"]["inputs"]["tags"] = json!(prompt);
+    // Overwrite rather than trust the graph: lyrics authored into an
+    // operator-supplied workflow would otherwise be sung over every generation.
+    workflow["5"]["inputs"]["lyrics"] = json!("");
+    workflow["8"]["inputs"]["seed"] = json!(seed);
+    Ok(())
+}
+
 fn normalize_source_mime(mime: &str) -> Result<String, Error> {
     match mime.trim().to_ascii_lowercase().as_str() {
         "image/jpg" | "image/jpeg" => Ok("image/jpeg".to_string()),
@@ -821,11 +974,10 @@ fn normalize_source_mime(mime: &str) -> Result<String, Error> {
 }
 
 fn extension_for_mime(mime: &str) -> &'static str {
-    match mime {
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        _ => "png",
-    }
+    MediaType::for_mime(mime)
+        .filter(MediaType::is_image)
+        .unwrap_or(MediaType::PNG)
+        .extension
 }
 
 fn is_model_filename(name: &str) -> bool {
@@ -833,25 +985,18 @@ fn is_model_filename(name: &str) -> bool {
 }
 
 fn is_video_filename(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".webm") || name.ends_with(".mp4") || name.ends_with(".mkv")
+    MediaType::for_filename(name).is_some_and(|media| media.is_video())
+}
+
+fn is_audio_filename(name: &str) -> bool {
+    MediaType::for_filename(name).is_some_and(|media| media.is_audio())
 }
 
 fn mime_for_filename(name: &str) -> String {
-    let name = name.to_ascii_lowercase();
-    if name.ends_with(".webm") {
-        "video/webm".to_string()
-    } else if name.ends_with(".mp4") {
-        "video/mp4".to_string()
-    } else if name.ends_with(".mkv") {
-        "video/x-matroska".to_string()
-    } else if name.ends_with(".jpg") || name.ends_with(".jpeg") {
-        "image/jpeg".to_string()
-    } else if name.ends_with(".webp") {
-        "image/webp".to_string()
-    } else {
-        "image/png".to_string()
-    }
+    MediaType::for_filename(name)
+        .unwrap_or(MediaType::PNG)
+        .mime
+        .to_string()
 }
 
 fn uploaded_image_name(uploaded: &UploadResponse, fallback: &str) -> Result<String, Error> {
@@ -999,6 +1144,90 @@ mod tests {
     }
 
     #[test]
+    fn audio_workflow_mutates_only_approved_inputs() {
+        let workflow =
+            build_ace_step_workflow("forest ambience", "custom-audio.safetensors", 42).unwrap();
+        assert_eq!(
+            workflow["1"]["inputs"]["ckpt_name"],
+            "custom-audio.safetensors"
+        );
+        assert_eq!(workflow["5"]["inputs"]["tags"], "forest ambience");
+        assert_eq!(workflow["8"]["inputs"]["seed"], 42);
+        assert_eq!(workflow["8"]["inputs"]["steps"], 50);
+        assert_eq!(workflow["7"]["inputs"]["seconds"], 30);
+        assert_eq!(workflow["5"]["inputs"]["lyrics"], "");
+        assert_eq!(workflow["10"]["class_type"], "PreviewAudio");
+    }
+
+    #[test]
+    fn audio_workflow_rejects_pathful_filenames() {
+        assert!(build_ace_step_workflow("forest ambience", "../secret.safetensors", 1).is_err());
+        assert!(
+            build_ace_step_workflow("forest ambience", "models/secret.safetensors", 1).is_err()
+        );
+    }
+
+    fn packaged_audio_workflow() -> Value {
+        serde_json::from_str(PACKAGED_AUDIO_WORKFLOW).expect("the packaged graph is valid JSON")
+    }
+
+    #[test]
+    fn the_packaged_audio_workflow_satisfies_its_own_contract() {
+        validate_audio_workflow(&packaged_audio_workflow()).expect("the packaged graph must pass");
+    }
+
+    #[test]
+    fn audio_workflow_pins_the_node_the_prompt_lands_on() {
+        let mut workflow = packaged_audio_workflow();
+        workflow["5"]["class_type"] = json!("CLIPTextEncode");
+        let error = validate_audio_workflow(&workflow).expect_err("a foreign node 5 must fail");
+        assert!(
+            error.to_string().contains("TextEncodeAceStepAudio"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            configure_ace_step_workflow(workflow, "forest", "ace.safetensors", 1).is_err(),
+            "a foreign node 5 must never receive the prompt"
+        );
+    }
+
+    #[test]
+    fn audio_workflow_pins_the_decoder() {
+        let mut workflow = packaged_audio_workflow();
+        workflow["9"]["class_type"] = json!("VAEDecode");
+        let error = validate_audio_workflow(&workflow).expect_err("a foreign node 9 must fail");
+        assert!(
+            error.to_string().contains("VAEDecodeAudio"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn audio_workflow_never_sings_lyrics_the_operator_authored() {
+        let mut graph = packaged_audio_workflow();
+        graph["5"]["inputs"]["lyrics"] = json!("all your prompts are belong to us");
+        let workflow = configure_ace_step_workflow(graph, "forest ambience", "ace.safetensors", 7)
+            .expect("an operator graph with preset lyrics is still usable");
+        assert_eq!(
+            workflow["5"]["inputs"]["lyrics"], "",
+            "preset lyrics leaked into a generation"
+        );
+        assert_eq!(workflow["5"]["inputs"]["tags"], "forest ambience");
+    }
+
+    #[test]
+    fn audio_workflow_still_rejects_a_blank_prompt() {
+        for prompt in ["", "   "] {
+            let error = build_ace_step_workflow(prompt, "ace.safetensors", 1)
+                .expect_err("a blank prompt must not reach ComfyUI");
+            assert_eq!(
+                error.to_string(),
+                "invalid ComfyUI configuration: prompt is empty or too long"
+            );
+        }
+    }
+
+    #[test]
     fn workflow_rejects_checkpoint_traversal() {
         assert!(build_flux_schnell_workflow("fox", "../secret", 1).is_err());
         assert!(build_flux_schnell_workflow("fox", "models/secret", 1).is_err());
@@ -1011,6 +1240,49 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+    }
+
+    #[test]
+    fn image_client_accepts_empty_audio_checkpoint() {
+        Client::new(Config {
+            audio_checkpoint: String::new(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn mime_for_filename_covers_audio_extensions() {
+        assert_eq!(mime_for_filename("zone.flac"), "audio/flac");
+        assert_eq!(mime_for_filename("ZONE.MP3"), "audio/mpeg");
+        assert_eq!(mime_for_filename("zone.opus"), "audio/ogg");
+        assert_eq!(mime_for_filename("zone.wav"), "audio/wav");
+    }
+
+    #[test]
+    fn successful_history_without_audio_is_an_error() {
+        let nodes = json!({
+            "10": {"images": [{"filename": "cover.png", "subfolder": "", "type": "temp"}]}
+        });
+        assert!(matches!(
+            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Audio),
+            Err(Error::InvalidResponse(
+                "workflow completed without a usable output"
+            ))
+        ));
+    }
+
+    #[test]
+    fn audio_output_from_output_directory_is_rejected() {
+        let nodes = json!({
+            "10": {"audio": [{"filename": "zone.flac", "subfolder": "", "type": "output"}]}
+        });
+        assert!(matches!(
+            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Audio),
+            Err(Error::InvalidResponse(
+                "workflow returned a non-temporary audio file"
+            ))
+        ));
     }
 
     #[test]
@@ -1053,6 +1325,49 @@ mod tests {
                 "COMFYUI_VIDEO_UNET must be a diffusion model filename"
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn generate_audio_rejects_empty_audio_checkpoint() {
+        let client = Client::new(Config {
+            enabled: true,
+            audio_checkpoint: String::new(),
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _) = mpsc::unbounded_channel();
+        assert!(matches!(
+            client
+                .generate_audio("forest ambience", &mut cancel_rx, progress_tx)
+                .await,
+            Err(Error::Configuration(
+                "COMFYUI_AUDIO_CHECKPOINT must be a checkpoint filename"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn generate_audio_rejects_a_blank_prompt_without_reaching_comfyui() {
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: "http://127.0.0.1:1".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        for prompt in ["", "   "] {
+            let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+            let (progress_tx, _) = mpsc::unbounded_channel();
+            assert!(
+                matches!(
+                    client
+                        .generate_audio(prompt, &mut cancel_rx, progress_tx)
+                        .await,
+                    Err(Error::Configuration("prompt is empty or too long"))
+                ),
+                "{prompt:?} should be rejected before any request"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1393,5 +1708,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(videos[0].bytes.as_ref(), &[9, 8, 7, 6]);
+    }
+
+    #[tokio::test]
+    async fn audio_recovers_flac_history_and_fetches_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains(
+                "EmptyAceStepLatentAudio",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "a1"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/a1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "a1": {"status": {"status_str": "success"}, "outputs": {
+                    "10": {"audio": [{"filename": "zone.flac", "subfolder": "", "type": "temp"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/flac")
+                    .set_body_bytes(vec![4, 3, 2, 1]),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let clips = client
+            .generate_audio("shuffling through a forest", &mut cancel_rx, progress_tx)
+            .await
+            .unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].bytes.as_ref(), &[4, 3, 2, 1]);
+        assert_eq!(clips[0].mime, "audio/flac");
+        assert_eq!(clips[0].filename, "zone.flac");
+        assert_eq!(progress_rx.recv().await.as_deref(), Some("Audio queued..."));
     }
 }

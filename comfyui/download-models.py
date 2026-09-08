@@ -17,7 +17,7 @@ CHUNK_SIZE = 8 * 1024 * 1024
 USER_AGENT = "zone-comfyui-model-setup/1"
 
 
-VALID_BUNDLES = {"image", "image-dev", "image-edit", "video"}
+VALID_BUNDLES = {"audio", "image", "image-dev", "image-edit", "video"}
 
 
 def load_manifest(path: Path) -> list[dict[str, Any]]:
@@ -162,7 +162,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--bundle",
-        choices=("image", "image-dev", "image-edit", "video", "all"),
+        choices=(*sorted(VALID_BUNDLES), "all"),
         default="image",
         help="download or verify only this model bundle (default: image)",
     )

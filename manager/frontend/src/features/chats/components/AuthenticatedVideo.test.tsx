@@ -4,37 +4,34 @@ import { AuthenticatedVideo } from './AuthenticatedVideo';
 
 const originalFetch = globalThis.fetch;
 const originalCreateObjectUrl = URL.createObjectURL;
-const originalRevokeObjectUrl = URL.revokeObjectURL;
 
 const fetchMock = mock();
 const createObjectUrlMock = mock(() => 'blob:protected-video');
-const revokeObjectUrlMock = mock();
 
 beforeEach(() => {
   fetchMock.mockReset();
   createObjectUrlMock.mockClear();
-  revokeObjectUrlMock.mockClear();
   globalThis.fetch = fetchMock;
   URL.createObjectURL = createObjectUrlMock;
-  URL.revokeObjectURL = revokeObjectUrlMock;
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   URL.createObjectURL = originalCreateObjectUrl;
-  URL.revokeObjectURL = originalRevokeObjectUrl;
 });
 
 describe('AuthenticatedVideo', () => {
-  it('fetches protected artifacts with the bearer token and plays the object URL', async () => {
-    const videoBlob = new Blob(['video'], { type: 'video/webm' });
+  it('plays a signed URL so the browser can range-request the media itself', async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
-      blob: async () => videoBlob,
+      json: async () => ({
+        url: '/api/artifacts/chat/clip.webm?expires=2000&signature=abc',
+        expires_at: 2000,
+      }),
     } as Response);
 
-    const { unmount } = render(
+    render(
       <AuthenticatedVideo
         src="/api/artifacts/chat/clip.webm"
         label="generated-video-1.webm"
@@ -46,19 +43,19 @@ describe('AuthenticatedVideo', () => {
 
     const video = await screen.findByLabelText('generated-video-1.webm');
     expect(video.tagName).toBe('VIDEO');
-    expect(video).toHaveAttribute('src', 'blob:protected-video');
+    expect(video).toHaveAttribute(
+      'src',
+      '/api/artifacts/chat/clip.webm?expires=2000&signature=abc'
+    );
     expect(video).toHaveAttribute('controls');
-    expect(fetchMock).toHaveBeenCalledWith('/api/artifacts/chat/clip.webm', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/artifacts/chat/clip.webm/signature', {
       headers: { Authorization: 'Bearer secret-token' },
       signal: expect.any(AbortSignal),
     });
-    expect(createObjectUrlMock).toHaveBeenCalledWith(videoBlob);
-
-    unmount();
-    expect(revokeObjectUrlMock).toHaveBeenCalledWith('blob:protected-video');
+    expect(createObjectUrlMock).not.toHaveBeenCalled();
   });
 
-  it('renders data and HTTP videos directly without fetching them', () => {
+  it('renders data and HTTP videos directly without signing them', () => {
     const { rerender } = render(
       <AuthenticatedVideo src="data:video/webm;base64,abc" label="Inline video" />
     );
@@ -77,14 +74,13 @@ describe('AuthenticatedVideo', () => {
       'https://videos.example.test/clip.webm'
     );
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(createObjectUrlMock).not.toHaveBeenCalled();
   });
 
-  it('shows an error when a protected video cannot be loaded', async () => {
+  it('shows an error when a protected video cannot be signed', async () => {
     fetchMock.mockResolvedValue({
       ok: false,
       status: 403,
-      blob: async () => new Blob(),
+      json: async () => ({}),
     } as Response);
 
     render(
@@ -99,6 +95,5 @@ describe('AuthenticatedVideo', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('Video unavailable');
     });
     expect(screen.queryByLabelText('Denied video')).toBeNull();
-    expect(createObjectUrlMock).not.toHaveBeenCalled();
   });
 });

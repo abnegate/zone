@@ -1,7 +1,8 @@
-//! Durable generated-image persistence beneath a protected artifact root.
+//! Durable generated-media persistence beneath a protected artifact root.
 
 use std::path::{Component, Path, PathBuf};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +53,18 @@ impl ArtifactStore {
         owner_id: Uuid,
         filename: &str,
     ) -> Result<Vec<u8>, ArtifactError> {
+        let artifact = self.open(workspace_id, chat_id, owner_id, filename).await?;
+        let length = artifact.length();
+        artifact.read(0, length).await
+    }
+
+    pub async fn open(
+        &self,
+        workspace_id: Uuid,
+        chat_id: Uuid,
+        owner_id: Uuid,
+        filename: &str,
+    ) -> Result<Artifact, ArtifactError> {
         if !safe_filename(filename) {
             return Err(ArtifactError::InvalidPath);
         }
@@ -67,7 +80,9 @@ impl ArtifactStore {
         if !canonical.starts_with(root) {
             return Err(ArtifactError::InvalidPath);
         }
-        Ok(fs::read(canonical).await?)
+        let file = fs::File::open(canonical).await?;
+        let length = file.metadata().await?.len();
+        Ok(Artifact { file, length })
     }
 
     pub async fn cleanup_chat(&self, workspace_id: Uuid, chat_id: Uuid) {
@@ -118,6 +133,25 @@ impl ArtifactStore {
     }
 }
 
+#[derive(Debug)]
+pub struct Artifact {
+    file: fs::File,
+    length: u64,
+}
+
+impl Artifact {
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+
+    pub async fn read(mut self, start: u64, length: u64) -> Result<Vec<u8>, ArtifactError> {
+        self.file.seek(std::io::SeekFrom::Start(start)).await?;
+        let mut bytes = Vec::new();
+        self.file.take(length).read_to_end(&mut bytes).await?;
+        Ok(bytes)
+    }
+}
+
 fn uuid_component(id: Uuid) -> Result<String, ArtifactError> {
     Ok(safe_path_component(&id.as_hyphenated().to_string())?.to_string())
 }
@@ -138,6 +172,10 @@ fn safe_extension(extension: &str) -> Result<&str, ArtifactError> {
         "webp" => Ok("webp"),
         "webm" => Ok("webm"),
         "mp4" => Ok("mp4"),
+        "flac" => Ok("flac"),
+        "mp3" => Ok("mp3"),
+        "opus" => Ok("opus"),
+        "wav" => Ok("wav"),
         _ => Err(ArtifactError::InvalidPath),
     }
 }
@@ -187,9 +225,64 @@ mod tests {
     }
 
     #[test]
+    fn audio_extensions_are_allowed_and_normalised() {
+        assert_eq!(safe_extension("flac").unwrap(), "flac");
+        assert_eq!(safe_extension("mp3").unwrap(), "mp3");
+        assert_eq!(safe_extension("opus").unwrap(), "opus");
+        assert_eq!(safe_extension("wav").unwrap(), "wav");
+        assert_eq!(safe_extension("FLAC").unwrap(), "flac");
+        assert_eq!(safe_extension("Wav").unwrap(), "wav");
+        assert_eq!(safe_extension("JPEG").unwrap(), "jpg");
+    }
+
+    #[test]
+    fn unapproved_extensions_are_still_rejected() {
+        for extension in [
+            "exe", "sh", "flac.exe", "mp3.sh", "ogg", "m4a", "mkv", "", "../flac",
+        ] {
+            assert!(
+                safe_extension(extension).is_err(),
+                "expected the artifact allowlist to reject {extension:?}"
+            );
+        }
+    }
+
+    #[test]
     fn candidate_must_remain_beneath_root() {
         assert!(ensure_lexically_beneath(Path::new("/tmp/a"), Path::new("/tmp/a/x/y")).is_ok());
         assert!(ensure_lexically_beneath(Path::new("/tmp/a"), Path::new("/tmp/b/y")).is_err());
+    }
+
+    #[tokio::test]
+    async fn persists_audio_artifacts_for_every_supported_extension() {
+        let root = std::env::temp_dir().join(format!("zone-artifacts-{}", Uuid::new_v4()));
+        let store = ArtifactStore::new(root.clone());
+        let workspace = Uuid::new_v4();
+        let chat = Uuid::new_v4();
+        for (requested, expected) in [
+            ("flac", "flac"),
+            ("mp3", "mp3"),
+            ("opus", "opus"),
+            ("wav", "wav"),
+            ("FLAC", "flac"),
+        ] {
+            let owner = Uuid::new_v4();
+            let url = store
+                .persist(workspace, chat, owner, requested, b"audio-data")
+                .await
+                .unwrap_or_else(|error| panic!("expected {requested} to persist, got {error}"));
+            let actual = url.rsplit('.').next().unwrap_or_default();
+            assert_eq!(
+                actual, expected,
+                "expected the {requested} artifact to be stored as .{expected}"
+            );
+            let filename = url.rsplit('/').next().unwrap();
+            assert_eq!(
+                store.read(workspace, chat, owner, filename).await.unwrap(),
+                b"audio-data"
+            );
+        }
+        let _ = fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]

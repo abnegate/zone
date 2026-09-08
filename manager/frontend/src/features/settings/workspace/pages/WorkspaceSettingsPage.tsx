@@ -69,6 +69,7 @@ const modelOptions = {
 
 const IMAGE_MODEL_OPTIONS = ['flux1-schnell-fp8.safetensors'];
 const VIDEO_MODEL_OPTIONS = ['wan2.2_ti2v_5B_fp16.safetensors'];
+const AUDIO_MODEL_OPTIONS = ['ace_step_v1_3.5b.safetensors'];
 
 function comfyImageOptions(
   installed: Array<{ name: string; details?: { format?: string | null } | null }>,
@@ -139,6 +140,7 @@ export default function WorkspaceSettingsPage() {
   const [modelEmbedding, setModelEmbedding] = useState('');
   const [modelImage, setModelImage] = useState('');
   const [modelVideo, setModelVideo] = useState('');
+  const [modelAudio, setModelAudio] = useState('');
   const [hasLitellmKey, setHasLitellmKey] = useState(false);
   const [hasOpenaiKey, setHasOpenaiKey] = useState(false);
   const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
@@ -157,6 +159,7 @@ export default function WorkspaceSettingsPage() {
       settings.model_embedding ||
       settings.model_image ||
       settings.model_video ||
+      settings.model_audio ||
       settings.litellm_host ||
       settings.openai_base_url ||
       settings.anthropic_base_url ||
@@ -174,6 +177,7 @@ export default function WorkspaceSettingsPage() {
     setModelEmbedding(settings.model_embedding || '');
     setModelImage(settings.model_image || '');
     setModelVideo(settings.model_video || '');
+    setModelAudio(settings.model_audio || '');
     setHasLitellmKey(settings.has_litellm_key);
     setHasOpenaiKey(settings.has_openai_api_key);
     setHasAnthropicKey(settings.has_anthropic_api_key);
@@ -333,6 +337,7 @@ export default function WorkspaceSettingsPage() {
           // Empty string clears the stored override so org/server inheritance resumes.
           model_image: modelImage,
           model_video: modelVideo,
+          model_audio: modelAudio,
         };
         if (aiProvider === 'self_hosted') {
           aiRequest.litellm_host = litellmHost || undefined;
@@ -1043,6 +1048,27 @@ export default function WorkspaceSettingsPage() {
                           ComfyUI UNET used when a message asks for a video.
                         </p>
                       </div>
+                      <div className="form-group">
+                        <label htmlFor="model-audio">Audio Model</label>
+                        <select
+                          id="model-audio"
+                          value={modelAudio}
+                          onChange={(e) => setModelAudio(e.target.value)}
+                          className="form-select"
+                        >
+                          <option value="">Use organization / server default</option>
+                          {Array.from(
+                            new Set([...AUDIO_MODEL_OPTIONS, modelAudio].filter(Boolean))
+                          ).map((model) => (
+                            <option key={model} value={model}>
+                              {model}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="form-hint">
+                          ComfyUI checkpoint used when a message asks for audio.
+                        </p>
+                      </div>
                     </div>
                   </>
                 ) : (
@@ -1085,6 +1111,12 @@ export default function WorkspaceSettingsPage() {
                           <span className="effective-label">Video Model:</span>
                           <span className="effective-value">
                             {effectiveSettings.model_video || 'Server default'}
+                          </span>
+                        </div>
+                        <div className="effective-row">
+                          <span className="effective-label">Audio Model:</span>
+                          <span className="effective-value">
+                            {effectiveSettings.model_audio || 'Server default'}
                           </span>
                         </div>
                       </div>

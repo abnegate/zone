@@ -29,6 +29,8 @@ pub struct Config {
     pub video_unet: String,
     pub video_clip: String,
     pub video_vae: String,
+    pub audio_workflow_path: std::path::PathBuf,
+    pub audio_checkpoint: String,
     pub artifact_root: std::path::PathBuf,
     pub classifier_model: String,
     pub classifier_timeout_secs: u64,
@@ -38,6 +40,7 @@ pub struct Config {
     pub request_timeout_secs: u64,
     pub generation_timeout_secs: u64,
     pub video_generation_timeout_secs: u64,
+    pub audio_generation_timeout_secs: u64,
     pub poll_interval_ms: u64,
     /// ComfyUI models root (`checkpoints/`, `loras/`, `diffusion_models/`, ...).
     pub models_dir: std::path::PathBuf,
@@ -61,6 +64,9 @@ impl Default for Config {
             video_unet: "wan2.2_ti2v_5B_fp16.safetensors".to_string(),
             video_clip: "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string(),
             video_vae: "wan2.2_vae.safetensors".to_string(),
+            audio_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../comfyui/workflows/ace-step-v1-3.5b-api.json"),
+            audio_checkpoint: "ace_step_v1_3.5b.safetensors".to_string(),
             artifact_root: "/app/artifacts".into(),
             classifier_model: "auto".to_string(),
             classifier_timeout_secs: 3,
@@ -69,6 +75,7 @@ impl Default for Config {
             request_timeout_secs: 15,
             generation_timeout_secs: 300,
             video_generation_timeout_secs: 600,
+            audio_generation_timeout_secs: 600,
             poll_interval_ms: 500,
             models_dir: std::path::PathBuf::from("/app/comfyui/models"),
             train_command: None,
@@ -102,6 +109,11 @@ impl Config {
                 .unwrap_or_else(|_| "umt5_xxl_fp8_e4m3fn_scaled.safetensors".to_string()),
             video_vae: env::var("COMFYUI_VIDEO_VAE")
                 .unwrap_or_else(|_| "wan2.2_vae.safetensors".to_string()),
+            audio_workflow_path: env::var("COMFYUI_AUDIO_WORKFLOW_PATH")
+                .unwrap_or_else(|_| "/app/comfyui/workflows/ace-step-v1-3.5b-api.json".to_string())
+                .into(),
+            audio_checkpoint: env::var("COMFYUI_AUDIO_CHECKPOINT")
+                .unwrap_or_else(|_| "ace_step_v1_3.5b.safetensors".to_string()),
             artifact_root: env::var("ARTIFACT_ROOT")
                 .unwrap_or_else(|_| "/app/artifacts".to_string())
                 .into(),
@@ -125,6 +137,12 @@ impl Config {
                 10,
                 3600,
             ),
+            audio_generation_timeout_secs: env_u64(
+                "COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS",
+                600,
+                10,
+                3600,
+            ),
             poll_interval_ms: env_u64("COMFYUI_POLL_INTERVAL_MS", 500, 50, 5000),
             models_dir: env::var("COMFYUI_MODELS_DIR")
                 .unwrap_or_else(|_| "/app/comfyui/models".to_string())
@@ -134,6 +152,33 @@ impl Config {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
             train_timeout_secs: env_u64("COMFYUI_TRAIN_TIMEOUT_SECS", 3600, 60, 14400),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_defaults_cover_dev_and_container_paths() {
+        let development = Config::default();
+        assert!(
+            development
+                .audio_workflow_path
+                .ends_with("comfyui/workflows/ace-step-v1-3.5b-api.json"),
+            "dev default must resolve the packaged graph, got {:?}",
+            development.audio_workflow_path
+        );
+        assert_eq!(development.audio_checkpoint, "ace_step_v1_3.5b.safetensors");
+        assert_eq!(development.audio_generation_timeout_secs, 600);
+
+        if env::var_os("COMFYUI_AUDIO_WORKFLOW_PATH").is_none() {
+            let container = Config::from_env();
+            assert_eq!(
+                container.audio_workflow_path,
+                std::path::PathBuf::from("/app/comfyui/workflows/ace-step-v1-3.5b-api.json")
+            );
         }
     }
 }

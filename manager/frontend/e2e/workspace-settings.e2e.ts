@@ -42,6 +42,7 @@ test.describe('Workspace Settings Page', () => {
       model_embedding: 'text-embedding-3-small',
       model_image: 'flux1-schnell-fp8.safetensors',
       model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+      model_audio: 'ace_step_v1_3.5b.safetensors',
     };
     await routeApiContext(
       context,
@@ -407,7 +408,9 @@ test.describe('Workspace Settings Page', () => {
     });
 
     test('saves the selected image model with the other AI settings', async ({ page }) => {
-      let savedBody: { model_image?: string; model_video?: string } | undefined;
+      let savedBody:
+        | { model_image?: string; model_video?: string; model_audio?: string }
+        | undefined;
       await routeApi(page, '**/api/organizations/**/workspaces/**/settings/ai', (route) => {
         if (route.request().method() === 'PUT') {
           savedBody = route.request().postDataJSON();
@@ -431,6 +434,7 @@ test.describe('Workspace Settings Page', () => {
             model_embedding: 'text-embedding-3-small',
             model_image: 'flux1-schnell-fp8.safetensors',
             model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+            model_audio: 'ace_step_v1_3.5b.safetensors',
           }),
         });
       });
@@ -444,6 +448,7 @@ test.describe('Workspace Settings Page', () => {
       await expect(page.locator('.alert-success')).toContainText('Settings saved successfully');
       expect(savedBody?.model_image).toBe('flux1-schnell-fp8.safetensors');
       expect(savedBody?.model_video).toBe('wan2.2_ti2v_5B_fp16.safetensors');
+      expect(savedBody?.model_audio).toBe('ace_step_v1_3.5b.safetensors');
     });
 
     test('shows the effective image model when the workspace is not overriding', async ({
@@ -476,6 +481,29 @@ test.describe('Workspace Settings Page', () => {
       await expect(page.getByText('Video Model:')).toBeVisible();
       await expect(
         page.locator('.effective-value').filter({ hasText: 'wan2.2_ti2v_5B_fp16.safetensors' })
+      ).toBeVisible();
+    });
+  });
+
+  test.describe('Audio Model', () => {
+    test('shows the configured ComfyUI audio checkpoint', async ({ page }) => {
+      await page.getByRole('tab', { name: 'AI Settings' }).click();
+
+      await expect(page.locator('#model-audio')).toHaveValue('ace_step_v1_3.5b.safetensors');
+      await expect(
+        page.getByText('ComfyUI checkpoint used when a message asks for audio.')
+      ).toBeVisible();
+    });
+
+    test('shows the effective audio model when the workspace is not overriding', async ({
+      page,
+    }) => {
+      await page.getByRole('tab', { name: 'AI Settings' }).click();
+      await page.getByLabel('Override organization AI settings').uncheck();
+
+      await expect(page.getByText('Audio Model:')).toBeVisible();
+      await expect(
+        page.locator('.effective-value').filter({ hasText: 'ace_step_v1_3.5b.safetensors' })
       ).toBeVisible();
     });
   });

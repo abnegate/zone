@@ -50,10 +50,6 @@ jobs:
       - name: Install Playwright browsers
         run: bunx playwright install chromium
 
-      - name: Build UI package
-        run: bun run build:css
-        working-directory: ${{ github.workspace }}/packages/ui
-
       - name: Build frontend
         run: bun run build
 
@@ -251,10 +247,6 @@ jobs:
 
       - name: Install Playwright browsers
         run: bunx playwright install chromium
-
-      - name: Build UI package
-        run: bun run build:css
-        working-directory: ${{ github.workspace }}/packages/ui
 
       - name: Build frontend
         run: bun run build

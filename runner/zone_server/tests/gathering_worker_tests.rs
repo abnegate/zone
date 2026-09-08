@@ -343,13 +343,20 @@ async fn test_database_callback_persists_events() {
         timestamp: chrono::Utc::now(),
     });
 
-    // Give async task time to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     // Then: Event should be persisted
-    let events = gathering_events::get_events_since(&pool, gathering_id, None, None)
-        .await
-        .expect("Failed to get events");
+    let events = timeout(Duration::from_secs(2), async {
+        loop {
+            let events = gathering_events::get_events_since(&pool, gathering_id, None, None)
+                .await
+                .expect("Failed to get events");
+            if !events.is_empty() {
+                break events;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Timed out waiting for events");
 
     assert!(!events.is_empty(), "Should have persisted event");
     assert_eq!(events[0].event_type, "started");

@@ -12,7 +12,7 @@ RUN bun install --frozen-lockfile
 
 COPY --chown=bun:bun packages/ui packages/ui
 COPY --chown=bun:bun manager/frontend manager/frontend
-RUN bun run --filter @zone/ui build && bun run --filter zone build
+RUN bun run --filter zone build
 
 # =============================================================================
 # Stage 2: Production runtime with bun

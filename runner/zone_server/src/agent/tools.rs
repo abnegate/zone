@@ -207,6 +207,7 @@ impl ChatTools {
             super::documents::register(&mut registry, scope);
             super::integrations::register(&mut registry, scope);
             super::images::register(&mut registry, scope);
+            super::audio::register(&mut registry, scope);
             super::monitoring::register(&mut registry, scope);
             workspace = registry
                 .names()

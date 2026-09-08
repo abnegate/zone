@@ -50,6 +50,7 @@ node_modules/
 manager/build
 manager/coverage
 manager/frontend/coverage
+packages/ui/dist
 runner/target
 runner/coverage
 runner/lcov.info

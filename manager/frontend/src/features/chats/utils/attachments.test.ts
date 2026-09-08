@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import {
   attachmentMetadata,
+  audioAttachments,
   imageAttachments,
   isSendable,
   isStartingImage,
@@ -45,6 +46,74 @@ describe('videoAttachments', () => {
   it('returns an empty list when metadata is missing', () => {
     expect(videoAttachments(undefined)).toEqual([]);
     expect(videoAttachments(null)).toEqual([]);
+  });
+});
+
+describe('audioAttachments', () => {
+  it('returns only audio attachments with a url', () => {
+    expect(
+      audioAttachments({
+        attachments: [
+          {
+            name: 'generated-audio-1.flac',
+            mime: 'audio/flac',
+            url: '/api/artifacts/ws/chat/msg/generated-audio-1.flac',
+          },
+          { name: 'clip.webm', mime: 'video/webm', url: '/api/artifacts/ws/chat/msg/clip.webm' },
+          { name: 'empty.flac', mime: 'audio/flac', url: '' },
+        ],
+      })
+    ).toEqual([
+      {
+        name: 'generated-audio-1.flac',
+        mime: 'audio/flac',
+        url: '/api/artifacts/ws/chat/msg/generated-audio-1.flac',
+      },
+    ]);
+  });
+
+  it('keeps every generated audio mime the server emits', () => {
+    const attachments = [
+      { name: 'track.flac', mime: 'audio/flac', url: '/api/artifacts/ws/chat/msg/track.flac' },
+      { name: 'track.mp3', mime: 'audio/mpeg', url: '/api/artifacts/ws/chat/msg/track.mp3' },
+      { name: 'track.opus', mime: 'audio/ogg', url: '/api/artifacts/ws/chat/msg/track.opus' },
+      { name: 'track.wav', mime: 'audio/wav', url: '/api/artifacts/ws/chat/msg/track.wav' },
+    ];
+    expect(audioAttachments({ attachments })).toEqual(attachments);
+  });
+
+  it('keeps the audio/opus mime stored on messages from before the ogg fix', () => {
+    const attachments = [
+      { name: 'track.opus', mime: 'audio/opus', url: '/api/artifacts/ws/chat/msg/track.opus' },
+    ];
+    expect(audioAttachments({ attachments })).toEqual(attachments);
+  });
+
+  it('returns an empty list when metadata is missing', () => {
+    expect(audioAttachments(undefined)).toEqual([]);
+    expect(audioAttachments(null)).toEqual([]);
+  });
+});
+
+describe('attachment partitioning', () => {
+  it('splits a mixed list across image, video and audio without overlap', () => {
+    const image = { name: 'shot.png', mime: 'image/png', url: 'data:image/png;base64,xx' };
+    const video = { name: 'clip.webm', mime: 'video/webm', url: '/api/artifacts/clip.webm' };
+    const audio = { name: 'track.flac', mime: 'audio/flac', url: '/api/artifacts/track.flac' };
+    const notes = { name: 'notes.md', mime: 'text/markdown', url: 'https://example.test/notes.md' };
+    const metadata = { attachments: [image, video, audio, notes] };
+
+    expect(imageAttachments(metadata)).toEqual([image]);
+    expect(videoAttachments(metadata)).toEqual([video]);
+    expect(audioAttachments(metadata)).toEqual([audio]);
+
+    const partitioned = [
+      ...imageAttachments(metadata),
+      ...videoAttachments(metadata),
+      ...audioAttachments(metadata),
+    ];
+    expect(partitioned).toHaveLength(3);
+    expect(new Set(partitioned.map((a) => a.url)).size).toBe(3);
   });
 });
 

@@ -51,6 +51,7 @@ pub struct AiSettingsResponse {
     pub model_embedding: Option<String>,
     pub model_image: Option<String>,
     pub model_video: Option<String>,
+    pub model_audio: Option<String>,
 }
 
 impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
@@ -72,6 +73,7 @@ impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
             model_embedding: row.model_embedding,
             model_image: row.model_image,
             model_video: row.model_video,
+            model_audio: row.model_audio,
         }
     }
 }
@@ -97,6 +99,7 @@ impl From<ai_settings::WorkspaceAiSettingsRow> for AiSettingsResponse {
             model_embedding: row.model_embedding,
             model_image: row.model_image,
             model_video: row.model_video,
+            model_audio: row.model_audio,
         }
     }
 }
@@ -120,6 +123,7 @@ impl From<ai_settings::EffectiveAiSettings> for AiSettingsResponse {
             model_embedding: settings.model_embedding,
             model_image: settings.model_image,
             model_video: settings.model_video,
+            model_audio: settings.model_audio,
         }
     }
 }
@@ -143,6 +147,7 @@ pub struct UpdateAiSettingsRequest {
     pub model_embedding: Option<String>,
     pub model_image: Option<String>,
     pub model_video: Option<String>,
+    pub model_audio: Option<String>,
 }
 
 // ============================================================================
@@ -175,6 +180,7 @@ pub async fn get_org(
                 model_embedding: None,
                 model_image: None,
                 model_video: None,
+                model_audio: None,
             })
             .into_response()
         }
@@ -235,6 +241,7 @@ pub async fn upsert_org(
         req.model_embedding.as_deref(),
         req.model_image.as_deref(),
         req.model_video.as_deref(),
+        req.model_audio.as_deref(),
     )
     .await
     {
@@ -310,6 +317,7 @@ pub async fn get_workspace(
                 model_embedding: None,
                 model_image: None,
                 model_video: None,
+                model_audio: None,
             })
             .into_response()
         }
@@ -370,6 +378,7 @@ pub async fn upsert_workspace(
         req.model_embedding.as_deref(),
         req.model_image.as_deref(),
         req.model_video.as_deref(),
+        req.model_audio.as_deref(),
     )
     .await
     {

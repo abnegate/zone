@@ -1,6 +1,6 @@
 [package]
 name = "zone_comfy"
-description = "ComfyUI image and video generation, model inventory, and LoRA training"
+description = "ComfyUI image, video, and audio generation, model inventory, and LoRA training"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

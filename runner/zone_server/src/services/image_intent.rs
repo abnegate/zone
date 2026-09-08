@@ -16,8 +16,35 @@ use crate::config::ComfyUiConfig;
 enum RuleDecision {
     Image,
     Video,
+    Audio,
     Chat,
     Ambiguous,
+}
+
+/// The three lanes the short LiteLLM call can pick between. Anything it cannot
+/// be read as — a refusal, prose, a timeout — is `Chat`, so an unavailable
+/// classifier never starts a generation job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AmbiguousVerdict {
+    Image,
+    Audio,
+    Chat,
+}
+
+impl AmbiguousVerdict {
+    const IMAGE: &'static str = "IMAGE";
+    const AUDIO: &'static str = "AUDIO";
+
+    fn parse(answer: &str) -> Self {
+        let answer = answer.trim();
+        if answer.eq_ignore_ascii_case(Self::IMAGE) {
+            Self::Image
+        } else if answer.eq_ignore_ascii_case(Self::AUDIO) {
+            Self::Audio
+        } else {
+            Self::Chat
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,11 +52,16 @@ pub enum GenerationIntent {
     Chat,
     Image,
     Video,
+    Audio,
 }
 
 impl GenerationIntent {
-    /// Agent chats still generate images. Video requests become normal chat so
-    /// the agent can use tools instead of being replaced by a ComfyUI job.
+    /// Audio mirrors images, not video. A direct "generate a song" is one
+    /// ComfyUI job in an agent chat exactly as "generate an image" is, and the
+    /// `generate_audio` / `generate_image` tools exist for the composite turns
+    /// where the model decides to produce media mid-task. Video has no tool at
+    /// all, so a video request falls back to chat rather than being replaced by
+    /// a job the agent cannot then build on.
     pub fn yielding_to_agent(self, agent_enabled: bool) -> Self {
         match self {
             Self::Video if agent_enabled => Self::Chat,
@@ -68,6 +100,13 @@ impl ImageIntentClassifier {
             return GenerationIntent::Video;
         }
         if metadata
+            .and_then(|m| m.get("audio_generation"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return GenerationIntent::Audio;
+        }
+        if metadata
             .and_then(|m| m.get("image_generation"))
             .and_then(Value::as_bool)
             == Some(true)
@@ -78,23 +117,28 @@ impl ImageIntentClassifier {
             .and_then(|m| m.get("video_generation"))
             .and_then(Value::as_bool)
             == Some(false);
+        let skip_audio = metadata
+            .and_then(|m| m.get("audio_generation"))
+            .and_then(Value::as_bool)
+            == Some(false);
         let skip_image = metadata
             .and_then(|m| m.get("image_generation"))
             .and_then(Value::as_bool)
             == Some(false);
-        if skip_video && skip_image {
+        if skip_video && skip_audio && skip_image {
             return GenerationIntent::Chat;
         }
 
         let has_source_image = crate::services::image_source::has_image_attachment(metadata);
         match deterministic_decision(content, has_source_image) {
             RuleDecision::Video if !skip_video => GenerationIntent::Video,
+            RuleDecision::Audio if !skip_audio => GenerationIntent::Audio,
             RuleDecision::Image if !skip_image => GenerationIntent::Image,
-            RuleDecision::Ambiguous if !skip_image => {
-                if self.classify_ambiguous(content, has_source_image).await {
-                    GenerationIntent::Image
-                } else {
-                    GenerationIntent::Chat
+            RuleDecision::Ambiguous if !skip_image || !skip_audio => {
+                match self.classify_ambiguous(content, has_source_image).await {
+                    AmbiguousVerdict::Image if !skip_image => GenerationIntent::Image,
+                    AmbiguousVerdict::Audio if !skip_audio => GenerationIntent::Audio,
+                    _ => GenerationIntent::Chat,
                 }
             }
             _ => GenerationIntent::Chat,
@@ -105,9 +149,9 @@ impl ImageIntentClassifier {
         self.classify(content, metadata).await == GenerationIntent::Image
     }
 
-    async fn classify_ambiguous(&self, content: &str, has_source_image: bool) -> bool {
+    async fn classify_ambiguous(&self, content: &str, has_source_image: bool) -> AmbiguousVerdict {
         if self.litellm_host.trim().is_empty() {
-            return false;
+            return AmbiguousVerdict::Chat;
         }
         let client = LlmClient::new(LlmConfig {
             base_url: self.litellm_host.clone(),
@@ -118,19 +162,24 @@ impl ImageIntentClassifier {
         });
         let prompt = if has_source_image {
             format!(
-                "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
-                 or wants the attached image edited now: add, remove, replace, restyle, transform, \
-                 change the background or environment, place the subject in a different setting, \
-                 or any other change to the photo, including short or informal wording. \
-                 Greetings, thanks, opinions, discussion, analysis, prompt-writing, coding, and \
-                 questions about the attached image are CHAT.\nUser: {content}"
+                "Return exactly IMAGE, AUDIO, or CHAT. IMAGE when the user wants a new image \
+                 generated now, or wants the attached image edited now: add, remove, replace, \
+                 restyle, transform, change the background or environment, place the subject in a \
+                 different setting, or any other change to the photo, including short or informal \
+                 wording. AUDIO when the user wants a sound, a song, or a piece of music produced \
+                 now. Greetings, thanks, opinions, discussion, analysis, prompt-writing, coding, \
+                 and questions about the attached image are CHAT, and so is writing code, tests, \
+                 documentation, prose, lyrics, or a plan about music or audio.\nUser: {content}"
             )
         } else {
             format!(
-                "Return exactly IMAGE or CHAT. IMAGE when the user wants a new image generated now, \
-                 or wants something added to, removed from, or changed on an existing image now, \
-                 including a new background or environment, even if the wording is informal. \
-                 Discussion, analysis, prompt-writing, coding, and how-to questions are CHAT.\nUser: {content}"
+                "Return exactly IMAGE, AUDIO, or CHAT. IMAGE when the user wants a new image \
+                 generated now, or wants something added to, removed from, or changed on an \
+                 existing image now, including a new background or environment, even if the \
+                 wording is informal. AUDIO when the user wants a sound, a song, or a piece of \
+                 music produced now. Discussion, analysis, prompt-writing, coding, and how-to \
+                 questions are CHAT, and so is writing code, tests, documentation, prose, lyrics, \
+                 or a plan about music or audio.\nUser: {content}"
             )
         };
         let messages = [Message::user(prompt)];
@@ -141,16 +190,16 @@ impl ImageIntentClassifier {
         .await;
 
         let Ok(Ok(response)) = result else {
-            return false;
+            return AmbiguousVerdict::Chat;
         };
         let Some(answer) = response
             .choices
             .first()
             .and_then(|choice| choice.message.content.as_deref())
         else {
-            return false;
+            return AmbiguousVerdict::Chat;
         };
-        answer.trim().eq_ignore_ascii_case("IMAGE")
+        AmbiguousVerdict::parse(answer)
     }
 
     /// Turn an attached-image edit request into a CLIP prompt for img2img.
@@ -196,6 +245,37 @@ impl ImageIntentClassifier {
     }
 }
 
+const IMAGE_ACTIONS: &[&str] = &[
+    "generate",
+    "create",
+    "make",
+    "draw",
+    "render",
+    "paint",
+    "illustrate",
+    "sketch",
+];
+const VISUAL_NOUNS: &[&str] = &[
+    "image",
+    "images",
+    "picture",
+    "pictures",
+    "photo",
+    "photos",
+    "artwork",
+    "illustration",
+    "illustrations",
+    "poster",
+    "posters",
+    "logo",
+    "logos",
+    "wallpaper",
+    "wallpapers",
+    "portrait",
+    "portraits",
+];
+const VISUAL_IMPERATIVES: &[&str] = &["draw", "paint", "illustrate", "sketch"];
+
 fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision {
     let tokens = tokenize(content);
     if tokens.is_empty() {
@@ -224,7 +304,12 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
     ]
     .iter()
     .any(|word| has(word));
-    let discusses_code = (programming_language && implementation_term)
+    let software_only_noun = ["endpoint", "endpoints"].iter().any(|word| has(word));
+    let asks_for_visual = tokens.iter().any(|token| {
+        VISUAL_NOUNS.contains(&token.as_str()) || VISUAL_IMPERATIVES.contains(&token.as_str())
+    });
+    let discusses_code = (software_only_noun && !asks_for_visual)
+        || (programming_language && implementation_term)
         || ((has("image") || has("images"))
             && ["component", "api", "workflow", "code", "implement"]
                 .iter()
@@ -247,43 +332,19 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         return RuleDecision::Video;
     }
 
+    let audio = audio_signal(&tokens, &has_phrase);
+    if audio == AudioSignal::Certain {
+        return RuleDecision::Audio;
+    }
+
     if is_edit_request(&tokens, &has_phrase)
         && (has_source_image || refers_to_existing_image(&tokens, &has_phrase))
     {
         return RuleDecision::Image;
     }
 
-    const ACTIONS: &[&str] = &[
-        "generate",
-        "create",
-        "make",
-        "draw",
-        "render",
-        "paint",
-        "illustrate",
-        "sketch",
-    ];
-    const VISUAL_NOUNS: &[&str] = &[
-        "image",
-        "images",
-        "picture",
-        "pictures",
-        "photo",
-        "photos",
-        "artwork",
-        "illustration",
-        "illustrations",
-        "poster",
-        "posters",
-        "logo",
-        "logos",
-        "wallpaper",
-        "wallpapers",
-        "portrait",
-        "portraits",
-    ];
     let explicit = tokens.iter().enumerate().any(|(index, token)| {
-        ACTIONS.contains(&token.as_str())
+        IMAGE_ACTIONS.contains(&token.as_str())
             && tokens
                 .iter()
                 .skip(index + 1)
@@ -293,7 +354,7 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
     let visual_imperative = tokens
         .iter()
         .take(4)
-        .any(|token| ["draw", "paint", "illustrate", "sketch"].contains(&token.as_str()))
+        .any(|token| VISUAL_IMPERATIVES.contains(&token.as_str()))
         && !["conclusion", "conclusions", "attention", "parallel"]
             .iter()
             .any(|word| has(word));
@@ -301,10 +362,13 @@ fn deterministic_decision(content: &str, has_source_image: bool) -> RuleDecision
         return RuleDecision::Image;
     }
 
-    if tokens
-        .iter()
-        .any(|token| ACTIONS.contains(&token.as_str()) || VISUAL_NOUNS.contains(&token.as_str()))
-        || has("visualize")
+    if audio == AudioSignal::Possible {
+        return RuleDecision::Ambiguous;
+    }
+
+    if tokens.iter().any(|token| {
+        IMAGE_ACTIONS.contains(&token.as_str()) || VISUAL_NOUNS.contains(&token.as_str())
+    }) || has("visualize")
         || has("visualise")
         || has_source_image
     {
@@ -338,9 +402,14 @@ fn tokenize(content: &str) -> Vec<String> {
 }
 
 fn phrase_in(tokens: &[String], phrase: &[&str]) -> bool {
+    phrase_end(tokens, phrase).is_some()
+}
+
+fn phrase_end(tokens: &[String], phrase: &[&str]) -> Option<usize> {
     tokens
         .windows(phrase.len())
-        .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+        .position(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+        .map(|start| start + phrase.len() - 1)
 }
 
 fn is_video_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
@@ -375,6 +444,151 @@ fn is_video_request(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) ->
         || has_phrase(&["make", "this", "a", "video"])
         || has_phrase(&["turn", "this", "into", "a", "video"])
         || has_phrase(&["bring", "this", "to", "life"])
+}
+
+/// Words that close a direct object: after one of these the noun phrase the
+/// verb governs has ended, so a later audio noun belongs to something else
+/// ("make a playlist *of* songs" is a list, not a song).
+const OBJECT_BREAKS: &[&str] = &[
+    "about", "after", "and", "around", "as", "at", "because", "before", "but", "by", "during",
+    "for", "from", "if", "in", "into", "like", "of", "on", "once", "or", "over", "since", "so",
+    "than", "that", "then", "through", "to", "until", "when", "where", "which", "while", "with",
+    "without",
+];
+
+/// Closed-class words that can follow the head of a noun phrase without
+/// modifying it. A content word that is not one of these is a second noun, so
+/// the audio word in front of it was attributive: "music *player*", "song
+/// *lyrics*", "audio *pipeline*", "music *API*".
+const PHRASE_TRAILERS: &[&str] = &[
+    "a", "again", "an", "instead", "now", "only", "please", "the", "thanks", "this", "today", "too",
+];
+
+const OBJECT_WINDOW: usize = 7;
+
+/// Audio words that name a thing only an audio model produces, so a request to
+/// make one is never a request for text or code.
+const AUDIO_OBJECTS: &[&str] = &[
+    "audio",
+    "beat",
+    "beats",
+    "instrumental",
+    "instrumentals",
+    "jingle",
+    "jingles",
+    "melodies",
+    "melody",
+    "music",
+    "sfx",
+    "song",
+    "songs",
+    "soundtrack",
+    "soundtracks",
+    "track",
+    "tracks",
+    "tune",
+    "tunes",
+];
+
+/// Audio words that just as readily name a document, a control-flow construct,
+/// or a design token. They only ever raise a question for the classifier.
+const AUDIO_TOPICS: &[&str] = &[
+    "ambiance", "ambience", "loop", "loops", "lyrics", "mp3", "score", "scores", "sounds", "theme",
+    "themes",
+];
+
+const VISUAL_VETO: &[&str] = &[
+    "art",
+    "banner",
+    "banners",
+    "cover",
+    "covers",
+    "flyer",
+    "flyers",
+    "graphic",
+    "graphics",
+    "sleeve",
+    "thumbnail",
+    "thumbnails",
+    "visual",
+    "visuals",
+];
+
+/// How strongly a message asks for audio. `Certain` is terminal; `Possible`
+/// goes to the classifier, which is the only thing that can tell "write a song
+/// about the sea" from "write a poem about music".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioSignal {
+    None,
+    Possible,
+    Certain,
+}
+
+/// True when one of `nouns` is the head of the noun phrase `action` governs:
+/// reached without crossing a preposition, and not itself modifying a later
+/// noun.
+fn governs_object(tokens: &[String], action: usize, nouns: &[&str]) -> bool {
+    tokens
+        .iter()
+        .enumerate()
+        .skip(action + 1)
+        .take(OBJECT_WINDOW)
+        .take_while(|(_, token)| !OBJECT_BREAKS.contains(&token.as_str()))
+        .any(|(index, token)| {
+            nouns.contains(&token.as_str())
+                && tokens.get(index + 1).is_none_or(|next| {
+                    OBJECT_BREAKS.contains(&next.as_str())
+                        || PHRASE_TRAILERS.contains(&next.as_str())
+                })
+        })
+}
+
+fn audio_signal(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> AudioSignal {
+    const ACTIONS: &[&str] = &["compose", "create", "generate", "make", "produce"];
+    const DRAFTS: &[&str] = &["write", "writing"];
+    const REQUESTS: &[&[&str]] = &[
+        &["give", "me"],
+        &["i", "want"],
+        &["i", "need"],
+        &["i", "d", "like"],
+        &["i", "would", "like"],
+    ];
+
+    if tokens.iter().any(|token| {
+        VISUAL_NOUNS.contains(&token.as_str()) || VISUAL_VETO.contains(&token.as_str())
+    }) {
+        return AudioSignal::None;
+    }
+
+    let acting = tokens.iter().any(|token| ACTIONS.contains(&token.as_str()));
+    if has_phrase(&["text", "to", "audio"])
+        || has_phrase(&["text", "to", "music"])
+        || (acting && (has_phrase(&["sound", "effect"]) || has_phrase(&["sound", "effects"])))
+    {
+        return AudioSignal::Certain;
+    }
+
+    let commanded = |verbs: &[&str]| {
+        tokens.iter().enumerate().any(|(index, token)| {
+            verbs.contains(&token.as_str()) && governs_object(tokens, index, AUDIO_OBJECTS)
+        })
+    };
+    if commanded(ACTIONS) {
+        return AudioSignal::Certain;
+    }
+
+    let requested = REQUESTS
+        .iter()
+        .filter_map(|frame| phrase_end(tokens, frame))
+        .any(|index| governs_object(tokens, index, AUDIO_OBJECTS));
+    let scented = tokens.iter().any(|token| {
+        AUDIO_TOPICS.contains(&token.as_str()) || AUDIO_OBJECTS.contains(&token.as_str())
+    });
+    if commanded(DRAFTS) || requested || (acting && scented) {
+        AudioSignal::Possible
+    } else {
+        AudioSignal::None
+    }
 }
 
 fn is_animate_existing(tokens: &[String], has_phrase: &impl Fn(&[&str]) -> bool) -> bool {
@@ -582,6 +796,164 @@ mod tests {
     }
 
     #[test]
+    fn agent_mode_serves_audio_directly_like_images() {
+        assert_eq!(
+            GenerationIntent::Audio.yielding_to_agent(true),
+            GenerationIntent::Audio
+        );
+        assert_eq!(
+            GenerationIntent::Audio.yielding_to_agent(false),
+            GenerationIntent::Audio
+        );
+    }
+
+    #[test]
+    fn audio_requests_do_not_steal_image_requests() {
+        for image in [
+            "generate an image of a music studio",
+            "make a poster for a music festival",
+            "generate an image of a beat-up truck",
+            "create an image with noise texture",
+        ] {
+            assert_eq!(
+                deterministic_decision(image, false),
+                RuleDecision::Image,
+                "{image}"
+            );
+        }
+        assert_eq!(
+            deterministic_decision("make a music video of a fox", false),
+            RuleDecision::Video
+        );
+        for not_audio in [
+            "create an album cover for my song",
+            "write a rust function that plays audio",
+            "make a music video of a fox",
+            "keep track of the noise levels",
+        ] {
+            assert_ne!(
+                deterministic_decision(not_audio, false),
+                RuleDecision::Audio,
+                "{not_audio}"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_rules_leave_code_and_writing_alone() {
+        for not_audio in [
+            "write a function that plays audio",
+            "write a go function that plays audio",
+            "write a music player component",
+            "create an audio recording endpoint",
+            "write tests for the audio pipeline",
+            "write documentation for the music API",
+            "write song lyrics about the sea",
+            "make a playlist of songs for a party",
+            "write a blog post about music production",
+            "create a music theory lesson",
+            "write a poem about music",
+            "make a loop over the array",
+        ] {
+            assert_ne!(
+                deterministic_decision(not_audio, false),
+                RuleDecision::Audio,
+                "{not_audio}"
+            );
+        }
+
+        for chat in [
+            "write a function that plays audio",
+            "write a go function that plays audio",
+            "write a music player component",
+            "write tests for the audio pipeline",
+            "write documentation for the music API",
+            "write song lyrics about the sea",
+            "write a blog post about music production",
+            "write a poem about music",
+            "create an audio recording endpoint",
+            "create audio recording endpoints",
+            "create an endpoint that returns song metadata",
+            "create a rust endpoint that streams music",
+        ] {
+            assert_eq!(
+                deterministic_decision(chat, false),
+                RuleDecision::Chat,
+                "{chat}"
+            );
+        }
+    }
+
+    #[test]
+    fn implementation_nouns_leave_the_generation_lanes_alone() {
+        for image in [
+            "generate an image of a music studio",
+            "make a poster for a music festival",
+            "draw a line segment with two endpoints",
+            "draw a diagram showing the endpoints of a vector",
+            "generate an image of the endpoint of a hiking trail",
+            "illustrate the endpoint of the journey",
+            "generate an image of a rust covered endpoint",
+        ] {
+            assert_eq!(
+                deterministic_decision(image, false),
+                RuleDecision::Image,
+                "{image}"
+            );
+        }
+
+        assert_eq!(
+            deterministic_decision("make a music video of a fox", false),
+            RuleDecision::Video,
+        );
+    }
+
+    #[test]
+    fn audio_rule_matrix() {
+        for audio in [
+            "make a background audio track that sounds like shuffling through a forest",
+            "Generate a song about the sea",
+            "Create some music for my podcast",
+            "Make me a jingle",
+            "compose a melody in a minor key",
+            "generate audio of rain falling",
+            "produce an instrumental for the intro",
+            "text to music of a piano piece",
+            "make a sound effect of a door closing",
+            "make a background track that sounds like shuffling through a forest",
+            "make me some sfx of a door creaking",
+            "make a beat for the chorus",
+            "text to audio of a cat purring",
+        ] {
+            assert_eq!(
+                deterministic_decision(audio, false),
+                RuleDecision::Audio,
+                "{audio}"
+            );
+        }
+    }
+
+    #[test]
+    fn softer_audio_phrasings_reach_the_classifier() {
+        for ambiguous in [
+            "generate ambient rain sounds",
+            "generate a 30 second loop of ocean waves",
+            "generate an mp3 of birdsong",
+            "give me a song about the sea",
+            "I want a song about the sea",
+            "write a song about the sea",
+            "create a music theory lesson",
+            "make a playlist of songs for a party",
+        ] {
+            assert_eq!(
+                deterministic_decision(ambiguous, false),
+                RuleDecision::Ambiguous,
+                "{ambiguous}"
+            );
+        }
+    }
+
+    #[test]
     fn classifier_rule_matrix() {
         for request in [
             "Generate an image of a red panda",
@@ -782,6 +1154,127 @@ mod tests {
                     Some(&serde_json::json!({"image_generation": true}))
                 )
                 .await
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_metadata_flag_forces_and_skips_audio() {
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            String::new(),
+            String::new(),
+        );
+        assert_eq!(
+            classifier
+                .classify(
+                    "hello",
+                    Some(&serde_json::json!({"audio_generation": true}))
+                )
+                .await,
+            GenerationIntent::Audio
+        );
+        assert_eq!(
+            classifier
+                .classify(
+                    "Generate a song about the sea",
+                    Some(&serde_json::json!({"audio_generation": false}))
+                )
+                .await,
+            GenerationIntent::Chat
+        );
+    }
+
+    async fn classifier_answering(answer: &str) -> (MockServer, ImageIntentClassifier) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "classification",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "fast",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": answer},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let classifier = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                classifier_model: "fast".to_string(),
+                ..Default::default()
+            },
+            server.uri(),
+            "key".to_string(),
+        );
+        (server, classifier)
+    }
+
+    #[tokio::test]
+    async fn ambiguous_arm_answers_audio_image_or_chat() {
+        const SOFT_AUDIO: &str = "generate ambient rain sounds";
+
+        let (_audio, classifier) = classifier_answering(AmbiguousVerdict::AUDIO).await;
+        assert_eq!(
+            classifier.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Audio
+        );
+        for recovered in [
+            "generate a 30 second loop of ocean waves",
+            "generate an mp3 of birdsong",
+            "give me a song about the sea",
+            "I want a song about the sea",
+        ] {
+            assert_eq!(
+                classifier.classify(recovered, None).await,
+                GenerationIntent::Audio,
+                "{recovered}"
+            );
+        }
+
+        let (_image, classifier) = classifier_answering(AmbiguousVerdict::IMAGE).await;
+        assert_eq!(
+            classifier.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Image
+        );
+
+        let (_chat, classifier) = classifier_answering("maybe some audio?").await;
+        assert_eq!(
+            classifier.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Chat
+        );
+
+        let hostless = ImageIntentClassifier::new(
+            ComfyUiConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            String::new(),
+            String::new(),
+        );
+        assert_eq!(
+            hostless.classify(SOFT_AUDIO, None).await,
+            GenerationIntent::Chat
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_audio_respects_the_skip_audio_flag() {
+        let (_server, classifier) = classifier_answering(AmbiguousVerdict::AUDIO).await;
+        assert_eq!(
+            classifier
+                .classify(
+                    "generate ambient rain sounds",
+                    Some(&serde_json::json!({"audio_generation": false}))
+                )
+                .await,
+            GenerationIntent::Chat
         );
     }
 

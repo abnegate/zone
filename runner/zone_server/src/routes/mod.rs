@@ -75,6 +75,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/plans/{plan_id}", get(billing::get_plan))
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))
+        // Artifact reads (public - a bearer header or an HMAC-signed URL, checked
+        // in the handler, because a media element cannot send a header)
+        .route(
+            "/api/artifacts/{workspace_id}/{chat_id}/{owner_id}/{filename}",
+            get(artifacts::get),
+        )
         // Webhook routes (public - verified via HMAC signature)
         .route(
             "/api/webhooks/sync/{sync_config_id}/github",
@@ -186,8 +192,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/tasks/runs/{run_id}/logs", get(tasks::get_run_logs))
         // Chats
         .route(
-            "/api/artifacts/{workspace_id}/{chat_id}/{owner_id}/{filename}",
-            get(artifacts::get),
+            "/api/artifacts/{workspace_id}/{chat_id}/{owner_id}/{filename}/signature",
+            get(artifacts::signature),
         )
         .route("/api/chats", get(chats::list).post(chats::create))
         .route("/api/chats/search", get(chats::search_messages))

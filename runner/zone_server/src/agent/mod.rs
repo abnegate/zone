@@ -11,6 +11,7 @@
 
 pub mod actions;
 pub mod approval;
+pub mod audio;
 pub mod citations;
 pub mod documents;
 pub mod images;
