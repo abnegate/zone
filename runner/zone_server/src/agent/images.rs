@@ -313,7 +313,9 @@ mod tests {
         let enabled_scope = scope();
         let mut enabled = ToolRegistry::new();
         register(&mut enabled, &enabled_scope);
-        assert_eq!(enabled.names(), vec!["generate_image", "edit_image"]);
+        let mut names = enabled.names();
+        names.sort_unstable();
+        assert_eq!(names, vec!["edit_image", "generate_image"]);
 
         let context = ToolContext::default();
         let generate = GenerateImageTool(enabled_scope.clone());
