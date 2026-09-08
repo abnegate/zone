@@ -86,6 +86,7 @@ tool_runner = { path = "../tool_runner" }
 zone_chat = { path = "../zone_chat" }
 zone_comfy = { path = "../zone_comfy" }
 zone_email = { path = "../zone_email" }
+zone_notify = { path = "../zone_notify" }
 zone_search = { path = "../zone_search" }
 zone_vcs = { path = "../zone_vcs" }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
