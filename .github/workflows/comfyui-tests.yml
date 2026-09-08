@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'comfyui/**'
+      - 'runner/zone_comfy/**'
       - 'scripts/setup-comfyui-macos.sh'
       - '.github/workflows/comfyui-tests.yml'
   pull_request:
     paths:
       - 'comfyui/**'
+      - 'runner/zone_comfy/**'
       - 'scripts/setup-comfyui-macos.sh'
       - '.github/workflows/comfyui-tests.yml'
 
