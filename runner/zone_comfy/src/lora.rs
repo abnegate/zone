@@ -46,6 +46,7 @@ pub struct TrainImage {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct TrainBase {
     pub id: String,
     pub label: String,
@@ -82,14 +83,20 @@ pub async fn train(
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
     }
-    let name = sanitize_weight_filename(&format!("{}.safetensors", request.name.trim()))
-        .or_else(|_| sanitize_weight_filename(request.name.trim()))
-        .map_err(|_| TrainError::Invalid("invalid LoRA name"))?;
+    // Sanitizing the finished filename rather than the name it came from is
+    // what keeps the length limit honest: an empty name would otherwise pass as
+    // the hidden ".safetensors", and a 250-character one would pass as a
+    // filename too long for the disk to hold, failing inside the trainer.
+    let name = request.name.trim();
     let filename = if name.ends_with(".safetensors") {
-        name
+        name.to_string()
     } else {
         format!("{name}.safetensors")
     };
+    let filename = sanitize_weight_filename(&filename)
+        .ok()
+        .filter(|filename| filename != ".safetensors")
+        .ok_or(TrainError::Invalid("invalid LoRA name"))?;
     if request.images.is_empty() {
         return Err(TrainError::Invalid("training needs images"));
     }
@@ -242,11 +249,14 @@ pub async fn train(
 }
 
 fn caption(image: &TrainImage, trigger: Option<&str>) -> String {
+    let described = image.caption.trim();
     match trigger.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(trigger) if !image.caption.contains(trigger) => {
-            format!("{trigger}, {}", image.caption.trim())
-        }
-        _ => image.caption.trim().to_string(),
+        // A trigger with nothing after it is the whole caption, not the start
+        // of one: the separator would otherwise dangle on every image the
+        // vision model could not describe.
+        Some(trigger) if described.is_empty() => trigger.to_string(),
+        Some(trigger) if !described.contains(trigger) => format!("{trigger}, {described}"),
+        _ => described.to_string(),
     }
 }
 
@@ -416,6 +426,310 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("training/my-style/targets/0000.txt")).unwrap(),
             "ohwx, a portrait"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A models root with the output directory the writer needs.
+    fn root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("zone-train-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("loras")).unwrap();
+        root
+    }
+
+    fn request(name: &str, base: &str, trigger: Option<&str>) -> TrainRequest {
+        TrainRequest {
+            name: name.into(),
+            base: base.into(),
+            trigger: trigger.map(str::to_string),
+            images: vec![upload("a portrait", None)],
+        }
+    }
+
+    async fn rejected(config: &Config, request: TrainRequest) -> TrainError {
+        train(config, String::new(), String::new(), request)
+            .await
+            .expect_err("this request should not have trained")
+    }
+
+    #[tokio::test]
+    async fn training_needs_either_a_command_or_a_reachable_comfyui() {
+        let error = rejected(
+            &Config::default(),
+            request("my-style", "flux-schnell", Some("ohwx")),
+        )
+        .await;
+        assert!(matches!(error, TrainError::Disabled), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_name_that_is_not_a_filename_is_refused() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        for name in ["", "../escape", "/etc/passwd"] {
+            let error = rejected(&config, request(name, "flux-schnell", Some("ohwx"))).await;
+            assert!(matches!(error, TrainError::Invalid(_)), "{name}: {error}");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn training_needs_images() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        let mut empty = request("my-style", "flux-schnell", Some("ohwx"));
+        empty.images.clear();
+        let error = rejected(&config, empty).await;
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_blank_trigger_counts_as_no_trigger() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        let error = rejected(&config, request("my-style", "flux-schnell", Some("   "))).await;
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_base_is_refused_before_anything_is_written() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        let error = rejected(&config, request("my-style", "no-such-base", Some("ohwx"))).await;
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+        assert!(
+            !root.join("training/my-style").exists(),
+            "a refused request should leave no dataset behind"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_trainer_that_exits_badly_is_reported() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("exit 3".into()),
+            ..Default::default()
+        };
+        let error = rejected(&config, request("my-style", "flux-schnell", Some("ohwx"))).await;
+        let TrainError::Failed(message) = &error else {
+            panic!("expected a failure, got {error}");
+        };
+        assert!(
+            message.contains('3'),
+            "the exit code is the diagnosis: {message}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_trainer_that_writes_nothing_is_not_a_success() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        let error = rejected(&config, request("my-style", "flux-schnell", Some("ohwx"))).await;
+        assert!(
+            matches!(&error, TrainError::Failed(message) if message.contains("did not write")),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_edit_base_gets_a_control_directory_beside_its_targets() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("printf lora > \"$ZONE_TRAIN_OUTPUT\"".into()),
+            ..Default::default()
+        };
+        let catalog = RecipeCatalog::packaged().unwrap();
+        let edit = catalog
+            .image_recipes()
+            .find(|recipe| {
+                !recipe.adapter && recipe.prompt_mode == crate::recipe::PromptMode::EditInstruction
+            })
+            .expect("the packaged catalog no longer ships an edit base")
+            .id
+            .clone();
+        let mut pair = request("my-edit", &edit, Some("ohwx"));
+        pair.images[0].before_base64 = Some(encoded_at(8, 8));
+        train(&config, String::new(), String::new(), pair)
+            .await
+            .unwrap();
+        assert!(
+            root.join("training/my-edit/control_1/0000.png").is_file(),
+            "an edit base trains on before and after together"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_blank_caption_is_filled_in_before_the_dataset_is_written() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("printf lora > \"$ZONE_TRAIN_OUTPUT\"".into()),
+            ..Default::default()
+        };
+        let mut blank = request("my-style", "flux-schnell", Some("ohwx"));
+        blank.images[0].caption = String::new();
+        train(&config, String::new(), String::new(), blank)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("training/my-style/targets/0000.txt")).unwrap(),
+            "ohwx",
+            "with no caption model, the trigger alone still has to reach the dataset"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_name_too_long_to_write_is_refused_rather_than_failing_in_the_trainer() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("printf lora > \"$ZONE_TRAIN_OUTPUT\"".into()),
+            ..Default::default()
+        };
+        // Under the limit itself, over it once ".safetensors" is on the end.
+        let long = "a".repeat(250);
+        let error = rejected(&config, request(&long, "flux-schnell", Some("ohwx"))).await;
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+
+        let named = train(
+            &config,
+            String::new(),
+            String::new(),
+            request("already.safetensors", "flux-schnell", Some("ohwx")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            named.file_name().unwrap(),
+            "already.safetensors",
+            "a name that already carries the extension keeps exactly one"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_empty_upload_is_not_an_image() {
+        let Err(error) = decode("") else {
+            panic!("an empty upload is not an image");
+        };
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+    }
+
+    #[test]
+    fn only_installed_bases_are_offered_for_training() {
+        let root = std::env::temp_dir().join(format!("zone-bases-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("checkpoints")).unwrap();
+        let catalog = RecipeCatalog::packaged().unwrap();
+
+        assert!(
+            available_bases(&catalog, &root).is_empty(),
+            "nothing is trainable until its weights are on disk"
+        );
+
+        let recipe = catalog
+            .get("flux-schnell")
+            .expect("the packaged catalog ships flux-schnell");
+        let checkpoint = recipe
+            .defaults
+            .get("checkpoint")
+            .expect("flux-schnell declares a checkpoint");
+        fs::write(root.join("checkpoints").join(checkpoint), vec![0u8; 1024]).unwrap();
+
+        let bases = available_bases(&catalog, &root);
+        assert!(
+            bases
+                .iter()
+                .any(|base| base.id == "flux-schnell" && !base.edit),
+            "the installed base should be offered: {bases:?}"
+        );
+        assert!(
+            !bases.iter().any(|base| base.id.ends_with("-adapter")),
+            "a LoRA slot is not something to train onto: {bases:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn without_a_train_command_the_job_runs_as_a_comfyui_graph() {
+        use wiremock::matchers::{method, path as path_matcher};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_matcher("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_matcher("/prompt"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"prompt_id": "p-1"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_matcher("/history/p-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"p-1": {"status": {"completed": true, "status_str": "success"}}}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_matcher("/view"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![9u8; 20_000]))
+            .mount(&server)
+            .await;
+
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            enabled: true,
+            base_url: server.uri(),
+            train_command: None,
+            poll_interval_ms: 50,
+            ..Default::default()
+        };
+        let output = train(
+            &config,
+            String::new(),
+            String::new(),
+            request("graph-style", "flux-schnell", Some("ohwx")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&output).unwrap(), vec![9u8; 20_000]);
+        assert!(
+            root.join("training/graph-style/targets/0000.png").is_file(),
+            "the dataset has to reach disk before the graph is queued"
         );
         let _ = fs::remove_dir_all(root);
     }

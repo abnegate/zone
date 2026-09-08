@@ -204,6 +204,45 @@ mod tests {
         assert_eq!(subject.weighted(&raster, &[1.0; 16], elsewhere), elsewhere);
     }
 
+    fn encoded(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &vec![90u8; (width * height * 3) as usize],
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_crop_without_a_model_is_still_the_square_the_trainer_asked_for() {
+        let rendered = Subject::none().crop(&encoded(16, 9), 8).unwrap();
+        assert_eq!((rendered.width, rendered.height), (8, 8));
+    }
+
+    #[test]
+    fn something_that_is_not_an_image_cannot_be_cropped() {
+        let error = Subject::none().crop(b"not an image", 8).unwrap_err();
+        assert!(matches!(error, Error::Decode(_)), "{error}");
+    }
+
+    #[test]
+    fn a_zero_sided_crop_is_refused_rather_than_rendered() {
+        let raster = Raster {
+            width: 4,
+            height: 4,
+            layout: zone_vision::decode::Layout::Rgb,
+            orientation: zone_vision::decode::Orientation::Normal,
+            pixels: vec![128; 4 * 4 * 3],
+        };
+        let error = Subject::none().render(&raster, 0, CENTRE).unwrap_err();
+        assert!(matches!(error, Error::Crop(_)), "{error}");
+    }
+
     #[test]
     fn a_crop_is_the_square_the_trainer_asked_for() {
         let raster = Raster {

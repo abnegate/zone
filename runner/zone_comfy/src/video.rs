@@ -386,21 +386,23 @@ fn diversify(candidates: &[usize], measured: &[Measured], budget: usize) -> Vec<
     if candidates.len() <= 1 {
         return candidates.to_vec();
     }
-    let first = *candidates
-        .iter()
-        .max_by(|&&left, &&right| {
-            measured[left]
-                .sharpness
-                .total_cmp(&measured[right].sharpness)
-        })
-        .expect("candidates is not empty");
+    let Some((sharpest, _)) =
+        candidates
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|&(_, left), &(_, right)| {
+                measured[left]
+                    .sharpness
+                    .total_cmp(&measured[right].sharpness)
+            })
+    else {
+        return Vec::new();
+    };
     let mut taken = vec![false; candidates.len()];
     let mut distances = vec![u32::MAX; candidates.len()];
     let mut chosen = Vec::with_capacity(budget.min(candidates.len()));
-    let mut next = candidates
-        .iter()
-        .position(|&index| index == first)
-        .expect("the sharpest candidate is a candidate");
+    let mut next = sharpest;
     while chosen.len() < budget.min(candidates.len()) {
         taken[next] = true;
         chosen.push(candidates[next]);
@@ -543,6 +545,10 @@ fn luma(pixels: &[u8]) -> Vec<f32> {
 /// Variance of the Laplacian: a blurred frame has little left after a
 /// second-derivative filter, a sharp one keeps its edges.
 fn sharpness(luma: &[f32], side: usize) -> f64 {
+    // A second derivative needs a pixel on each side of the one it is taken at.
+    if side < 3 || luma.len() < side * side {
+        return 0.0;
+    }
     let mut total = 0.0f64;
     let mut squares = 0.0f64;
     let mut count = 0u32;
@@ -560,9 +566,6 @@ fn sharpness(luma: &[f32], side: usize) -> f64 {
             squares += response * response;
             count += 1;
         }
-    }
-    if count == 0 {
-        return 0.0;
     }
     let mean = total / f64::from(count);
     squares / f64::from(count) - mean * mean
@@ -827,6 +830,58 @@ mod tests {
         assert_eq!(container("clip.../etc/passwd"), "mp4");
     }
 
+    #[test]
+    fn a_clip_ffmpeg_read_nothing_out_of_is_not_a_training_set() {
+        let stills = tempfile::tempdir().unwrap();
+        let error = build(
+            stills.path(),
+            8.0,
+            Options {
+                fps: 4,
+                resolution: 512,
+                mirror: true,
+                limit: 48,
+            },
+            &Subject::none(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_decoder_that_cannot_be_run_is_reported_rather_than_swallowed() {
+        // Present but not executable: a misconfigured path, not a missing one,
+        // so it is the server's fault in a way "not installed" does not cover.
+        let work = tempfile::tempdir().unwrap();
+        let blocked = work.path().join("ffmpeg");
+        std::fs::write(&blocked, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let error = extract(
+            &Config {
+                ffmpeg: blocked.display().to_string(),
+                ..Default::default()
+            },
+            b"clip",
+            "clip.mp4",
+            Options {
+                fps: 4,
+                resolution: 512,
+                mirror: true,
+                limit: 48,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, TrainError::Failed(_)),
+            "a decoder that is there but unusable is not the same as one that is absent: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn an_empty_upload_is_rejected_before_ffmpeg_runs() {
         let error = extract(
@@ -896,6 +951,88 @@ mod tests {
             .await
             .unwrap();
         assert!(built.success(), "could not build the test clip");
+    }
+
+    #[test]
+    fn a_still_that_cannot_be_read_is_skipped_rather_than_failing_the_clip() {
+        let stills = tempfile::tempdir().unwrap();
+        let good = crop::render(
+            &Raster {
+                width: 8,
+                height: 8,
+                layout: decode::Layout::Rgb,
+                orientation: decode::Orientation::Normal,
+                pixels: (0..8 * 8)
+                    .flat_map(|index| [index as u8, 30, 200])
+                    .collect(),
+            },
+            Region {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            },
+            Target::square(8),
+        )
+        .unwrap();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&good.pixels, 8, 8, image::ExtendedColorType::Rgb8)
+            .unwrap();
+
+        std::fs::write(stills.path().join("000001.jpg"), &jpeg).unwrap();
+        std::fs::write(stills.path().join("000002.jpg"), b"not an image").unwrap();
+        std::fs::write(stills.path().join("000003.png"), &jpeg).unwrap();
+
+        let measured = measure(stills.path(), 4.0).unwrap();
+        assert_eq!(
+            measured.len(),
+            1,
+            "only the readable jpeg counts: a corrupt frame is dropped, and so is a file \
+             ffmpeg did not write"
+        );
+        assert_eq!(measured[0].timestamp_ms, 0);
+    }
+
+    #[test]
+    fn a_clip_of_black_frames_still_offers_something_to_choose_from() {
+        let frames: Vec<Measured> = (0..12)
+            .map(|index| Measured {
+                brightness: 1.0,
+                contrast: 0.5,
+                ..measured(index as u64 * 250, index as f64, distinct(index))
+            })
+            .collect();
+        assert!(
+            !choose(&frames, 4, 48).is_empty(),
+            "a clip too dark to judge is still the clip the caller submitted"
+        );
+    }
+
+    #[test]
+    fn one_candidate_needs_no_ranking() {
+        let frames = vec![measured(0, 1.0, distinct(0))];
+        assert_eq!(diversify(&[0], &frames, 48), vec![0]);
+        assert_eq!(diversify(&[], &frames, 48), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn an_empty_plane_has_no_spread() {
+        assert_eq!(spread(&[]), (0.0, 0.0));
+        assert_eq!(sharpness(&[], 0), 0.0);
+    }
+
+    #[test]
+    fn a_frame_with_no_motion_at_all_is_framed_on_its_centre() {
+        assert_eq!(focus(&vec![0.0; GRID * GRID]), Point { x: 0.5, y: 0.5 });
+    }
+
+    #[test]
+    fn a_single_frame_clip_has_motion_to_read() {
+        let frames = vec![measured(0, 1.0, distinct(0))];
+        let motion = motion(&frames);
+        assert_eq!(motion.len(), 1);
+        assert_eq!(motion[0].len(), GRID * GRID);
     }
 
     #[tokio::test]
@@ -1007,6 +1144,36 @@ mod tests {
                 frame.filename
             );
         }
+    }
+
+    #[tokio::test]
+    async fn mirroring_can_be_turned_off_for_a_subject_a_mirror_would_get_wrong() {
+        if !ffmpeg_installed() {
+            eprintln!("skipping: ffmpeg is not installed");
+            return;
+        }
+        let work = tempfile::tempdir().unwrap();
+        let clip = work.path().join("clip.mp4");
+        synthesize(&clip, MOVING_SUBJECT, "2").await;
+
+        let extracted = extract(
+            &Config::default(),
+            &std::fs::read(&clip).unwrap(),
+            "clip.mp4",
+            Options {
+                fps: 3,
+                resolution: 128,
+                mirror: false,
+                limit: 48,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!extracted.frames.is_empty());
+        assert!(
+            extracted.frames.iter().all(|frame| !frame.mirrored),
+            "a subject carrying text must come back the way round it was filmed"
+        );
     }
 
     #[tokio::test]

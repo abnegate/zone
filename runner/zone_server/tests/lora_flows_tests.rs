@@ -126,10 +126,21 @@ async fn router_with(
     models_dir: PathBuf,
     train_command: Option<String>,
 ) -> (axum::Router, String) {
+    router_tuned(ollama, catalog, models_dir, train_command, |_| {}).await
+}
+
+async fn router_tuned(
+    ollama: &str,
+    catalog: &str,
+    models_dir: PathBuf,
+    train_command: Option<String>,
+    tune: impl FnOnce(&mut zone_comfy::Config),
+) -> (axum::Router, String) {
     let mut config = common::test_config_with_ollama_host(ollama);
     config.huggingface_models_url = catalog.to_string();
     config.comfyui.models_dir = models_dir;
     config.comfyui.train_command = train_command;
+    tune(&mut config.comfyui);
     let secret = config.jwt_secret.clone();
     let pool = PgPoolOptions::new()
         .connect_lazy(&config.database_url)
@@ -537,6 +548,115 @@ async fn frames_endpoint_rejects_a_file_that_is_not_a_video() {
             .is_some_and(|error| !error.is_empty()),
         "the failure has to say what went wrong: {body}"
     );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+async fn post_frames(router: axum::Router, secret: &str, body: Value) -> (StatusCode, Value) {
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/models/train/frames")
+        .header("Authorization", format!("Bearer {}", token(secret)))
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn frames_endpoint_rejects_a_body_that_is_not_base64() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+
+    let (status, body) = post_frames(
+        router,
+        &secret,
+        json!({ "filename": "clip.mp4", "bytes_base64": "this is not base64!" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("base64")),
+        "the failure has to name what was wrong: {body}"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn frames_endpoint_rejects_an_empty_clip() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+
+    let (status, body) = post_frames(
+        router,
+        &secret,
+        json!({ "filename": "clip.mp4", "bytes_base64": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().is_some(), "{body}");
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn frames_endpoint_says_so_when_the_decoder_is_not_installed() {
+    use base64::Engine;
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, secret) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
+        comfyui.ffmpeg = "zone-has-no-such-decoder".into();
+    })
+    .await;
+
+    let (status, body) = post_frames(
+        router,
+        &secret,
+        json!({
+            "filename": "clip.mp4",
+            "bytes_base64": base64::engine::general_purpose::STANDARD.encode("pretend clip"),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a missing decoder is the server's problem, not the caller's: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("zone-has-no-such-decoder")),
+        "the reply has to name the binary an operator needs to install: {body}"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn frames_endpoint_needs_authentication() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, _) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/models/train/frames")
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            json!({ "filename": "clip.mp4", "bytes_base64": "" }).to_string(),
+        ))
+        .unwrap();
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let _ = fs::remove_dir_all(models_dir);
 }
 
