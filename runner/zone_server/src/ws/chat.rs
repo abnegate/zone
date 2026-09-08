@@ -32,7 +32,7 @@ use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
 
 use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, ToolCallRecord};
 use crate::auth::validate_access_token;
-use crate::db::{ai_settings, chats, knowledge, workspace_members, workspaces};
+use crate::db::{self, ai_settings, chats, knowledge, sessions, workspace_members, workspaces};
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
 use crate::services::chat::session::{self, Session};
@@ -49,8 +49,8 @@ const WS_POLL_INTERVAL_MS: u64 = 50;
 /// Authentication timeout in seconds
 const WS_AUTH_TIMEOUT_SECS: u64 = 30;
 
-/// Re-check authorization every ~10 seconds (200 poll cycles at 50ms)
-const AUTH_RECHECK_INTERVAL: u32 = 200;
+/// Re-check authorization every 10 seconds.
+const AUTH_RECHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// WebSocket idle timeout in seconds (5 minutes)
 const WS_IDLE_TIMEOUT_SECS: u64 = 300;
@@ -89,6 +89,20 @@ const STATUS_CONNECTED: &str = "connected";
 
 /// Global connection limiter per chat
 static CHAT_CONNECTIONS: Lazy<DashMap<Uuid, Arc<Semaphore>>> = Lazy::new(DashMap::new);
+
+async fn can_access_chat(
+    state: &AppState,
+    user_id: Uuid,
+    session_id: Uuid,
+    workspace_id: Uuid,
+) -> db::DbResult<bool> {
+    let (session_active, can_write) = tokio::try_join!(
+        sessions::is_active_user_session(state.db(), session_id, user_id),
+        workspace_members::can_write(state.db(), workspace_id, user_id),
+    )?;
+
+    Ok(session_active && can_write)
+}
 
 /// Live frames per chat, kept while a connection or a generation holds one.
 static CHAT_STREAMS: Lazy<DashMap<Uuid, Weak<ChatStream>>> = Lazy::new(DashMap::new);
@@ -743,7 +757,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     };
 
     // Wait for auth message
-    let claims = match tokio::time::timeout(
+    let access = match tokio::time::timeout(
         Duration::from_secs(WS_AUTH_TIMEOUT_SECS),
         receiver.next(),
     )
@@ -752,7 +766,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
         Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
             Ok(ClientMessage::Auth { token }) => {
                 match validate_access_token(&token, state.config().jwt_secret()) {
-                    Ok(access) => access.claims,
+                    Ok(access) => access,
                     Err(e) => {
                         crate::metrics::record_ws_chat("rejected", "auth_failed");
                         tracing::warn!("Authentication failed for chat {}: {}", chat_id, e);
@@ -788,7 +802,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     };
 
     // Get user ID from claims
-    let user_id = match claims.user_id() {
+    let user_id = match access.claims.user_id() {
         Ok(id) => id,
         Err(e) => {
             tracing::error!("Invalid user ID in JWT: {}", e);
@@ -799,6 +813,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
             let _ = sender.close().await;
             return;
         }
+    };
+    let Some(session_id) = access.session_id else {
+        let error_msg = ServerMessage::Error {
+            message: "Authentication failed".to_string(),
+        };
+        let _ = sender.send(error_msg.to_ws_message()).await;
+        let _ = sender.close().await;
+        return;
     };
 
     // Verify chat exists and get workspace
@@ -838,7 +860,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     };
 
     // Verify user has write access to the workspace
-    match workspace_members::can_write(state.db(), workspace_id, user_id).await {
+    match can_access_chat(&state, user_id, session_id, workspace_id).await {
         Ok(true) => {
             tracing::info!(
                 "User {} connected to chat {} in workspace {}",
@@ -895,9 +917,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     }
 
     // Setup state for message loop
-    let mut auth_check_counter = 0;
     let mut consecutive_errors = 0;
     let mut last_client_activity = Instant::now();
+    let mut auth_interval = tokio::time::interval(AUTH_RECHECK_INTERVAL);
     let mut ping_interval = tokio::time::interval(Duration::from_secs(WS_PING_INTERVAL_SECS));
     let mut message_count = 0;
     let mut rate_limit_window_start = Instant::now();
@@ -909,7 +931,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 if let Ok((destination, message)) = update
                     && destination == chat_id
                 {
-                    if !workspace_members::is_member(state.db(), user_id, workspace_id).await.unwrap_or(false) {
+                    if !can_access_chat(&state, user_id, session_id, workspace_id)
+                        .await
+                        .unwrap_or(false)
+                    {
                         let _ = sender.lock().await.close().await;
                         return;
                     }
@@ -1061,53 +1086,48 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                 }
             }
 
+            _ = auth_interval.tick() => {
+                match can_access_chat(&state, user_id, session_id, workspace_id).await {
+                    Ok(false) => {
+                        tracing::warn!(
+                            "User {} lost access to workspace {} during chat {}",
+                            user_id,
+                            workspace_id,
+                            chat_id
+                        );
+                        let error_msg = ServerMessage::Error {
+                            message: "Access revoked".to_string(),
+                        };
+                        let _ = send_server(&sender, error_msg).await;
+                        let _ = sender.lock().await.close().await;
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!("Error re-checking chat authorization: {}", e);
+                        consecutive_errors += 1;
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            let error_msg = ServerMessage::Error {
+                                message: "Connection unstable, please reconnect".to_string(),
+                            };
+                            let _ = send_server(&sender, error_msg).await;
+                            let _ = sender.lock().await.close().await;
+                            return;
+                        }
+                    }
+                    Ok(true) => {
+                        consecutive_errors = 0;
+                    }
+                }
+            }
+
             // Periodic ping and idle timeout check
             _ = ping_interval.tick() => {
-                // Check for idle timeout
                 if last_client_activity.elapsed() > Duration::from_secs(WS_IDLE_TIMEOUT_SECS) {
                     tracing::info!("Closing idle WebSocket connection for chat {}", chat_id);
                     let _ = sender.lock().await.close().await;
                     return;
                 }
 
-                // Periodic authorization re-check
-                auth_check_counter += 1;
-                if auth_check_counter >= AUTH_RECHECK_INTERVAL {
-                    auth_check_counter = 0;
-                    match workspace_members::can_write(state.db(), workspace_id, user_id).await {
-                        Ok(false) => {
-                            tracing::warn!(
-                                "User {} lost access to workspace {} during chat {}",
-                                user_id,
-                                workspace_id,
-                                chat_id
-                            );
-                            let error_msg = ServerMessage::Error {
-                                message: "Access revoked".to_string(),
-                            };
-                            let _ = send_server(&sender, error_msg).await;
-                            let _ = sender.lock().await.close().await;
-                            return;
-                        }
-                        Err(e) => {
-                            tracing::error!("Error re-checking workspace access: {}", e);
-                            consecutive_errors += 1;
-                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                                let error_msg = ServerMessage::Error {
-                                    message: "Connection unstable, please reconnect".to_string(),
-                                };
-                                let _ = send_server(&sender, error_msg).await;
-                                let _ = sender.lock().await.close().await;
-                                return;
-                            }
-                        }
-                        Ok(true) => {
-                            consecutive_errors = 0;
-                        }
-                    }
-                }
-
-                // Send ping
                 if sender.lock().await.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
                 }
@@ -3569,7 +3589,7 @@ mod tests {
     #[test]
     fn test_constants() {
         assert_eq!(WS_AUTH_TIMEOUT_SECS, 30);
-        assert_eq!(AUTH_RECHECK_INTERVAL, 200);
+        assert_eq!(AUTH_RECHECK_INTERVAL, Duration::from_secs(10));
         assert_eq!(WS_IDLE_TIMEOUT_SECS, 300);
         assert_eq!(WS_PING_INTERVAL_SECS, 30);
         assert_eq!(MAX_CONSECUTIVE_ERRORS, 5);

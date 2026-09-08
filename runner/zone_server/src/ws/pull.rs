@@ -12,8 +12,10 @@ use futures::{SinkExt, StreamExt, stream::SplitSink};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
+use uuid::Uuid;
 
 use crate::auth::validate_access_token;
+use crate::db::{self, sessions};
 use crate::pull::{ComfyPull, Event, Pull, PullRegistry, PullStart};
 use crate::state::AppState;
 use zone_comfy::recipe::RecipeCatalog;
@@ -22,6 +24,23 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const PING_INTERVAL: Duration = Duration::from_secs(15);
 
 type Sender = SplitSink<WebSocket, Message>;
+
+#[derive(Clone, Copy)]
+struct Authorization {
+    expires_at: i64,
+    session_id: Uuid,
+    user_id: Uuid,
+}
+
+impl Authorization {
+    async fn is_current(self, state: &AppState) -> db::DbResult<bool> {
+        if chrono::Utc::now().timestamp() >= self.expires_at {
+            return Ok(false);
+        }
+
+        sessions::is_active_user_session(state.db(), self.session_id, self.user_id).await
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -61,17 +80,34 @@ pub async fn handle_pull_ws(
 
 async fn handle(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
-    let authenticated = match tokio::time::timeout(HANDSHAKE_TIMEOUT, receiver.next()).await {
+    let access = match tokio::time::timeout(HANDSHAKE_TIMEOUT, receiver.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<Authentication>(&text) {
             Ok(Authentication::Auth { token }) => {
-                validate_access_token(&token, state.config().jwt_secret())
-                    .is_ok_and(|access| access.claims.user_id().is_ok())
+                validate_access_token(&token, state.config().jwt_secret()).ok()
             }
-            Err(_) => false,
+            Err(_) => None,
         },
-        _ => false,
+        _ => None,
     };
-    if !authenticated {
+    let authorization = access.and_then(|access| {
+        Some(Authorization {
+            expires_at: access.claims.exp,
+            session_id: access.session_id?,
+            user_id: access.claims.user_id().ok()?,
+        })
+    });
+    let Some(authorization) = authorization else {
+        let _ = emit_handshake(
+            &mut sender,
+            Handshake::Error {
+                message: "Authentication failed".to_string(),
+            },
+        )
+        .await;
+        let _ = sender.close().await;
+        return;
+    };
+    if !authorization.is_current(&state).await.unwrap_or(false) {
         let _ = emit_handshake(
             &mut sender,
             Handshake::Error {
@@ -124,6 +160,8 @@ async fn handle(socket: WebSocket, state: AppState) {
         &mut receiver,
         registry,
         pull_start(&state, request),
+        &state,
+        authorization,
     )
     .await;
 }
@@ -170,6 +208,8 @@ async fn subscribe(
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     registry: &PullRegistry,
     request: PullStart,
+    state: &AppState,
+    authorization: Authorization,
 ) {
     let mut subscription = registry.start(request);
     for event in subscription.replay() {
@@ -201,6 +241,17 @@ async fn subscribe(
                 }
             }
             _ = ping.tick() => {
+                if !authorization.is_current(state).await.unwrap_or(false) {
+                    let _ = emit_event(
+                        sender,
+                        &Event::Error {
+                            message: "Access revoked".to_string(),
+                        },
+                    )
+                    .await;
+                    let _ = sender.close().await;
+                    return;
+                }
                 if sender.send(Message::Ping(Bytes::new())).await.is_err() {
                     return;
                 }

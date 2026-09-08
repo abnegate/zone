@@ -8,7 +8,7 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{
@@ -18,17 +18,40 @@ use std::sync::{
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tower::ServiceExt;
-use zone_server::auth::create_access_token;
+use zone_server::auth::create_session_access_token;
 use zone_server::config::DEFAULT_HUGGINGFACE_MODELS_URL;
+use zone_server::db::{sessions, users};
 use zone_server::routes::models::{BrowseQuery, HuggingFaceProvider, ModelMediumFilter, ModelSort};
 
-fn token(secret: &str) -> String {
-    create_access_token(
-        uuid::Uuid::new_v4(),
+async fn token(pool: &PgPool, secret: &str) -> String {
+    let user = users::create_user(
+        pool,
+        &common::test_email(),
+        "password-hash",
+        Some("LoRA test user"),
+        false,
+    )
+    .await
+    .unwrap();
+    let session = sessions::create_session(
+        pool,
+        user.id,
+        &format!("refresh-{}", uuid::Uuid::new_v4()),
+        None,
+        None,
+        None,
+        (chrono::Utc::now() + chrono::Duration::hours(1)).naive_utc(),
+    )
+    .await
+    .unwrap();
+
+    create_session_access_token(
+        user.id,
         "lora@example.com",
         vec![],
         vec![],
         false,
+        session.id,
         secret,
         chrono::Duration::hours(1),
     )
@@ -116,13 +139,11 @@ async fn router_with(
     config.huggingface_models_url = catalog.to_string();
     config.comfyui.models_dir = models_dir;
     config.comfyui.train_command = train_command;
-    let secret = config.jwt_secret.clone();
-    let pool = PgPoolOptions::new()
-        .connect_lazy(&config.database_url)
-        .unwrap();
+    let pool = common::create_test_pool().await;
+    let token = token(&pool, config.jwt_secret()).await;
     (
         common::create_test_router(common::create_test_state(config, pool)),
-        secret,
+        token,
     )
 }
 
@@ -175,11 +196,11 @@ async fn live_huggingface_adapter_search_finds_qwen_edit_lora() {
 async fn browse_image_generation_returns_loras_not_gguf() {
     let catalog = start_catalog(split_catalog).await;
     let ollama = mock_ollama().await;
-    let (router, secret) = router_with(&ollama, &catalog, temp_models(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, temp_models(), None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models?source=huggingface&medium=image_generation")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -205,11 +226,11 @@ async fn browse_image_generation_returns_loras_not_gguf() {
 async fn browse_huggingface_empty_query_stays_gguf() {
     let catalog = start_catalog(split_catalog).await;
     let ollama = mock_ollama().await;
-    let (router, secret) = router_with(&ollama, &catalog, temp_models(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, temp_models(), None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models?source=huggingface")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -231,11 +252,11 @@ async fn list_models_includes_unready_adapter() {
     .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir, None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir, None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -257,7 +278,7 @@ async fn train_endpoint_writes_lora_and_lists_it() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(
+    let (router, token) = router_with(
         &ollama,
         &catalog,
         models_dir.clone(),
@@ -269,7 +290,7 @@ async fn train_endpoint_writes_lora_and_lists_it() {
     let request = axum::http::Request::builder()
         .method("POST")
         .uri("/api/models/train")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .header("Content-Type", "application/json")
         .body(Body::from(
             json!({
@@ -293,7 +314,7 @@ async fn train_endpoint_writes_lora_and_lists_it() {
     let list = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(list).await.unwrap();
@@ -315,11 +336,11 @@ async fn delete_removes_comfy_lora() {
     fs::write(&lora, b"lora").unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
     let request = axum::http::Request::builder()
         .method("DELETE")
         .uri("/api/models/custom-style.safetensors")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();
@@ -360,10 +381,8 @@ async fn comfy_pull_writes_lora_from_hub_origin() {
     let mut config = common::test_config_with_ollama_host("http://127.0.0.1:9");
     config.huggingface_models_url = format!("http://{hub_addr}/api/models");
     config.comfyui.models_dir = models_dir.clone();
-    let token = token(&config.jwt_secret);
-    let pool = PgPoolOptions::new()
-        .connect_lazy(&config.database_url)
-        .unwrap();
+    let pool = common::create_test_pool().await;
+    let token = token(&pool, config.jwt_secret()).await;
     let router = common::create_test_router(common::create_test_state(config, pool));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -428,11 +447,11 @@ async fn train_bases_lists_flux_when_checkpoint_present() {
     .unwrap();
     let ollama = mock_ollama().await;
     let catalog = start_catalog(split_catalog).await;
-    let (router, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (router, token) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
     let request = axum::http::Request::builder()
         .method("GET")
         .uri("/api/models/train/bases")
-        .header("Authorization", format!("Bearer {}", token(&secret)))
+        .header("Authorization", format!("Bearer {}", token))
         .body(Body::empty())
         .unwrap();
     let response = router.oneshot(request).await.unwrap();

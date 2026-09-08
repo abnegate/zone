@@ -84,13 +84,8 @@ async fn task_in(client: &TestClient, owner: &Tenant) -> String {
         .to_string()
 }
 
-/// A refusal must not distinguish "exists elsewhere" from "does not exist", or
-/// the endpoints become an id oracle across tenants.
-fn refused(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
-    )
+fn denied_write(status: StatusCode) -> bool {
+    matches!(status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN)
 }
 
 #[tokio::test]
@@ -106,8 +101,9 @@ async fn a_stranger_cannot_read_or_change_another_tenants_task() {
             &attacker.token,
         )
         .await;
-    assert!(
-        refused(listed.status),
+    assert_eq!(
+        listed.status,
+        StatusCode::NOT_FOUND,
         "listing another tenant's tasks returned {}",
         listed.status
     );
@@ -115,8 +111,9 @@ async fn a_stranger_cannot_read_or_change_another_tenants_task() {
     let read = client
         .get_auth(&format!("/api/tasks/{task}"), &attacker.token)
         .await;
-    assert!(
-        refused(read.status),
+    assert_eq!(
+        read.status,
+        StatusCode::NOT_FOUND,
         "reading another tenant's task returned {}",
         read.status
     );
@@ -129,7 +126,7 @@ async fn a_stranger_cannot_read_or_change_another_tenants_task() {
         )
         .await;
     assert!(
-        refused(rewritten.status),
+        denied_write(rewritten.status),
         "rewriting another tenant's task returned {}",
         rewritten.status
     );
@@ -138,7 +135,7 @@ async fn a_stranger_cannot_read_or_change_another_tenants_task() {
         .delete_auth(&format!("/api/tasks/{task}"), &attacker.token)
         .await;
     assert!(
-        refused(deleted.status),
+        denied_write(deleted.status),
         "deleting another tenant's task returned {}",
         deleted.status
     );
@@ -168,7 +165,7 @@ async fn a_stranger_cannot_start_an_agent_run_in_another_tenants_workspace() {
         )
         .await;
     assert!(
-        refused(started.status),
+        denied_write(started.status),
         "starting a run in another tenant's workspace returned {}",
         started.status
     );
@@ -181,7 +178,7 @@ async fn a_stranger_cannot_start_an_agent_run_in_another_tenants_workspace() {
         )
         .await;
     assert!(
-        refused(queued.status),
+        denied_write(queued.status),
         "queueing another tenant's task returned {}",
         queued.status
     );
@@ -189,8 +186,9 @@ async fn a_stranger_cannot_start_an_agent_run_in_another_tenants_workspace() {
     let runs = client
         .get_auth(&format!("/api/tasks/{task}/runs"), &attacker.token)
         .await;
-    assert!(
-        refused(runs.status),
+    assert_eq!(
+        runs.status,
+        StatusCode::NOT_FOUND,
         "listing another tenant's runs returned {}",
         runs.status
     );
@@ -216,7 +214,7 @@ async fn a_stranger_cannot_repoint_another_tenants_model_host() {
         )
         .await;
     assert!(
-        refused(redirected.status),
+        denied_write(redirected.status),
         "repointing another tenant's model host returned {}",
         redirected.status
     );
@@ -227,8 +225,9 @@ async fn a_stranger_cannot_repoint_another_tenants_model_host() {
             &attacker.token,
         )
         .await;
-    assert!(
-        refused(read.status),
+    assert_eq!(
+        read.status,
+        StatusCode::NOT_FOUND,
         "reading another tenant's AI settings returned {}",
         read.status
     );
@@ -240,7 +239,7 @@ async fn a_stranger_cannot_repoint_another_tenants_model_host() {
         )
         .await;
     assert!(
-        refused(erased.status),
+        denied_write(erased.status),
         "deleting another tenant's AI settings returned {}",
         erased.status
     );
@@ -256,7 +255,7 @@ async fn a_stranger_cannot_repoint_another_tenants_model_host() {
         )
         .await;
     assert!(
-        refused(workspace_write.status),
+        denied_write(workspace_write.status),
         "repointing another tenant's workspace model host returned {}",
         workspace_write.status
     );
@@ -276,7 +275,7 @@ async fn a_stranger_cannot_rewrite_another_tenants_branding() {
         )
         .await;
     assert!(
-        refused(rewritten.status),
+        denied_write(rewritten.status),
         "rewriting another tenant's theme returned {}",
         rewritten.status
     );
@@ -288,7 +287,7 @@ async fn a_stranger_cannot_rewrite_another_tenants_branding() {
         )
         .await;
     assert!(
-        refused(erased.status),
+        denied_write(erased.status),
         "deleting another tenant's theme returned {}",
         erased.status
     );

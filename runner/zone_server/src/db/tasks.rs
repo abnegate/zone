@@ -999,7 +999,7 @@ pub async fn get_task_run_logs(pool: &PgPool, task_run_id: Uuid) -> DbResult<Vec
         SELECT id, task_run_id, phase, agent_type, log_level, message, metadata, created_at
         FROM task_run_logs
         WHERE task_run_id = $1
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC NULLS LAST, id ASC
         "#,
         task_run_id
     )

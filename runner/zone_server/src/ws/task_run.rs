@@ -27,6 +27,23 @@ use crate::state::AppState;
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+type LogCursor = (Option<chrono::NaiveDateTime>, Uuid);
+
+fn log_follows_cursor(
+    created_at: Option<chrono::NaiveDateTime>,
+    id: Uuid,
+    cursor: LogCursor,
+) -> bool {
+    match (created_at, cursor.0) {
+        (Some(created_at), Some(last_created_at)) => {
+            created_at > last_created_at || (created_at == last_created_at && id > cursor.1)
+        }
+        (None, Some(_)) => true,
+        (Some(_), None) => false,
+        (None, None) => id > cursor.1,
+    }
+}
+
 /// Progress message sent to clients
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -293,7 +310,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
         return;
     }
 
-    let mut last_log_id: Option<Uuid> = None;
+    let mut last_log_cursor: Option<LogCursor> = None;
     match tasks::get_task_run_logs(state.db(), run_id).await {
         Ok(logs) => {
             if !revalidate(&mut sender, &state, authorization, run_id).await {
@@ -301,7 +318,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
             }
 
             for log in logs {
-                last_log_id = Some(log.id);
+                last_log_cursor = Some((log.created_at, log.id));
                 let log_msg = ProgressMessage::Log {
                     id: log.id,
                     phase: log.phase,
@@ -413,12 +430,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
 
                         for log in logs {
                             // Skip logs we've already sent
-                            if let Some(last_id) = last_log_id
-                                && log.id <= last_id {
+                            if let Some(cursor) = last_log_cursor
+                                && !log_follows_cursor(log.created_at, log.id, cursor)
+                            {
                                     continue;
                                 }
 
-                            last_log_id = Some(log.id);
+                            last_log_cursor = Some((log.created_at, log.id));
 
                             let log_msg = ProgressMessage::Log {
                                 id: log.id,
@@ -457,5 +475,39 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn later_log_follows_cursor_even_when_its_uuid_is_lower() {
+        let previous_time = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let later_time = previous_time + chrono::Duration::seconds(1);
+
+        assert!(log_follows_cursor(
+            Some(later_time),
+            Uuid::nil(),
+            (Some(previous_time), Uuid::max()),
+        ));
+    }
+
+    #[test]
+    fn log_uuid_breaks_created_at_ties() {
+        let created_at = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
+        assert!(log_follows_cursor(
+            Some(created_at),
+            Uuid::max(),
+            (Some(created_at), Uuid::nil()),
+        ));
     }
 }
