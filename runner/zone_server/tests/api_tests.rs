@@ -12,9 +12,7 @@ use serde_json::json;
 
 use common::{TestClient, test_email, test_password};
 
-// =============================================================================
 // Health Check Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_health_check() {
@@ -58,9 +56,7 @@ async fn test_metrics_endpoint_is_public() {
     client.head("/metrics").await.assert_status(StatusCode::OK);
 }
 
-// =============================================================================
 // Auth - Registration Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_register_success() {
@@ -167,9 +163,7 @@ async fn test_register_duplicate_email() {
     );
 }
 
-// =============================================================================
 // Auth - Login Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_login_success() {
@@ -253,9 +247,7 @@ async fn test_login_nonexistent_user() {
     response.assert_status(StatusCode::UNAUTHORIZED);
 }
 
-// =============================================================================
 // Auth - Token Refresh Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_refresh_token_success() {
@@ -310,9 +302,7 @@ async fn test_refresh_invalid_token() {
     response.assert_status(StatusCode::UNAUTHORIZED);
 }
 
-// =============================================================================
 // Auth - Logout Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_logout_success() {
@@ -351,9 +341,7 @@ async fn test_logout_without_auth() {
     response.assert_status(StatusCode::UNAUTHORIZED);
 }
 
-// =============================================================================
 // Protected Routes - Without Auth
-// =============================================================================
 
 #[tokio::test]
 async fn test_organizations_list_without_auth() {
@@ -409,9 +397,7 @@ async fn test_models_list_without_auth() {
     response.assert_status(StatusCode::UNAUTHORIZED);
 }
 
-// =============================================================================
 // Protected Routes - With Auth
-// =============================================================================
 
 async fn get_auth_token(client: &TestClient) -> String {
     let response = client
@@ -514,9 +500,7 @@ async fn test_sources_types_with_auth() {
     assert!(first["category"].is_string());
 }
 
-// =============================================================================
 // Organizations - CRUD Tests
-// =============================================================================
 
 fn test_slug() -> String {
     format!("test-slug-{}", uuid::Uuid::new_v4())
@@ -741,9 +725,7 @@ async fn test_organization_delete_not_found() {
     response.assert_status(StatusCode::FORBIDDEN);
 }
 
-// =============================================================================
 // Workspaces - CRUD Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_workspace_create() {
@@ -979,9 +961,7 @@ async fn test_workspace_delete() {
     response.assert_status(StatusCode::NO_CONTENT);
 }
 
-// =============================================================================
 // Projects - CRUD Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_project_create() {
@@ -1211,9 +1191,7 @@ async fn test_project_github_link() {
     assert!(response.json_value()["project"]["github_repo_url"].is_null());
 }
 
-// =============================================================================
 // Tasks - CRUD Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_task_create() {
@@ -1602,9 +1580,7 @@ async fn test_task_run_not_found() {
     response.assert_status(StatusCode::NOT_FOUND);
 }
 
-// =============================================================================
 // Chats - CRUD Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_chat_create() {
@@ -1912,9 +1888,7 @@ async fn test_chat_message_delete_not_found() {
     response.assert_status(StatusCode::NOT_FOUND);
 }
 
-// =============================================================================
 // Sources - CRUD Tests
-// =============================================================================
 
 fn test_source_name() -> String {
     format!("test-source-{}", uuid::Uuid::new_v4())
@@ -2217,9 +2191,7 @@ async fn test_source_list_with_filters() {
     response.assert_status(StatusCode::OK);
 }
 
-// =============================================================================
 // Edge Cases and Error Handling
-// =============================================================================
 
 #[tokio::test]
 async fn test_invalid_uuid_path_param() {
@@ -2413,9 +2385,7 @@ async fn test_source_create_minimal() {
     assert!(body["source"]["url"].is_null());
 }
 
-// =============================================================================
 // Workspace Themes - CRUD Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_workspace_theme_upsert() {
@@ -2655,9 +2625,7 @@ async fn test_workspace_theme_delete_not_found() {
     response.assert_status(StatusCode::NOT_FOUND);
 }
 
-// =============================================================================
 // Models - Tests (limited - external service dependent)
-// =============================================================================
 
 #[tokio::test]
 async fn test_models_list_huggingface() {
@@ -2704,9 +2672,7 @@ async fn test_models_list_unknown_source() {
     assert!(body["error"].as_str().unwrap().contains("Unknown source"));
 }
 
-// =============================================================================
 // Additional Not Found Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_task_queue_not_found() {
@@ -2993,13 +2959,11 @@ async fn test_task_run_logs_not_found() {
         )
         .await;
 
-    // Returns empty array for non-existent run
-    response.assert_status(StatusCode::OK);
+    response.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value()["error"], "Task run not found");
 }
 
-// =============================================================================
 // Additional Edge Case Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_register_without_display_name() {
@@ -3337,9 +3301,8 @@ async fn test_task_runs_list_for_nonexistent_task() {
         .get_auth(&format!("/api/tasks/{}/runs", uuid::Uuid::new_v4()), &token)
         .await;
 
-    // Returns empty runs array
-    response.assert_status(StatusCode::OK);
-    assert!(response.json_value()["runs"].is_array());
+    response.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value()["error"], "Task not found");
 }
 
 #[tokio::test]
@@ -3365,9 +3328,7 @@ async fn test_source_with_gitlab_type() {
     assert_eq!(response.json_value()["source"]["source_type"], "gitlab");
 }
 
-// =============================================================================
 // Auth Edge Cases - Header Format Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_basic_auth_instead_of_bearer() {
@@ -3442,8 +3403,8 @@ async fn test_task_create_run_for_nonexistent_task() {
         )
         .await;
 
-    // Should fail with FK constraint
-    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    response.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(response.json_value()["error"], "Task not found");
 }
 
 #[tokio::test]
@@ -3486,8 +3447,11 @@ async fn test_task_create_for_nonexistent_project() {
         )
         .await;
 
-    // Should fail with FK constraint
-    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value()["error"],
+        "Project is not available in this workspace"
+    );
 }
 
 #[tokio::test]
@@ -3715,9 +3679,7 @@ async fn test_source_inactive_filter() {
     response.assert_status(StatusCode::OK);
 }
 
-// =============================================================================
 // Auth Edge Cases - Disabled User and Error Handling
-// =============================================================================
 
 #[tokio::test]
 async fn test_login_disabled_user() {
@@ -3946,9 +3908,7 @@ async fn test_user_response_fields() {
     assert!(body["expires_in"].as_u64().is_some());
 }
 
-// =============================================================================
 // AI Settings - Organization Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_org_ai_settings_upsert() {
@@ -4096,9 +4056,7 @@ async fn test_org_ai_settings_delete() {
     assert_eq!(body["provider"], "self_hosted");
 }
 
-// =============================================================================
 // AI Settings - Workspace Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_workspace_ai_settings_upsert() {
@@ -4338,9 +4296,7 @@ async fn test_ai_settings_provider_validation() {
     response.assert_status(StatusCode::BAD_REQUEST);
 }
 
-// =============================================================================
 // Audit Logs Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_audit_logs_list_requires_auth() {
