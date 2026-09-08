@@ -158,9 +158,6 @@ pub async fn train(
 
     for (index, (image, framed)) in request.images.iter().zip(&framed).enumerate() {
         let stem = format!("{index:04}");
-        let write = |path: PathBuf, bytes: &[u8]| {
-            fs::write(path, bytes).map_err(|error| TrainError::Failed(error.to_string()))
-        };
         write(targets.join(format!("{stem}.png")), &framed.target)?;
         write(
             targets.join(format!("{stem}.txt")),
@@ -273,6 +270,12 @@ fn shots(images: &[TrainImage]) -> impl Iterator<Item = usize> + '_ {
         .iter()
         .enumerate()
         .map(move |(index, image)| image.group.unwrap_or(clips + index))
+}
+
+/// Writes one file of the dataset, naming the error mapping the three writes
+/// would otherwise repeat.
+fn write(path: PathBuf, bytes: &[u8]) -> Result<(), TrainError> {
+    fs::write(path, bytes).map_err(|error| TrainError::Failed(error.to_string()))
 }
 
 /// The filename a crop is captioned under. Only its extension is read, to pick
@@ -462,18 +465,51 @@ mod tests {
         assert!(matches!(error, TrainError::Disabled), "{error}");
     }
 
+    /// The LoRA name reaches `create_dir_all` and `fs::write`, so it is the one
+    /// field of a training request that could write outside the models
+    /// directory. Nothing here may be accepted, and nothing may be created.
     #[tokio::test]
     async fn a_name_that_is_not_a_filename_is_refused() {
         let root = root();
+        let outside = root
+            .join("..")
+            .join(format!("escaped-{}", uuid::Uuid::new_v4()));
         let config = Config {
             models_dir: root.clone(),
             train_command: Some("true".into()),
             ..Default::default()
         };
-        for name in ["", "../escape", "/etc/passwd"] {
+        for name in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "../escape",
+            "../../escape",
+            "a/../../escape",
+            "/etc/passwd",
+            "/absolute",
+            "back\\slash",
+            "nested/name",
+            &outside.display().to_string(),
+            &"a".repeat(300),
+        ] {
             let error = rejected(&config, request(name, "flux-schnell", Some("ohwx"))).await;
-            assert!(matches!(error, TrainError::Invalid(_)), "{name}: {error}");
+            assert!(
+                matches!(error, TrainError::Invalid(_)),
+                "{name:?} was not refused: {error}"
+            );
         }
+
+        let training = root.join("training");
+        assert!(
+            !training.exists() || fs::read_dir(&training).unwrap().count() == 0,
+            "a refused name must not create a dataset directory"
+        );
+        assert!(
+            !outside.exists(),
+            "a refused name reached outside the models directory"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

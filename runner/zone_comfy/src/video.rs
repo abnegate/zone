@@ -401,7 +401,9 @@ fn diversify(candidates: &[usize], measured: &[Measured], budget: usize) -> Vec<
     };
     let mut taken = vec![false; candidates.len()];
     let mut distances = vec![u32::MAX; candidates.len()];
-    let mut chosen = Vec::with_capacity(budget.min(candidates.len()));
+    // Sized as it grows rather than reserved: the budget is small, and a
+    // capacity taken from the clip is a promise about the clip's size.
+    let mut chosen = Vec::new();
     let mut next = sharpest;
     while chosen.len() < budget.min(candidates.len()) {
         taken[next] = true;
