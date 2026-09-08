@@ -201,8 +201,8 @@ test('empty chat previews and context updates survive adversarial frame ordering
   await expect(input).toBeFocused();
   hold = true;
   await page.keyboard.type('First draft');
-  await expect.poll(() => held !== null).toBe(true);
-  expect(draft).toBe('First draft');
+  await expect.poll(() => draft).toBe('First draft');
+  expect(held).not.toBeNull();
   usage = {
     ...initial,
     used: 4064,
