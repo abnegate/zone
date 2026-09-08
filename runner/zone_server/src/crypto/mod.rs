@@ -7,7 +7,14 @@ use aes_gcm::{
     aead::{Aead, KeyInit, consts::U12},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
+use std::sync::LazyLock;
 use thiserror::Error;
+
+const SALT: &[u8] = b"zone-encryption-salt-v1";
+
+static DERIVED: LazyLock<DashMap<[u8; 32], [u8; 32]>> = LazyLock::new(DashMap::new);
 
 #[derive(Error, Debug)]
 pub enum CryptoError {
@@ -95,6 +102,10 @@ pub fn decrypt(key: &[u8], ciphertext: &str) -> CryptoResult<String> {
 ///
 /// Uses Argon2id with a deterministic salt derived from the key itself.
 /// This is acceptable because the key is meant to be high-entropy (32+ bytes).
+///
+/// The result is memoised per key. Argon2id is memory-hard on purpose, so an
+/// unoptimised build spends seconds in it, and every `AppState` re-derives the
+/// same value from the same configured key.
 pub fn derive_key(config_key: &str) -> CryptoResult<[u8; 32]> {
     use argon2::Argon2;
     use sha2::{Digest, Sha256};
@@ -108,9 +119,16 @@ pub fn derive_key(config_key: &str) -> CryptoResult<[u8; 32]> {
     // Use a fixed salt derived from the key itself for deterministic derivation
     // This is acceptable because the key is meant to be high-entropy
     let mut hasher = Sha256::new();
-    hasher.update(b"zone-encryption-salt-v1");
+    hasher.update(SALT);
     hasher.update(key_bytes);
-    let salt_bytes = hasher.finalize();
+    let salt_bytes: [u8; 32] = hasher.finalize().into();
+
+    // Holding the vacant entry keeps callers that raced in behind one
+    // derivation instead of each running their own.
+    let slot = match DERIVED.entry(salt_bytes) {
+        Entry::Occupied(derived) => return Ok(*derived.get()),
+        Entry::Vacant(slot) => slot,
+    };
 
     let argon2 = Argon2::default();
     let mut output = [0u8; 32];
@@ -126,12 +144,15 @@ pub fn derive_key(config_key: &str) -> CryptoResult<[u8; 32]> {
         )
         .map_err(|_| CryptoError::KeyDerivationFailed)?;
 
+    slot.insert(output);
+
     Ok(output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn random_key() -> [u8; 32] {
         let mut key = [0u8; 32];
@@ -331,6 +352,28 @@ mod tests {
 
         // Then: Should handle empty string correctly
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn repeated_derivation_reuses_the_first_result() {
+        let config_key = "a-different-high-entropy-key-for-the-memoisation-test";
+        let first = derive_key(config_key).unwrap();
+
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            assert_eq!(
+                derive_key(config_key).unwrap(),
+                first,
+                "a memoised derivation still returns the derived key"
+            );
+        }
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "20 repeat derivations took {:?}; Argon2id is memory-hard, so re-running it \
+             per call costs seconds each in an unoptimised build",
+            started.elapsed()
+        );
     }
 
     #[test]
