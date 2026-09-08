@@ -9,6 +9,7 @@ use zone_context::embeddings::{
     providers::{AiSettings, EmbeddingProviderFactory},
 };
 use zone_context::error::Result as ContextResult;
+use zone_core::OptionalSecretExt;
 
 use crate::db::ai_settings::EffectiveAiSettings;
 
@@ -29,8 +30,11 @@ pub fn create_embedding_service(
     let ai_settings = AiSettings {
         provider: settings.provider.clone(),
         litellm_host: settings.litellm_host.clone(),
-        litellm_key: settings.litellm_key.clone(),
-        openai_api_key: settings.openai_api_key.clone(),
+        litellm_key: settings.litellm_key.expose_as_deref().map(str::to_string),
+        openai_api_key: settings
+            .openai_api_key
+            .expose_as_deref()
+            .map(str::to_string),
         openai_base_url: settings.openai_base_url.clone(),
         bedrock_region: settings.bedrock_region.clone(),
         model_embedding: settings.model_embedding.clone(),
@@ -111,6 +115,7 @@ pub fn embedding_engine_from_env() -> Option<String> {
 mod tests {
     use super::*;
     use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+    use zone_core::SecretValue;
 
     #[test]
     fn test_create_embedding_service_ollama() {
@@ -118,7 +123,7 @@ mod tests {
         let settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
             litellm_host: Some("http://localhost:11434".to_string()),
-            litellm_key: Some("test-key".to_string()),
+            litellm_key: Some(SecretValue::new("test-key")),
             openai_api_key: None,
             openai_base_url: None,
             anthropic_api_key: None,
@@ -182,7 +187,7 @@ mod tests {
             provider: "openai".to_string(),
             litellm_host: None,
             litellm_key: None,
-            openai_api_key: Some("sk-test".to_string()),
+            openai_api_key: Some(SecretValue::new("sk-test")),
             openai_base_url: None,
             anthropic_api_key: None,
             anthropic_base_url: None,

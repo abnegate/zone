@@ -4,6 +4,7 @@
 //! Web links can be added with optional auto-refresh for keeping content up-to-date.
 
 use chrono::NaiveDateTime;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_context::embeddings::align_vector;
@@ -1128,4 +1129,368 @@ pub async fn update_document(
     }
     transaction.commit().await?;
     Ok(changed)
+}
+
+/// Category marking a knowledge entry as a promoted standing instruction.
+pub const STANDING_INSTRUCTION_CATEGORY: &str = "standing-instruction";
+
+const PROMOTION_TAG: &str = "promoted";
+const OCCURRENCES_TAG: &str = "occurrences";
+const CHATS_TAG: &str = "chats";
+const CONFIRMED_TAG: &str = "confirmed";
+
+const MAX_STANDING_INSTRUCTIONS: i64 = 40;
+const CHARACTERS_PER_TOKEN: usize = 4;
+
+fn tag(key: &str, value: &str) -> String {
+    format!("{key}:{value}")
+}
+
+fn tag_value<'a>(tags: &'a [String], key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}:");
+    tags.iter().find_map(|entry| entry.strip_prefix(&prefix))
+}
+
+/// Provenance recorded alongside a promoted answer so the entry stays inspectable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotionProvenance {
+    pub fingerprint: String,
+    pub occurrences: usize,
+    pub distinct_chats: usize,
+    pub last_confirmed: chrono::NaiveDate,
+}
+
+impl PromotionProvenance {
+    pub fn tags(&self) -> Vec<String> {
+        vec![
+            STANDING_INSTRUCTION_CATEGORY.to_string(),
+            tag(PROMOTION_TAG, &self.fingerprint),
+            tag(OCCURRENCES_TAG, &self.occurrences.to_string()),
+            tag(CHATS_TAG, &self.distinct_chats.to_string()),
+            tag(CONFIRMED_TAG, &self.last_confirmed.to_string()),
+        ]
+    }
+
+    pub fn from_tags(tags: &[String]) -> Option<Self> {
+        Some(Self {
+            fingerprint: tag_value(tags, PROMOTION_TAG)?.to_string(),
+            occurrences: tag_value(tags, OCCURRENCES_TAG)?.parse().ok()?,
+            distinct_chats: tag_value(tags, CHATS_TAG)?.parse().ok()?,
+            last_confirmed: tag_value(tags, CONFIRMED_TAG)?.parse().ok()?,
+        })
+    }
+}
+
+/// A standing instruction ready to be written to the knowledge store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingInstruction {
+    pub workspace_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub provenance: PromotionProvenance,
+}
+
+/// Stored standing instruction as read back for prompt assembly.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct StandingInstructionRow {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub title: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub updated_at: Option<NaiveDateTime>,
+}
+
+/// What an upsert did, so callers can log promotions without re-reading the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandingInstructionOutcome {
+    Created,
+    Superseded,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct StandingInstructionUpsertRow {
+    id: Uuid,
+    created: bool,
+    superseded: bool,
+}
+
+fn advisory_lock_key(workspace_id: Uuid, fingerprint: &str) -> i64 {
+    let mut hasher = Sha256::new();
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(fingerprint.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(bytes)
+}
+
+/// Create or supersede the standing instruction identified by its promotion fingerprint.
+///
+/// The fingerprint is the identity key, so re-promoting the same question cluster updates
+/// one row instead of accumulating near-duplicates. The advisory lock keeps concurrent
+/// server instances from racing the existence check.
+pub async fn upsert_standing_instruction(
+    pool: &PgPool,
+    instruction: &StandingInstruction,
+) -> DbResult<(Uuid, StandingInstructionOutcome)> {
+    let tags = instruction.provenance.tags();
+    let promotion_tag = tag(PROMOTION_TAG, &instruction.provenance.fingerprint);
+    let token_count = instruction
+        .content
+        .chars()
+        .count()
+        .div_ceil(CHARACTERS_PER_TOKEN) as i32;
+
+    let mut transaction = pool.begin().await?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(advisory_lock_key(
+            instruction.workspace_id,
+            &instruction.provenance.fingerprint,
+        ))
+        .execute(&mut *transaction)
+        .await?;
+
+    let row: StandingInstructionUpsertRow = sqlx::query_as(
+        r#"
+        WITH existing AS (
+            SELECT id, title, content, tags, is_active
+            FROM knowledge_entries
+            WHERE workspace_id = $1 AND category = $2 AND $3 = ANY(tags)
+            ORDER BY created_at, id
+            LIMIT 1
+        ),
+        superseded AS (
+            UPDATE knowledge_entries AS entry
+            SET title = $4,
+                content = $5,
+                tags = $6,
+                token_count = $7,
+                is_active = TRUE,
+                updated_at = NOW()
+            FROM existing
+            WHERE entry.id = existing.id
+              AND (existing.title IS DISTINCT FROM $4
+                   OR existing.content IS DISTINCT FROM $5
+                   OR existing.tags IS DISTINCT FROM $6
+                   OR existing.is_active IS DISTINCT FROM TRUE)
+            RETURNING entry.id
+        ),
+        created AS (
+            INSERT INTO knowledge_entries (
+                workspace_id, title, content, category, tags, token_count
+            )
+            SELECT $1, $4, $5, $2, $6, $7
+            WHERE NOT EXISTS (SELECT 1 FROM existing)
+            RETURNING id
+        )
+        SELECT
+            COALESCE(
+                (SELECT id FROM created),
+                (SELECT id FROM superseded),
+                (SELECT id FROM existing)
+            ) AS id,
+            EXISTS (SELECT 1 FROM created) AS created,
+            EXISTS (SELECT 1 FROM superseded) AS superseded
+        "#,
+    )
+    .bind(instruction.workspace_id)
+    .bind(STANDING_INSTRUCTION_CATEGORY)
+    .bind(&promotion_tag)
+    .bind(&instruction.title)
+    .bind(&instruction.content)
+    .bind(&tags)
+    .bind(token_count)
+    .fetch_one(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+
+    let outcome = match (row.created, row.superseded) {
+        (true, _) => StandingInstructionOutcome::Created,
+        (_, true) => StandingInstructionOutcome::Superseded,
+        _ => StandingInstructionOutcome::Unchanged,
+    };
+
+    Ok((row.id, outcome))
+}
+
+/// Active standing instructions for a workspace, most recently confirmed first.
+pub async fn list_standing_instructions(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<Vec<StandingInstructionRow>> {
+    sqlx::query_as::<_, StandingInstructionRow>(
+        r#"
+        SELECT id, workspace_id, title, content, tags, updated_at
+        FROM knowledge_entries
+        WHERE workspace_id = $1 AND category = $2 AND is_active = TRUE
+        ORDER BY updated_at DESC NULLS LAST, id
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(STANDING_INSTRUCTION_CATEGORY)
+    .bind(MAX_STANDING_INSTRUCTIONS)
+    .fetch_all(pool)
+    .await
+}
+
+/// Withdraw a promoted instruction. Promotion is reversible: a later scan re-creates it
+/// only while the question keeps recurring.
+pub async fn retire_standing_instruction(pool: &PgPool, id: Uuid) -> DbResult<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE knowledge_entries
+        SET is_active = FALSE, updated_at = NOW()
+        WHERE id = $1 AND category = $2 AND is_active = TRUE
+        "#,
+    )
+    .bind(id)
+    .bind(STANDING_INSTRUCTION_CATEGORY)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Render standing instructions as a system-prompt section. Empty when there are none.
+pub fn render_standing_instructions(instructions: &[StandingInstructionRow]) -> String {
+    if instructions.is_empty() {
+        return String::new();
+    }
+
+    let mut rendered = String::from(
+        "\n\n# Standing instructions\n\
+         These answers have already been given repeatedly in this workspace. Follow them \
+         unless the user's request contradicts one, and say so when you depart from one.\n",
+    );
+
+    for instruction in instructions {
+        rendered.push_str(&format!(
+            "\n## {}\n{}\n",
+            instruction.title.trim(),
+            instruction.content.trim()
+        ));
+        if let Some(provenance) = PromotionProvenance::from_tags(&instruction.tags) {
+            rendered.push_str(&format!(
+                "(promoted from {} matching answers across {} chats, last confirmed {})\n",
+                provenance.occurrences, provenance.distinct_chats, provenance.last_confirmed
+            ));
+        }
+    }
+
+    rendered
+}
+
+/// Standing instructions for a workspace, ready to append to a system prompt.
+pub async fn standing_instructions_prompt(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let instructions = list_standing_instructions(pool, workspace_id).await?;
+    Ok(render_standing_instructions(&instructions))
+}
+
+#[cfg(test)]
+mod standing_instruction_tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn provenance(occurrences: usize, distinct_chats: usize) -> PromotionProvenance {
+        PromotionProvenance {
+            fingerprint: "abc123".to_string(),
+            occurrences,
+            distinct_chats,
+            last_confirmed: NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+        }
+    }
+
+    fn row(title: &str, content: &str, tags: Vec<String>) -> StandingInstructionRow {
+        StandingInstructionRow {
+            id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            title: title.to_string(),
+            content: content.to_string(),
+            tags,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn provenance_round_trips_through_tags() {
+        let original = provenance(7, 4);
+        let parsed = PromotionProvenance::from_tags(&original.tags())
+            .expect("provenance should parse back from its own tags");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn provenance_tags_carry_the_category_marker() {
+        assert!(
+            provenance(5, 3)
+                .tags()
+                .iter()
+                .any(|entry| entry == STANDING_INSTRUCTION_CATEGORY),
+            "tags must include the standing-instruction marker"
+        );
+    }
+
+    #[test]
+    fn provenance_rejects_incomplete_tags() {
+        assert!(
+            PromotionProvenance::from_tags(&["promoted:abc123".to_string()]).is_none(),
+            "tags missing occurrence counts must not parse"
+        );
+        assert!(
+            PromotionProvenance::from_tags(&[]).is_none(),
+            "empty tags must not parse"
+        );
+    }
+
+    #[test]
+    fn render_is_empty_without_instructions() {
+        assert!(render_standing_instructions(&[]).is_empty());
+    }
+
+    #[test]
+    fn render_includes_instruction_and_provenance() {
+        let rendered = render_standing_instructions(&[row(
+            "Repeated answer: how do I run the tests",
+            "Run cargo test from the runner directory.",
+            provenance(6, 4).tags(),
+        )]);
+
+        assert!(rendered.contains("# Standing instructions"));
+        assert!(rendered.contains("Run cargo test from the runner directory."));
+        assert!(
+            rendered.contains("promoted from 6 matching answers across 4 chats"),
+            "rendered prompt must disclose how often the answer was seen: {rendered}"
+        );
+        assert!(rendered.contains("last confirmed 2026-09-01"));
+    }
+
+    #[test]
+    fn render_survives_missing_provenance_tags() {
+        let rendered = render_standing_instructions(&[row("Title", "Body", Vec::new())]);
+        assert!(rendered.contains("Body"));
+        assert!(!rendered.contains("promoted from"));
+    }
+
+    #[test]
+    fn advisory_lock_key_is_stable_and_scoped() {
+        let workspace = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        assert_eq!(
+            advisory_lock_key(workspace, "fingerprint"),
+            advisory_lock_key(workspace, "fingerprint")
+        );
+        assert_ne!(
+            advisory_lock_key(workspace, "fingerprint"),
+            advisory_lock_key(other, "fingerprint")
+        );
+        assert_ne!(
+            advisory_lock_key(workspace, "fingerprint"),
+            advisory_lock_key(workspace, "other")
+        );
+    }
 }
