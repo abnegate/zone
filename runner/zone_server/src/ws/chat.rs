@@ -2596,6 +2596,7 @@ async fn handle_chat_generation(
                             )
                             .await
                             {
+                                pending_content.clone_from(&full_content);
                                 persist_now = true;
                                 stop_stream = true;
                             } else {
