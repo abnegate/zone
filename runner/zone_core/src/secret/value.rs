@@ -99,6 +99,16 @@ impl OptionalSecretExt for Option<SecretValue> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn display_is_redacted_so_it_must_never_reach_an_authorization_header() {
+        // reqwest's bearer_auth takes T: Display. Handing it a SecretValue
+        // compiles and then sends this placeholder as the credential, so the
+        // redaction becomes the defect. .expose() is the only correct argument.
+        let secret = super::SecretValue::new("ghp_a_real_looking_token_value");
+        assert_eq!(secret.to_string(), super::REDACTED);
+        assert_ne!(secret.to_string(), secret.expose());
+    }
+
     use super::*;
 
     #[derive(Serialize, Deserialize)]
