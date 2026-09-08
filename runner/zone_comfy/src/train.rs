@@ -788,7 +788,7 @@ pub(crate) fn manifest(
         return None;
     }
     let mut entries: Vec<(&String, &String)> = captions.iter().collect();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(name, _)| *name);
     let pairs = entries
         .into_iter()
         .enumerate()
