@@ -386,6 +386,77 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   });
 
+  test('Qwen training form while a run is in progress', async ({ page }) => {
+    let announceStart = (): void => {};
+    let finishTraining = (): void => {};
+    const started = new Promise<void>((resolve) => {
+      announceStart = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      finishTraining = resolve;
+    });
+    await setupCommonRoutes(page, true);
+    await routeApi(page, '**/api/models/train/bases', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{ id: 'qwen-image-edit', label: 'Qwen Image Edit', edit: true }]),
+      });
+    });
+    await routeApi(page, '**/api/models/train', async (route) => {
+      announceStart();
+      await finish;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ filename: 'studio-edit.safetensors', quality: null }),
+      });
+    });
+    await page.goto('/login');
+    await page.evaluate(() => localStorage.clear());
+    await setupAdminAuth(page);
+
+    await page.goto('/models');
+    await page.waitForLoadState('domcontentloaded');
+    await page.getByRole('tab', { name: 'Train' }).click();
+    const panel = page
+      .locator('.card')
+      .filter({ has: page.getByRole('heading', { name: 'Train a LoRA' }) });
+    await panel.getByLabel('Name', { exact: true }).fill('studio-edit');
+    await panel.getByLabel('Target images').setInputFiles({
+      name: 'blue-studio-target.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+    await panel
+      .getByLabel('Reference image for target 1: blue-studio-target.png')
+      .setInputFiles({
+        name: 'blue-studio-reference.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from(PNG_BASE64, 'base64'),
+      });
+    await panel
+      .getByLabel('Instruction for target 1: blue-studio-target.png')
+      .fill('Change the background to a blue studio');
+    await panel.getByRole('button', { name: 'Train' }).click();
+    await started;
+    await expect(panel.locator('form')).toHaveAttribute('aria-busy', 'true');
+
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await panel.evaluate((element) => element.scrollTo({ top: 0 }));
+    await page.evaluate(() => {
+      window.scrollTo({ top: 0 });
+      document.documentElement.setAttribute('data-theme', 'light');
+    });
+    await capturePage(page, {
+      path: 'screenshots/models-train-qwen-busy.png',
+      fullPage: true,
+    });
+
+    finishTraining();
+    await expect(panel.locator('form')).toHaveAttribute('aria-busy', 'false');
+  });
+
   test('Chats page (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');

@@ -14,16 +14,20 @@ import './TrainPanel.css';
 type TrainBase = { id: string; label: string; edit: boolean };
 
 type Reference = {
+  key: string;
   filename: string;
   bytes_base64: string;
+  reading: boolean;
 };
 
 type Draft = {
   key: string;
   filename: string;
   caption: string;
+  captionRevision: number;
   instruction: string;
   bytes_base64: string;
+  reading: boolean;
   reference?: Reference;
 };
 
@@ -214,7 +218,7 @@ function fileToBase64(file: File): Promise<string> {
 }
 
 function missingReference(image: Draft): boolean {
-  return !image.reference?.bytes_base64;
+  return !image.reference;
 }
 
 function missingInstruction(image: Draft): boolean {
@@ -231,10 +235,14 @@ function focusIncomplete(images: Draft[]): void {
   const id = missingReference(image)
     ? `train-reference-${image.key}`
     : `train-instruction-${image.key}`;
-  setTimeout(() => document.getElementById(id)?.focus(), 0);
+  document.getElementById(id)?.focus();
 }
 
 function readiness(images: Draft[]): string {
+  const reading = images.filter((image) => image.reading || image.reference?.reading).length;
+  if (reading > 0) {
+    return `Reading selected ${reading === 1 ? 'image' : 'images'}.`;
+  }
   const pending = incomplete(images);
   if (images.length === 0) return 'Add at least one target image to begin pairing.';
   if (pending.length === 0) return 'Every target has one reference image and one instruction.';
@@ -257,6 +265,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [result, setResult] = useState<TrainResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [captioning, setCaptioning] = useState(false);
+  const [focusRequested, setFocusRequested] = useState(false);
 
   useEffect(() => {
     modelsApi
@@ -268,40 +277,89 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       .catch(() => setBases([]));
   }, []);
 
+  useEffect(() => {
+    if (!focusRequested) return;
+    focusIncomplete(images);
+    setFocusRequested(false);
+  }, [focusRequested, images]);
+
   const selected = bases.find((row) => row.id === base);
   const edit = Boolean(selected?.edit);
   const pending = edit ? incomplete(images) : [];
+  const reading = images.some((image) => image.reading || image.reference?.reading);
   const ready =
-    Boolean(name.trim() && base && (edit || trigger.trim()) && images.length > 0) &&
+    Boolean(name.trim() && base && (edit || trigger.trim()) && images.length > 0 && !reading) &&
     pending.length === 0;
 
   const handleTargets = async (files: File[]) => {
-    if (files.length === 0) return;
-    const added: Draft[] = [];
-    for (const file of files) {
-      added.push({
+    if (busy || files.length === 0) return;
+    const added = files.map((file) => ({
+      file,
+      draft: {
         key: nextKey(),
         filename: file.name,
         caption: '',
+        captionRevision: 0,
         instruction: '',
-        bytes_base64: await fileToBase64(file),
-      });
-    }
-    const next = [...images, ...added];
-    setImages(next);
-    if (edit) focusIncomplete(next);
-  };
+        bytes_base64: '',
+        reading: true,
+      } satisfies Draft,
+    }));
+    setImages((current) => [...current, ...added.map(({ draft }) => draft)]);
+    if (edit) setFocusRequested(true);
 
-  const handleReference = async (key: string, files: FileList | null) => {
-    if (files?.length !== 1) return;
-    const [file] = Array.from(files);
-    const reference = { filename: file.name, bytes_base64: await fileToBase64(file) };
-    setImages((current) =>
-      current.map((image) => (image.key === key ? { ...image, reference } : image))
+    await Promise.all(
+      added.map(async ({ draft, file }) => {
+        try {
+          const bytes_base64 = await fileToBase64(file);
+          setImages((current) =>
+            current.map((image) =>
+              image.key === draft.key ? { ...image, bytes_base64, reading: false } : image
+            )
+          );
+        } catch (caught) {
+          setImages((current) => current.filter((image) => image.key !== draft.key));
+          setError(caught instanceof Error ? caught.message : `Failed to read ${file.name}`);
+        }
+      })
     );
   };
 
+  const handleReference = async (key: string, files: FileList | null) => {
+    if (busy || files?.length !== 1) return;
+    const [file] = Array.from(files);
+    const reference: Reference = {
+      key: nextKey(),
+      filename: file.name,
+      bytes_base64: '',
+      reading: true,
+    };
+    setImages((current) =>
+      current.map((image) => (image.key === key ? { ...image, reference } : image))
+    );
+    try {
+      const bytes_base64 = await fileToBase64(file);
+      setImages((current) =>
+        current.map((image) =>
+          image.key === key && image.reference?.key === reference.key
+            ? { ...image, reference: { ...reference, bytes_base64, reading: false } }
+            : image
+        )
+      );
+    } catch (caught) {
+      setImages((current) =>
+        current.map((image) =>
+          image.key === key && image.reference?.key === reference.key
+            ? { ...image, reference: undefined }
+            : image
+        )
+      );
+      setError(caught instanceof Error ? caught.message : `Failed to read ${file.name}`);
+    }
+  };
+
   const handleBase = (value: string) => {
+    if (busy) return;
     const nextEdit = Boolean(bases.find((row) => row.id === value)?.edit);
     setBase(value);
     if (!nextEdit) {
@@ -310,24 +368,41 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       );
       return;
     }
-    if (!edit) focusIncomplete(images);
+    if (!edit) setFocusRequested(true);
   };
 
   const handleCaption = async () => {
-    if (edit || images.length === 0) return;
+    if (busy || edit || reading || images.length === 0) return;
+    const requested = images.map(({ key, filename, caption, captionRevision, bytes_base64 }) => ({
+      key,
+      filename,
+      caption,
+      captionRevision,
+      bytes_base64,
+    }));
     setCaptioning(true);
     setError(null);
     try {
       const { captions } = await modelsApi.captions({
         trigger: trigger.trim() || undefined,
-        images: images.map(({ filename, caption, bytes_base64 }) => ({
+        images: requested.map(({ filename, caption, bytes_base64 }) => ({
           filename,
           caption,
           bytes_base64,
         })),
       });
+      const generated = new Map(
+        requested.map((image, index) => [
+          image.key,
+          { caption: captions[index], revision: image.captionRevision },
+        ])
+      );
       setImages((current) =>
-        current.map((image, index) => ({ ...image, caption: captions[index] ?? image.caption }))
+        current.map((image) => {
+          const result = generated.get(image.key);
+          if (!result?.caption || image.captionRevision !== result.revision) return image;
+          return { ...image, caption: result.caption };
+        })
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Captioning failed');
@@ -338,8 +413,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!ready) {
-      if (edit) focusIncomplete(images);
+    if (busy || !ready) {
+      if (!busy && edit) setFocusRequested(true);
       return;
     }
     setBusy(true);
@@ -368,12 +443,16 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     }
   };
 
-  const move = (index: number, direction: -1 | 1) => {
-    const destination = index + direction;
-    if (destination < 0 || destination >= images.length) return;
-    const next = [...images];
-    [next[index], next[destination]] = [next[destination], next[index]];
-    setImages(next);
+  const move = (key: string, direction: -1 | 1) => {
+    if (busy) return;
+    setImages((current) => {
+      const index = current.findIndex((image) => image.key === key);
+      const destination = index + direction;
+      if (index < 0 || destination < 0 || destination >= current.length) return current;
+      const next = [...current];
+      [next[index], next[destination]] = [next[destination], next[index]];
+      return next;
+    });
   };
 
   return (
@@ -395,11 +474,14 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           <Advice findings={result.dataset ?? []} />
         </div>
       )}
-      <form className="ui-form" onSubmit={handleSubmit}>
+      <form className="ui-form" aria-busy={busy} onSubmit={handleSubmit}>
         <Input
           label="Name"
           value={name}
-          onChange={(event) => setName(event.target.value)}
+          disabled={busy}
+          onChange={(event) => {
+            if (!busy) setName(event.target.value);
+          }}
           required
         />
         <Select
@@ -408,12 +490,15 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           onValueChange={handleBase}
           options={bases.map((row) => ({ value: row.id, label: row.label }))}
           placeholder="No trainable base installed"
-          disabled={bases.length === 0}
+          disabled={busy || bases.length === 0}
         />
         <Input
           label="Trigger word"
           value={trigger}
-          onChange={(event) => setTrigger(event.target.value)}
+          disabled={busy}
+          onChange={(event) => {
+            if (!busy) setTrigger(event.target.value);
+          }}
           placeholder={edit ? 'optional subject name' : 'required for a unique identity'}
           required={!edit}
         />
@@ -427,6 +512,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           }
           type="file"
           accept="image/png,image/jpeg,image/webp"
+          disabled={busy}
           multiple
           onChange={(event) => {
             const files = Array.from(event.target.files ?? []);
@@ -440,7 +526,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
               type="button"
               variant="secondary"
               loading={captioning}
-              disabled={captioning}
+              disabled={busy || captioning || reading}
               onClick={() => void handleCaption()}
             >
               Auto-caption images
@@ -473,6 +559,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                   className="train-pair"
                   key={image.key}
                   aria-label={`Target pair ${number}: ${image.filename}`}
+                  aria-busy={image.reading || Boolean(image.reference?.reading)}
                 >
                   <legend className="train-pair-title">
                     <span>Target {number}</span>
@@ -485,6 +572,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                         label={referenceLabel}
                         type="file"
                         accept="image/png,image/jpeg,image/webp"
+                        disabled={busy}
                         aria-required="true"
                         error={
                           missingReference(image)
@@ -507,6 +595,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                     id={edit ? `train-instruction-${image.key}` : `train-caption-${image.key}`}
                     label={edit ? instructionLabel : `Caption for ${image.filename}`}
                     value={edit ? image.instruction : image.caption}
+                    disabled={busy}
                     required={edit}
                     error={
                       edit && missingInstruction(image)
@@ -514,13 +603,18 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                         : undefined
                     }
                     onChange={(event) => {
+                      if (busy) return;
                       const value = event.target.value;
                       setImages((current) =>
                         current.map((currentImage) =>
                           currentImage.key === image.key
                             ? edit
                               ? { ...currentImage, instruction: value }
-                              : { ...currentImage, caption: value }
+                              : {
+                                  ...currentImage,
+                                  caption: value,
+                                  captionRevision: currentImage.captionRevision + 1,
+                                }
                             : currentImage
                         )
                       );
@@ -535,9 +629,9 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                       type="button"
                       size="sm"
                       variant="ghost"
-                      disabled={index === 0}
+                      disabled={busy || index === 0}
                       aria-label={`Move target ${number}: ${image.filename} up`}
-                      onClick={() => move(index, -1)}
+                      onClick={() => move(image.key, -1)}
                     >
                       Move up
                     </Button>
@@ -545,9 +639,9 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                       type="button"
                       size="sm"
                       variant="ghost"
-                      disabled={index === images.length - 1}
+                      disabled={busy || index === images.length - 1}
                       aria-label={`Move target ${number}: ${image.filename} down`}
-                      onClick={() => move(index, 1)}
+                      onClick={() => move(image.key, 1)}
                     >
                       Move down
                     </Button>
@@ -555,12 +649,14 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                       type="button"
                       size="sm"
                       variant="ghost"
+                      disabled={busy}
                       aria-label={`Remove target ${number}: ${image.filename}`}
-                      onClick={() =>
+                      onClick={() => {
+                        if (busy) return;
                         setImages((current) =>
                           current.filter((currentImage) => currentImage.key !== image.key)
-                        )
-                      }
+                        );
+                      }}
                     >
                       Remove
                     </Button>
@@ -573,7 +669,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         <Button
           type="submit"
           loading={busy}
-          disabled={!ready}
+          disabled={busy || !ready}
           aria-describedby={edit ? 'train-pairs-status' : undefined}
         >
           Train

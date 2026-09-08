@@ -259,6 +259,14 @@ async function selectTrainBase(page: Page, panel: Locator, label: string): Promi
   await expect(panel.getByLabel('Base')).toContainText(label);
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve = (_value: T): void => {};
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 // Helper to switch to browse tab and wait for it to load
 async function switchToBrowseTab(page: Page) {
   await page.getByRole('tab', { name: 'Browse' }).click();
@@ -518,6 +526,99 @@ test.describe('Models Page', () => {
       '1 target pair still needs a reference image and instruction.'
     );
     expect(requests).toHaveLength(0);
+  });
+
+  test('keeps deferred auto-captions with their original targets after draft mutations', async ({
+    page,
+  }) => {
+    const requested = deferred<TrainImage[]>();
+    const release = deferred<void>();
+    await routeApi(page, '**/api/models/train/captions', async (route) => {
+      const body = route.request().postDataJSON() as { images: TrainImage[] };
+      requested.resolve(body.images);
+      await release.promise;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ captions: ['generated a', 'generated b', 'generated c'] }),
+      });
+    });
+    const panel = trainPanel(page);
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await panel.getByLabel('Target images').setInputFiles([
+      { name: 'a.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+      { name: 'b.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+      { name: 'c.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+    ]);
+    await panel.getByRole('button', { name: 'Auto-caption images' }).click();
+    await expect.poll(async () => (await requested.promise).map((image) => image.filename)).toEqual([
+      'a.png',
+      'b.png',
+      'c.png',
+    ]);
+
+    await panel.getByRole('button', { name: 'Move target 3: c.png up' }).click();
+    await panel.getByRole('button', { name: 'Remove target 1: a.png' }).click();
+    await panel.getByLabel('Caption for b.png').fill('keep my caption');
+    await panel.getByLabel('Target images').setInputFiles({
+      name: 'd.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from(PNG_BASE64, 'base64'),
+    });
+    await expect(panel.getByLabel('Caption for d.png')).toBeVisible();
+    release.resolve();
+
+    await expect(panel.getByLabel('Caption for c.png')).toHaveValue('generated c');
+    await expect(panel.getByLabel('Caption for b.png')).toHaveValue('keep my caption');
+    await expect(panel.getByLabel('Caption for d.png')).toHaveValue('');
+  });
+
+  test('freezes every draft control while a training request is in flight', async ({ page }) => {
+    const requested = deferred<TrainRequest>();
+    const release = deferred<void>();
+    await routeApi(page, '**/api/models/train', async (route) => {
+      requested.resolve(route.request().postDataJSON() as TrainRequest);
+      await release.promise;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ filename: 'zoneface.safetensors', quality: null }),
+      });
+    });
+    const panel = trainPanel(page);
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await panel.getByLabel('Name', { exact: true }).fill('zoneface');
+    await panel.getByLabel('Trigger word').fill('zne person');
+    await panel.getByLabel('Target images').setInputFiles([
+      { name: 'first.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+      { name: 'second.png', mimeType: 'image/png', buffer: Buffer.from(PNG_BASE64, 'base64') },
+    ]);
+    await panel.getByLabel('Caption for first.png').fill('first caption');
+    await panel.getByRole('button', { name: 'Train' }).click();
+    await requested.promise;
+
+    await expect(panel.locator('form')).toHaveAttribute('aria-busy', 'true');
+    for (const control of [
+      panel.getByLabel('Name', { exact: true }),
+      panel.getByLabel('Base'),
+      panel.getByLabel('Trigger word'),
+      panel.getByLabel('Target images'),
+      panel.getByLabel('Caption for first.png'),
+      panel.getByRole('button', { name: 'Auto-caption images' }),
+      panel.getByRole('button', { name: 'Move target 1: first.png down' }),
+      panel.getByRole('button', { name: 'Remove target 1: first.png' }),
+      panel.getByRole('button', { name: 'Train' }),
+    ]) {
+      await expect(control).toBeDisabled();
+    }
+
+    release.resolve();
+    await expect(panel.getByText('Training finished: zoneface.safetensors')).toBeVisible();
+    await expect(panel.locator('form')).toHaveAttribute('aria-busy', 'false');
+    await expect(panel.getByLabel('Name', { exact: true })).toBeEnabled();
+    await expect(panel.getByLabel('Caption for first.png')).toHaveCount(0);
   });
 
   test('reports measured Qwen quality without FLUX health bands', async ({ page }) => {
