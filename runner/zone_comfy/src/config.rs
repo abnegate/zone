@@ -55,6 +55,8 @@ pub struct Config {
     pub video_vae: String,
     pub audio_workflow_path: std::path::PathBuf,
     pub audio_checkpoint: String,
+    pub upscale_workflow_path: std::path::PathBuf,
+    pub upscale_model: String,
     pub artifact_root: std::path::PathBuf,
     pub classifier_model: String,
     pub classifier_timeout_secs: u64,
@@ -65,6 +67,7 @@ pub struct Config {
     pub generation_timeout_secs: u64,
     pub video_generation_timeout_secs: u64,
     pub audio_generation_timeout_secs: u64,
+    pub upscale_generation_timeout_secs: u64,
     pub poll_interval_ms: u64,
     /// ComfyUI models root (`checkpoints/`, `loras/`, `diffusion_models/`, ...).
     pub models_dir: std::path::PathBuf,
@@ -103,6 +106,9 @@ impl Default for Config {
             audio_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../comfyui/workflows/ace-step-v1-3.5b-api.json"),
             audio_checkpoint: "ace_step_v1_3.5b.safetensors".to_string(),
+            upscale_workflow_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../comfyui/workflows/upscale-image-api.json"),
+            upscale_model: "RealESRGAN_x4plus.safetensors".to_string(),
             artifact_root: "/app/artifacts".into(),
             classifier_model: "auto".to_string(),
             classifier_timeout_secs: 3,
@@ -112,6 +118,7 @@ impl Default for Config {
             generation_timeout_secs: 300,
             video_generation_timeout_secs: 600,
             audio_generation_timeout_secs: 600,
+            upscale_generation_timeout_secs: 600,
             poll_interval_ms: 500,
             models_dir: std::path::PathBuf::from("/app/comfyui/models"),
             train_command: None,
@@ -158,6 +165,11 @@ impl Config {
                 .into(),
             audio_checkpoint: env::var("COMFYUI_AUDIO_CHECKPOINT")
                 .unwrap_or_else(|_| "ace_step_v1_3.5b.safetensors".to_string()),
+            upscale_workflow_path: env::var("COMFYUI_UPSCALE_WORKFLOW_PATH")
+                .unwrap_or_else(|_| "/app/comfyui/workflows/upscale-image-api.json".to_string())
+                .into(),
+            upscale_model: env::var("COMFYUI_UPSCALE_MODEL")
+                .unwrap_or_else(|_| "RealESRGAN_x4plus.safetensors".to_string()),
             artifact_root: env::var("ARTIFACT_ROOT")
                 .unwrap_or_else(|_| "/app/artifacts".to_string())
                 .into(),
@@ -176,6 +188,12 @@ impl Config {
             ),
             audio_generation_timeout_secs: env_u64(
                 "COMFYUI_AUDIO_GENERATION_TIMEOUT_SECS",
+                600,
+                10,
+                3600,
+            ),
+            upscale_generation_timeout_secs: env_u64(
+                "COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECS",
                 600,
                 10,
                 3600,

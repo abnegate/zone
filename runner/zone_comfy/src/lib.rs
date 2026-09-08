@@ -1,5 +1,5 @@
-//! ComfyUI integration: image, video, and audio generation, model inventory,
-//! and LoRA training.
+//! ComfyUI integration: image, video, and audio generation, upscaling, model
+//! inventory, and LoRA training.
 //!
 //! The crate talks to a ComfyUI server over HTTP and owns nothing else. It has
 //! no web framework, database, or application state, so it can be dropped into
@@ -74,7 +74,7 @@ pub mod train;
 pub mod video;
 
 pub use caption::{CaptionImage, CaptionRequest, Captioner, Draft, data_url};
-pub use client::{Client, Error, GeneratedImage, SourceImage};
+pub use client::{Client, Error, GeneratedImage, SourceImage, SourceVideo};
 pub use config::Config;
 pub use inventory::{InventoryItem, WeightSidecar, scan};
 pub use lora::{TrainBase, TrainError, TrainImage, TrainRequest, available_bases, train};
