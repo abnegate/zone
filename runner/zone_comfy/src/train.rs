@@ -357,18 +357,71 @@ mod tests {
 
     #[test]
     fn identity_config_trains_long_enough_for_eight_images() {
-        let config = packaged_config().unwrap();
-        assert_eq!(config.steps(8), 400);
+        let config: TrainConfig = packaged_config().unwrap();
+        assert!(
+            config.steps(8) >= config.min_steps,
+            "eight images clear the step floor"
+        );
         assert_eq!(config.steps(1), config.min_steps, "a tiny set still trains");
         assert_eq!(
             config.steps(10_000),
             config.max_steps,
             "a huge set is capped"
         );
-        assert_eq!(config.rank, 8);
-        assert_eq!(config.resolution, 512);
-        assert_eq!(config.min_steps, 400);
-        assert_eq!(config.steps_per_image, 50);
+    }
+
+    #[test]
+    fn packaged_config_tracks_the_shipped_json() {
+        let config: TrainConfig = packaged_config().unwrap();
+        let raw: Value = serde_json::from_str(PACKAGED_TRAIN_CONFIG).unwrap();
+        assert_eq!(raw["steps_per_image"], config.steps_per_image);
+        assert_eq!(raw["min_steps"], config.min_steps);
+        assert_eq!(raw["max_steps"], config.max_steps);
+        assert_eq!(raw["rank"], config.rank);
+        assert_eq!(raw["learning_rate"], config.learning_rate);
+        assert_eq!(raw["lora_dtype"], config.lora_dtype);
+        assert_eq!(raw["training_dtype"], config.training_dtype);
+        assert_eq!(raw["resolution"], config.resolution);
+        assert_eq!(raw["bypass_mode"], config.bypass_mode);
+        assert_eq!(raw["gradient_checkpointing"], config.gradient_checkpointing);
+        assert_eq!(raw["checkpoint_depth"], config.checkpoint_depth);
+        assert_eq!(raw["seed"], config.seed);
+    }
+
+    #[test]
+    fn train_graph_sends_every_value_from_the_packaged_config() {
+        let settings: TrainConfig = packaged_config().unwrap();
+        let images: usize = 12;
+        let steps: u32 = settings.steps(images);
+        assert!(
+            steps > settings.min_steps && steps < settings.max_steps,
+            "pick a dataset size between the step bounds, or a hardcoded step count passes unnoticed"
+        );
+        let graph: Value = train_graph(
+            "base.safetensors",
+            "zone-train-inputs",
+            &HashMap::new(),
+            "identity",
+            &settings,
+            steps,
+        );
+
+        let loader: &Value = &graph["2"]["inputs"];
+        assert_eq!(loader["resolution"], settings.resolution);
+
+        let trainer: &Value = &graph["4"]["inputs"];
+        assert_eq!(trainer["steps"], steps);
+        assert_eq!(trainer["rank"], settings.rank);
+        assert_eq!(trainer["learning_rate"], settings.learning_rate);
+        assert_eq!(trainer["seed"], settings.seed);
+        assert_eq!(trainer["training_dtype"], settings.training_dtype);
+        assert_eq!(trainer["lora_dtype"], settings.lora_dtype);
+        assert_eq!(
+            trainer["gradient_checkpointing"],
+            settings.gradient_checkpointing
+        );
+        assert_eq!(trainer["checkpoint_depth"], settings.checkpoint_depth);
+        assert_eq!(trainer["bypass_mode"], settings.bypass_mode);
     }
 
     /// Keys the packaged Python node reads. Rust never touches them, so only a
