@@ -650,6 +650,38 @@ async fn frames_endpoint_says_so_when_the_decoder_is_not_installed() {
 }
 
 #[tokio::test]
+async fn frames_endpoint_maps_decoder_execution_failures() {
+    use base64::Engine;
+    let models_dir = temp_models();
+    let decoder = models_dir.join("not-executable");
+    fs::write(&decoder, "not an executable").unwrap();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (router, secret) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
+        comfyui.ffmpeg = decoder.display().to_string();
+    })
+    .await;
+
+    let (status, body) = post_frames(
+        router,
+        &secret,
+        json!({
+            "filename": "clip.mp4",
+            "bytes_base64": base64::engine::general_purpose::STANDARD.encode("pretend clip"),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "the server should preserve the operating-system execution failure: {body}"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
 async fn a_second_training_upload_is_refused_while_one_is_running() {
     use base64::Engine;
     let models_dir = temp_models();
