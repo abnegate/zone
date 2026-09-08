@@ -170,6 +170,20 @@ def setup_identity_lora(mp, existing_weights, algorithm, lora_dtype, rank):
     return lora_sd, trained, bypass_manager
 
 
+def square(image: Image.Image, resolution: int) -> Image.Image:
+    """Crop to the centre square rather than padding to it.
+
+    Padding a 16:9 photo to a square leaves 44% of every training image a flat
+    border, and a border that appears in all of them is exactly what an identity
+    adapter learns first.
+    """
+    side = min(image.width, image.height)
+    left = (image.width - side) // 2
+    top = (image.height - side) // 2
+    cropped = image.crop((left, top, left + side, top + side))
+    return cropped.resize((resolution, resolution), Image.LANCZOS)
+
+
 class ZoneLoadTrainFolder(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -195,14 +209,8 @@ class ZoneLoadTrainFolder(io.ComfyNode):
         images = []
         texts = []
         for png in sorted(root.glob('*.png')):
-            image = Image.open(png).convert('RGB')
-            image.thumbnail((resolution, resolution))
-            canvas = Image.new('RGB', (resolution, resolution), (255, 255, 255))
-            canvas.paste(
-                image,
-                ((resolution - image.width) // 2, (resolution - image.height) // 2),
-            )
-            array = np.array(canvas).astype(np.float32) / 255.0
+            image = square(Image.open(png).convert('RGB'), resolution)
+            array = np.array(image).astype(np.float32) / 255.0
             images.append(torch.from_numpy(array)[None,])
             caption_path = png.with_suffix('.txt')
             texts.append(
