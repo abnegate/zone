@@ -191,8 +191,9 @@ async fn main() {
     zone_server::workers::analytics::spawn(state.clone());
     zone_server::workers::regression::spawn(state.clone());
     zone_server::workers::reports::spawn(state.clone());
+    zone_server::workers::reception::spawn(state.clone());
     tracing::info!(
-        "Started knowledge refresh, source resync, answer promotion, learning, agent analytics, regression watch and scheduled report workers"
+        "Started knowledge refresh, source resync, answer promotion, learning, agent analytics, regression watch, scheduled report and reception sync workers"
     );
 
     // Configure CORS based on environment
