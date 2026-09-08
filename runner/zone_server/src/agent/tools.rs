@@ -21,7 +21,7 @@ use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::citations::{self, Citation};
 use super::receipts::{self, ActionReceipt};
-use crate::db::{knowledge, message_embeddings, projects, sources, users};
+use crate::db::{knowledge, message_embeddings, projects, sources, users, workspace_members};
 use crate::state::AppState;
 
 /// Bound legacy search snippets and inventory summaries; full document reads are preserved.
@@ -41,16 +41,29 @@ const SNIPPET_CHARS: usize = 500;
 
 /// What the workspace tools are allowed to touch.
 ///
-/// Fixed by the chat being answered, not by anything the model says, which is
-/// what keeps tool calls inside the caller's tenant. Every workspace tool
+/// Fixed by the chat or task being answered, never by model arguments, which
+/// keeps tool calls inside the caller's tenant. Every workspace tool
 /// holds one of these, because `zone_core`'s `ToolContext` describes a working
 /// directory and knows nothing about tenants.
 #[derive(Clone)]
 pub struct WorkspaceScope {
     pub state: AppState,
     pub workspace_id: Uuid,
-    pub chat_id: Uuid,
+    pub chat_id: Option<Uuid>,
     pub user_id: Uuid,
+}
+
+async fn task_writer(state: &AppState, workspace: Uuid, actor: Uuid) -> bool {
+    match workspace_members::get_member(state.db(), workspace, actor).await {
+        Ok(Some(member)) => {
+            member.is_active && member.role >= workspace_members::WorkspaceRole::Member
+        }
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, "Could not authorize task actor");
+            false
+        }
+    }
 }
 
 /// Where server tools start when the model gives a relative path.
@@ -96,8 +109,9 @@ pub enum ToolProfile {
 
 /// The tools offered for one turn, and the context they run in.
 ///
-/// Chat and tasks share this builder. Workspace tools stay on chat; tasks
-/// get the sandboxed file/shell set plus MCP.
+/// Chat and tasks share workspace tools. Tasks have a sandboxed file/shell
+/// context and only receive workspace tools for an active initiating writer.
+/// Server-wide MCP tools are restricted to chats because they carry no task scope.
 pub struct ChatTools {
     registry: ToolRegistry,
     context: ToolContext,
@@ -125,15 +139,25 @@ impl ChatTools {
         Self::assemble(Some(scope), ToolProfile::Chat, None, false).await
     }
 
-    /// Sandboxed file/shell tools plus MCP for a background task run.
-    pub async fn for_task(state: &AppState, cwd: std::path::PathBuf) -> Self {
-        let mut assembled = Self::assemble(None, ToolProfile::Task, Some(cwd), false).await;
-        let added = assembled.registry.register_mcp(state.mcp_hub().await);
-        if added > 0 {
-            tracing::info!(tools = added, "Attached MCP tools to task");
-        }
-        assembled.cache_catalog();
-        assembled
+    /// Sandboxed tools and workspace tools authorized as the initiating task actor.
+    pub async fn for_task(
+        state: &AppState,
+        cwd: std::path::PathBuf,
+        workspace_id: Uuid,
+        actor: Option<Uuid>,
+    ) -> Self {
+        let scope = match actor {
+            Some(user_id) if task_writer(state, workspace_id, user_id).await => {
+                Some(WorkspaceScope {
+                    state: state.clone(),
+                    workspace_id,
+                    user_id,
+                    chat_id: None,
+                })
+            }
+            _ => None,
+        };
+        Self::assemble(scope, ToolProfile::Task, Some(cwd), false).await
     }
 
     async fn assemble(
@@ -146,9 +170,11 @@ impl ChatTools {
         let mut workspace = Vec::new();
 
         if let Some(scope) = &scope {
-            registry.register(Arc::new(crate::services::chat::evidence::EvidenceTool(
-                scope.clone(),
-            )));
+            if scope.chat_id.is_some() {
+                registry.register(Arc::new(crate::services::chat::evidence::EvidenceTool(
+                    scope.clone(),
+                )));
+            }
             registry.register(Arc::new(SearchKnowledgeTool(scope.clone())));
             registry.register(Arc::new(SearchChatHistoryTool(scope.clone())));
             registry.register(Arc::new(ListSourcesTool(scope.clone())));
@@ -156,8 +182,10 @@ impl ChatTools {
             super::actions::register(&mut registry, scope);
             super::documents::register(&mut registry, scope);
             super::integrations::register(&mut registry, scope);
-            super::images::register(&mut registry, scope);
-            super::audio::register(&mut registry, scope);
+            if scope.chat_id.is_some() {
+                super::images::register(&mut registry, scope);
+                super::audio::register(&mut registry, scope);
+            }
             super::monitoring::register(&mut registry, scope);
             workspace = registry
                 .names()
@@ -180,7 +208,9 @@ impl ChatTools {
             }
         }
 
-        if let Some(scope) = &scope {
+        if let Some(scope) = &scope
+            && profile == ToolProfile::Chat
+        {
             let hub = if connect {
                 Some(scope.state.mcp_hub().await)
             } else {
@@ -333,6 +363,13 @@ impl ChatTools {
         let Some(scope) = self.scope.as_ref() else {
             return Err(ToolResult::error("Workspace access denied."));
         };
+        if self.profile == ToolProfile::Task {
+            return if task_writer(&scope.state, scope.workspace_id, scope.user_id).await {
+                Ok(())
+            } else {
+                Err(ToolResult::error("Workspace write access denied."))
+            };
+        }
         match self
             .membership
             .get_or_try_init(|| async {
@@ -785,7 +822,10 @@ impl SearchChatHistoryTool {
             .get("this_chat_only")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let scope = this_chat_only.then_some(ctx.chat_id);
+        if this_chat_only && ctx.chat_id.is_none() {
+            return ToolResult::error("This task has no chat to search");
+        }
+        let scope = if this_chat_only { ctx.chat_id } else { None };
 
         let semantic_fut = async {
             match ctx.state.embedding_service() {
@@ -1164,7 +1204,7 @@ mod tests {
             state: AppState::for_tests(),
             user_id: Uuid::new_v4(),
             workspace_id: Uuid::new_v4(),
-            chat_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
         }
     }
 
@@ -1228,7 +1268,13 @@ mod tests {
 
     #[tokio::test]
     async fn task_tools_are_sandboxed_and_omit_workspace_catalog() {
-        let tools = ChatTools::for_task(&AppState::for_tests(), std::env::temp_dir()).await;
+        let tools = ChatTools::for_task(
+            &AppState::for_tests(),
+            std::env::temp_dir(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await;
         assert_eq!(tools.profile(), ToolProfile::Task);
         assert!(!tools.context.unrestricted);
         assert!(tools.names().contains(&"read_file".to_string()));
@@ -1360,7 +1406,7 @@ mod tests {
         let scope = WorkspaceScope {
             state,
             workspace_id: workspace.id,
-            chat_id: chat,
+            chat_id: Some(chat),
             user_id: user.id,
         };
         let tools = ChatTools::build(scope.clone()).await;
@@ -1379,7 +1425,7 @@ mod tests {
         let denied = tools.execute("create_document", &json!({"title":"Denied", "content":"Denied", "user_id":Uuid::new_v4(), "workspace_id":workspace.id}).to_string()).await;
         assert!(!denied.success);
         let invalid = ChatTools::build(WorkspaceScope {
-            chat_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
             ..scope
         })
         .await;

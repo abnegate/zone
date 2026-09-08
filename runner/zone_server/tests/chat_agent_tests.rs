@@ -88,7 +88,7 @@ async fn exercise_approved(
         user_id: Uuid::new_v4(),
         state,
         workspace_id: Uuid::new_v4(),
-        chat_id: Uuid::new_v4(),
+        chat_id: Some(Uuid::new_v4()),
     })
     .await;
     // Missing `path` fails validation before read_file accesses the filesystem.

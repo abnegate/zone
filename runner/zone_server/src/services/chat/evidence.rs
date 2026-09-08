@@ -58,7 +58,9 @@ impl Tool for EvidenceTool {
         }
         let store = Store::new(
             self.0.state.db().clone(),
-            self.0.chat_id,
+            self.0
+                .chat_id
+                .ok_or_else(|| ToolError::Execution("Chat evidence requires a chat".into()))?,
             Some(self.0.workspace_id),
         );
         let limit = capped_limit(request.limit);

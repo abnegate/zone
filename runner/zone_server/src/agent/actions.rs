@@ -39,6 +39,18 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Action::GetTaskRun,
         Action::TailTaskLog,
     ] {
+        if scope.chat_id.is_none()
+            && matches!(
+                action,
+                Action::SendMessage
+                    | Action::CreateReminder
+                    | Action::ListReminders
+                    | Action::CancelReminder
+                    | Action::StartTask
+            )
+        {
+            continue;
+        }
         registry.register(Arc::new(WorkspaceAction {
             scope: scope.clone(),
             action,
@@ -228,7 +240,9 @@ impl WorkspaceAction {
                     pool,
                     scope.workspace_id,
                     scope.user_id,
-                    scope.chat_id,
+                    scope
+                        .chat_id
+                        .ok_or_else(|| actions::invalid("This action requires a chat"))?,
                     decode(params)?,
                 )
                 .await
@@ -238,7 +252,9 @@ impl WorkspaceAction {
                     pool,
                     scope.workspace_id,
                     scope.user_id,
-                    scope.chat_id,
+                    scope
+                        .chat_id
+                        .ok_or_else(|| actions::invalid("This action requires a chat"))?,
                     decode(params)?,
                 )
                 .await

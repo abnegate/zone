@@ -360,7 +360,7 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
         };
     let workspace_path = checkout.path().to_path_buf();
 
-    let tools = ChatTools::for_task(state, workspace_path.clone()).await;
+    let tools = ChatTools::for_task(state, workspace_path.clone(), task.workspace_id, None).await;
     let mut system_prompt = agent::system_prompt(&tools, true);
     system_prompt.push_str(
         "\n\nYou are completing a background coding task. Stay inside the sandboxed working directory.\n",
@@ -626,8 +626,22 @@ async fn run_task_loop(
                 name,
                 success,
                 detail,
+                receipt,
                 ..
             } => {
+                if let Some(receipt) = receipt {
+                    tasks::add_task_run_log(
+                        &callback.pool,
+                        callback.run_id,
+                        "acting",
+                        "tool",
+                        "info",
+                        "Workspace action receipt",
+                        Some(serde_json::json!({"action_receipt": receipt})),
+                    )
+                    .await
+                    .map_err(|error| format!("Could not persist action receipt: {error}"))?;
+                }
                 tool_calls += 1;
                 let result = if success {
                     ToolResult::success(detail)
@@ -791,4 +805,122 @@ mod tests {
     }
 
     // Integration tests are in zone_server/tests/task_execution_tests.rs
+
+    #[tokio::test]
+    async fn task_loop_persists_workspace_receipt_before_returning() {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use serde_json::{Value, json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        let database =
+            std::env::var("TEST_DATABASE_URL").expect("explicit disposable TEST_DATABASE_URL");
+        let pool = PgPool::connect(&database).await.unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Task receipts",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Receipts",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Task actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Receipt owner",
+            "Run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        let provider = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |_: &Request| {
+            let delta = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                json!({"tool_calls":[{"index":0,"id":"receipt-call","type":"function","function":{"name":"create_task","arguments":r#"{"title":"Made by the scoped task","description":"durable result"}"#}}]})
+            } else { json!({"content":"The task was created."}) };
+            let chunk = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            let end = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+            ResponseTemplate::new(200).insert_header("Content-Type", "text/event-stream").set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+        }).mount(&provider).await;
+        let tools =
+            ChatTools::for_task(&state, std::env::temp_dir(), workspace.id, Some(user.id)).await;
+        let callback = DatabaseTaskCallback::new(pool.clone(), run.id);
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_task_loop(
+                LlmClient::new(LlmConfig {
+                    base_url: provider.uri(),
+                    ..LlmConfig::default()
+                }),
+                "test".into(),
+                tools,
+                RunContext::from_messages(vec![LlmMessage::user(
+                    "Create a task titled Made by the scoped task with description durable result",
+                )]),
+                &callback,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(outcome.tool_calls, 1);
+        let receipts: Vec<Value> = sqlx::query_scalar("SELECT metadata->'action_receipt' FROM task_run_logs WHERE task_run_id=$1 AND metadata ? 'action_receipt'").bind(run.id).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            receipts.len(),
+            1,
+            "task loop returned without its durable action receipt"
+        );
+        assert_eq!(receipts[0]["actor_id"], user.id.to_string());
+        assert_eq!(receipts[0]["action"], "create_task");
+        assert_eq!(receipts[0]["success"], true);
+        let target = Uuid::parse_str(receipts[0]["target_id"].as_str().unwrap()).unwrap();
+        let written = tasks::get_task(&pool, target).await.unwrap().unwrap();
+        assert_eq!(written.workspace_id, workspace.id);
+        assert_eq!(written.title, "Made by the scoped task");
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }

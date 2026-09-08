@@ -69,10 +69,6 @@ async fn get_ws_auth_token() -> String {
     json["access_token"].as_str().unwrap().to_string()
 }
 
-// =============================================================================
-// TaskProgressBroadcaster Unit Tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_broadcaster_new() {
     let broadcaster = TaskProgressBroadcaster::new();
@@ -228,10 +224,6 @@ async fn test_broadcaster_multiple_runs() {
     }
 }
 
-// =============================================================================
-// ProgressMessage Tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_progress_message_init_to_ws() {
     let msg = ProgressMessage::Init {
@@ -266,6 +258,7 @@ async fn test_progress_message_log() {
         agent_type: "executor".to_string(),
         log_level: "info".to_string(),
         message: "Starting task".to_string(),
+        metadata: None,
     };
 
     let json = serde_json::to_string(&msg).unwrap();
@@ -303,10 +296,6 @@ async fn test_progress_message_error() {
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains("\"type\":\"error\""));
 }
-
-// =============================================================================
-// WebSocket Connection Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_ws_connect_without_auth() {
@@ -410,12 +399,12 @@ async fn test_ws_connect_task_run_not_found() {
         .await
         .expect("send");
 
-    // Should receive error about task run not found
+    // Do not distinguish missing runs from runs in another workspace.
     if let Some(Ok(Message::Text(text))) = ws_stream.next().await {
         let text_str: &str = text.as_ref();
         let msg: serde_json::Value = serde_json::from_str(text_str).expect("parse");
         assert_eq!(msg["type"], "error");
-        assert!(msg["message"].as_str().unwrap().contains("not found"));
+        assert_eq!(msg["message"], "Forbidden");
     }
 }
 
@@ -437,10 +426,6 @@ async fn test_ws_ping_pong() {
     // We might receive it as a Pong or not at all (depends on implementation)
 }
 
-// =============================================================================
-// WebSocket Tests with Actual Task Runs
-// =============================================================================
-
 /// Helper to create a project and task for testing
 async fn create_test_task() -> (uuid::Uuid, uuid::Uuid, String) {
     use zone_server::db::{projects, tasks};
@@ -450,6 +435,18 @@ async fn create_test_task() -> (uuid::Uuid, uuid::Uuid, String) {
 
     // Setup test data (organization, workspace, user)
     let (_org_id, workspace_id, _user_id) = common::setup_test_data(&pool).await;
+    let claims =
+        zone_server::auth::validate_token(&token, &common::test_config().jwt_secret).unwrap();
+    let actor = uuid::Uuid::parse_str(&claims.sub).unwrap();
+    zone_server::db::workspace_members::add_member(
+        &pool,
+        workspace_id,
+        actor,
+        zone_server::db::workspace_members::WorkspaceRole::Member,
+        None,
+    )
+    .await
+    .expect("authorize websocket test actor");
 
     // Create a project (pool, name, description, workspace_id)
     let project = projects::create_project(&pool, "WS Test Project", None, Some(workspace_id))

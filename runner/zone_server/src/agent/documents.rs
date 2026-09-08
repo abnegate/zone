@@ -444,7 +444,7 @@ mod tests {
         let scope = WorkspaceScope {
             state: AppState::new(test_config(), pool.clone(), None),
             workspace_id: workspace.id,
-            chat_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
             user_id: user.id,
         };
         let mut registry = ToolRegistry::new();

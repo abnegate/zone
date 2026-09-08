@@ -17,11 +17,12 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::auth::validate_token;
-use crate::db::tasks;
+use crate::db::{tasks, workspace_members};
 use crate::state::AppState;
 
 /// Progress message sent to clients
@@ -47,6 +48,7 @@ pub enum ProgressMessage {
         agent_type: String,
         log_level: String,
         message: String,
+        metadata: Option<serde_json::Value>,
     },
     /// Task completed successfully
     Completed { status: String },
@@ -134,13 +136,30 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     let (mut sender, mut receiver) = socket.split();
 
     // Wait for auth message
+    let mut actor = None;
     let authenticated =
         match tokio::time::timeout(std::time::Duration::from_secs(30), receiver.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
                 match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(ClientMessage::Auth { token }) => {
                         match validate_token(&token, state.config().jwt_secret()) {
-                            Ok(_claims) => true,
+                            Ok(claims) => match Uuid::parse_str(&claims.sub) {
+                                Ok(user_id) if authorized(&state, run_id, user_id).await => {
+                                    actor = Some(user_id);
+                                    true
+                                }
+                                _ => {
+                                    let _ = sender
+                                        .send(
+                                            ProgressMessage::Error {
+                                                message: "Forbidden".to_string(),
+                                            }
+                                            .to_ws_message(),
+                                        )
+                                        .await;
+                                    false
+                                }
+                            },
                             Err(e) => {
                                 let msg = ProgressMessage::Error {
                                     message: format!("Authentication failed: {}", e),
@@ -174,6 +193,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
         return;
     }
 
+    let Some(actor) = actor else {
+        return;
+    };
+
     // Verify task run exists and get initial state
     let task_run = match tasks::get_task_run(state.db(), run_id).await {
         Ok(Some(run)) => run,
@@ -204,15 +227,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
         return;
     }
 
+    // UUID order does not reflect log creation order.
+    let mut sent = HashSet::new();
     // Send existing logs
     if let Ok(logs) = tasks::get_task_run_logs(state.db(), run_id).await {
         for log in logs {
+            sent.insert(log.id);
             let log_msg = ProgressMessage::Log {
                 id: log.id,
                 phase: log.phase,
                 agent_type: log.agent_type,
                 log_level: log.log_level,
                 message: log.message,
+                metadata: log.metadata,
             };
             if sender.send(log_msg.to_ws_message()).await.is_err() {
                 return;
@@ -221,7 +248,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     }
 
     // If task is already complete, send completion and close
-    if task_run.status == "completed" || task_run.status == "failed" {
+    if matches!(
+        task_run.status.as_str(),
+        "completed" | "failed" | "cancelled"
+    ) {
         let final_msg = if task_run.status == "completed" {
             ProgressMessage::Completed {
                 status: task_run.status,
@@ -240,74 +270,64 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     // For now, we'll poll the database for updates
     // In production, this would use the TaskProgressBroadcaster with Redis pub/sub
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
-    let mut last_log_id: Option<Uuid> = None;
     let mut last_status = task_run.status;
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                // Check for status updates
-                match tasks::get_task_run(state.db(), run_id).await {
-                    Ok(Some(run)) => {
-                        // Send status update if changed
-                        if run.status != last_status {
-                            last_status = run.status.clone();
-
-                            if run.status == "completed" {
-                                let msg = ProgressMessage::Completed {
-                                    status: run.status,
-                                };
-                                let _ = sender.send(msg.to_ws_message()).await;
-                                return;
-                            } else if run.status == "failed" {
-                                let msg = ProgressMessage::Failed {
-                                    error: run.error_message.unwrap_or_else(|| "Unknown error".to_string()),
-                                };
-                                let _ = sender.send(msg.to_ws_message()).await;
-                                return;
-                            } else {
-                                let msg = ProgressMessage::StatusUpdate {
-                                    status: run.status,
-                                    current_phase: run.current_phase,
-                                    progress_percent: run.progress_percent,
-                                };
-                                if sender.send(msg.to_ws_message()).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                    }
+                if !authorized(&state, run_id, actor).await {
+                    let _ = sender.send(ProgressMessage::Error { message: "Forbidden".into() }.to_ws_message()).await;
+                    let _ = sender.close().await;
+                    return;
+                }
+                // A terminal snapshot guarantees its awaited receipts are visible
+                // when we load logs before announcing completion.
+                let run = match tasks::get_task_run(state.db(), run_id).await {
+                    Ok(Some(run)) => run,
                     Ok(None) => {
-                        let msg = ProgressMessage::Error {
-                            message: "Task run not found".to_string(),
-                        };
-                        let _ = sender.send(msg.to_ws_message()).await;
+                        let _ = sender.send(ProgressMessage::Error {
+                            message: "Task run not found".into(),
+                        }.to_ws_message()).await;
                         return;
                     }
                     Err(_) => continue,
+                };
+                let logs = match tasks::get_task_run_logs(state.db(), run_id).await {
+                    Ok(logs) => logs,
+                    Err(_) => continue,
+                };
+                for log in logs {
+                    if !sent.insert(log.id) {
+                        continue;
+                    }
+                    let message = ProgressMessage::Log {
+                        id: log.id,
+                        phase: log.phase,
+                        agent_type: log.agent_type,
+                        log_level: log.log_level,
+                        message: log.message,
+                        metadata: log.metadata,
+                    };
+                    if sender.send(message.to_ws_message()).await.is_err() {
+                        return;
+                    }
                 }
-
-                // Check for new logs
-                if let Ok(logs) = tasks::get_task_run_logs(state.db(), run_id).await {
-                    for log in logs {
-                        // Skip logs we've already sent
-                        if let Some(last_id) = last_log_id
-                            && log.id <= last_id {
-                                continue;
-                            }
-
-                        last_log_id = Some(log.id);
-
-                        let log_msg = ProgressMessage::Log {
-                            id: log.id,
-                            phase: log.phase,
-                            agent_type: log.agent_type,
-                            log_level: log.log_level,
-                            message: log.message,
-                        };
-                        if sender.send(log_msg.to_ws_message()).await.is_err() {
-                            return;
-                        }
+                if run.status != last_status {
+                    last_status = run.status.clone();
+                    let terminal = matches!(run.status.as_str(), "completed" | "failed" | "cancelled");
+                    let message = match run.status.as_str() {
+                        "completed" => ProgressMessage::Completed { status: run.status },
+                        "failed" | "cancelled" => ProgressMessage::Failed {
+                            error: run.error_message.unwrap_or_else(|| "Unknown error".into()),
+                        },
+                        _ => ProgressMessage::StatusUpdate {
+                            status: run.status,
+                            current_phase: run.current_phase,
+                            progress_percent: run.progress_percent,
+                        },
+                    };
+                    if sender.send(message.to_ws_message()).await.is_err() || terminal {
+                        return;
                     }
                 }
             }
@@ -326,4 +346,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
             }
         }
     }
+}
+
+/// Authorize before exposing whether a run exists, its state, or any log.
+async fn authorized(state: &AppState, run: Uuid, user: Uuid) -> bool {
+    let workspace = sqlx::query_scalar::<_, Uuid>(
+        "SELECT tasks.workspace_id FROM task_runs JOIN tasks ON tasks.id = task_runs.task_id WHERE task_runs.id = $1",
+    ).bind(run).fetch_optional(state.db()).await;
+    let workspace = match workspace {
+        Ok(Some(workspace)) => workspace,
+        _ => return false,
+    };
+    matches!(workspace_members::get_member(state.db(), workspace, user).await, Ok(Some(member)) if member.is_active)
 }

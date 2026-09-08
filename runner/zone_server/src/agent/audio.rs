@@ -77,6 +77,9 @@ async fn effective_comfyui(scope: &WorkspaceScope) -> ComfyUiConfig {
 }
 
 async fn run_audio(scope: &WorkspaceScope, config: &ComfyUiConfig, params: Value) -> ToolResult {
+    let Some(chat_id) = scope.chat_id else {
+        return ToolResult::error("Media generation requires a chat");
+    };
     let prompt = match string_arg(&params, "prompt") {
         Ok(prompt) => prompt.to_string(),
         Err(error) => return error,
@@ -104,8 +107,8 @@ async fn run_audio(scope: &WorkspaceScope, config: &ComfyUiConfig, params: Value
         match store
             .persist(
                 scope.workspace_id,
-                scope.chat_id,
-                scope.chat_id,
+                chat_id,
+                chat_id,
                 extension_for(&clip.mime),
                 &clip.bytes,
             )
@@ -155,7 +158,7 @@ mod tests {
         WorkspaceScope {
             state: AppState::new(config, database, None),
             workspace_id: Uuid::new_v4(),
-            chat_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
         }
     }
@@ -295,7 +298,7 @@ mod tests {
         let scope = WorkspaceScope {
             state: AppState::new(config, database.clone(), None),
             workspace_id,
-            chat_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
         };
         assert_ne!(
