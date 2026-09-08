@@ -2967,8 +2967,80 @@ mod tests {
             interleave_context_lines(knowledge, sources, 8),
             ["k1", "s1", "k2", "s2", "k3"]
         );
+        assert_eq!(
+            interleave_context_lines(vec!["k".into()], vec!["s".into()], 1),
+            ["k"]
+        );
         assert!(interleave_context_lines(vec!["k".into()], vec!["s".into()], 0).is_empty());
         assert!(interleave_context_lines(Vec::new(), Vec::new(), 5).is_empty());
+    }
+
+    #[tokio::test]
+    async fn system_prompt_preserves_persona_and_agent_contracts() {
+        let state = AppState::for_tests();
+        let tools = agent::ChatTools::preview(agent::WorkspaceScope {
+            state,
+            workspace_id: Uuid::new_v4(),
+            chat_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+        })
+        .await;
+        let character = ChatCharacter {
+            name: "Ari".into(),
+            system_prompt: Some("Stay {{char}}.".into()),
+            ..Default::default()
+        };
+
+        let persona = chat_system_prompt(Some(&character), false, &tools, false);
+        assert_eq!(persona, "Stay Ari.");
+
+        let agent = chat_system_prompt(None, true, &tools, true);
+        assert!(agent.contains("You can call these tools"), "{agent}");
+        assert!(
+            agent.contains("without waiting for confirmation"),
+            "{agent}"
+        );
+
+        let combined = chat_system_prompt(Some(&character), true, &tools, false);
+        assert!(combined.starts_with("Stay Ari.\n\n"), "{combined}");
+        assert!(
+            combined.contains("wait for the user to approve"),
+            "{combined}"
+        );
+
+        assert_eq!(
+            chat_system_prompt(None, false, &tools, false),
+            "You are Zone's assistant, answering inside one of the user's workspaces."
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_web_search_requests_do_not_create_a_client() {
+        let state = AppState::for_tests();
+        assert!(matches!(
+            load_web_search(&state, " \n\t ", true).await,
+            SearchContext::Disabled
+        ));
+    }
+
+    #[tokio::test]
+    async fn unavailable_history_degrades_image_reuse_to_no_source() {
+        let state = AppState::for_tests();
+        let store = crate::services::artifacts::ArtifactStore::new(std::env::temp_dir());
+
+        assert!(
+            resolve_generation_source(
+                &state,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                "Change the background to a forest",
+                None,
+                &store,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[tokio::test]

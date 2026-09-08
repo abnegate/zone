@@ -40,6 +40,76 @@ async fn stop_tokens_never_reach_the_live_or_persisted_answer() {
 }
 
 #[tokio::test]
+async fn incomplete_stop_prefix_is_not_lost_at_the_end_of_a_stream() {
+    let harness = Harness::new(Some(200_000), false, vec![answer("Visible<|im_")]).await;
+
+    let frames = harness.turn("Preserve an incomplete template prefix").await;
+    successful(&frames);
+    let chunks = frames
+        .iter()
+        .filter(|frame| frame["type"] == "chunk")
+        .map(|frame| frame["content"].as_str().unwrap())
+        .collect::<String>();
+    assert_eq!(chunks, "Visible<|im_");
+    let end = frames
+        .iter()
+        .find(|frame| frame["type"] == "message_end")
+        .unwrap();
+    assert_eq!(end["content"], "Visible<|im_");
+
+    let stored: String = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE chat_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(harness.chat)
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, "Visible<|im_");
+}
+
+#[tokio::test]
+async fn workspace_knowledge_is_injected_as_untrusted_retrieved_context() {
+    let harness = Harness::new(Some(200_000), false, vec![answer("Used workspace context")]).await;
+    let created = harness
+        .client
+        .post_json_auth(
+            "/api/knowledge",
+            &json!({
+                "workspace_id": harness.workspace,
+                "title": "Frozen release runbook",
+                "content": "The FROZEN_DEPLOY_SIGNAL confirms this release is pinned.",
+                "category": "documentation",
+                "tags": ["release"]
+            }),
+            &harness.token,
+        )
+        .await;
+    created.assert_status(axum::http::StatusCode::CREATED);
+
+    let frames = harness
+        .turn("What does FROZEN_DEPLOY_SIGNAL confirm?")
+        .await;
+    successful(&frames);
+    let requests = harness.requests().await;
+    let prompt = requests.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "system")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(prompt.contains("<retrieved_context>"), "{prompt}");
+    assert!(
+        prompt.contains("[knowledge] Frozen release runbook"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("knowledge://"), "{prompt}");
+    assert!(prompt.contains("FROZEN_DEPLOY_SIGNAL"), "{prompt}");
+    assert!(prompt.contains("untrusted source data"), "{prompt}");
+}
+
+#[tokio::test]
 async fn oversized_provider_output_is_bounded_and_marked_in_history() {
     let harness = Harness::new(Some(200_000), false, vec![answer(&"x".repeat(100_001))]).await;
 

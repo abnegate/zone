@@ -10,7 +10,10 @@ use common::{
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{
@@ -218,6 +221,72 @@ async fn chat_lookup_database_failure_is_reported_without_internal_detail() {
 
     assert_error(&mut socket, "Internal server error").await;
     assert!(next_json(&mut socket).await.is_none());
+}
+
+#[tokio::test]
+async fn membership_database_failure_is_reported_without_internal_detail() {
+    const PASSWORD: &str = "zone-contract-password";
+
+    let owner = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        owner.clone(),
+    )));
+    let (token, _, chat) = seed(&client).await;
+    let role = format!("zone_contract_{}", Uuid::new_v4().simple());
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD '{PASSWORD}'"
+    )))
+    .execute(&owner)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "GRANT USAGE ON SCHEMA public TO {role}"
+    )))
+    .execute(&owner)
+    .await
+    .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "GRANT SELECT ON chats TO {role}"
+    )))
+    .execute(&owner)
+    .await
+    .unwrap();
+
+    let options = std::env::var("DATABASE_URL")
+        .unwrap()
+        .parse::<PgConnectOptions>()
+        .unwrap()
+        .username(&role)
+        .password(PASSWORD);
+    let restricted = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let address = spawn(config, restricted.clone()).await;
+    let mut socket = connect(&address, chat).await;
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let frame = next_json(&mut socket).await;
+    let closed = next_json(&mut socket).await;
+
+    restricted.close().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP OWNED BY {role}")))
+        .execute(&owner)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
+        .execute(&owner)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        frame,
+        Some(json!({"type": "error", "message": "Internal server error"}))
+    );
+    assert!(closed.is_none());
 }
 
 #[tokio::test]
@@ -528,6 +597,42 @@ async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert_error(&mut socket, "Access revoked").await;
     assert!(next_json(&mut socket).await.is_none());
+}
+
+#[tokio::test]
+async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
+    let pool = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, _, chat) = seed(&client).await;
+    let address = spawn(config, pool).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+
+    tokio::time::pause();
+    for _ in 0..190 {
+        tokio::time::advance(Duration::from_secs(30)).await;
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        let frame = socket.next().await.expect("authorization ping").unwrap();
+        if let WsMessage::Ping(data) = frame {
+            socket.send(WsMessage::Pong(data)).await.unwrap();
+        }
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(269_999)).await;
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    socket
+        .send(WsMessage::Text("not-json".to_string().into()))
+        .await
+        .unwrap();
+    assert_error(&mut socket, "Invalid message format").await;
+    socket.close(None).await.unwrap();
 }
 
 #[tokio::test]
