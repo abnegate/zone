@@ -2,12 +2,29 @@
 //!
 //! All messages are serialized as newline-delimited JSON (NDJSON).
 
+use crate::executor::Confinement;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Protocol version for compatibility checking
+/// Protocol version for compatibility checking.
+///
+/// Confinement was added without a bump: `RunStart.confinement` defaults to
+/// absent and the capability list is the negotiated extension point, so a
+/// client that predates it keeps working unchanged.
 pub const PROTOCOL_VERSION: &str = "1.0";
+
+/// Filesystem a confined job is allowed to see.
+///
+/// Everything outside these roots is denied, as is the network. Roots must be
+/// absolute paths that exist when the job starts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfinementRequest {
+    #[serde(default)]
+    pub read_roots: Vec<PathBuf>,
+    #[serde(default)]
+    pub write_roots: Vec<PathBuf>,
+}
 
 /// Messages sent from the backend to the Runner
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -35,6 +52,10 @@ pub enum InboundMessage {
         max_output_bytes: Option<usize>,
         #[serde(default)]
         working_dir: Option<PathBuf>,
+        /// When present the job runs under OS confinement, and fails to start
+        /// if this runner cannot prove confinement works.
+        #[serde(default)]
+        confinement: Option<ConfinementRequest>,
     },
 
     /// Send data to a running command's stdin
@@ -147,6 +168,8 @@ pub enum ErrorCode {
     InternalError,
     /// Workspace path is invalid
     InvalidWorkspace,
+    /// Confinement was requested but this runner cannot prove it works
+    ConfinementUnavailable,
 }
 
 /// Runner capabilities advertised during handshake
@@ -160,35 +183,61 @@ pub enum Capability {
     Logs,
     /// Uses process groups for clean kill
     ProcessGroup,
+    /// Can run jobs under OS-level confinement
+    Confinement,
 }
 
 impl Capability {
+    const ALL: [Capability; 5] = [
+        Capability::Cancel,
+        Capability::Stdin,
+        Capability::Logs,
+        Capability::ProcessGroup,
+        Capability::Confinement,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Capability::Cancel => "cancel",
             Capability::Stdin => "stdin",
             Capability::Logs => "logs",
             Capability::ProcessGroup => "process_group",
+            Capability::Confinement => "confinement",
         }
     }
 
+    /// Every capability the protocol defines.
     pub fn all() -> Vec<String> {
-        vec![
-            Capability::Cancel.as_str().to_string(),
-            Capability::Stdin.as_str().to_string(),
-            Capability::Logs.as_str().to_string(),
-            Capability::ProcessGroup.as_str().to_string(),
-        ]
+        Self::ALL
+            .iter()
+            .map(|capability| capability.as_str().to_string())
+            .collect()
+    }
+
+    /// The capabilities this host can honour.
+    pub fn supported() -> Vec<String> {
+        Self::ALL
+            .iter()
+            .filter(|capability| capability.is_supported())
+            .map(|capability| capability.as_str().to_string())
+            .collect()
+    }
+
+    fn is_supported(&self) -> bool {
+        match self {
+            Capability::Confinement => Confinement::is_available(),
+            _ => true,
+        }
     }
 }
 
 impl OutboundMessage {
-    /// Create a HelloAck with all supported capabilities
+    /// Create a HelloAck with the capabilities this host can honour
     pub fn hello_ack() -> Self {
         OutboundMessage::HelloAck {
             protocol_version: PROTOCOL_VERSION.to_string(),
             runner_version: env!("CARGO_PKG_VERSION").to_string(),
-            capabilities: Capability::all(),
+            capabilities: Capability::supported(),
         }
     }
 
@@ -386,7 +435,11 @@ mod tests {
             "env": {"NODE_ENV": "production", "CI": "true"},
             "timeout_ms": 300000,
             "max_output_bytes": 10485760,
-            "working_dir": "/home/user/project/packages/app"
+            "working_dir": "/home/user/project/packages/app",
+            "confinement": {
+                "read_roots": ["/home/user/project"],
+                "write_roots": ["/home/user/project/target"]
+            }
         }"#;
 
         let msg: InboundMessage = serde_json::from_str(json).unwrap();
@@ -400,6 +453,7 @@ mod tests {
                 timeout_ms,
                 max_output_bytes,
                 working_dir,
+                confinement,
             } => {
                 assert_eq!(job_id, "full-job");
                 assert_eq!(workspace.to_str().unwrap(), "/home/user/project");
@@ -413,6 +467,15 @@ mod tests {
                 assert_eq!(
                     working_dir.unwrap().to_str().unwrap(),
                     "/home/user/project/packages/app"
+                );
+                let confinement = confinement.unwrap();
+                assert_eq!(
+                    confinement.read_roots,
+                    vec![PathBuf::from("/home/user/project")]
+                );
+                assert_eq!(
+                    confinement.write_roots,
+                    vec![PathBuf::from("/home/user/project/target")]
                 );
             }
             _ => panic!("Wrong message type"),
@@ -803,6 +866,7 @@ mod tests {
             (ErrorCode::Cancelled, "cancelled"),
             (ErrorCode::InternalError, "internal_error"),
             (ErrorCode::InvalidWorkspace, "invalid_workspace"),
+            (ErrorCode::ConfinementUnavailable, "confinement_unavailable"),
         ];
 
         for (code, expected_str) in error_codes {
@@ -827,16 +891,28 @@ mod tests {
         assert_eq!(Capability::Stdin.as_str(), "stdin");
         assert_eq!(Capability::Logs.as_str(), "logs");
         assert_eq!(Capability::ProcessGroup.as_str(), "process_group");
+        assert_eq!(Capability::Confinement.as_str(), "confinement");
     }
 
     #[test]
     fn test_capability_all() {
         let all = Capability::all();
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 5);
         assert!(all.contains(&"cancel".to_string()));
         assert!(all.contains(&"stdin".to_string()));
         assert!(all.contains(&"logs".to_string()));
         assert!(all.contains(&"process_group".to_string()));
+        assert!(all.contains(&"confinement".to_string()));
+    }
+
+    #[test]
+    fn test_capability_supported_tracks_confinement_availability() {
+        let supported = Capability::supported();
+        assert!(supported.contains(&"cancel".to_string()));
+        assert_eq!(
+            supported.contains(&"confinement".to_string()),
+            Confinement::is_available()
+        );
     }
 
     // ==========================================================================

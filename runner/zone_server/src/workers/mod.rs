@@ -7,13 +7,16 @@
 //! - Task execution
 //! - PR creation on task completion
 //! - Knowledge refresh from web URLs
+//! - Promotion of repeated answers to standing instructions
 //! - Cleanup tasks
 
 pub mod embeddings;
+pub mod evaluation;
 pub mod gathering;
 pub mod indexing;
 pub mod knowledge_refresh;
 pub mod pr;
+pub mod promotion;
 pub mod reminders;
 pub mod source_resync;
 pub mod task;

@@ -31,6 +31,7 @@ fn create_echo_request(job_id: &str, message: &str) -> InboundMessage {
         timeout_ms: Some(5000),
         max_output_bytes: None,
         working_dir: None,
+        confinement: None,
     }
 }
 
@@ -44,6 +45,7 @@ fn create_bash_request(job_id: &str, script: &str) -> InboundMessage {
         timeout_ms: Some(30000),
         max_output_bytes: None,
         working_dir: None,
+        confinement: None,
     }
 }
 
@@ -230,6 +232,7 @@ async fn test_command_with_arguments() {
         timeout_ms: Some(5000),
         max_output_bytes: None,
         working_dir: None,
+        confinement: None,
     };
 
     let _handle = executor.spawn(&request, tx).await.unwrap();
@@ -263,6 +266,7 @@ async fn test_environment_variables() {
         timeout_ms: Some(5000),
         max_output_bytes: None,
         working_dir: None,
+        confinement: None,
     };
 
     let _handle = executor.spawn(&request, tx).await.unwrap();
@@ -301,6 +305,7 @@ async fn test_custom_working_dir() {
         timeout_ms: Some(5000),
         max_output_bytes: None,
         working_dir: Some(temp_path.clone()),
+        confinement: None,
     };
 
     let _handle = executor.spawn(&request, tx).await.unwrap();
@@ -339,6 +344,7 @@ async fn test_command_timeout() {
         timeout_ms: Some(500), // 500ms timeout
         max_output_bytes: None,
         working_dir: None,
+        confinement: None,
     };
 
     let _handle = executor.spawn(&request, tx).await.unwrap();
@@ -378,6 +384,7 @@ async fn test_invalid_workspace() {
         timeout_ms: None,
         max_output_bytes: None,
         working_dir: None,
+        confinement: None,
     };
 
     let result = executor.spawn(&request, tx).await;
@@ -398,6 +405,7 @@ async fn test_invalid_command() {
         timeout_ms: Some(5000),
         max_output_bytes: None,
         working_dir: None,
+        confinement: None,
     };
 
     let result = executor.spawn(&request, tx).await;
@@ -429,6 +437,7 @@ async fn test_output_limit() {
         timeout_ms: Some(5000),
         max_output_bytes: Some(500),
         working_dir: None,
+        confinement: None,
     };
 
     let _handle = executor.spawn(&request, tx).await.unwrap();
