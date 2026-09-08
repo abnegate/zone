@@ -517,3 +517,104 @@ async fn task_snapshot_orders_disclosure_after_pending_revocation() {
         "the committed revocation must deny the waiting read"
     );
 }
+
+async fn http_revocation(logs: bool) {
+    let (pool, _, organization, workspace, user) = fixture().await;
+    let task = tasks::create_task(
+        &pool,
+        workspace,
+        &[],
+        "DO NOT LEAK",
+        "Private state",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+    tasks::add_task_run_log(&pool, run.id, "acting", "tool", "info", "DO NOT LEAK", None)
+        .await
+        .unwrap();
+    let application = format!("task-http-{}", Uuid::new_v4());
+    let reader = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            (*pool.connect_options())
+                .clone()
+                .application_name(&application),
+        )
+        .await
+        .unwrap();
+    let config = common::test_config();
+    let token = create_access_token(
+        user,
+        "scope@example.com",
+        vec![],
+        vec![],
+        false,
+        &config.jwt_secret,
+        Duration::minutes(1),
+    )
+    .unwrap();
+    let client = common::TestClient::new(common::create_test_router(common::create_test_state(
+        config,
+        reader.clone(),
+    )));
+    let path = if logs {
+        format!("/api/tasks/runs/{}/logs", run.id)
+    } else {
+        format!("/api/tasks/runs/{}", run.id)
+    };
+    client
+        .get_auth(&path, &token)
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+    let mut revocation = pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE workspace_members SET is_active = false WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(user)
+    .execute(&mut *revocation)
+    .await
+    .unwrap();
+    let request = tokio::spawn(async move { client.get_auth(&path, &token).await });
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if request.is_finished() {
+                return false;
+            }
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock')")
+                .bind(&application).fetch_one(&pool).await.unwrap();
+            if waiting {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    revocation.commit().await.unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await
+        .unwrap()
+        .unwrap();
+    reader.close().await;
+    cleanup(&pool, organization, user).await;
+    response.assert_status(axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(response.json_value()["error"], "Workspace access required");
+    assert!(
+        blocked.unwrap(),
+        "HTTP disclosure must wait for pending revocation"
+    );
+}
+
+#[tokio::test]
+async fn http_run_waits_for_revocation_before_disclosing() {
+    http_revocation(false).await;
+}
+
+#[tokio::test]
+async fn http_logs_wait_for_revocation_before_disclosing() {
+    http_revocation(true).await;
+}

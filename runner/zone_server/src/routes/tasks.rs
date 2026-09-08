@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{sources, tasks, workspace_members};
+use crate::db::{sources, task_access, tasks, workspace_members};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
@@ -97,7 +97,7 @@ async fn authorize_run(
     state: &AppState,
     auth: &AuthUser,
     id: Uuid,
-) -> Result<tasks::TaskRunRow, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<task_access::Snapshot, (StatusCode, Json<ErrorResponse>)> {
     let run = tasks::get_task_run(state.db(), id)
         .await
         .map_err(|error| {
@@ -113,8 +113,22 @@ async fn authorize_run(
                 Json(ErrorResponse::new("Task run not found")),
             )
         })?;
-    authorize_task(state, auth, run.task_id, false).await?;
-    Ok(run)
+    let (actor, _) = authorize_task(state, auth, run.task_id, false).await?;
+    task_access::read(state.db(), id, actor)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Could not read authorized task snapshot");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse::new("Workspace access required")),
+            )
+        })
 }
 
 async fn validate_projects(
@@ -618,7 +632,7 @@ pub async fn get_run(
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
     match authorize_run(&state, &auth, run_id).await {
-        Ok(run) => Json(TaskRunResponse::from(run)).into_response(),
+        Ok(snapshot) => Json(TaskRunResponse::from(snapshot.run)).into_response(),
         Err(response) => response.into_response(),
     }
 }
@@ -629,16 +643,16 @@ pub async fn get_run_logs(
     auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_run(&state, &auth, run_id).await {
-        return response.into_response();
-    }
-
-    match tasks::get_task_run_logs(state.db(), run_id).await {
-        Ok(logs) => Json(TaskRunLogsListResponse {
-            logs: logs.into_iter().map(TaskRunLogData::from).collect(),
+    match authorize_run(&state, &auth, run_id).await {
+        Ok(snapshot) => Json(TaskRunLogsListResponse {
+            logs: snapshot
+                .logs
+                .into_iter()
+                .map(TaskRunLogData::from)
+                .collect(),
         })
         .into_response(),
-        Err(error) => database_error(error),
+        Err(response) => response.into_response(),
     }
 }
 

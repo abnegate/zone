@@ -463,7 +463,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires migrated PostgreSQL DATABASE_URL"]
     async fn actions_enforce_workspace_roles_sparse_updates_and_mentions() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let created = create_task(
@@ -601,7 +600,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires migrated PostgreSQL DATABASE_URL"]
     async fn reminders_cancel_revoke_and_deliver_once_across_workers() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
         let reminder = || reminders::Reminder {
