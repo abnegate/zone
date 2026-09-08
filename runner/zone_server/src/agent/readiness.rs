@@ -7,6 +7,11 @@
 //! module refuses that: counts that do not close collapse to unknown, a
 //! partially fetched thread or comment list is a named blocker on its own, and
 //! a review only counts when it names the current head commit.
+//!
+//! Which review bots are recognised is configuration, not a constant. Every
+//! bot states its own scale, and a score is only ever compared against the bar
+//! of the scale it was published on, so a perfect mark from one bot can never
+//! stand in for a perfect mark from another.
 
 use serde::Serialize;
 use std::fmt;
@@ -14,8 +19,11 @@ use std::sync::LazyLock;
 
 const SHA_LENGTH: usize = 40;
 const SHORT_SHA_LENGTH: usize = 7;
+const BOT_SUFFIX: &str = "[bot]";
 const GREPTILE_REVIEWER: &str = "greptile-apps";
 const GREPTILE_SCALE: u8 = 5;
+const CODERABBIT_REVIEWER: &str = "coderabbitai";
+const CODERABBIT_SCALE: u8 = 1;
 
 /// A 40 character hexadecimal Git object name, lowercased.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -180,7 +188,12 @@ pub struct ReviewSummary {
 }
 
 /// A review bot whose comments carry a confidence score and a reviewed commit.
-pub trait ReviewSignal {
+///
+/// An implementation owns every piece of vendor knowledge: the account it
+/// publishes under, the bar it has to clear, the scale that bar is expressed
+/// on, and how to read a score and a reviewed commit out of a comment body.
+/// Nothing above this trait knows any of that.
+pub trait ReviewSignal: Send + Sync {
     fn reviewer(&self) -> &str;
 
     fn required(&self) -> Confidence;
@@ -191,10 +204,17 @@ pub trait ReviewSignal {
 
     fn reviewed_commit(&self, body: &str) -> Option<CommitSha>;
 
+    /// Whether a comment author is this reviewer. GitHub reports a bot account
+    /// as `name` over GraphQL and `name[bot]` over REST, so both are the
+    /// reviewer.
+    fn authored(&self, author: &str) -> bool {
+        account(author) == account(self.reviewer())
+    }
+
     fn summarize(&self, comments: &[ReviewComment]) -> Option<ReviewSummary> {
         comments
             .iter()
-            .filter(|comment| comment.author == self.reviewer() && self.identifies(&comment.body))
+            .filter(|comment| self.authored(&comment.author) && self.identifies(&comment.body))
             .max_by_key(|comment| published_at(&comment.created_at))
             .map(|comment| ReviewSummary {
                 reviewer: self.reviewer().to_string(),
@@ -204,6 +224,146 @@ pub trait ReviewSignal {
                 reviewed_commit: self.reviewed_commit(&comment.body),
                 created_at: comment.created_at.clone(),
             })
+    }
+}
+
+/// A review bot this build knows how to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalKind {
+    CodeRabbit,
+    Greptile,
+}
+
+impl SignalKind {
+    pub const ALL: [Self; 2] = [Self::CodeRabbit, Self::Greptile];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match account(value).as_str() {
+            "coderabbit" | "coderabbitai" => Some(Self::CodeRabbit),
+            "greptile" | "greptile-apps" => Some(Self::Greptile),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CodeRabbit => "coderabbit",
+            Self::Greptile => "greptile",
+        }
+    }
+
+    fn signal(self) -> Box<dyn ReviewSignal> {
+        match self {
+            Self::CodeRabbit => Box::new(CodeRabbit),
+            Self::Greptile => Box::new(Greptile),
+        }
+    }
+}
+
+/// The set of review bots whose summaries count as review evidence.
+///
+/// The set is configuration. A deployment that runs one bot recognises one; a
+/// deployment that runs several recognises several and every one of them that
+/// spoke has to clear its own bar. A set with nothing in it can never
+/// establish review evidence, so it can never be ready.
+pub struct ReviewSignals {
+    signals: Vec<Box<dyn ReviewSignal>>,
+}
+
+/// One recognised bot's latest summary, paired with the bar it must clear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewFinding {
+    pub required: Confidence,
+    pub summary: ReviewSummary,
+}
+
+impl ReviewSignals {
+    /// Every bot this build knows how to read.
+    pub fn recognized() -> Self {
+        Self::of(SignalKind::ALL)
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            signals: Vec::new(),
+        }
+    }
+
+    pub fn of(kinds: impl IntoIterator<Item = SignalKind>) -> Self {
+        let mut chosen: Vec<SignalKind> = Vec::new();
+        for kind in kinds {
+            if !chosen.contains(&kind) {
+                chosen.push(kind);
+            }
+        }
+        Self::custom(chosen.into_iter().map(SignalKind::signal).collect())
+    }
+
+    pub fn custom(signals: Vec<Box<dyn ReviewSignal>>) -> Self {
+        Self { signals }
+    }
+
+    /// Build a set from configured names, rejecting anything unrecognised
+    /// rather than silently dropping it.
+    pub fn select<Name: AsRef<str>>(names: &[Name]) -> Result<Self, String> {
+        let mut kinds = Vec::with_capacity(names.len());
+        for name in names {
+            kinds.push(SignalKind::parse(name.as_ref()).ok_or_else(|| {
+                format!(
+                    "Unrecognised review signal \"{}\". Recognised signals: {}.",
+                    name.as_ref(),
+                    SignalKind::ALL.map(SignalKind::as_str).join(", ")
+                )
+            })?);
+        }
+        Ok(Self::of(kinds))
+    }
+
+    pub fn reviewers(&self) -> Vec<String> {
+        self.signals
+            .iter()
+            .map(|signal| signal.reviewer().to_string())
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.signals.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.signals.is_empty()
+    }
+
+    /// The latest summary from every recognised bot that published one.
+    ///
+    /// A bot that said nothing produces no finding: silence is not evidence
+    /// either way, and the missing-review blocker covers the case where every
+    /// recognised bot was silent.
+    pub fn findings(&self, comments: &[ReviewComment]) -> Vec<ReviewFinding> {
+        self.signals
+            .iter()
+            .filter_map(|signal| {
+                signal.summarize(comments).map(|summary| ReviewFinding {
+                    required: signal.required(),
+                    summary,
+                })
+            })
+            .collect()
+    }
+}
+
+impl Default for ReviewSignals {
+    fn default() -> Self {
+        Self::recognized()
+    }
+}
+
+impl fmt::Debug for ReviewSignals {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("ReviewSignals")
+            .field(&self.reviewers())
+            .finish()
     }
 }
 
@@ -221,6 +381,14 @@ static REVIEWED_SHA_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 static MARKUP_PATTERN: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"<[^>]*>|&nbsp;|[*_`]").expect("markup pattern"));
+static ACTIONABLE_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)Actionable\s+comments\s+posted\s*:\s*(\d{1,4})")
+        .expect("actionable comments pattern")
+});
+static REVIEWED_RANGE_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)between\s+([0-9a-f]{40})\s+and\s+([0-9a-f]{40})")
+        .expect("reviewed commit range pattern")
+});
 
 /// Greptile publishes one summary comment carrying `Confidence Score: n/5` and
 /// `Last reviewed commit: <sha>`.
@@ -255,6 +423,49 @@ impl ReviewSignal for Greptile {
         let line = REVIEWED_LINE_PATTERN.find(body)?;
         let captures = REVIEWED_SHA_PATTERN.captures(line.as_str())?;
         CommitSha::parse(captures.get(1)?.as_str())
+    }
+}
+
+/// CodeRabbit publishes one walkthrough comment carrying
+/// `Actionable comments posted: n` and a review range naming the base and the
+/// head commit it read.
+///
+/// It scores nothing, so its scale is one: a review with no actionable comment
+/// left on it is 1/1, and a review that left any is 0/1. That is a different
+/// scale from a five-point score and never substitutes for one.
+pub struct CodeRabbit;
+
+impl ReviewSignal for CodeRabbit {
+    fn reviewer(&self) -> &str {
+        CODERABBIT_REVIEWER
+    }
+
+    fn required(&self) -> Confidence {
+        Confidence {
+            score: CODERABBIT_SCALE,
+            scale: CODERABBIT_SCALE,
+        }
+    }
+
+    fn identifies(&self, body: &str) -> bool {
+        let readable = readable(body);
+        ACTIONABLE_PATTERN.is_match(&readable) || REVIEWED_RANGE_PATTERN.is_match(&readable)
+    }
+
+    fn confidence(&self, body: &str) -> Option<Confidence> {
+        let readable = readable(body);
+        let captures = ACTIONABLE_PATTERN.captures(&readable)?;
+        let actionable: u32 = captures.get(1)?.as_str().parse().ok()?;
+        Some(Confidence {
+            score: u8::from(actionable == 0),
+            scale: CODERABBIT_SCALE,
+        })
+    }
+
+    fn reviewed_commit(&self, body: &str) -> Option<CommitSha> {
+        let readable = readable(body);
+        let captures = REVIEWED_RANGE_PATTERN.captures(&readable)?;
+        CommitSha::parse(captures.get(2)?.as_str())
     }
 }
 
@@ -331,7 +542,7 @@ pub enum Blocker {
     CommentsIncomplete,
     UnresolvedThreads(u32),
     ReviewMissing {
-        reviewer: String,
+        reviewers: Vec<String>,
     },
     ReviewLinkMissing {
         reviewer: String,
@@ -405,7 +616,12 @@ impl fmt::Display for Blocker {
                 "{count} unresolved review {}",
                 if *count == 1 { "thread" } else { "threads" }
             ),
-            Self::ReviewMissing { reviewer } => write!(formatter, "{reviewer} summary missing"),
+            Self::ReviewMissing { reviewers } if reviewers.is_empty() => formatter.write_str(
+                "No review signal is recognised, so no review evidence can be established",
+            ),
+            Self::ReviewMissing { reviewers } => {
+                write!(formatter, "{} summary missing", reviewers.join(", "))
+            }
             Self::ReviewLinkMissing { reviewer } => {
                 write!(formatter, "{reviewer} review link missing")
             }
@@ -470,7 +686,7 @@ pub struct Assessment {
     pub ready: bool,
     pub blockers: Vec<Blocker>,
     pub checks: CheckSummary,
-    pub review: Option<ReviewSummary>,
+    pub reviews: Vec<ReviewSummary>,
     pub review_current: bool,
     pub unresolved: u32,
     pub threads_complete: bool,
@@ -485,21 +701,31 @@ impl Assessment {
 
 /// Judge one pull request. `ready` is the conjunction of every positive
 /// condition, so evidence that was never established can never satisfy it.
-pub fn assess(evidence: PullEvidence, signal: &dyn ReviewSignal) -> Assessment {
+///
+/// Nothing here knows which bots exist. Every recognised bot that published a
+/// summary has to clear the bar it declared, on the scale it declared, and at
+/// least one has to have spoken at all.
+pub fn assess(evidence: PullEvidence, signals: &ReviewSignals) -> Assessment {
     let checks = evidence.checks.normalize();
-    let review = signal.summarize(&evidence.comments.comments);
+    let findings = signals.findings(&evidence.comments.comments);
     let unresolved = evidence.threads.unresolved();
     let threads_complete = evidence.threads.complete;
     let comments_complete = evidence.comments.complete;
-    let reviewer = signal.reviewer().to_string();
-    let required = signal.required();
-    let reviewed = review
-        .as_ref()
-        .and_then(|summary| summary.reviewed_commit.clone());
-    let review_current =
-        matches!((&reviewed, &evidence.head), (Some(reviewed), Some(head)) if reviewed == head);
-    let confidence = review.as_ref().and_then(|summary| summary.confidence);
-    let review_url = review.as_ref().and_then(|summary| summary.url.clone());
+    let review_current = !findings.is_empty()
+        && findings.iter().all(|finding| {
+            matches!(
+                (&finding.summary.reviewed_commit, &evidence.head),
+                (Some(reviewed), Some(head)) if reviewed == head
+            )
+        });
+    let reviews_satisfied = !findings.is_empty()
+        && findings.iter().all(|finding| {
+            finding.summary.url.is_some()
+                && finding
+                    .summary
+                    .confidence
+                    .is_some_and(|observed| observed.satisfies(finding.required))
+        });
     let mut blockers = Vec::new();
 
     if evidence.draft {
@@ -518,42 +744,41 @@ pub fn assess(evidence: PullEvidence, signal: &dyn ReviewSignal) -> Assessment {
         blockers.push(Blocker::UnresolvedThreads(unresolved));
     }
 
-    match &review {
-        None => blockers.push(Blocker::ReviewMissing {
-            reviewer: reviewer.clone(),
-        }),
-        Some(_) => {
-            match confidence {
-                None => blockers.push(Blocker::ConfidenceUnreadable {
+    if findings.is_empty() {
+        blockers.push(Blocker::ReviewMissing {
+            reviewers: signals.reviewers(),
+        });
+    }
+    for finding in &findings {
+        let reviewer = finding.summary.reviewer.clone();
+        match finding.summary.confidence {
+            None => blockers.push(Blocker::ConfidenceUnreadable {
+                reviewer: reviewer.clone(),
+            }),
+            Some(observed) if !observed.satisfies(finding.required) => {
+                blockers.push(Blocker::ConfidenceBelowRequirement {
                     reviewer: reviewer.clone(),
-                }),
-                Some(observed) if !observed.satisfies(required) => {
-                    blockers.push(Blocker::ConfidenceBelowRequirement {
-                        reviewer: reviewer.clone(),
-                        observed,
-                        required,
-                    });
-                }
-                Some(_) => {}
-            }
-            match (&reviewed, &evidence.head) {
-                (None, _) => blockers.push(Blocker::ReviewedCommitUnreadable {
-                    reviewer: reviewer.clone(),
-                }),
-                (Some(reviewed), Some(head)) if reviewed != head => {
-                    blockers.push(Blocker::ReviewedCommitStale {
-                        reviewer: reviewer.clone(),
-                        reviewed: reviewed.clone(),
-                        head: head.clone(),
-                    });
-                }
-                _ => {}
-            }
-            if review_url.is_none() {
-                blockers.push(Blocker::ReviewLinkMissing {
-                    reviewer: reviewer.clone(),
+                    observed,
+                    required: finding.required,
                 });
             }
+            Some(_) => {}
+        }
+        match (&finding.summary.reviewed_commit, &evidence.head) {
+            (None, _) => blockers.push(Blocker::ReviewedCommitUnreadable {
+                reviewer: reviewer.clone(),
+            }),
+            (Some(reviewed), Some(head)) if reviewed != head => {
+                blockers.push(Blocker::ReviewedCommitStale {
+                    reviewer: reviewer.clone(),
+                    reviewed: reviewed.clone(),
+                    head: head.clone(),
+                });
+            }
+            _ => {}
+        }
+        if finding.summary.url.is_none() {
+            blockers.push(Blocker::ReviewLinkMissing { reviewer });
         }
     }
 
@@ -570,10 +795,8 @@ pub fn assess(evidence: PullEvidence, signal: &dyn ReviewSignal) -> Assessment {
         && threads_complete
         && comments_complete
         && unresolved == 0
-        && review.is_some()
-        && review_url.is_some()
+        && reviews_satisfied
         && review_current
-        && confidence.is_some_and(|observed| observed.satisfies(required))
         && checks.complete
         && checks.state == CheckState::Success;
 
@@ -587,7 +810,10 @@ pub fn assess(evidence: PullEvidence, signal: &dyn ReviewSignal) -> Assessment {
         ready,
         blockers,
         checks,
-        review,
+        reviews: findings
+            .into_iter()
+            .map(|finding| finding.summary)
+            .collect(),
         review_current,
         unresolved,
         threads_complete,
@@ -602,6 +828,13 @@ fn readable(body: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn account(login: &str) -> String {
+    login
+        .trim()
+        .trim_end_matches(BOT_SUFFIX)
+        .to_ascii_lowercase()
 }
 
 fn published_at(value: &str) -> i64 {
@@ -786,7 +1019,7 @@ mod tests {
                 },
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert_eq!(
@@ -808,7 +1041,7 @@ mod tests {
                 },
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert_eq!(
@@ -828,7 +1061,7 @@ mod tests {
                 },
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert!(!assessment.review_current);
@@ -849,7 +1082,7 @@ mod tests {
                 head: CommitSha::parse("not-a-commit"),
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert!(assessment.blockers.contains(&Blocker::HeadCommitUnverified));
@@ -866,7 +1099,7 @@ mod tests {
                 },
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert_eq!(
@@ -887,7 +1120,7 @@ mod tests {
                 },
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert_eq!(
@@ -914,7 +1147,7 @@ mod tests {
                 },
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert_eq!(assessment.unresolved, 2);
@@ -926,7 +1159,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "2 unresolved review threads".to_string(),
-                "greptile-apps summary missing".to_string(),
+                "coderabbitai, greptile-apps summary missing".to_string(),
             ]
         );
     }
@@ -943,7 +1176,7 @@ mod tests {
                 },
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert_eq!(assessment.reports()[0].code, BlockerCode::ReviewLinkMissing);
@@ -956,7 +1189,7 @@ mod tests {
                 draft: true,
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert_eq!(assessment.blockers, vec![Blocker::Draft]);
@@ -979,7 +1212,7 @@ mod tests {
                     },
                     ..green_pull()
                 },
-                &Greptile,
+                &ReviewSignals::recognized(),
             );
             assert!(!assessment.ready, "state {state}");
             assert_eq!(assessment.reports()[0].code, code, "state {state}");
@@ -999,7 +1232,7 @@ mod tests {
                 },
                 ..green_pull()
             },
-            &Greptile,
+            &ReviewSignals::recognized(),
         );
         assert!(!assessment.ready);
         assert_eq!(assessment.checks.state, CheckState::Unknown);
@@ -1008,18 +1241,19 @@ mod tests {
 
     #[test]
     fn a_fully_green_pull_request_is_ready_with_no_blockers() {
-        let assessment = assess(green_pull(), &Greptile);
+        let assessment = assess(green_pull(), &ReviewSignals::recognized());
         assert!(assessment.ready);
         assert!(assessment.blockers.is_empty());
         assert!(assessment.review_current);
         assert_eq!(assessment.checks.state, CheckState::Success);
         assert_eq!(assessment.checks.counts.passed, 4);
+        assert_eq!(assessment.reviews.len(), 1);
         assert_eq!(
-            assessment.review.as_ref().unwrap().confidence,
+            assessment.reviews[0].confidence,
             Some(Confidence { score: 5, scale: 5 })
         );
         assert_eq!(
-            assessment.review.unwrap().reviewed_commit,
+            assessment.reviews[0].reviewed_commit,
             CommitSha::parse(HEAD)
         );
     }
@@ -1062,7 +1296,7 @@ mod tests {
                                                 },
                                                 ..green_pull()
                                             },
-                                            &Greptile,
+                                            &ReviewSignals::recognized(),
                                         );
                                         assert_eq!(
                                             assessment.ready,
@@ -1194,5 +1428,289 @@ mod tests {
         for value in ["", "aaaaaaa", &format!("{HEAD}a"), &HEAD.replace('a', "z")] {
             assert!(CommitSha::parse(value).is_none(), "{value}");
         }
+    }
+
+    fn coderabbit_body(actionable: u32, base: &str, head: &str) -> String {
+        format!(
+            "**Actionable comments posted: {actionable}**\n\n\
+             <details>\n<summary>Commits</summary>\n\n\
+             Reviewing files that changed from the base of the PR and between `{base}` and `{head}`.\n\n\
+             </details>"
+        )
+    }
+
+    fn authored(author: &str, body: &str) -> ReviewComment {
+        ReviewComment {
+            id: 12,
+            author: author.to_string(),
+            body: body.to_string(),
+            url: "https://github.com/owner/repository/pull/7#issuecomment-12".into(),
+            created_at: "2026-09-06T00:00:00Z".into(),
+        }
+    }
+
+    struct Housebot;
+
+    impl ReviewSignal for Housebot {
+        fn reviewer(&self) -> &str {
+            "housebot"
+        }
+
+        fn required(&self) -> Confidence {
+            Confidence { score: 7, scale: 7 }
+        }
+
+        fn identifies(&self, body: &str) -> bool {
+            body.contains("Housebot verdict")
+        }
+
+        fn confidence(&self, body: &str) -> Option<Confidence> {
+            body.contains("Housebot verdict: clean")
+                .then_some(Confidence { score: 7, scale: 7 })
+        }
+
+        fn reviewed_commit(&self, body: &str) -> Option<CommitSha> {
+            body.split_whitespace().find_map(CommitSha::parse)
+        }
+    }
+
+    #[test]
+    fn coderabbit_reads_its_own_comment_and_states_its_own_scale() {
+        let body = coderabbit_body(0, OLDER, HEAD);
+        assert!(CodeRabbit.identifies(&body));
+        assert_eq!(
+            CodeRabbit.confidence(&body),
+            Some(Confidence { score: 1, scale: 1 })
+        );
+        assert_eq!(CodeRabbit.reviewed_commit(&body), CommitSha::parse(HEAD));
+
+        let noisy = coderabbit_body(3, OLDER, HEAD);
+        assert_eq!(
+            CodeRabbit.confidence(&noisy),
+            Some(Confidence { score: 0, scale: 1 }),
+            "actionable comments are not a clean review"
+        );
+        assert!(!CodeRabbit.identifies("Nice work!"));
+        assert!(
+            CodeRabbit
+                .reviewed_commit("Reviewing between aaaaaaa and bbbbbbb")
+                .is_none(),
+            "a short hex run is not a commit name"
+        );
+    }
+
+    #[test]
+    fn coderabbit_blocks_when_it_reviewed_an_older_commit() {
+        let assessment = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![
+                        comment(&summary_body(5, HEAD)),
+                        authored(CODERABBIT_REVIEWER, &coderabbit_body(0, HEAD, OLDER)),
+                    ],
+                },
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(!assessment.ready);
+        assert!(!assessment.review_current);
+        assert_eq!(assessment.reviews.len(), 2);
+        assert_eq!(
+            assessment.reports(),
+            vec![BlockerReport {
+                code: BlockerCode::ReviewedCommitStale,
+                detail: "coderabbitai reviewed bbbbbbb; head is aaaaaaa".into(),
+            }],
+            "one bot's current review does not excuse another's stale one"
+        );
+    }
+
+    #[test]
+    fn two_recognized_bots_at_their_own_bars_are_ready_together() {
+        let assessment = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![
+                        comment(&summary_body(5, HEAD)),
+                        authored(
+                            &format!("{CODERABBIT_REVIEWER}{BOT_SUFFIX}"),
+                            &coderabbit_body(0, OLDER, HEAD),
+                        ),
+                    ],
+                },
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(assessment.ready, "{:?}", assessment.reports());
+        assert_eq!(
+            assessment
+                .reviews
+                .iter()
+                .map(|review| review.reviewer.as_str())
+                .collect::<Vec<_>>(),
+            vec![CODERABBIT_REVIEWER, GREPTILE_REVIEWER],
+            "a bot account is the same reviewer with or without its [bot] suffix"
+        );
+    }
+
+    #[test]
+    fn a_perfect_score_on_one_scale_never_stands_in_for_another() {
+        assert!(
+            !Confidence { score: 1, scale: 1 }.satisfies(Greptile.required()),
+            "a clean 1/1 must not clear a 5/5 bar"
+        );
+        assert!(
+            !Confidence { score: 5, scale: 5 }.satisfies(CodeRabbit.required()),
+            "a 5/5 must not clear a 1/1 bar"
+        );
+        assert!(
+            !Confidence {
+                score: 10,
+                scale: 10
+            }
+            .satisfies(Greptile.required()),
+            "a 10/10 must not clear a 5/5 bar"
+        );
+
+        let assessment = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![
+                        comment(&summary_body(5, HEAD)),
+                        authored(
+                            CODERABBIT_REVIEWER,
+                            &format!(
+                                "Confidence Score: 10/10\n{}",
+                                coderabbit_body(0, OLDER, HEAD)
+                            ),
+                        ),
+                    ],
+                },
+                ..green_pull()
+            },
+            &ReviewSignals::of([SignalKind::Greptile]),
+        );
+        assert!(
+            assessment.ready,
+            "a bot outside the recognised set is not review evidence at all"
+        );
+    }
+
+    #[test]
+    fn the_recognized_set_decides_which_comments_are_review_evidence() {
+        let comments = CommentEvidence {
+            complete: true,
+            comments: vec![comment(&summary_body(5, HEAD))],
+        };
+
+        let recognized = assess(
+            PullEvidence {
+                comments: comments.clone(),
+                ..green_pull()
+            },
+            &ReviewSignals::of([SignalKind::Greptile]),
+        );
+        assert!(recognized.ready);
+
+        let elsewhere = assess(
+            PullEvidence {
+                comments: comments.clone(),
+                ..green_pull()
+            },
+            &ReviewSignals::of([SignalKind::CodeRabbit]),
+        );
+        assert!(!elsewhere.ready);
+        assert_eq!(
+            elsewhere.reports(),
+            vec![BlockerReport {
+                code: BlockerCode::ReviewMissing,
+                detail: "coderabbitai summary missing".into(),
+            }]
+        );
+
+        let none = assess(
+            PullEvidence {
+                comments,
+                ..green_pull()
+            },
+            &ReviewSignals::empty(),
+        );
+        assert!(
+            !none.ready,
+            "an empty set can never establish review evidence"
+        );
+        assert_eq!(
+            none.reports()[0].detail,
+            "No review signal is recognised, so no review evidence can be established"
+        );
+    }
+
+    #[test]
+    fn signal_names_are_parsed_and_unrecognised_names_are_rejected() {
+        assert_eq!(
+            ReviewSignals::select(&["greptile", "CodeRabbit", "greptile-apps"])
+                .unwrap()
+                .reviewers(),
+            vec![GREPTILE_REVIEWER, CODERABBIT_REVIEWER],
+            "names resolve to signals and repeats collapse"
+        );
+        assert_eq!(
+            SignalKind::parse("coderabbitai[bot]"),
+            Some(SignalKind::CodeRabbit)
+        );
+        assert!(SignalKind::parse("sonarcloud").is_none());
+        let error = ReviewSignals::select(&["sonarcloud"]).unwrap_err();
+        assert!(error.contains("sonarcloud"), "{error}");
+        assert!(error.contains("coderabbit, greptile"), "{error}");
+        assert_eq!(ReviewSignals::recognized().len(), SignalKind::ALL.len());
+        assert!(ReviewSignals::empty().is_empty());
+    }
+
+    #[test]
+    fn the_assessment_holds_no_vendor_knowledge() {
+        let signals = ReviewSignals::custom(vec![Box::new(Housebot)]);
+        let clean = authored("housebot", &format!("Housebot verdict: clean {HEAD}"));
+        let assessment = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![clean, comment(&summary_body(1, OLDER))],
+                },
+                ..green_pull()
+            },
+            &signals,
+        );
+        assert!(
+            assessment.ready,
+            "a signal the module has never heard of judges itself: {:?}",
+            assessment.reports()
+        );
+        assert_eq!(assessment.reviews.len(), 1);
+        assert_eq!(assessment.reviews[0].reviewer, "housebot");
+
+        let dirty = assess(
+            PullEvidence {
+                comments: CommentEvidence {
+                    complete: true,
+                    comments: vec![authored(
+                        "housebot",
+                        &format!("Housebot verdict: findings {HEAD}"),
+                    )],
+                },
+                ..green_pull()
+            },
+            &signals,
+        );
+        assert!(!dirty.ready);
+        assert_eq!(
+            dirty.reports()[0].code,
+            BlockerCode::ConfidenceUnreadable,
+            "the bar and the scale both come from the signal"
+        );
     }
 }

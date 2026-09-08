@@ -5,7 +5,7 @@ use chrono::Utc;
 use reqwest::{Client, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use uuid::Uuid;
 use zone_core::tools::{
@@ -13,11 +13,15 @@ use zone_core::tools::{
 };
 
 use super::readiness::{
-    self, CheckEvidence, CommentEvidence, CommitSha, Greptile, PullEvidence, ReviewComment,
+    self, CheckEvidence, CommentEvidence, CommitSha, PullEvidence, ReviewComment, ReviewSignals,
     ReviewThread, ThreadEvidence,
 };
+use super::releases::{self, Lookup, ReleaseIdentity, ReleasePipeline, RunEvidence};
 use super::tools::{WorkspaceScope, truncate};
 use crate::db::{sources, workspace_members};
+use crate::services::prioritisation::{
+    Configuration as Prioritisation, Prioritiser, RiskSignal, pull_request,
+};
 
 const ORIGIN: &str = "https://api.github.com/";
 const PAGE_SIZE: usize = 100;
@@ -33,6 +37,10 @@ reviewThreads(first:$first){pageInfo{hasNextPage}nodes{isResolved}}\
 comments(last:$first){pageInfo{hasPreviousPage}nodes{databaseId body url createdAt author{login}}}\
 }}}";
 const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
+const PULL_FILE_PAGES: u32 = 30;
+const RELEASE_PAGE_SIZE: usize = 5;
+const RELEASE_EVENT: &str = "release";
+const RELEASE_ASSESSMENT: &str = "Observed release-triggered workflow runs only. A lookup that could not be completed, a run record whose identity does not add up, and a release with no observed run are all reported as unknown rather than succeeded. This is not proof that release artifacts were published or that the deployed service is healthy.";
 const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const LOG_EXCERPT_CHARS: u64 = 5_500;
 const LOG_EXCERPT_FLOOR_CHARS: u64 = 500;
@@ -62,6 +70,11 @@ const LOG_REDIRECT_HOSTS: [&str; 4] = [
 ];
 const LOG_NOTE: &str = "Excerpt of what the job printed, not proof of why it failed. Per-line timestamps, progress redraws and over-long lines are trimmed, and unshown regions are marked as omitted.";
 
+/// Compiling the path vocabulary is the expensive part, so the prioritiser
+/// behind a blast radius is built once and shared by every assessment.
+static PRIORITISER: LazyLock<Prioritiser> =
+    LazyLock::new(|| Prioritiser::new(Prioritisation::default()));
+
 #[derive(Clone, Copy)]
 enum Operation {
     Build,
@@ -69,6 +82,7 @@ enum Operation {
     Issues,
     File,
     PullRequests,
+    ReleasePipelines,
     CheckLogs,
     CreatePull,
     Comment,
@@ -81,6 +95,7 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::Issues,
         Operation::File,
         Operation::PullRequests,
+        Operation::ReleasePipelines,
         Operation::CheckLogs,
         Operation::CreatePull,
         Operation::Comment,
@@ -116,6 +131,7 @@ struct Arguments {
     body: Option<String>,
     number: Option<u64>,
     job_id: Option<u64>,
+    tag: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -125,6 +141,9 @@ struct Configuration {
     branch: Option<String>,
     path: Option<String>,
     token: Option<String>,
+    /// Which review bots count as review evidence for this source. Absent
+    /// means every bot this build recognises.
+    review_signals: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -137,6 +156,7 @@ impl Tool for Integration {
             Operation::File => "read_repository_file",
             Operation::CheckLogs => "read_check_logs",
             Operation::PullRequests => "assess_pull_requests",
+            Operation::ReleasePipelines => "assess_release_pipelines",
             Operation::CreatePull => "create_pull_request",
             Operation::Comment => "comment_on_issue",
         }
@@ -157,7 +177,10 @@ impl Tool for Integration {
                 "Read UTF-8 content of a specific repository file from a connected GitHub source at an immutable commit, with a source URL. Returns a character page that fits the context budget; follow next to continue. Does not read host files. GitHub files over 100 MB are unsupported."
             }
             Operation::PullRequests => {
-                "Assess whether pull requests on a connected GitHub source are ready to merge, returning a verdict plus every blocker behind it. Ready is the conjunction of every positive condition: no unresolved review threads, a review-bot summary at full confidence naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
+                "Assess whether pull requests on a connected GitHub source are ready to merge, returning a verdict plus every blocker behind it. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
+            }
+            Operation::ReleasePipelines => {
+                "Assess the workflow pipelines behind published GitHub releases on a connected source, returning each release's pipeline state plus every reason it is not green. Succeeded is the conjunction of every positive condition: the lookup completed, at least one release-triggered workflow run was observed, every observed run names the same commit, and every one of them succeeded. A lookup that could not be completed, a run record whose identity or state does not add up, runs that disagree on the commit they built, and a release with no observed run are all reported as unknown rather than succeeded. Results are paginated. This is what the workflows reported: it is not proof that release artifacts were published, that the deployed service is healthy, or that a rerun would pass."
             }
             Operation::CheckLogs => {
                 "Read a bounded excerpt of one GitHub Actions job log for a connected source, after confirming the job runs against the pull request or commit being asked about. Returns the lines around the first error and the end of the log within a character budget, never the whole file; omitted regions and capped downloads are marked. An excerpt is evidence of what the job printed, never proof of why it failed, that the log names the real cause, or that a rerun would pass."
@@ -173,7 +196,10 @@ impl Tool for Integration {
 
     fn parameters_schema(&self) -> Value {
         let mut properties = json!({"source_id": {"type": "string", "format": "uuid"}});
-        if !matches!(self.operation, Operation::Issues | Operation::PullRequests) {
+        if !matches!(
+            self.operation,
+            Operation::Issues | Operation::PullRequests | Operation::ReleasePipelines
+        ) {
             properties["ref"] = json!({"type": "string", "description": "Branch, tag or commit; defaults to the source branch or repository default branch."});
         }
         if matches!(self.operation, Operation::Deployments | Operation::Issues) {
@@ -185,6 +211,10 @@ impl Tool for Integration {
         if matches!(self.operation, Operation::PullRequests) {
             properties["page"] = json!({"type": "integer", "minimum": 1, "description": "Page of 10 pull requests, most recently updated first, default 1. Follow next_page until null."});
             properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Assess only this pull request instead of a page of them."});
+        }
+        if matches!(self.operation, Operation::ReleasePipelines) {
+            properties["page"] = json!({"type": "integer", "minimum": 1, "description": "Page of 5 releases, most recently published first, default 1. Follow next_page until null."});
+            properties["tag"] = json!({"type": "string", "description": "Assess only the release published under this tag instead of a page of releases."});
         }
         let mut required = vec!["source_id"];
         if matches!(self.operation, Operation::File) {
@@ -303,6 +333,7 @@ struct Github {
     client: Client,
     origin: Url,
     log_bytes: u64,
+    signals: ReviewSignals,
     configuration: Configuration,
 }
 
@@ -311,6 +342,10 @@ impl Github {
         if !segment(&configuration.owner) || !segment(&configuration.repo) {
             return Err("The source owner or repository name is invalid.".to_string());
         }
+        let signals = match &configuration.review_signals {
+            Some(names) => ReviewSignals::select(names)?,
+            None => ReviewSignals::recognized(),
+        };
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
@@ -321,8 +356,14 @@ impl Github {
             client,
             origin: Url::parse(ORIGIN).expect("constant GitHub origin"),
             log_bytes: MAX_LOG_BYTES,
+            signals,
             configuration,
         })
+    }
+
+    /// The `owner/repo` name GitHub reports records under.
+    fn full_name(&self) -> String {
+        format!("{}/{}", self.configuration.owner, self.configuration.repo)
     }
 
     fn url(&self, parts: &[&str]) -> Url {
@@ -535,6 +576,11 @@ impl Github {
             result["repository"] = json!(repository);
             return Ok(result);
         }
+        if matches!(operation, Operation::ReleasePipelines) {
+            let mut result = self.release_pipelines(arguments).await?;
+            result["repository"] = json!(repository);
+            return Ok(result);
+        }
         if matches!(operation, Operation::Issues) {
             let state = arguments.state.as_deref().unwrap_or("open");
             if !matches!(state, "open" | "closed" | "all") {
@@ -580,6 +626,7 @@ impl Github {
             }
             Operation::Issues
             | Operation::PullRequests
+            | Operation::ReleasePipelines
             | Operation::CheckLogs
             | Operation::CreatePull
             | Operation::Comment => unreachable!(),
@@ -730,7 +777,8 @@ impl Github {
         };
         let mut assessed = Vec::with_capacity(rows.len());
         for row in &rows {
-            assessed.push(assessment_record(&self.assess(row).await?));
+            let (assessment, risk) = self.assess(row).await?;
+            assessed.push(assessment_record(&assessment, &risk));
         }
         Ok(bound_readiness(
             json!({
@@ -745,7 +793,7 @@ impl Github {
         ))
     }
 
-    async fn assess(&self, row: &Value) -> Result<readiness::Assessment, String> {
+    async fn assess(&self, row: &Value) -> Result<(readiness::Assessment, RiskSignal), String> {
         let number = row["number"]
             .as_u64()
             .filter(|number| *number > 0)
@@ -762,20 +810,66 @@ impl Github {
             Some(head) => self.check_evidence(head.as_str()).await?,
             None => CheckEvidence::default(),
         };
-        Ok(readiness::assess(
-            PullEvidence {
-                number,
-                title: truncate(row["title"].as_str().unwrap_or_default(), PULL_TITLE_CHARS),
-                url: text(row, "html_url"),
-                updated_at: text(row, "updated_at"),
-                draft: draft || review.draft,
-                head,
-                threads: review.threads,
-                comments: review.comments,
-                checks,
-            },
-            &Greptile,
+        let risk = pull_request::risk(&PRIORITISER, &self.changed_paths(number).await);
+        Ok((
+            readiness::assess(
+                PullEvidence {
+                    number,
+                    title: truncate(row["title"].as_str().unwrap_or_default(), PULL_TITLE_CHARS),
+                    url: text(row, "html_url"),
+                    updated_at: text(row, "updated_at"),
+                    draft: draft || review.draft,
+                    head,
+                    threads: review.threads,
+                    comments: review.comments,
+                    checks,
+                },
+                &self.signals,
+            ),
+            risk,
         ))
+    }
+
+    /// The repository-relative paths a pull request touches.
+    ///
+    /// A list that could not be retrieved in full is returned as no paths at
+    /// all. The blast radius that follows then reads as assumed rather than
+    /// measured, which is the honest answer: a partial diff would produce a
+    /// confident tier from evidence that was never complete.
+    async fn changed_paths(&self, number: u64) -> Vec<String> {
+        let number = number.to_string();
+        let mut paths = Vec::new();
+        let mut page = 1;
+        loop {
+            let Ok(response) = self
+                .get(
+                    &["pulls", &number, "files"],
+                    &[
+                        ("per_page", PAGE_SIZE.to_string()),
+                        ("page", page.to_string()),
+                    ],
+                )
+                .await
+            else {
+                return Vec::new();
+            };
+            let Ok(rows) = array(&response) else {
+                return Vec::new();
+            };
+            for row in rows {
+                match row["filename"].as_str() {
+                    Some(filename) if !filename.trim().is_empty() => {
+                        paths.push(filename.to_string());
+                    }
+                    _ => return Vec::new(),
+                }
+            }
+            match next_page(rows.len(), page) {
+                Ok(None) => return paths,
+                Ok(Some(next)) if next <= PULL_FILE_PAGES => page = next,
+                Ok(Some(_)) | Err(_) => return Vec::new(),
+            }
+        }
     }
 
     async fn review(&self, number: u64) -> Result<Review, String> {
@@ -818,6 +912,137 @@ impl Github {
                     .collect(),
             },
         })
+    }
+
+    async fn release_pipelines(&self, arguments: &Arguments) -> Result<Value, String> {
+        let page = arguments.page.unwrap_or(1);
+        let (rows, next) = match arguments.tag.as_deref() {
+            Some(tag) => {
+                if !git_ref(tag) {
+                    return Err("tag is invalid.".to_string());
+                }
+                (vec![self.get(&["releases", "tags", tag], &[]).await?], None)
+            }
+            None => {
+                let response = self
+                    .get(
+                        &["releases"],
+                        &[
+                            ("per_page", RELEASE_PAGE_SIZE.to_string()),
+                            ("page", page.to_string()),
+                        ],
+                    )
+                    .await?;
+                let records = array(&response)?.clone();
+                let next = next_page_of(records.len(), page, RELEASE_PAGE_SIZE)?;
+                (records, next)
+            }
+        };
+        let releases: Vec<ReleaseIdentity> = rows
+            .iter()
+            .map(|row| self.release_identity(row))
+            .collect::<Result<_, _>>()?;
+        let checked_at = Utc::now().to_rfc3339();
+        let sweep = self.pipeline_sweep(&releases).await;
+        let mut assessed = Vec::with_capacity(releases.len());
+        for release in releases {
+            let observed = match &sweep {
+                Some(records) => ReleasePipeline::observe(release.clone(), records, &checked_at),
+                None => ReleasePipeline::unavailable(release.clone(), &checked_at),
+            };
+            let pipeline = if observed.lookup == Lookup::Complete {
+                observed
+            } else {
+                releases::merge(
+                    Some(observed),
+                    self.exact_pipeline(&release, &checked_at).await,
+                )
+            };
+            assessed.push(pipeline_record(&pipeline));
+        }
+        Ok(bound_releases(
+            json!({
+                "assessed": assessed.len(),
+                "succeeded": assessed.iter().filter(|row| row["succeeded"] == true).count(),
+                "next_page": next,
+                "complete": next.is_none(),
+                "assessment": RELEASE_ASSESSMENT,
+            }),
+            &assessed,
+            &checked_at,
+        ))
+    }
+
+    fn release_identity(&self, row: &Value) -> Result<ReleaseIdentity, String> {
+        let release = ReleaseIdentity {
+            repository: self.full_name(),
+            id: row["id"].as_u64().unwrap_or_default(),
+            tag: text(row, "tag_name"),
+            published_at: text(row, "published_at"),
+            url: text(row, "html_url"),
+        };
+        release
+            .valid()
+            .then_some(release)
+            .ok_or_else(|| "GitHub returned a release without a usable identity.".to_string())
+    }
+
+    /// One pass over the repository's release-triggered runs, bounded to the
+    /// window the listed releases were published in.
+    ///
+    /// `None` means the sweep could not be completed, which is not the same as
+    /// finding nothing: every release then falls back to its own lookup rather
+    /// than reading an empty sweep as an absent pipeline.
+    async fn pipeline_sweep(&self, releases: &[ReleaseIdentity]) -> Option<Vec<RunEvidence>> {
+        let earliest = releases
+            .iter()
+            .min_by_key(|release| release.published())
+            .map(|release| release.published_at.as_str())?;
+        self.pipeline_runs(&[("created", format!(">={earliest}"))])
+            .await
+            .ok()
+    }
+
+    /// The runs GitHub itself attributes to one release's tag.
+    async fn exact_pipeline(&self, release: &ReleaseIdentity, checked_at: &str) -> ReleasePipeline {
+        match self.pipeline_runs(&[("branch", release.tag.clone())]).await {
+            Ok(records) => ReleasePipeline::observe(release.clone(), &records, checked_at),
+            Err(_) => ReleasePipeline::unavailable(release.clone(), checked_at),
+        }
+    }
+
+    async fn pipeline_runs(&self, query: &[(&str, String)]) -> Result<Vec<RunEvidence>, String> {
+        let mut query = query.to_vec();
+        query.push(("event", RELEASE_EVENT.to_string()));
+        Ok(self
+            .pages(&["actions", "runs"], Some("workflow_runs"), &query)
+            .await?
+            .iter()
+            .map(|row| self.run_evidence(row))
+            .collect())
+    }
+
+    fn run_evidence(&self, row: &Value) -> RunEvidence {
+        RunEvidence {
+            id: row["id"].as_u64().unwrap_or_default(),
+            workflow_id: row["workflow_id"].as_u64().unwrap_or_default(),
+            attempt: row["run_attempt"]
+                .as_u64()
+                .and_then(|attempt| u32::try_from(attempt).ok())
+                .unwrap_or_default(),
+            name: text(row, "name"),
+            path: text(row, "path"),
+            event: text(row, "event"),
+            status: text(row, "status"),
+            conclusion: row["conclusion"].as_str().map(str::to_string),
+            head_branch: text(row, "head_branch"),
+            head_sha: text(row, "head_sha"),
+            created_at: text(row, "created_at"),
+            started_at: row["run_started_at"].as_str().map(str::to_string),
+            updated_at: text(row, "updated_at"),
+            url: text(row, "html_url"),
+            repository: text(&row["repository"], "full_name"),
+        }
     }
 
     async fn deployments(&self, sha: &str, page: u32) -> Result<Value, String> {
@@ -1528,6 +1753,27 @@ fn bound_readiness(mut result: Value, pulls: &[Value], observed_at: &str) -> Val
     }
 }
 
+/// Trim the assessed releases, and the citations derived from them, together
+/// so the whole payload fits the context budget.
+fn bound_releases(mut result: Value, pipelines: &[Value], observed_at: &str) -> Value {
+    let budget = FILE_PAGE_CHARS as usize;
+    let mut cap = pipelines.len().max(1);
+    loop {
+        apply_record_cap(&mut result, "releases", pipelines, cap, release_priority);
+        let listed = take_array(&result, "releases");
+        result["citations"] = json!(
+            listed
+                .iter()
+                .map(|row| release_citation(row, observed_at))
+                .collect::<Vec<_>>()
+        );
+        if json_chars(&result) <= budget || cap == 1 {
+            return result;
+        }
+        cap /= 2;
+    }
+}
+
 fn json_chars(value: &Value) -> usize {
     value.to_string().chars().count()
 }
@@ -1592,6 +1838,10 @@ fn pull_priority(row: &Value) -> u8 {
     u8::from(row["ready"] == true)
 }
 
+fn release_priority(row: &Value) -> u8 {
+    u8::from(row["succeeded"] == true)
+}
+
 struct Review {
     draft: bool,
     head: Option<CommitSha>,
@@ -1647,7 +1897,10 @@ fn tally<'a>(tokens: impl Iterator<Item = &'a str>) -> CheckEvidence {
     evidence
 }
 
-fn assessment_record(assessment: &readiness::Assessment) -> Value {
+/// The blast radius sits beside the blockers, never among them: how far a
+/// change reaches is information a reviewer weighs, not a reason to withhold a
+/// merge, so `ready` is built without it.
+fn assessment_record(assessment: &readiness::Assessment, risk: &RiskSignal) -> Value {
     json!({
         "number": assessment.number,
         "title": assessment.title,
@@ -1657,12 +1910,70 @@ fn assessment_record(assessment: &readiness::Assessment) -> Value {
         "head": assessment.head.as_ref().map(CommitSha::as_str),
         "ready": assessment.ready,
         "blockers": assessment.reports(),
+        "blast_radius": {
+            "tier": risk.blast_radius,
+            "touched": risk.touched,
+            "drivers": risk.drivers,
+            "presumed": risk.presumed(),
+            "summary": risk.to_string(),
+        },
         "checks": assessment.checks,
-        "review": assessment.review,
+        "reviews": assessment.reviews,
         "review_current": assessment.review_current,
         "unresolved_threads": assessment.unresolved,
         "threads_complete": assessment.threads_complete,
         "comments_complete": assessment.comments_complete,
+    })
+}
+
+fn pipeline_record(pipeline: &ReleasePipeline) -> Value {
+    json!({
+        "tag": pipeline.release.tag,
+        "release_id": pipeline.release.id,
+        "url": pipeline.release.url,
+        "published_at": pipeline.release.published_at,
+        "state": pipeline.state(),
+        "succeeded": pipeline.succeeded(),
+        "complete": pipeline.complete(),
+        "lookup": pipeline.lookup,
+        "commit": pipeline.commit(),
+        "blockers": pipeline.reports(),
+        "runs": pipeline.runs,
+        "checked_at": pipeline.checked_at,
+    })
+}
+
+fn release_citation(record: &Value, observed_at: &str) -> Value {
+    let complete = record["complete"] == true;
+    let state = text(record, "state");
+    let outcome = if record["succeeded"] == true {
+        "success"
+    } else if matches!(state.as_str(), "failed" | "timed-out" | "cancelled") {
+        "failure"
+    } else if matches!(state.as_str(), "running" | "queued") {
+        "pending"
+    } else if !complete {
+        "incomplete"
+    } else {
+        "observed"
+    };
+    let blockers: Vec<String> = take_array(record, "blockers")
+        .iter()
+        .map(|blocker| text(blocker, "detail"))
+        .collect();
+    json!({
+        "kind": "github_build",
+        "title": format!("Release {} pipeline", text(record, "tag")),
+        "url": text(record, "url"),
+        "revision": record["commit"],
+        "observed_at": observed_at,
+        "complete": complete,
+        "outcome": outcome,
+        "note": if blockers.is_empty() {
+            RELEASE_ASSESSMENT.to_string()
+        } else {
+            truncate(&blockers.join("; "), ISSUE_BODY_CHARS)
+        },
     })
 }
 
@@ -1719,6 +2030,7 @@ mod tests {
             branch: Some("main".into()),
             path: None,
             token: Some("test-secret".into()),
+            review_signals: None,
         })
         .unwrap();
         github.origin = Url::parse(&format!("{}/", server.uri())).unwrap();
@@ -1795,6 +2107,7 @@ mod tests {
                     body: None,
                     number: None,
                     job_id: None,
+                    tag: None,
                 },
             )
             .await
@@ -2099,6 +2412,7 @@ mod tests {
                     body: None,
                     number: None,
                     job_id: None,
+                    tag: None,
                 },
             )
             .await
@@ -2227,6 +2541,7 @@ mod tests {
                     body: Some("details".into()),
                     number: None,
                     job_id: None,
+                    tag: None,
                 },
             )
             .await
@@ -2269,6 +2584,7 @@ mod tests {
                     body: Some("ship it".into()),
                     number: Some(7),
                     job_id: None,
+                    tag: None,
                 },
             )
             .await
@@ -2297,6 +2613,7 @@ mod tests {
             body: body.map(str::to_string),
             number,
             job_id: None,
+            tag: None,
         }
     }
 
@@ -2421,6 +2738,7 @@ mod tests {
             body: None,
             number,
             job_id: None,
+            tag: None,
         }
     }
 
@@ -2471,7 +2789,7 @@ mod tests {
         assert_eq!(pull["head"], COMMIT);
         assert_eq!(pull["checks"]["state"], "success");
         assert_eq!(pull["checks"]["counts"]["total"], 2);
-        assert_eq!(pull["review"]["confidence"]["score"], 5);
+        assert_eq!(pull["reviews"][0]["confidence"]["score"], 5);
         assert_eq!(pull["review_current"], true);
         assert_eq!(result["ready"], 1);
         assert_eq!(result["assessed"], 1);
@@ -2910,6 +3228,7 @@ mod tests {
             body: None,
             number,
             job_id,
+            tag: None,
         }
     }
 
@@ -3194,5 +3513,505 @@ mod tests {
             Some(2),
             "an annotated error outranks an earlier generic marker"
         );
+    }
+
+    async fn mock_changed_files(server: &MockServer, filenames: &[&str]) {
+        mock(
+            server,
+            "pulls/7/files",
+            json!(
+                filenames
+                    .iter()
+                    .map(|filename| json!({"filename": filename, "status": "modified"}))
+                    .collect::<Vec<_>>()
+            ),
+        )
+        .await;
+    }
+
+    async fn assess_green_pull(server: &MockServer) -> Value {
+        mock_pull(server, COMMIT).await;
+        mock_graphql(
+            server,
+            review_payload(COMMIT, true, &summary(5, COMMIT), false),
+        )
+        .await;
+        mock_green_ci(server).await;
+        github(server)
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn changed_files_are_fetched_and_reported_as_a_blast_radius() {
+        let server = MockServer::start().await;
+        mock_changed_files(
+            &server,
+            &["src/auth/token.rs", "README.md", "src/api/routes.rs"],
+        )
+        .await;
+        let result = assess_green_pull(&server).await;
+        let radius = &result["pull_requests"][0]["blast_radius"];
+        assert_eq!(radius["tier"], "critical");
+        assert_eq!(radius["touched"], 3);
+        assert_eq!(radius["drivers"], json!(["src/auth/token.rs"]));
+        assert_eq!(radius["presumed"], false);
+        assert_eq!(
+            radius["summary"],
+            "Blast radius critical across 3 files (src/auth/token.rs)"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path() == "/repos/owner/repository/pulls/7/files"),
+            "the changed file list is fetched from the pull request files endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unfetchable_file_list_reads_as_assumed_rather_than_confident() {
+        let server = MockServer::start().await;
+        let result = assess_green_pull(&server).await;
+        let radius = &result["pull_requests"][0]["blast_radius"];
+        assert_eq!(
+            radius["tier"], "core",
+            "no observation must not read as a small change"
+        );
+        assert_eq!(radius["touched"], 0);
+        assert_eq!(radius["presumed"], true);
+        assert_eq!(
+            radius["summary"],
+            "Blast radius core (assumed: no files were observed)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_list_that_cannot_be_read_in_full_reads_as_assumed() {
+        let server = MockServer::start().await;
+        mock(
+            &server,
+            "pulls/7/files",
+            json!([{"filename": "src/auth/token.rs"}, {"status": "modified"}]),
+        )
+        .await;
+        let result = assess_green_pull(&server).await;
+        let radius = &result["pull_requests"][0]["blast_radius"];
+        assert_eq!(radius["presumed"], true);
+        assert_eq!(radius["touched"], 0);
+        assert_eq!(
+            radius["tier"], "core",
+            "a partial diff must not produce a confident tier"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blast_radius_can_never_flip_readiness() {
+        for (files, tier) in [
+            (vec!["src/auth/token.rs"], "critical"),
+            (vec!["deploy/helm/values.yaml"], "infrastructure"),
+            (vec!["README.md"], "cosmetic"),
+            (vec!["tests/queue.rs"], "test"),
+            (vec!["src/api/routes.rs"], "core"),
+            (vec!["src/formatting/pretty.rs"], "peripheral"),
+            (vec![], "core"),
+        ] {
+            for green in [true, false] {
+                let server = MockServer::start().await;
+                if !files.is_empty() {
+                    mock_changed_files(&server, &files).await;
+                }
+                mock_pull(&server, COMMIT).await;
+                mock_graphql(
+                    &server,
+                    review_payload(
+                        COMMIT,
+                        true,
+                        &summary(if green { 5 } else { 3 }, COMMIT),
+                        false,
+                    ),
+                )
+                .await;
+                mock_green_ci(&server).await;
+                let result = github(&server)
+                    .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                    .await
+                    .unwrap();
+                let pull = &result["pull_requests"][0];
+                assert_eq!(
+                    pull["ready"], green,
+                    "blast radius {tier} changed readiness for green={green}"
+                );
+                assert_eq!(pull["blast_radius"]["tier"], tier);
+                assert!(
+                    !take_array(pull, "blockers")
+                        .iter()
+                        .any(|blocker| text(blocker, "code").contains("blast")),
+                    "a blast radius must never appear as a blocker"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_review_bot_outside_the_configured_set_is_not_review_evidence() {
+        let server = MockServer::start().await;
+        mock_changed_files(&server, &["README.md"]).await;
+        mock_pull(&server, COMMIT).await;
+        mock_graphql(
+            &server,
+            review_payload(COMMIT, true, &summary(5, COMMIT), false),
+        )
+        .await;
+        mock_green_ci(&server).await;
+        let mut github = github(&server);
+        github.signals = ReviewSignals::select(&["coderabbit"]).unwrap();
+        let result = github
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap();
+        let pull = &result["pull_requests"][0];
+        assert_eq!(pull["ready"], false);
+        assert_eq!(pull["blockers"][0]["code"], "review_missing");
+        assert_eq!(
+            pull["blockers"][0]["detail"],
+            "coderabbitai summary missing"
+        );
+    }
+
+    #[test]
+    fn a_configured_review_signal_set_is_validated_when_the_source_is_read() {
+        let configuration = |signals: Option<Vec<String>>| Configuration {
+            owner: "owner".into(),
+            repo: "repository".into(),
+            branch: None,
+            path: None,
+            token: None,
+            review_signals: signals,
+        };
+        assert_eq!(
+            Github::new(configuration(None))
+                .unwrap()
+                .signals
+                .reviewers(),
+            ReviewSignals::recognized().reviewers()
+        );
+        assert_eq!(
+            Github::new(configuration(Some(vec!["greptile".into()])))
+                .unwrap()
+                .signals
+                .reviewers(),
+            vec!["greptile-apps".to_string()]
+        );
+        let error = Github::new(configuration(Some(vec!["sonarcloud".into()])))
+            .err()
+            .expect("an unrecognised review signal is rejected");
+        assert!(error.contains("sonarcloud"), "{error}");
+    }
+
+    const RELEASE_TAG: &str = "v1.4.0";
+
+    fn workflow_run(id: u64, workflow_id: u64, conclusion: &str) -> Value {
+        json!({
+            "id": id,
+            "workflow_id": workflow_id,
+            "run_attempt": 1,
+            "name": "Publish",
+            "path": ".github/workflows/publish.yml",
+            "event": "release",
+            "status": "completed",
+            "conclusion": conclusion,
+            "head_branch": RELEASE_TAG,
+            "head_sha": COMMIT,
+            "created_at": "2026-09-05T00:01:00Z",
+            "run_started_at": "2026-09-05T00:01:10Z",
+            "updated_at": "2026-09-05T00:04:00Z",
+            "html_url": format!("https://github.com/owner/repository/actions/runs/{id}"),
+            "repository": {"full_name": "owner/repository"},
+        })
+    }
+
+    async fn mock_release(server: &MockServer) {
+        mock(
+            server,
+            "releases",
+            json!([{
+                "id": 90,
+                "tag_name": RELEASE_TAG,
+                "published_at": "2026-09-05T00:00:00Z",
+                "html_url": "https://github.com/owner/repository/releases/tag/v1.4.0",
+            }]),
+        )
+        .await;
+    }
+
+    async fn mock_release_runs(server: &MockServer, runs: Vec<Value>) {
+        let total = runs.len();
+        mock(
+            server,
+            "actions/runs",
+            json!({"workflow_runs": runs, "total_count": total}),
+        )
+        .await;
+    }
+
+    fn release_args(tag: Option<&str>) -> Arguments {
+        Arguments {
+            tag: tag.map(str::to_string),
+            ..readiness_args(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_release_whose_runs_all_succeeded_is_green_and_cites_the_commit() {
+        let server = MockServer::start().await;
+        mock_release(&server).await;
+        mock_release_runs(
+            &server,
+            vec![
+                workflow_run(1, 10, "success"),
+                workflow_run(2, 20, "success"),
+            ],
+        )
+        .await;
+        let result = github(&server)
+            .observe(Operation::ReleasePipelines, &release_args(None))
+            .await
+            .unwrap();
+        let release = &result["releases"][0];
+        assert_eq!(release["state"], "succeeded");
+        assert_eq!(release["succeeded"], true);
+        assert_eq!(release["lookup"], "complete");
+        assert_eq!(release["commit"], COMMIT);
+        assert_eq!(release["runs"].as_array().unwrap().len(), 2);
+        assert_eq!(release["blockers"].as_array().unwrap().len(), 0);
+        assert_eq!(result["succeeded"], 1);
+        assert_eq!(result["assessed"], 1);
+        assert_eq!(result["next_page"], Value::Null);
+        assert!(json_chars(&result) <= FILE_PAGE_CHARS as usize);
+
+        let citation = crate::agent::citations::from_tool_at(
+            "assess_release_pipelines",
+            &result.to_string(),
+            "2026-09-05T00:00:00+00:00",
+        )
+        .remove(0);
+        assert!(
+            citation.passing(),
+            "a release pipeline this server observed is authoritative"
+        );
+        assert_eq!(citation.revision.as_deref(), Some(COMMIT));
+        assert_eq!(
+            citation.url,
+            "https://github.com/owner/repository/releases/tag/v1.4.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_release_run_is_named_and_never_green() {
+        let server = MockServer::start().await;
+        mock_release(&server).await;
+        mock_release_runs(
+            &server,
+            vec![
+                workflow_run(1, 10, "success"),
+                workflow_run(2, 20, "failure"),
+            ],
+        )
+        .await;
+        let result = github(&server)
+            .observe(Operation::ReleasePipelines, &release_args(None))
+            .await
+            .unwrap();
+        let release = &result["releases"][0];
+        assert_eq!(release["state"], "failed");
+        assert_eq!(release["succeeded"], false);
+        assert_eq!(release["blockers"][0]["code"], "runs_failed");
+        assert_eq!(
+            release["blockers"][0]["detail"],
+            "1 of 2 release workflow runs failed"
+        );
+        let citation = crate::agent::citations::from_tool_at(
+            "assess_release_pipelines",
+            &result.to_string(),
+            "2026-09-05T00:00:00+00:00",
+        )
+        .remove(0);
+        assert!(!citation.passing());
+        assert_eq!(citation.outcome, crate::agent::CitationOutcome::Failure);
+    }
+
+    #[tokio::test]
+    async fn a_release_with_no_observed_run_is_unknown_rather_than_green() {
+        let server = MockServer::start().await;
+        mock_release(&server).await;
+        mock_release_runs(&server, Vec::new()).await;
+        let result = github(&server)
+            .observe(Operation::ReleasePipelines, &release_args(None))
+            .await
+            .unwrap();
+        let release = &result["releases"][0];
+        assert_eq!(release["state"], "unknown");
+        assert_eq!(release["succeeded"], false);
+        assert_eq!(release["complete"], false);
+        assert_eq!(release["lookup"], "pending");
+        assert_eq!(release["commit"], Value::Null);
+        assert_eq!(result["succeeded"], 0);
+        let citation = crate::agent::citations::from_tool_at(
+            "assess_release_pipelines",
+            &result.to_string(),
+            "2026-09-05T00:00:00+00:00",
+        )
+        .remove(0);
+        assert!(!citation.passing());
+        assert_eq!(citation.outcome, crate::agent::CitationOutcome::Incomplete);
+    }
+
+    #[tokio::test]
+    async fn a_run_record_that_does_not_add_up_makes_the_release_unknown() {
+        let server = MockServer::start().await;
+        mock_release(&server).await;
+        let mut impostor = workflow_run(2, 20, "success");
+        impostor["html_url"] = json!("https://github.com/owner/repository/actions/runs/999");
+        mock_release_runs(&server, vec![workflow_run(1, 10, "success"), impostor]).await;
+        let result = github(&server)
+            .observe(Operation::ReleasePipelines, &release_args(None))
+            .await
+            .unwrap();
+        let release = &result["releases"][0];
+        assert_eq!(release["state"], "unknown");
+        assert_eq!(release["lookup"], "unavailable");
+        assert_eq!(release["blockers"][0]["code"], "lookup_unavailable");
+        assert_eq!(
+            release["runs"].as_array().unwrap().len(),
+            1,
+            "the record that held is still reported, it is just not a complete lookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_release_can_be_assessed_by_tag_alone() {
+        let server = MockServer::start().await;
+        mock(
+            &server,
+            &format!("releases/tags/{RELEASE_TAG}"),
+            json!({
+                "id": 90,
+                "tag_name": RELEASE_TAG,
+                "published_at": "2026-09-05T00:00:00Z",
+                "html_url": "https://github.com/owner/repository/releases/tag/v1.4.0",
+            }),
+        )
+        .await;
+        mock_release_runs(&server, vec![workflow_run(1, 10, "success")]).await;
+        let result = github(&server)
+            .observe(
+                Operation::ReleasePipelines,
+                &release_args(Some(RELEASE_TAG)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["releases"][0]["succeeded"], true);
+        assert_eq!(result["next_page"], Value::Null);
+        assert_eq!(result["complete"], true);
+        assert_eq!(
+            github(&server)
+                .observe(Operation::ReleasePipelines, &release_args(Some("../etc")))
+                .await
+                .unwrap_err(),
+            "tag is invalid."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_release_the_sweep_missed_falls_back_to_its_own_lookup() {
+        let server = MockServer::start().await;
+        mock_release(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repository/actions/runs"))
+            .and(query_param("branch", RELEASE_TAG))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"workflow_runs": [workflow_run(1, 10, "success")], "total_count": 1}),
+            ))
+            .mount(&server)
+            .await;
+        mock_release_runs(&server, Vec::new()).await;
+        let result = github(&server)
+            .observe(Operation::ReleasePipelines, &release_args(None))
+            .await
+            .unwrap();
+        let release = &result["releases"][0];
+        assert_eq!(
+            release["succeeded"], true,
+            "an empty repository sweep is not evidence that a release has no pipeline"
+        );
+        assert_eq!(release["lookup"], "complete");
+    }
+
+    #[tokio::test]
+    async fn a_release_without_a_usable_identity_fails_closed() {
+        let server = MockServer::start().await;
+        mock(
+            &server,
+            "releases",
+            json!([{"id": 90, "tag_name": "", "published_at": "2026-09-05T00:00:00Z"}]),
+        )
+        .await;
+        assert_eq!(
+            github(&server)
+                .observe(Operation::ReleasePipelines, &release_args(None))
+                .await
+                .unwrap_err(),
+            "GitHub returned a release without a usable identity."
+        );
+    }
+
+    #[tokio::test]
+    async fn one_sweep_is_routed_to_the_release_each_run_belongs_to() {
+        let server = MockServer::start().await;
+        mock(
+            &server,
+            "releases",
+            json!([
+                {
+                    "id": 90,
+                    "tag_name": RELEASE_TAG,
+                    "published_at": "2026-09-05T00:00:00Z",
+                    "html_url": "https://github.com/owner/repository/releases/tag/v1.4.0",
+                },
+                {
+                    "id": 89,
+                    "tag_name": "v1.3.0",
+                    "published_at": "2026-09-01T00:00:00Z",
+                    "html_url": "https://github.com/owner/repository/releases/tag/v1.3.0",
+                },
+            ]),
+        )
+        .await;
+        let mut older = workflow_run(2, 20, "failure");
+        older["head_branch"] = json!("v1.3.0");
+        mock_release_runs(&server, vec![workflow_run(1, 10, "success"), older]).await;
+        let result = github(&server)
+            .observe(Operation::ReleasePipelines, &release_args(None))
+            .await
+            .unwrap();
+        let releases = result["releases"].as_array().unwrap();
+        assert_eq!(releases.len(), 2);
+        let current = releases
+            .iter()
+            .find(|row| row["tag"] == RELEASE_TAG)
+            .unwrap();
+        let previous = releases.iter().find(|row| row["tag"] == "v1.3.0").unwrap();
+        assert_eq!(
+            current["succeeded"], true,
+            "another release's failure is not this release's evidence"
+        );
+        assert_eq!(current["lookup"], "complete");
+        assert_eq!(current["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(previous["state"], "failed");
+        assert_eq!(result["succeeded"], 1);
     }
 }
