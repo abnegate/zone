@@ -9783,6 +9783,7 @@ dependencies = [
  "tool_runner",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

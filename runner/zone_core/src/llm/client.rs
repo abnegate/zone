@@ -1,16 +1,15 @@
 //! LLM client for OpenAI-compatible APIs
 
 use reqwest::Client;
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
+use tokio::runtime;
 
 use super::types::{ChatRequest, ChatResponse, ChatStreamChunk, Message, ToolDefinition};
 
-/// One connection pool for every completion in this process. Building a
-/// `reqwest::Client` per turn throws away TLS sessions and keep-alives to
-/// LiteLLM, which is the whole time-to-first-token budget on a local model.
-static HTTP: LazyLock<Client> = LazyLock::new(|| {
+fn pool() -> Client {
     Client::builder()
         .pool_max_idle_per_host(16)
         .pool_idle_timeout(Duration::from_secs(90))
@@ -18,7 +17,27 @@ static HTTP: LazyLock<Client> = LazyLock::new(|| {
         .tcp_nodelay(true)
         .build()
         .unwrap_or_else(|_| Client::new())
-});
+}
+
+/// One connection pool per runtime. Building a `reqwest::Client` per turn
+/// throws away TLS sessions and keep-alives to LiteLLM, which is the whole
+/// time-to-first-token budget on a local model, so completions share one.
+///
+/// They cannot share more widely than the runtime. Every pooled connection is
+/// driven by a task belonging to the runtime that opened it, so a pool reused
+/// from a second runtime hands out connections whose driver died with the
+/// first, and the send fails with "runtime dropped the dispatch task" without
+/// ever reaching the server.
+static HTTP: LazyLock<Mutex<HashMap<runtime::Id, Client>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn http() -> Client {
+    let Ok(runtime) = runtime::Handle::try_current() else {
+        return pool();
+    };
+    let mut pools = HTTP.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    pools.entry(runtime.id()).or_insert_with(pool).clone()
+}
 
 /// LLM client error
 #[derive(Debug, Error)]
@@ -103,7 +122,7 @@ impl LlmClient {
     /// Create a new LLM client
     pub fn new(config: LlmConfig) -> Self {
         Self {
-            client: HTTP.clone(),
+            client: http(),
             config,
             stop: Vec::new(),
             ollama: None,
@@ -163,6 +182,21 @@ impl LlmClient {
         Ok(body)
     }
 
+    async fn send(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, LlmError> {
+        Ok(self
+            .client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await?)
+    }
+
     /// Make a chat completion request
     pub async fn chat(
         &self,
@@ -211,14 +245,7 @@ impl LlmClient {
 
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&self.request(request)?)
-            .send()
-            .await?;
+        let response = self.send(&url, &self.request(request)?).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -284,14 +311,7 @@ impl LlmClient {
 
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&self.request(request)?)
-            .send()
-            .await?;
+        let response = self.send(&url, &self.request(request)?).await?;
 
         let status = response.status();
         if !status.is_success() {
