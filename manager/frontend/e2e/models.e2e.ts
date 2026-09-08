@@ -28,6 +28,12 @@ type TrainRequest = {
   images: TrainImage[];
 };
 
+type TrainResult = {
+  filename: string;
+  quality: { improvement: number; checkpoint: string; measured: boolean } | null;
+  dataset?: Array<{ concern: 'too_few' | 'low_variety' | 'mixed_subjects'; detail: string }>;
+};
+
 const mockInstalledModels: InstalledModel[] = [
   {
     name: 'llama3.2:latest',
@@ -209,6 +215,29 @@ function trainPanel(page: Page): Locator {
     .filter({ has: page.getByRole('heading', { name: 'Train a LoRA' }) });
 }
 
+async function routeTrainResult(page: Page, result: TrainResult): Promise<void> {
+  await routeApi(page, '**/api/models/train', (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(result),
+    });
+  });
+}
+
+async function trainOnce(page: Page, panel: Locator, filename = 'portrait.png'): Promise<void> {
+  await panel.getByLabel('Name', { exact: true }).fill('zoneface');
+  await panel.getByLabel('Trigger word').fill('zne person');
+  await panel.locator('input[type="file"]').setInputFiles({
+    name: filename,
+    mimeType: 'image/png',
+    buffer: Buffer.from(PNG_BASE64, 'base64'),
+  });
+  const submit = panel.getByRole('button', { name: 'Train' });
+  await expect(submit).toBeEnabled();
+  await submit.click();
+}
+
 // Helper to switch to browse tab and wait for it to load
 async function switchToBrowseTab(page: Page) {
   await page.getByRole('tab', { name: 'Browse' }).click();
@@ -347,6 +376,119 @@ test.describe('Models Page', () => {
     await expect(submit).toBeDisabled();
 
     expect(requests).toHaveLength(0);
+  });
+
+  test('bands a measured improvement against what a real run reaches', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.3472, checkpoint: 'step400', measured: true },
+      dataset: [],
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toHaveAttribute('role', 'status');
+    await expect(result).toContainText('zoneface.safetensors');
+    await expect(result).toContainText('Healthy');
+    await expect(result).toContainText('35% better');
+    await expect(result).toContainText('measured at step400');
+    await expect(result).toContainText('around 35%');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+  });
+
+  test('calls out a score a trainer that learned nothing also reaches', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.135, checkpoint: 'step400', measured: true },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('No measurable learning');
+    await expect(result).toContainText('14% better');
+    await expect(result).toContainText('still scores around 15%');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+  });
+
+  test('reports an unprobed run as not measured, not as a failure or a zero', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, { filename: 'zoneface.safetensors', quality: null });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('zoneface.safetensors');
+    await expect(result).toContainText('Not measured');
+    await expect(result).toContainText('The adapter trained normally');
+    await expect(result).not.toContainText('0%');
+    await expect(result.locator('.train-improvement')).toHaveCount(0);
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('offers dataset findings as advice and still accepts another run', async ({ page }) => {
+    const requests = trainRequests(page);
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.34, checkpoint: 'step400', measured: true },
+      dataset: [
+        {
+          concern: 'low_variety',
+          detail: 'these images look very alike; more angles and lighting will train better',
+        },
+        { concern: 'too_few', detail: 'six images is thin, a dozen holds an identity better' },
+      ],
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const advice = panel.locator('.train-advice');
+    await expect(advice).toContainText('Images too alike');
+    await expect(advice).toContainText('more angles and lighting will train better');
+    await expect(advice).toContainText('Too few images');
+    await expect(advice).toContainText('a dozen holds an identity better');
+    await expect(advice).toContainText('can be wrong');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+
+    await trainOnce(page, panel, 'portrait-2.png');
+    await expect.poll(() => requests.length).toBe(2);
+  });
+
+  test('says nothing about the dataset when there is nothing to flag', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.46, checkpoint: 'step600', measured: true },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('Strong');
+    await expect(panel.locator('.train-advice')).toHaveCount(0);
+    await expect(panel.getByText('Worth checking')).toHaveCount(0);
+
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.46, checkpoint: 'step800', measured: true },
+      dataset: [],
+    });
+    await trainOnce(page, panel, 'portrait-2.png');
+
+    await expect(result).toContainText('measured at step800');
+    await expect(panel.locator('.train-advice')).toHaveCount(0);
+    await expect(panel.getByText('Worth checking')).toHaveCount(0);
   });
 
   test('displays installed models', async ({ page }) => {

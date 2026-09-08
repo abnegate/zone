@@ -1,6 +1,13 @@
 import { Button, Input, Select } from '@zone/ui';
-import { type FormEvent, useEffect, useState } from 'react';
-import { modelsApi } from '../../../api/models';
+import { type FormEvent, type ReactElement, useEffect, useState } from 'react';
+import {
+  type DatasetConcern,
+  type DatasetFinding,
+  modelsApi,
+  type TrainQuality,
+  type TrainResult,
+} from '../../../api/models';
+import './TrainPanel.css';
 
 type TrainBase = { id: string; label: string; edit: boolean };
 
@@ -10,6 +17,91 @@ type TrainImage = {
   bytes_base64: string;
   before_base64?: string;
 };
+
+type Band = 'none' | 'weak' | 'healthy' | 'strong';
+
+const BANDS: Record<Band, { label: string; meaning: string }> = {
+  none: {
+    label: 'No measurable learning',
+    meaning:
+      'An adapter that learned nothing still scores around 15%, so this run cannot be told apart from one. Train again with more images or a longer run.',
+  },
+  weak: {
+    label: 'Weak',
+    meaning:
+      'Clear of the 15% a run that learned nothing scores, but short of the 35% a healthy run reaches.',
+  },
+  healthy: {
+    label: 'Healthy',
+    meaning: 'The range a good short run reaches, around 35%.',
+  },
+  strong: {
+    label: 'Strong',
+    meaning: 'As high as a full-length run reaches, around 46%.',
+  },
+};
+
+const CONCERNS: Record<DatasetConcern, string> = {
+  too_few: 'Too few images',
+  low_variety: 'Images too alike',
+  mixed_subjects: 'More than one subject',
+};
+
+function band(improvement: number): Band {
+  if (improvement <= 0.15) return 'none';
+  if (improvement < 0.3) return 'weak';
+  if (improvement < 0.45) return 'healthy';
+  return 'strong';
+}
+
+function Quality({ quality }: { quality: TrainQuality | null }): ReactElement {
+  if (!quality?.measured || !Number.isFinite(quality.improvement)) {
+    return (
+      <div className="train-quality">
+        <div className="train-quality-head">
+          <span className="tag">Not measured</span>
+        </div>
+        <p className="train-quality-meaning">
+          Quality probing is best effort and did not run for this LoRA. The adapter trained
+          normally, there is simply no score to show for it.
+        </p>
+      </div>
+    );
+  }
+
+  const level = band(quality.improvement);
+  return (
+    <div className="train-quality">
+      <div className="train-quality-head">
+        <span className={`tag train-band-${level}`}>{BANDS[level].label}</span>
+        <span className="train-improvement">{Math.round(quality.improvement * 100)}% better</span>
+        <span className="train-checkpoint">measured at {quality.checkpoint}</span>
+      </div>
+      <p className="train-quality-meaning">{BANDS[level].meaning}</p>
+    </div>
+  );
+}
+
+function Advice({ findings }: { findings: DatasetFinding[] }): ReactElement | null {
+  if (findings.length === 0) return null;
+
+  return (
+    <div className="train-advice">
+      <p className="train-advice-title">Worth checking</p>
+      <ul className="train-advice-list">
+        {findings.map((finding) => (
+          <li className="train-advice-item" key={`${finding.concern}:${finding.detail}`}>
+            {CONCERNS[finding.concern] && <span className="tag">{CONCERNS[finding.concern]}</span>}
+            <span>{finding.detail}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="train-advice-caveat">
+        Advice only, from a quick look at your images. It is a rough check and can be wrong.
+      </p>
+    </div>
+  );
+}
 
 function fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -31,6 +123,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [trigger, setTrigger] = useState('');
   const [images, setImages] = useState<TrainImage[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<TrainResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [captioning, setCaptioning] = useState(false);
 
@@ -92,13 +185,15 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (!name.trim() || !base || !trigger.trim() || images.length === 0) return;
     setBusy(true);
     setError(null);
+    setResult(null);
     try {
-      await modelsApi.train({
+      const trained = await modelsApi.train({
         name: name.trim(),
         base,
         trigger: trigger.trim() || undefined,
         images,
       });
+      setResult(trained);
       setImages([]);
       setName('');
       onTrained();
@@ -118,6 +213,15 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         identity.
       </p>
       {error && <div className="error-placeholder">{error}</div>}
+      {result && (
+        <div className="train-result" role="status">
+          <h3 className="train-result-title">
+            Training finished{result.filename ? `: ${result.filename}` : ''}
+          </h3>
+          <Quality quality={result.quality} />
+          <Advice findings={result.dataset ?? []} />
+        </div>
+      )}
       <form className="ui-form" onSubmit={handleSubmit}>
         <Input
           label="Name"

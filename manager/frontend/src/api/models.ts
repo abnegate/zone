@@ -16,6 +16,25 @@ import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
+export type TrainQuality = {
+  improvement: number;
+  checkpoint: string;
+  measured: boolean;
+};
+
+export type DatasetConcern = 'too_few' | 'low_variety' | 'mixed_subjects';
+
+export type DatasetFinding = {
+  concern: DatasetConcern;
+  detail: string;
+};
+
+export type TrainResult = {
+  filename: string | null;
+  quality: TrainQuality | null;
+  dataset?: DatasetFinding[];
+};
+
 /**
  * Models API
  * Provides methods for managing AI models: listing installed models,
@@ -157,7 +176,7 @@ export const modelsApi = {
       bytes_base64: string;
       before_base64?: string;
     }>;
-  }): Promise<{ filename: string | null }> {
+  }): Promise<TrainResult> {
     const response = await fetch(`${API_BASE}/api/models/train`, {
       method: 'POST',
       headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
