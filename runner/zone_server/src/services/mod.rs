@@ -11,5 +11,6 @@ pub mod embedding;
 pub mod image_intent;
 pub mod image_source;
 pub mod model;
+pub mod prioritisation;
 pub mod runner;
 pub mod stages;
