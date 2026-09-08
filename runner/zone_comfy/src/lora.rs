@@ -140,7 +140,7 @@ pub async fn train(
         .collect::<Result<Vec<_>, _>>()?;
 
     let trigger = request.trigger.clone().unwrap_or_default();
-    let groups: Vec<usize> = shots(&request.images).collect();
+    let groups = shots(&request.images);
     let mut drafts: Vec<Draft> = framed
         .iter()
         .zip(request.images.iter())
@@ -252,30 +252,61 @@ fn caption(image: &TrainImage, trigger: Option<&str>) -> String {
         // of one: the separator would otherwise dangle on every image the
         // vision model could not describe.
         Some(trigger) if described.is_empty() => trigger.to_string(),
-        Some(trigger) if !described.contains(trigger) => format!("{trigger}, {described}"),
+        Some(trigger) if !mentions(described, trigger) => format!("{trigger}, {described}"),
         _ => described.to_string(),
     }
+}
+
+/// Whether the caption already carries the trigger as a word of its own.
+///
+/// A substring test would read a one-letter trigger out of any caption
+/// containing that letter, and the image would train with no trigger at all.
+fn mentions(caption: &str, trigger: &str) -> bool {
+    caption
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|word| word == trigger)
 }
 
 /// The shot each image belongs to. Frames from a clip say which shot they came
 /// from; a separate photo is its own, numbered past every clip's groups so the
 /// two cannot be taken for each other.
-fn shots(images: &[TrainImage]) -> impl Iterator<Item = usize> + '_ {
-    let clips = images
+fn shots(images: &[TrainImage]) -> Vec<usize> {
+    // Renumbered into a dense range rather than used as sent. The group is
+    // deserialized straight from the request, so counting up from the largest
+    // one overflows on usize::MAX and, saturating, would hand a photo the same
+    // shot as the clip. Renumbering cannot collide whatever arrives, and cannot
+    // run past the number of images.
+    let mut clips: Vec<usize> = Vec::new();
+    let seen: Vec<Option<usize>> = images
         .iter()
-        .filter_map(|image| image.group)
-        .max()
-        .map_or(0, |last| last + 1);
-    images
-        .iter()
-        .enumerate()
-        .map(move |(index, image)| image.group.unwrap_or(clips + index))
+        .map(|image| {
+            image.group.map(|group| {
+                clips
+                    .iter()
+                    .position(|&known| known == group)
+                    .unwrap_or_else(|| {
+                        clips.push(group);
+                        clips.len() - 1
+                    })
+            })
+        })
+        .collect();
+    let mut next = clips.len();
+    seen.into_iter()
+        .map(|shot| {
+            shot.unwrap_or_else(|| {
+                next += 1;
+                next - 1
+            })
+        })
+        .collect()
 }
 
 /// Writes one file of the dataset, naming the error mapping the three writes
 /// would otherwise repeat.
 fn write(path: PathBuf, bytes: &[u8]) -> Result<(), TrainError> {
-    fs::write(path, bytes).map_err(|error| TrainError::Failed(error.to_string()))
+    fs::write(&path, bytes)
+        .map_err(|error| TrainError::Failed(format!("{}: {error}", path.display())))
 }
 
 /// The filename a crop is captioned under. Only its extension is read, to pick
@@ -808,6 +839,59 @@ mod tests {
     }
 
     #[test]
+    fn a_group_at_the_top_of_its_range_does_not_wrap_a_photo_onto_a_clip() {
+        // The group is deserialized straight from the request, so this is a
+        // value a caller can actually send.
+        let images = vec![
+            upload("", Some(usize::MAX)),
+            upload("", Some(usize::MAX)),
+            upload("", None),
+        ];
+        let assigned = shots(&images);
+        assert_eq!(assigned[0], assigned[1], "two frames of one shot share it");
+        assert_ne!(
+            assigned[2], assigned[0],
+            "a photo must not be captioned as part of the clip's shot"
+        );
+    }
+
+    #[test]
+    fn a_trigger_is_matched_as_a_word_rather_than_a_substring() {
+        // A short trigger occurs inside longer words, and a substring test
+        // would read that as the trigger already being present, leaving the
+        // image to train with no trigger at all.
+        assert_eq!(
+            caption(&upload("zrk pattern knitwear", None), Some("zrkx")),
+            "zrkx, zrk pattern knitwear"
+        );
+        assert_eq!(
+            caption(&upload("zrkxyz, a portrait", None), Some("zrkxyz")),
+            "zrkxyz, a portrait",
+            "a caption that already names the trigger keeps exactly one"
+        );
+        assert_eq!(
+            caption(&upload("zrkxyzed hair", None), Some("zrkxyz")),
+            "zrkxyz, zrkxyzed hair",
+            "a longer word that merely starts with the trigger is not the trigger"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_names_the_artifact_it_was_for() {
+        let missing = std::env::temp_dir()
+            .join(format!("zone-absent-{}", uuid::Uuid::new_v4()))
+            .join("targets")
+            .join("0000.png");
+        let Err(TrainError::Failed(message)) = write(missing.clone(), b"x") else {
+            panic!("writing into a directory that does not exist should fail");
+        };
+        assert!(
+            message.contains("0000.png"),
+            "an operator has to be told which artifact failed: {message}"
+        );
+    }
+
+    #[test]
     fn a_photo_never_lands_in_a_clips_shot() {
         let images = vec![
             upload("", Some(0)),
@@ -816,10 +900,10 @@ mod tests {
             upload("", None),
             upload("", None),
         ];
-        let assigned: Vec<usize> = shots(&images).collect();
+        let assigned = shots(&images);
         assert_eq!(
             assigned,
-            vec![0, 1, 0, 5, 6],
+            vec![0, 1, 0, 2, 3],
             "frames keep their shot, photos get one each, and the two never meet"
         );
     }

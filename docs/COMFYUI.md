@@ -422,18 +422,13 @@ earned rather than taken:
   of shots the clip holds. Once the only frames left repeat one already taken,
   selection stops early — a clip of someone standing still contributes a handful
   of frames, not eighty copies of one pose.
-<<<<<<< HEAD
-- **Cropped on the subject**, the same way a photo is. The loader takes the
-  centre square of whatever it is handed, which keeps the frame full but loses a
-  subject that is not in the middle of it; frames arrive already square and
-  already framed, so that crop is a no-op rather than a second opinion.
-=======
 - **Cropped on the subject**, the same way a photo is, except that a clip knows
   something a photo does not: the frames are diffed against their neighbours,
   and the region that moved is weighted up, so the crop lands on the subject
   being filmed rather than on whichever of several the model liked most. Without
-  the weights, motion decides on its own.
->>>>>>> 280f580 ((feat): frame every training crop on its subject)
+  the weights, motion decides on its own. Frames therefore arrive already square
+  and already framed, and the loader's own centre crop is a no-op on them rather
+  than a second opinion.
 - **Mirrored in alternation.** Half the frames of each second are flipped left
   to right, so a subject filmed from one side does not teach the adapter that it
   only ever faces that way. Turn it off for a subject carrying text, or anything

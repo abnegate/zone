@@ -641,6 +641,56 @@ async fn frames_endpoint_says_so_when_the_decoder_is_not_installed() {
 }
 
 #[tokio::test]
+async fn a_second_training_upload_is_refused_while_one_is_running() {
+    use base64::Engine;
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+
+    // A decoder that blocks whatever it is passed, so the first request is
+    // still holding its permit when the second arrives.
+    let stub = models_dir.join("slow-ffmpeg");
+    fs::write(&stub, "#!/bin/sh\nsleep 30\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = stub.display().to_string();
+    let (router, secret) = router_tuned(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        None,
+        move |comfyui| {
+            comfyui.ffmpeg = path;
+        },
+    )
+    .await;
+
+    let clip = json!({
+        "filename": "clip.mp4",
+        "bytes_base64": base64::engine::general_purpose::STANDARD.encode("pretend clip"),
+    });
+    let holder = tokio::spawn({
+        let router = router.clone();
+        let secret = secret.clone();
+        let clip = clip.clone();
+        async move { post_frames(router, &secret, clip).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let (status, body) = post_frames(router, &secret, clip).await;
+    holder.abort();
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a training upload holds its body and its decoded bytes at once, so a second has to wait: {body}"
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
 async fn frames_endpoint_needs_authentication() {
     let models_dir = temp_models();
     let ollama = mock_ollama().await;

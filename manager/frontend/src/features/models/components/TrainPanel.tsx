@@ -70,24 +70,28 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
 
   const handleFiles = async (files: FileList | null, before = false) => {
     if (!files?.length) return;
-    const next = [...images];
-    for (const file of Array.from(files)) {
-      const encoded = await fileToBase64(file);
-      if (before) {
-        const index = next.findIndex((image) => !image.before_base64);
-        if (index >= 0) {
-          next[index] = { ...next[index], before_base64: encoded };
+    const encoded = await Promise.all(
+      Array.from(files).map(async (file) => ({ name: file.name, bytes: await fileToBase64(file) }))
+    );
+    setImages((current) => {
+      const next = [...current];
+      for (const file of encoded) {
+        if (before) {
+          const index = next.findIndex((image) => !image.before_base64);
+          if (index >= 0) {
+            next[index] = { ...next[index], before_base64: file.bytes };
+          }
+        } else {
+          next.push({
+            id: crypto.randomUUID(),
+            filename: file.name,
+            caption: '',
+            bytes_base64: file.bytes,
+          });
         }
-      } else {
-        next.push({
-          id: crypto.randomUUID(),
-          filename: file.name,
-          caption: '',
-          bytes_base64: encoded,
-        });
       }
-    }
-    setImages(next);
+      return next;
+    });
   };
 
   const handleVideos = async (files: FileList | null) => {
@@ -95,7 +99,6 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     setError(null);
     setSampled(null);
     try {
-      let collected = [...images];
       for (const file of Array.from(files)) {
         setSampling(file.name);
         const clip = await modelsApi.frames({
@@ -103,24 +106,29 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           bytes_base64: await fileToBase64(file),
           mirror,
         });
-        const offset = nextGroup(collected);
-        collected = [
-          ...collected,
-          ...clip.frames.map((frame) => ({
-            id: crypto.randomUUID(),
-            filename: frame.filename,
-            caption: '',
-            bytes_base64: frame.bytes_base64,
-            group: offset + frame.group,
-            source: file.name,
-            mirrored: frame.mirrored,
-          })),
-        ];
+        // Appended against whatever the list holds now, not against a copy
+        // taken before the upload: images picked while a clip was extracting
+        // would otherwise be dropped, and a clip that failed would take the
+        // frames of the clips before it with it.
+        setImages((current) => {
+          const offset = nextGroup(current);
+          return [
+            ...current,
+            ...clip.frames.map((frame) => ({
+              id: crypto.randomUUID(),
+              filename: frame.filename,
+              caption: '',
+              bytes_base64: frame.bytes_base64,
+              group: offset + frame.group,
+              source: file.name,
+              mirrored: frame.mirrored,
+            })),
+          ];
+        });
         setSampled(
           `${file.name}: ${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`
         );
       }
-      setImages(collected);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not read the video');
     } finally {
@@ -273,9 +281,10 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             label={`Caption for ${captionOf(image)}`}
             value={image.caption}
             onChange={(event) => {
-              const next = [...images];
-              next[index] = { ...image, caption: event.target.value };
-              setImages(next);
+              const caption = event.target.value;
+              setImages((current) =>
+                current.map((row) => (row.id === image.id ? { ...row, caption } : row))
+              );
             }}
           />
         ))}

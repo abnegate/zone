@@ -1,7 +1,10 @@
+import type { z } from 'zod';
+import type { TrainFrameSchema } from '../features/models/schemas';
 import {
   BrowseResponseSchema,
   DiskUsageSchema,
   ModelsResponseSchema,
+  TrainClipSchema,
 } from '../features/models/schemas';
 import type {
   BrowseOptions,
@@ -16,19 +19,8 @@ import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
-export type TrainFrame = {
-  filename: string;
-  bytes_base64: string;
-  timestamp_ms: number;
-  mirrored: boolean;
-  group: number;
-};
-
-export type TrainClip = {
-  frames: TrainFrame[];
-  sampled: number;
-  sampled_fps: number;
-};
+export type TrainFrame = z.infer<typeof TrainFrameSchema>;
+export type TrainClip = z.infer<typeof TrainClipSchema>;
 
 /**
  * Models API
@@ -205,7 +197,7 @@ export const modelsApi = {
       const payload = await response.json().catch(() => ({ error: 'Frame extraction failed' }));
       throw new Error(payload.error || `Failed to read the video: ${response.status}`);
     }
-    return response.json();
+    return parse(TrainClipSchema, await response.json());
   },
 
   async trainBases(): Promise<Array<{ id: string; label: string; edit: boolean }>> {
