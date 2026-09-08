@@ -448,7 +448,7 @@ impl GitService {
 }
 
 /// Inject authentication token into a git URL
-fn inject_token_into_url(url: &str, token: &str) -> GitResult<String> {
+pub(crate) fn inject_token_into_url(url: &str, token: &str) -> GitResult<String> {
     // Handle HTTPS URLs: https://github.com/owner/repo.git
     if let Some(without_scheme) = url.strip_prefix("https://") {
         // Insert x-access-token:token@ after the scheme
