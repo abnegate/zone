@@ -56,8 +56,7 @@ class Run:
 
     @classmethod
     def create(cls, kind: str = 'train') -> 'Run':
-        identifier = str(uuid.uuid4())
-        return cls(folder=f'zone-{kind}-{identifier}', artifact=f'zone-lora-{identifier}')
+        return cls(folder=f'zone-{kind}-{uuid.uuid4()}', artifact=f'zone-lora-{uuid.uuid4()}')
 
     @classmethod
     def from_environment(cls) -> 'Run':

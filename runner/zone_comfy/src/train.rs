@@ -42,10 +42,9 @@ pub struct Run {
 
 impl Run {
     pub fn new() -> Self {
-        let id = Uuid::new_v4();
         Self {
-            folder: format!("zone-train-{id}"),
-            artifact: format!("zone-lora-{id}"),
+            folder: format!("zone-train-{}", Uuid::new_v4()),
+            artifact: format!("zone-lora-{}", Uuid::new_v4()),
         }
     }
 
@@ -874,11 +873,18 @@ mod tests {
         }
         assert_eq!(flux["4"]["class_type"], "CLIPTextEncode");
         assert_eq!(qwen["1"]["class_type"], "UNETLoader");
+        assert_eq!(qwen["1"]["inputs"]["unet_name"], "qwen-unet.safetensors");
+        assert_eq!(qwen["2"]["class_type"], "CLIPLoader");
         assert_eq!(qwen["2"]["inputs"]["type"], "qwen_image");
+        assert_eq!(qwen["2"]["inputs"]["clip_name"], "qwen-clip.safetensors");
+        assert_eq!(qwen["3"]["class_type"], "VAELoader");
+        assert_eq!(qwen["3"]["inputs"]["vae_name"], "qwen-vae.safetensors");
+        assert_eq!(qwen["5"]["class_type"], "VAEEncode");
         assert_eq!(qwen["6"]["class_type"], "TextEncodeQwenImageEditPlus");
         assert_eq!(qwen["5"]["inputs"]["pixels"], json!(["4", 0]));
         assert_eq!(qwen["6"]["inputs"]["image1"], json!(["4", 1]));
         assert_eq!(qwen["6"]["inputs"]["prompt"], json!(["4", 2]));
+        assert!(!qwen.to_string().contains("CheckpointLoaderSimple"));
     }
 
     #[test]
@@ -902,6 +908,10 @@ mod tests {
         let run = Run::new();
         run.validate().unwrap();
         assert_ne!(run, Run::new());
+        assert_ne!(
+            run.folder.trim_start_matches("zone-train-"),
+            run.artifact.trim_start_matches("zone-lora-")
+        );
         assert!(
             Run {
                 folder: "zone-train-user-name".into(),

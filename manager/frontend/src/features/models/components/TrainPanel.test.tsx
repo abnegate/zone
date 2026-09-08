@@ -90,7 +90,8 @@ describe('TrainPanel', () => {
   it('requires one reference and one instruction for every Qwen target', async () => {
     render(<TrainPanel onTrained={mock()} />);
     await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
-    fillIdentity();
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'zone-edit' } });
+    expect(screen.getByLabelText('Trigger word')).not.toHaveAttribute('required');
     await addTargets(file('after-one.png', 'after one'), file('after-two.png', 'after two'));
 
     const firstReference = screen.getByLabelText('Reference image for target 1: after-one.png');
@@ -126,6 +127,7 @@ describe('TrainPanel', () => {
     fireEvent.click(submit);
     await waitFor(() => expect(mockTrain).toHaveBeenCalledTimes(1));
     const request = mockTrain.mock.calls[0]?.[0];
+    expect(request?.trigger).toBeUndefined();
     expect(request?.images).toHaveLength(2);
     expect(request?.images[0]).toMatchObject({
       filename: 'after-one.png',

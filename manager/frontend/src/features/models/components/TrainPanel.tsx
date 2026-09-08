@@ -272,7 +272,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const edit = Boolean(selected?.edit);
   const pending = edit ? incomplete(images) : [];
   const ready =
-    Boolean(name.trim() && base && trigger.trim() && images.length > 0) && pending.length === 0;
+    Boolean(name.trim() && base && (edit || trigger.trim()) && images.length > 0) &&
+    pending.length === 0;
 
   const handleTargets = async (files: File[]) => {
     if (files.length === 0) return;
@@ -413,10 +414,8 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           label="Trigger word"
           value={trigger}
           onChange={(event) => setTrigger(event.target.value)}
-          placeholder={
-            edit ? 'required to name the trained subject' : 'required for a unique identity'
-          }
-          required
+          placeholder={edit ? 'optional subject name' : 'required for a unique identity'}
+          required={!edit}
         />
         <Input
           id="train-targets"

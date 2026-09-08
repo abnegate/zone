@@ -408,7 +408,7 @@ test.describe('Models Page', () => {
     await page.getByRole('tab', { name: 'Train' }).click();
     await selectTrainBase(page, panel, 'Qwen Image Edit');
     await panel.getByLabel('Name', { exact: true }).fill('zone-edit');
-    await panel.getByLabel('Trigger word').fill('zne subject');
+    await expect(panel.getByLabel('Trigger word')).not.toHaveAttribute('required', '');
     await panel.getByLabel('Target images').setInputFiles([
       {
         name: 'target-a.png',
@@ -463,6 +463,7 @@ test.describe('Models Page', () => {
 
     await expect.poll(() => requests.length).toBe(1);
     expect(requests[0].base).toBe('qwen-image-edit');
+    expect(requests[0].trigger).toBeUndefined();
     expect(requests[0].images).toEqual([
       {
         filename: 'target-b.png',

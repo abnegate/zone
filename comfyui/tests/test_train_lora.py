@@ -121,11 +121,19 @@ class GraphTests(unittest.TestCase):
     def test_qwen_uses_the_edit_reference_and_target_at_the_same_index(self) -> None:
         graph = train_lora.train_graph(qwen(), 'folder', '{}', 'artifact', self.config(), 12)
         self.assertEqual(graph['1']['class_type'], 'UNETLoader')
+        self.assertEqual(graph['1']['inputs']['unet_name'], 'qwen-unet.safetensors')
+        self.assertEqual(graph['2']['class_type'], 'CLIPLoader')
         self.assertEqual(graph['2']['inputs']['type'], 'qwen_image')
+        self.assertEqual(graph['2']['inputs']['clip_name'], 'qwen-clip.safetensors')
+        self.assertEqual(graph['3']['class_type'], 'VAELoader')
+        self.assertEqual(graph['3']['inputs']['vae_name'], 'qwen-vae.safetensors')
+        self.assertEqual(graph['5']['class_type'], 'VAEEncode')
+        self.assertEqual(graph['6']['class_type'], 'TextEncodeQwenImageEditPlus')
         self.assertEqual(graph['5']['inputs']['pixels'], ['4', 0])
         self.assertEqual(graph['6']['inputs']['prompt'], ['4', 2])
         self.assertEqual(graph['6']['inputs']['image1'], ['4', 1])
         self.assertEqual(graph['7']['inputs']['positive'], ['6', 0])
+        self.assertNotIn('CheckpointLoaderSimple', json.dumps(graph))
         self.assertNotIn('MakeTrainingDataset', json.dumps(graph))
 
 
@@ -181,6 +189,10 @@ class DatasetTests(unittest.TestCase):
         first.validate()
         second.validate()
         self.assertNotEqual(first, second)
+        self.assertNotEqual(
+            first.folder.removeprefix('zone-train-'),
+            first.artifact.removeprefix('zone-lora-'),
+        )
 
     def test_host_supplied_run_names_are_validated_as_a_pair(self) -> None:
         generated = train_lora.Run.create()

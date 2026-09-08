@@ -101,7 +101,7 @@ export default defineConfig({
   webServer: {
     command: `bun start -- --port ${port}`,
     url: baseURL,
-    reuseExistingServer: true,
+    reuseExistingServer: !isCI,
     timeout: 120000, // 120s to start server
     env: {
       PORT: port,

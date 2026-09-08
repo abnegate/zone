@@ -4,7 +4,8 @@ use crate::caption::{Captioner, data_url};
 use crate::config::Config;
 use crate::inventory::WeightSidecar;
 use crate::quality::Quality;
-use crate::recipe::{PromptMode, Recipe, RecipeCatalog, sanitize_weight_filename};
+use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
+use crate::train::Run;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -72,71 +73,6 @@ pub struct TrainBase {
     pub edit: bool,
 }
 
-/// The model files an admitted training recipe addresses. This is the
-/// compatibility boundary for the current catalog: once recipes carry their
-/// explicit training architecture, this resolves through
-/// `Recipe::training_model()` and is passed to `train::run` and
-/// `quality::select` unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TrainingModel {
-    Flux {
-        checkpoint: String,
-    },
-    QwenEdit {
-        unet: String,
-        clip: String,
-        vae: String,
-    },
-}
-
-impl TrainingModel {
-    fn from_recipe(recipe: &Recipe) -> Result<Self, TrainError> {
-        let checkpoint = model_file(recipe, "checkpoint");
-        let unet = model_file(recipe, "unet");
-        let clip = model_file(recipe, "clip");
-        let vae = model_file(recipe, "vae");
-        match (recipe.prompt_mode, checkpoint, unet, clip, vae) {
-            (PromptMode::ClipScene, Some(checkpoint), None, None, None) => {
-                Ok(Self::Flux { checkpoint })
-            }
-            (PromptMode::EditInstruction, None, Some(unet), Some(clip), Some(vae)) => {
-                Ok(Self::QwenEdit { unet, clip, vae })
-            }
-            _ => Err(TrainError::Invalid("training base is not supported")),
-        }
-    }
-
-    const fn edit(&self) -> bool {
-        matches!(self, Self::QwenEdit { .. })
-    }
-
-    fn checkpoint(&self) -> Option<&str> {
-        match self {
-            Self::Flux { checkpoint } => Some(checkpoint),
-            Self::QwenEdit { .. } => None,
-        }
-    }
-
-    fn apply_environment(&self, command: &mut Command) {
-        match self {
-            Self::Flux { checkpoint } => {
-                command.env("ZONE_TRAIN_CHECKPOINT", checkpoint);
-            }
-            Self::QwenEdit { unet, clip, vae } => {
-                command
-                    .env("ZONE_TRAIN_UNET", unet)
-                    .env("ZONE_TRAIN_CLIP", clip)
-                    .env("ZONE_TRAIN_VAE", vae);
-            }
-        }
-    }
-}
-
-fn model_file(recipe: &Recipe, key: &str) -> Option<String> {
-    let filename = recipe.defaults.get(key)?.trim();
-    sanitize_weight_filename(filename).ok()
-}
-
 struct ScreenedImage {
     original: usize,
     target: Vec<u8>,
@@ -149,7 +85,8 @@ struct Attempt {
     id: String,
     root: PathBuf,
     input: Option<PathBuf>,
-    folder: String,
+    folder: Option<String>,
+    artifact: Option<String>,
     produced: Option<PathBuf>,
 }
 
@@ -162,8 +99,9 @@ impl Attempt {
         fs::create_dir(&root).map_err(failed)?;
         let parent = models.parent();
         let attempt = Self {
+            artifact: None,
             input: parent.map(|root| root.join("input")),
-            folder: format!("zone-train-{id}"),
+            folder: None,
             produced: parent.map(|root| root.join("output").join("loras")),
             id,
             root,
@@ -172,37 +110,28 @@ impl Attempt {
         Ok(attempt)
     }
 
-    fn folder(&self) -> &str {
-        &self.folder
-    }
-
-    fn set_folder(&mut self, folder: String) -> Result<(), TrainError> {
-        let Some(id) = folder.strip_prefix("zone-train-") else {
-            return Err(TrainError::Failed(
-                "trainer returned an invalid input folder".to_string(),
-            ));
-        };
-        Uuid::parse_str(id)
-            .map_err(|_| TrainError::Failed("trainer returned an invalid input folder".into()))?;
-        self.folder = folder;
+    fn register(&mut self, run: &Run) -> Result<(), TrainError> {
+        run.validate()?;
+        self.folder = Some(run.folder.clone());
+        self.artifact = Some(run.artifact.clone());
         Ok(())
     }
 
-    fn artifact(&self) -> String {
+    fn staged_name(&self) -> String {
         format!("{}.safetensors", self.id)
     }
 
     fn output(&self) -> PathBuf {
-        self.root.join(self.artifact())
+        self.root.join(self.staged_name())
     }
 
     fn clean_runtime(&self) {
-        if let Some(input) = &self.input
+        if let (Some(input), Some(folder)) = (&self.input, &self.folder)
             && safe_directory(input)
         {
-            remove_entry(&input.join(&self.folder));
+            remove_entry(&input.join(folder));
         }
-        let Some(produced) = &self.produced else {
+        let (Some(produced), Some(artifact)) = (&self.produced, &self.artifact) else {
             return;
         };
         if !produced.parent().is_some_and(safe_directory) || !safe_directory(produced) {
@@ -211,12 +140,13 @@ impl Attempt {
         let Ok(entries) = fs::read_dir(produced) else {
             return;
         };
-        let artifact = self.artifact();
-        let checkpoint = format!("{}-step", self.id);
+        let final_name = format!("{artifact}.safetensors");
+        let checkpoint = format!("{artifact}-step");
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name == artifact || name.starts_with(&checkpoint) && name.ends_with(".safetensors") {
+            if name == final_name || name.starts_with(&checkpoint) && name.ends_with(".safetensors")
+            {
                 remove_entry(&entry.path());
             }
         }
@@ -235,7 +165,7 @@ pub fn available_bases(catalog: &RecipeCatalog, models_dir: &Path) -> Vec<TrainB
     catalog
         .image_recipes()
         .filter(|recipe| !recipe.adapter)
-        .filter(|recipe| TrainingModel::from_recipe(recipe).is_ok())
+        .filter(|recipe| recipe.training_model().is_ok())
         .filter(|recipe| {
             items
                 .iter()
@@ -289,9 +219,12 @@ async fn train_with_screening(
         .get(&request.base)
         .filter(|recipe| !recipe.adapter)
         .ok_or(TrainError::Invalid("unknown training base"))?;
-    let model = TrainingModel::from_recipe(recipe)?;
+    let model = recipe
+        .training_model()
+        .map_err(|_| TrainError::Invalid("training base is not supported"))?;
+    let edit = matches!(&model, TrainingModel::QwenEdit { .. });
     let trigger = request.trigger.as_deref().unwrap_or_default().trim();
-    if !model.edit() && trigger.is_empty() {
+    if !edit && trigger.is_empty() {
         return Err(TrainError::Invalid(
             "trigger word is required so the LoRA can retain identity",
         ));
@@ -332,7 +265,7 @@ async fn train_with_screening(
         .filter(|(index, _)| verdict.keep.binary_search(index).is_ok())
         .map(|(original, ((image, target), reference))| ScreenedImage {
             original,
-            url: (!model.edit()).then(|| data_url(&image.filename, &image.bytes_base64)),
+            url: (!edit).then(|| data_url(&image.filename, &image.bytes_base64)),
             target,
             reference,
             text: image.caption,
@@ -343,7 +276,7 @@ async fn train_with_screening(
             "screening returned an invalid survivor index".to_string(),
         ));
     }
-    let described = if model.edit() {
+    let described = if edit {
         for image in &mut survivors {
             image.text = image.text.trim().to_string();
         }
@@ -378,8 +311,7 @@ async fn train_with_screening(
     validate_output(&loras, &output)?;
     validate_output(&loras, &output_sidecar)?;
     let targets = ensure_child_directory(&attempt.root, "targets")?;
-    let controls = model
-        .edit()
+    let controls = edit
         .then(|| ensure_child_directory(&attempt.root, "control_1"))
         .transpose()?;
     let mut captions = HashMap::with_capacity(survivors.len());
@@ -391,7 +323,7 @@ async fn train_with_screening(
             &targets.join(format!("{stem}.png")),
             &image.target,
         )?;
-        let text = if model.edit() {
+        let text = if edit {
             image.text.clone()
         } else {
             identity_caption(&image.text, trigger)
@@ -411,20 +343,28 @@ async fn train_with_screening(
         }
     }
     let staged = attempt.output();
-    let artifact = attempt.artifact();
-    let folder = attempt.folder().to_string();
-    let folder = if let Some(command) = config.train_command.as_deref() {
+    let staged_name = attempt.staged_name();
+    let run = if let Some(command) = config.train_command.as_deref() {
+        let run = Run::new();
+        attempt.register(&run)?;
         let mut process = Command::new("sh");
         process
             .arg("-c")
             .arg(command)
-            .env("ZONE_TRAIN_NAME", &artifact)
+            .env("ZONE_TRAIN_NAME", &staged_name)
             .env("ZONE_TRAIN_FINAL_NAME", &filename)
             .env("ZONE_TRAIN_BASE", &recipe.id)
             .env("ZONE_TRAIN_DIR", &attempt.root)
             .env("ZONE_TRAIN_OUTPUT", &staged)
             .env("ZONE_TRAIN_TRIGGER", trigger)
             .env("ZONE_TRAIN_IMAGE_COUNT", survivors.len().to_string())
+            .env(
+                "ZONE_TRAIN_ARCHITECTURE",
+                crate::train::architecture(&model),
+            )
+            .env("ZONE_TRAIN_FOLDER", &run.folder)
+            .env("ZONE_TRAIN_ARTIFACT", &run.artifact)
+            .env("ZONE_TRAIN_DEFER_CLEANUP", "1")
             .env("COMFYUI_BASE_URL", &config.base_url)
             .env("ZONE_TRAIN_TIMEOUT", config.train_timeout_secs.to_string())
             .env(
@@ -440,38 +380,43 @@ async fn train_with_screening(
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        model.apply_environment(&mut process);
-        let status = process.status().await.map_err(failed)?;
+        match &model {
+            TrainingModel::Flux { checkpoint } => {
+                process.env("ZONE_TRAIN_CHECKPOINT", checkpoint);
+            }
+            TrainingModel::QwenEdit { unet, clip, vae } => {
+                process
+                    .env("ZONE_TRAIN_UNET", unet)
+                    .env("ZONE_TRAIN_CLIP", clip)
+                    .env("ZONE_TRAIN_VAE", vae);
+            }
+        }
+        let status = match process.status().await {
+            Ok(status) => status,
+            Err(error) => {
+                crate::train::cleanup(config, &run).await;
+                return Err(failed(error));
+            }
+        };
         if !status.success() {
+            crate::train::cleanup(config, &run).await;
             return Err(TrainError::Failed(format!(
                 "trainer exited {}",
                 status.code().unwrap_or(1)
             )));
         }
-        folder
+        run
     } else {
-        crate::train::run(
-            config,
-            recipe,
-            &attempt.root,
-            &staged,
-            &artifact,
-            survivors.len(),
-        )
-        .await?
+        crate::train::run(config, &model, &attempt.root, &staged, survivors.len()).await?
     };
-    attempt.set_folder(folder.clone())?;
-    require_regular_file(&attempt.root, &staged)
-        .map_err(|_| TrainError::Failed("trainer did not write a regular LoRA file".to_string()))?;
-    let checkpoint = model
-        .checkpoint()
-        .unwrap_or(config.checkpoint.as_str())
-        .to_string();
-    let probe = Config {
-        checkpoint,
-        ..config.clone()
-    };
-    let quality = crate::quality::select(&probe, &folder, &staged, &captions).await;
+    attempt.register(&run)?;
+    if require_regular_file(&attempt.root, &staged).is_err() {
+        crate::train::cleanup(config, &run).await;
+        return Err(TrainError::Failed(
+            "trainer did not write a regular LoRA file".to_string(),
+        ));
+    }
+    let quality = crate::quality::select(config, &model, &run, &staged, &captions).await;
     require_regular_file(&attempt.root, &staged).map_err(|_| {
         TrainError::Failed("quality selection did not leave a regular LoRA file".to_string())
     })?;
@@ -511,7 +456,7 @@ async fn train_with_screening(
 }
 
 fn validate_pairing(images: &[TrainImage], model: &TrainingModel) -> Result<(), TrainError> {
-    if model.edit() {
+    if matches!(model, TrainingModel::QwenEdit { .. }) {
         if images.iter().any(|image| image.before_base64.is_none()) {
             return Err(TrainError::Invalid(
                 "edit training needs one reference image for every target",
@@ -768,6 +713,11 @@ mod tests {
     use crate::config::Config;
     use crate::screening::{Rejection, Verdict};
     use base64::Engine;
+    use serde_json::{Value, json};
+    use wiremock::{
+        Mock, MockServer, Request, ResponseTemplate,
+        matchers::{method, path, path_regex},
+    };
 
     fn harness(command: &str) -> (tempfile::TempDir, Config) {
         let root = tempfile::tempdir().expect("temporary ComfyUI root");
@@ -923,6 +873,16 @@ mod tests {
             stem=${ZONE_TRAIN_NAME%.safetensors}
             test "$stem" != "$ZONE_TRAIN_NAME" || exit 13
             test "$stem" = "$(basename "$ZONE_TRAIN_DIR")" || exit 14
+            test "$ZONE_TRAIN_ARCHITECTURE" = "qwen_edit" || exit 23
+            test "$ZONE_TRAIN_UNET" = "qwen_image_edit_2511_fp8mixed.safetensors" || exit 24
+            test "$ZONE_TRAIN_CLIP" = "qwen_2.5_vl_7b_fp8_scaled.safetensors" || exit 25
+            test "$ZONE_TRAIN_VAE" = "qwen_image_vae.safetensors" || exit 26
+            test "$ZONE_TRAIN_DEFER_CLEANUP" = "1" || exit 27
+            folder_id=${ZONE_TRAIN_FOLDER#zone-train-}
+            artifact_id=${ZONE_TRAIN_ARTIFACT#zone-lora-}
+            test "$folder_id" != "$ZONE_TRAIN_FOLDER" || exit 28
+            test "$artifact_id" != "$ZONE_TRAIN_ARTIFACT" || exit 29
+            test "$folder_id" != "$artifact_id" || exit 30
             test "$(cat "$ZONE_TRAIN_DIR/targets/0000.png")" = "target-zero" || exit 15
             test "$(cat "$ZONE_TRAIN_DIR/control_1/0000.png")" = "reference-zero" || exit 16
             test "$(cat "$ZONE_TRAIN_DIR/targets/0000.txt")" = "change zero" || exit 17
@@ -965,6 +925,215 @@ mod tests {
         assert!(
             captioner.received_requests().await.unwrap().is_empty(),
             "edit instructions must never be sent through the identity captioner"
+        );
+        assert!(training_entries(&config).is_empty());
+    }
+
+    #[tokio::test]
+    async fn screened_qwen_pipeline_posts_one_aligned_model_and_pair_contract() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        let root = tempfile::tempdir().expect("temporary ComfyUI root");
+        let models = root.path().join("models");
+        let input = root.path().join("input");
+        let produced = root.path().join("output/loras");
+        fs::create_dir(&models).unwrap();
+        fs::create_dir(&input).unwrap();
+        fs::create_dir_all(&produced).unwrap();
+
+        let other_folder = format!("zone-train-{}", Uuid::new_v4());
+        let other_artifact = format!("zone-lora-{}", Uuid::new_v4());
+        fs::create_dir(input.join(&other_folder)).unwrap();
+        fs::write(input.join(&other_folder).join("kept"), b"other input").unwrap();
+        fs::write(
+            produced.join(format!("{other_artifact}.safetensors")),
+            b"other output",
+        )
+        .unwrap();
+
+        let produced_for_prompt = produced.clone();
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(move |request: &Request| {
+                let body: Value = request.body_json().unwrap();
+                let graph = &body["prompt"];
+                if graph.as_object().is_some_and(|nodes| {
+                    nodes
+                        .values()
+                        .any(|node| node["class_type"] == "ZoneTrainLoRA")
+                }) {
+                    let artifact = graph["7"]["inputs"]["save_name"].as_str().unwrap();
+                    fs::write(
+                        produced_for_prompt.join(format!("{artifact}.safetensors")),
+                        b"remote final",
+                    )
+                    .unwrap();
+                    fs::write(
+                        produced_for_prompt.join(format!("{artifact}-step11.safetensors")),
+                        b"remote checkpoint",
+                    )
+                    .unwrap();
+                }
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "prompt_id": prompt,
+                    "number": 0.0,
+                    "node_errors": {}
+                }))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/history/[0-9a-f-]+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                prompt.to_string(): {
+                    "status": {"completed": true, "status_str": "success"},
+                    "outputs": {}
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(|request: &Request| {
+                let filename = request
+                    .url
+                    .query_pairs()
+                    .find_map(|(name, value)| (name == "filename").then(|| value.into_owned()))
+                    .unwrap();
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Disposition", format!("filename=\"{filename}\""))
+                    .insert_header("Content-Type", "application/octet-stream")
+                    .set_body_bytes(vec![7; 10_001])
+            })
+            .mount(&server)
+            .await;
+
+        let config = Config {
+            enabled: true,
+            base_url: server.uri(),
+            models_dir: models,
+            poll_interval_ms: 1,
+            train_command: None,
+            train_timeout_secs: 2,
+            ..Default::default()
+        };
+        let outcome = train_with_screening(
+            &config,
+            String::new(),
+            String::new(),
+            edit(vec![
+                image("target-zero", " change zero ", Some("reference-zero")),
+                image("target-one", "change one", Some("reference-one")),
+                image("target-two", " change two ", Some("reference-two")),
+            ]),
+            drop_middle,
+        )
+        .await
+        .expect("native Qwen run");
+
+        assert_eq!(outcome.screening.kept, 2);
+        assert_eq!(fs::read(&outcome.path).unwrap(), vec![7; 10_001]);
+        let requests = server.received_requests().await.unwrap();
+        let graphs = requests
+            .iter()
+            .filter(|request| request.url.path() == "/prompt")
+            .map(|request| request.body_json::<Value>().unwrap()["prompt"].clone())
+            .collect::<Vec<Value>>();
+        let training = graphs
+            .iter()
+            .find(|graph| {
+                graph.as_object().is_some_and(|nodes| {
+                    nodes
+                        .values()
+                        .any(|node| node["class_type"] == "ZoneTrainLoRA")
+                })
+            })
+            .expect("posted training graph");
+        assert_eq!(training["1"]["class_type"], "UNETLoader");
+        assert_eq!(training["2"]["class_type"], "CLIPLoader");
+        assert_eq!(training["2"]["inputs"]["type"], "qwen_image");
+        assert_eq!(training["3"]["class_type"], "VAELoader");
+        assert_eq!(training["5"]["class_type"], "VAEEncode");
+        assert_eq!(training["6"]["class_type"], "TextEncodeQwenImageEditPlus");
+        let serialized = training.to_string();
+        assert!(!serialized.contains("CheckpointLoaderSimple"));
+        assert!(!serialized.contains("MakeTrainingDataset"));
+
+        let manifest: Value =
+            serde_json::from_str(training["4"]["inputs"]["manifest_json"].as_str().unwrap())
+                .unwrap();
+        let expected = json!({
+            "schema_version": 1,
+            "architecture": "qwen_edit",
+            "pairs": [
+                {
+                    "index": 0,
+                    "target": "targets/0000.png",
+                    "reference": "control_1/0000.png",
+                    "instruction": "change zero"
+                },
+                {
+                    "index": 1,
+                    "target": "targets/0001.png",
+                    "reference": "control_1/0001.png",
+                    "instruction": "change two"
+                }
+            ]
+        });
+        assert_eq!(manifest, expected);
+
+        let folder = training["4"]["inputs"]["folder"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let artifact = training["7"]["inputs"]["save_name"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        Run {
+            folder: folder.clone(),
+            artifact: artifact.clone(),
+        }
+        .validate()
+        .unwrap();
+        assert_ne!(
+            folder.trim_start_matches("zone-train-"),
+            artifact.trim_start_matches("zone-lora-")
+        );
+
+        let quality = graphs
+            .iter()
+            .find(|graph| {
+                graph.as_object().is_some_and(|nodes| {
+                    nodes
+                        .values()
+                        .any(|node| node["class_type"] == "ZoneProbeLoss")
+                })
+            })
+            .expect("posted quality graph");
+        let quality_manifest: Value =
+            serde_json::from_str(quality["4"]["inputs"]["manifest_json"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(quality_manifest, expected);
+        assert_eq!(quality["1"]["class_type"], "UNETLoader");
+        assert_eq!(quality["2"]["inputs"]["type"], "qwen_image");
+        assert_eq!(quality["3"]["class_type"], "VAELoader");
+        assert_eq!(quality["6"]["class_type"], "TextEncodeQwenImageEditPlus");
+
+        assert!(!input.join(folder).exists());
+        assert!(!produced.join(format!("{artifact}.safetensors")).exists());
+        assert!(
+            !produced
+                .join(format!("{artifact}-step11.safetensors"))
+                .exists()
+        );
+        assert_eq!(
+            fs::read(input.join(other_folder).join("kept")).unwrap(),
+            b"other input"
+        );
+        assert_eq!(
+            fs::read(produced.join(format!("{other_artifact}.safetensors"))).unwrap(),
+            b"other output"
         );
         assert!(training_entries(&config).is_empty());
     }
