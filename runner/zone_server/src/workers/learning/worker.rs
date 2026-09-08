@@ -11,7 +11,6 @@
 
 use chrono::{Duration as CalendarDuration, NaiveDateTime, Utc};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 use uuid::Uuid;
 
 use super::artifacts;
@@ -30,7 +29,7 @@ use super::{convention, lesson, quality};
 use crate::db::{DbResult, knowledge};
 use crate::state::AppState;
 
-const LEARNING_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
+pub const LEARNING_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
 const LOOKBACK_DAYS: i64 = 90;
 const MAXIMUM_RUNS_PER_WORKSPACE: i64 = 500;
 const MAXIMUM_ERRORS_EMBEDDED: usize = 200;
@@ -395,7 +394,8 @@ pub async fn learn_workspace(
     Ok(report)
 }
 
-async fn run_cycle(state: &AppState, policy: &LearningPolicy) -> DbResult<()> {
+/// Learn from every workspace's finished runs once.
+pub async fn run_cycle(state: &AppState, policy: &LearningPolicy) -> DbResult<()> {
     let since = Utc::now().naive_utc() - CalendarDuration::days(policy.lookback_days);
     let workspaces = store::active_workspaces(state.db(), since).await?;
     if workspaces.is_empty() {
@@ -435,24 +435,6 @@ async fn run_cycle(state: &AppState, policy: &LearningPolicy) -> DbResult<()> {
     }
 
     Ok(())
-}
-
-/// Run the learning pass on an interval. The first pass waits one interval so server
-/// startup is not competing with a full workspace scan.
-pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let policy = LearningPolicy::default();
-        let mut interval = tokio::time::interval(Duration::from_secs(LEARNING_INTERVAL_SECONDS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-            if let Err(error) = run_cycle(&state, &policy).await {
-                tracing::warn!(%error, "Learning cycle failed");
-            }
-        }
-    })
 }
 
 #[cfg(test)]

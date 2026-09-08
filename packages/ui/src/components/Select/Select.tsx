@@ -180,6 +180,11 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
 
     const handleValueChange = useCallback(
       (nextValue: string) => {
+        // Radix remounts its hidden form-bubble select whenever the option set
+        // changes and echoes the current value back through onValueChange. No
+        // item can hold an empty value, so an empty change is only ever that
+        // echo, and forwarding it would clobber a value set while options load.
+        if (nextValue === '') return;
         onValueChange?.(nextValue);
         if (onChange) {
           const syntheticEvent = {

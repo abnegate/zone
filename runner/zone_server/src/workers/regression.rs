@@ -43,4 +43,4 @@ pub use checker::{
 };
 pub use recurrence::RecurrenceChecker;
 pub use reopen::ReopenChecker;
-pub use worker::{RegressionSettings, check_all, scan_workspace, spawn, subjects};
+pub use worker::{Alerted, RegressionSettings, check_all, checkers, scan_workspace, subjects};

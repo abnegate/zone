@@ -11,8 +11,6 @@
 //! an open question, and a run whose change is still being argued over is exactly
 //! the run whose score will change.
 
-use std::time::Duration;
-
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -21,7 +19,7 @@ use crate::state::AppState;
 use crate::workers::pr::{ReceptionSyncResult, sync_reception};
 
 /// How often reception is re-read.
-const SYNC_INTERVAL_SECONDS: u64 = 30 * 60;
+pub const SYNC_INTERVAL_SECONDS: u64 = 30 * 60;
 
 /// How far back a cycle looks for runs still worth revisiting.
 const LOOKBACK_DAYS: i32 = 14;
@@ -90,23 +88,6 @@ pub async fn run_cycle(state: &AppState) -> DbResult<usize> {
     }
 
     Ok(recorded)
-}
-
-pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(SYNC_INTERVAL_SECONDS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-            match run_cycle(&state).await {
-                Ok(0) => {}
-                Ok(recorded) => tracing::info!("Recorded reception for {} run(s)", recorded),
-                Err(error) => tracing::warn!(%error, "Reception sync cycle failed"),
-            }
-        }
-    })
 }
 
 #[cfg(test)]

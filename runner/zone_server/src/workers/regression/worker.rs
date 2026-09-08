@@ -11,7 +11,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{NaiveDateTime, Utc};
 use sqlx::PgPool;
@@ -26,10 +25,9 @@ use crate::state::AppState;
 use crate::workers::analytics::{AgentRun, TimeWindow, load_runs};
 use crate::workers::learning::attempt::AttemptOutcome;
 use crate::workers::learning::error_category::ErrorCategory;
-use crate::workers::notify;
 use zone_notify::{Fanout, Notification, Severity};
 
-const REGRESSION_INTERVAL_SECONDS: u64 = 60 * 60;
+pub const REGRESSION_INTERVAL_SECONDS: u64 = 60 * 60;
 const MAXIMUM_TASKS_PER_WORKSPACE: i64 = 500;
 const MAXIMUM_RUNS_PER_WORKSPACE: i64 = 10_000;
 
@@ -219,7 +217,8 @@ pub async fn check_all(
     results
 }
 
-async fn run_cycle(
+/// Check every monitored fix once, alerting on the ones that came back.
+pub async fn run_cycle(
     state: &AppState,
     checkers: &[Arc<dyn RegressionChecker>],
     settings: &RegressionSettings,
@@ -272,31 +271,17 @@ async fn run_cycle(
     Ok(())
 }
 
-/// Watch shipped fixes on an interval. The first pass waits one interval so
-/// server startup is not competing with a full workspace scan.
-pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let settings = RegressionSettings::default();
-        let checkers: Vec<Arc<dyn RegressionChecker>> = vec![
-            Arc::new(RecurrenceChecker::new(settings.policy)),
-            Arc::new(ReopenChecker::new(settings.policy)),
-        ];
-        let fanout = notify::from_process_environment();
-        let mut alerted: BTreeMap<Uuid, NaiveDateTime> = BTreeMap::new();
-
-        let mut interval = tokio::time::interval(Duration::from_secs(REGRESSION_INTERVAL_SECONDS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-            if let Err(error) = run_cycle(&state, &checkers, &settings, &fanout, &mut alerted).await
-            {
-                tracing::warn!(%error, "Regression cycle failed");
-            }
-        }
-    })
+/// The checkers a scan runs, in the order they were written.
+pub fn checkers(settings: &RegressionSettings) -> Vec<Arc<dyn RegressionChecker>> {
+    vec![
+        Arc::new(RecurrenceChecker::new(settings.policy)),
+        Arc::new(ReopenChecker::new(settings.policy)),
+    ]
 }
+
+/// Which fixes have already been alerted on, so a regression is reported once
+/// rather than every hour it stays broken.
+pub type Alerted = BTreeMap<Uuid, NaiveDateTime>;
 
 #[cfg(test)]
 mod tests {

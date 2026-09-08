@@ -10,8 +10,6 @@
 //! The series is for a digest, which has to carry its own history because it
 //! arrives as one message.
 
-use std::time::Duration;
-
 use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -24,7 +22,7 @@ use crate::metrics::{AgentSnapshot, FailureCount};
 use crate::state::AppState;
 use crate::workers::learning::error_category::ErrorCategory;
 
-const ANALYTICS_INTERVAL_SECONDS: u64 = 15 * 60;
+pub const ANALYTICS_INTERVAL_SECONDS: u64 = 15 * 60;
 const MAXIMUM_RUNS_PER_WORKSPACE: i64 = 5_000;
 
 /// What the pass covers each time it runs.
@@ -130,7 +128,8 @@ async fn refresh_workspace(
     Ok(())
 }
 
-async fn run_cycle(state: &AppState, policy: &AnalyticsPolicy) -> DbResult<()> {
+/// Refresh every workspace's agent gauges once.
+pub async fn run_cycle(state: &AppState, policy: &AnalyticsPolicy) -> DbResult<()> {
     let pool = state.db();
     let since = Utc::now().naive_utc() - chrono::Duration::days(policy.lookback_days());
 
@@ -145,24 +144,6 @@ async fn run_cycle(state: &AppState, policy: &AnalyticsPolicy) -> DbResult<()> {
     }
 
     Ok(())
-}
-
-/// Refresh the agent gauges on an interval. The first pass waits one interval so
-/// server startup is not competing with a full workspace scan.
-pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let policy = AnalyticsPolicy::default();
-        let mut interval = tokio::time::interval(Duration::from_secs(ANALYTICS_INTERVAL_SECONDS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-            if let Err(error) = run_cycle(&state, &policy).await {
-                tracing::warn!(%error, "Agent analytics cycle failed");
-            }
-        }
-    })
 }
 
 #[cfg(test)]

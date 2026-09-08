@@ -1,9 +1,10 @@
 //! Periodic and change-driven source reindexing
 //!
-//! Polls active sources on a schedule. Incremental adapters (GitHub, GitLab,
+//! One poll looks at every active source. Incremental adapters (GitHub, GitLab,
 //! filesystem) are reindexed when their remote version changes or when files
 //! never got embeddings. Other sources are refreshed when they age past
-//! `SOURCE_RESYNC_INTERVAL_SECS`.
+//! `SOURCE_RESYNC_INTERVAL_SECS`. How often a poll happens is
+//! [`crate::workers::housekeeping`]'s business.
 
 use chrono::{DateTime, Utc};
 use std::time::Duration;
@@ -62,27 +63,11 @@ pub fn resync_decision(
     }
 }
 
-/// Start the source resync worker
-pub fn start_resync_worker(state: AppState) {
-    let config = state.config().source_index.clone();
-    if !config.enabled {
-        tracing::info!("Source resync worker disabled");
-        return;
-    }
+/// The short first delay, so a just-started server picks up failed files well
+/// before the first full poll would come round.
+pub const FIRST_POLL_DELAY: Duration = Duration::from_secs(15);
 
-    tokio::spawn(async move {
-        // Short first delay so a just-started server can pick up failed files
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        loop {
-            if let Err(e) = poll_sources(&state).await {
-                tracing::error!("Source resync poll failed: {}", e);
-            }
-            tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
-        }
-    });
-}
-
-async fn poll_sources(state: &AppState) -> Result<(), sqlx::Error> {
+pub async fn poll_sources(state: &AppState) -> Result<(), sqlx::Error> {
     let sources = sources::list_active_index_sources(state.db()).await?;
     if sources.is_empty() {
         return Ok(());

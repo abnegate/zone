@@ -29,4 +29,4 @@ pub mod worker;
 
 pub use digest::{Digest, generate};
 pub use schedule::{Cadence, Due, Schedule, due};
-pub use worker::{Ledger, ReportEnvironment, ReportSettings, build, deliver, owed, spawn};
+pub use worker::{Ledger, ReportEnvironment, ReportSettings, build, deliver, owed};

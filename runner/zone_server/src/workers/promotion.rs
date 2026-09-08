@@ -14,13 +14,12 @@ use chrono::{Duration as CalendarDuration, NaiveDateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::HashSet;
-use std::time::Duration;
 use uuid::Uuid;
 
 use crate::db::{DbResult, knowledge};
 use crate::state::AppState;
 
-const PROMOTION_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
+pub const PROMOTION_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
 const MINIMUM_OCCURRENCES: usize = 4;
 const MINIMUM_DISTINCT_CHATS: usize = 3;
 const MINIMUM_QUESTION_SIMILARITY: f32 = 0.88;
@@ -581,7 +580,8 @@ pub async fn promote_workspace(
     Ok(report)
 }
 
-async fn run_cycle(state: &AppState, policy: &PromotionPolicy) -> DbResult<()> {
+/// Promote every answer that has earned it, across every workspace.
+pub async fn run_cycle(state: &AppState, policy: &PromotionPolicy) -> DbResult<()> {
     let since = Utc::now().naive_utc() - CalendarDuration::days(policy.lookback_days);
     let workspaces = active_workspaces(state.db(), since).await?;
 
@@ -603,24 +603,6 @@ async fn run_cycle(state: &AppState, policy: &PromotionPolicy) -> DbResult<()> {
     }
 
     Ok(())
-}
-
-/// Run the promoter on an interval. The first pass waits one interval so server
-/// startup is not competing with a full workspace scan.
-pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let policy = PromotionPolicy::default();
-        let mut interval = tokio::time::interval(Duration::from_secs(PROMOTION_INTERVAL_SECONDS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-            if let Err(error) = run_cycle(&state, &policy).await {
-                tracing::warn!(%error, "Standing instruction promotion cycle failed");
-            }
-        }
-    })
 }
 
 #[cfg(test)]
