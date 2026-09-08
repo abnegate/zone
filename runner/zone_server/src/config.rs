@@ -44,7 +44,8 @@ pub struct Config {
     pub model_search_proxy_url: Option<String>,
     /// Encryption key for source credentials (must be at least 32 characters)
     pub encryption_key: String,
-    /// CORS allowed origins (comma-separated, default: *)
+    /// Browser origins allowed to call the API, comma-separated. Entries may be
+    /// full origins or bare hosts; a host also covers its subdomains.
     pub cors_origins: Vec<String>,
     /// CORS allow credentials (default: false)
     pub cors_allow_credentials: bool,
@@ -164,6 +165,116 @@ impl MonitoringConfig {
     }
 }
 
+/// Base domain the browser-facing subdomains hang off, shared with Traefik.
+const DOMAIN_HOST: &str = "DOMAIN_HOST_WEBUI";
+
+/// Development hosts that stay reachable with no configuration at all.
+///
+/// Matched by equality, never by prefix: `localhost.attacker.com` starts with
+/// `localhost` and is not loopback.
+const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
+
+/// Browser origins the API answers, credentials included.
+///
+/// The match is on the origin's host, and an allowed host must be a configured
+/// host or a subdomain of one. A substring test would admit
+/// `evil-zone.attacker.com` for a `zone.` deployment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AllowedOrigins {
+    hosts: Vec<String>,
+}
+
+impl AllowedOrigins {
+    /// `CORS_ORIGINS` plus the deployment's base domain. With neither set this
+    /// admits loopback only, so a deployment that forgot to configure the
+    /// console fails closed rather than open.
+    pub fn from_config(config: &Config) -> Self {
+        Self::new(
+            config
+                .cors_origins
+                .iter()
+                .cloned()
+                .chain(env::var(DOMAIN_HOST).ok()),
+        )
+    }
+
+    pub fn new(entries: impl IntoIterator<Item = String>) -> Self {
+        let mut hosts: Vec<String> = entries
+            .into_iter()
+            .filter_map(|entry| configured_host(&entry))
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        Self { hosts }
+    }
+
+    /// Whether an `Origin` header value may call the API.
+    pub fn allows(&self, origin: &str) -> bool {
+        let Some(host) = origin_host(origin) else {
+            return false;
+        };
+        LOOPBACK_HOSTS.contains(&host.as_str())
+            || self.hosts.iter().any(|allowed| within(&host, allowed))
+    }
+}
+
+/// A configured entry, written either as an origin or as a bare host.
+fn configured_host(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    if entry == "*" {
+        return None;
+    }
+    if entry.contains("://") {
+        return origin_host(entry);
+    }
+    origin_host(&format!("https://{entry}"))
+}
+
+/// The lowercased host of a `scheme://host[:port]` origin.
+fn origin_host(origin: &str) -> Option<String> {
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))?;
+    if rest.is_empty()
+        || rest.contains('/')
+        || rest.contains('@')
+        || rest.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    let host = match rest.strip_prefix('[') {
+        Some(tail) => {
+            let (inside, after) = tail.split_once(']')?;
+            match after.strip_prefix(':') {
+                Some(port) if is_port(port) => inside,
+                None if after.is_empty() => inside,
+                _ => return None,
+            }
+        }
+        None => match rest.split_once(':') {
+            Some((host, port)) if is_port(port) => host,
+            Some(_) => return None,
+            None => rest,
+        },
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn is_port(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|character| character.is_ascii_digit())
+}
+
+/// Equal to the allowed host, or a subdomain of it on a label boundary.
+fn within(host: &str, allowed: &str) -> bool {
+    host == allowed
+        || host
+            .strip_suffix(allowed)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
 fn env_truthy(name: &str, default: bool) -> bool {
     match env::var(name) {
         Ok(s) => matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
@@ -217,16 +328,16 @@ impl Config {
             ));
         }
 
-        // Parse CORS origins
         let cors_origins = env::var("CORS_ORIGINS")
             .ok()
-            .map(|s| {
-                s.split(',')
+            .filter(|list| !list.trim().is_empty())
+            .map(|list| {
+                list.split(',')
                     .map(|origin| origin.trim().to_string())
                     .filter(|origin| !origin.is_empty())
                     .collect()
             })
-            .unwrap_or_else(|| vec!["*".to_string()]); // Default to permissive
+            .unwrap_or_else(|| vec!["*".to_string()]);
 
         let cors_allow_credentials = env::var("CORS_ALLOW_CREDENTIALS")
             .ok()
@@ -505,6 +616,86 @@ mod tests {
         let invalid = ConfigError::Invalid("reason here");
         assert!(invalid.to_string().contains("Invalid"));
         assert!(invalid.to_string().contains("reason here"));
+    }
+
+    fn allowed(entries: &[&str]) -> AllowedOrigins {
+        AllowedOrigins::new(entries.iter().map(|entry| entry.to_string()))
+    }
+
+    #[test]
+    fn allowed_origins_reject_hosts_that_merely_contain_a_configured_one() {
+        let origins = allowed(&["https://zone.example.com", "manager.example.com"]);
+        for origin in [
+            "https://evil-zone.attacker.com",
+            "https://manager.attacker.com",
+            "https://zone.example.com.attacker.com",
+            "https://attacker.com/?x=https://zone.example.com",
+            "https://notzone.example.com",
+            "https://zone.example.como",
+        ] {
+            assert!(!origins.allows(origin), "{origin} must be rejected");
+        }
+    }
+
+    #[test]
+    fn allowed_origins_accept_the_configured_host_and_its_subdomains() {
+        let origins = allowed(&["https://zone.example.com"]);
+        for origin in [
+            "https://zone.example.com",
+            "http://zone.example.com",
+            "https://zone.example.com:8443",
+            "https://manager.zone.example.com",
+            "https://ZONE.example.com",
+        ] {
+            assert!(origins.allows(origin), "{origin} must be accepted");
+        }
+    }
+
+    #[test]
+    fn allowed_origins_scope_loopback_to_the_loopback_hosts() {
+        let origins = AllowedOrigins::default();
+        for origin in [
+            "http://localhost",
+            "http://localhost:3001",
+            "https://127.0.0.1:8000",
+            "http://[::1]:5173",
+        ] {
+            assert!(origins.allows(origin), "{origin} must be accepted");
+        }
+        for origin in [
+            "http://localhost.attacker.com",
+            "https://127.0.0.1.attacker.com",
+            "http://sub.localhost",
+            "http://evil.127.0.0.1",
+        ] {
+            assert!(!origins.allows(origin), "{origin} must be rejected");
+        }
+    }
+
+    #[test]
+    fn allowed_origins_fail_closed_without_configuration() {
+        let origins = allowed(&["*", "", "   "]);
+        assert_eq!(origins, AllowedOrigins::default());
+        assert!(origins.allows("http://localhost:3001"));
+        assert!(!origins.allows("https://anything.example.com"));
+    }
+
+    #[test]
+    fn allowed_origins_reject_values_that_are_not_plain_origins() {
+        let origins = allowed(&["zone.example.com"]);
+        for origin in [
+            "null",
+            "",
+            "zone.example.com",
+            "file://zone.example.com",
+            "https://",
+            "https://user@zone.example.com",
+            "https://zone.example.com/path",
+            "https://zone.example.com:notaport",
+            "https://zone.example.com evil.com",
+        ] {
+            assert!(!origins.allows(origin), "{origin} must be rejected");
+        }
     }
 
     #[test]
