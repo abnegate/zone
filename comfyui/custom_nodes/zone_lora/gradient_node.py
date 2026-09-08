@@ -22,7 +22,8 @@ from comfy_extras.nodes_train import (
 )
 
 from .inference_hooks import install_all, prepare_frozen_weights, wrap_early_frozen
-from .train_node import setup_identity_lora
+from .train_config import load_config
+from .train_node import error_scale, setup_identity_lora
 
 
 class FixedBatchDescent(comfy.samplers.Sampler):
@@ -44,6 +45,7 @@ class FixedBatchDescent(comfy.samplers.Sampler):
         self.percent = percent
         self.seed = seed
         self.training_dtype = training_dtype
+        self.sigma_floor = float(load_config().get('sigma_floor', 0.0))
         self.optimizer = torch.optim.AdamW(parameters, lr=learning_rate)
         self.losses: list[float] = []
         self.gradient_norms: list[float] = []
@@ -77,7 +79,10 @@ class FixedBatchDescent(comfy.samplers.Sampler):
         for _ in range(self.iterations):
             with torch.autocast(xt.device.type, dtype=self.training_dtype):
                 x0_pred = model_wrap(xt, sigma, **extra)
-                loss = torch.nn.functional.mse_loss(x0_pred.float(), x0.float()) / (sigma.item() ** 2)
+                scale = error_scale(sigma, x0_pred, self.sigma_floor)
+                loss = torch.nn.functional.mse_loss(
+                    x0_pred.float() / scale, x0.float() / scale
+                )
             self.optimizer.zero_grad()
             loss.backward()
             broken = [

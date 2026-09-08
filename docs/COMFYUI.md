@@ -429,6 +429,24 @@ python3 comfyui/probe_lora.py
 ComfyUI runs prompts one at a time, so a probe queued during training waits for
 it to finish.
 
+Both probes measure the objective training optimises — the x0 error divided by
+sigma, floored by `sigma_floor` — through the one `error_scale` in `train_node`.
+Scoring the raw x0 error instead would weight every sample by sigma squared and
+rank adapters by the noisiest end of the schedule, where an adapter can only
+shift colour.
+
+`train_config.json` is the single source for every training value. The one
+override is `ZONE_TRAIN_STEPS`, which shortens a run so a diagnostic is worth
+running:
+
+```bash
+ZONE_TRAIN_STEPS=100 \
+ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_OUTPUT="$HOME/Library/Application Support/Zone/ComfyUI/models/loras/probe.safetensors" \
+COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+python3 comfyui/train_lora.py
+```
+
 ## Workflow contract
 
 `comfyui/workflows/flux1-schnell-fp8-api.json` is the default text-to-image

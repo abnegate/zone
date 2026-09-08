@@ -21,15 +21,14 @@ def load_config() -> dict:
 
 
 def train_steps(image_count: int, config: dict) -> int:
-    """Steps are forward passes, and the budget in config counts optimiser updates."""
+    """ZONE_TRAIN_STEPS is what keeps a diagnostic run short enough to be worth running."""
     override = env('ZONE_TRAIN_STEPS')
     if override:
         return int(override)
-    updates = min(
+    return min(
         int(config['max_steps']),
         max(int(config['min_steps']), max(image_count, 1) * int(config['steps_per_image'])),
     )
-    return updates * max(1, int(config.get('gradient_accumulation', 1)))
 
 
 def env(name: str, default: str = '') -> str:
@@ -93,10 +92,6 @@ def wait_prompt(base: str, prompt_id: str, timeout: int) -> dict:
     raise SystemExit(f'train timed out after {timeout}s')
 
 
-def learning_rate(config: dict) -> float:
-    return float(env('ZONE_TRAIN_LEARNING_RATE') or config['learning_rate'])
-
-
 def train_graph(checkpoint: str, folder: str, captions: dict[str, str], save_name: str, config: dict, steps: int) -> dict:
     return {
         '1': {
@@ -127,7 +122,7 @@ def train_graph(checkpoint: str, folder: str, captions: dict[str, str], save_nam
                 'latents': ['3', 0],
                 'positive': ['3', 1],
                 'steps': steps,
-                'learning_rate': learning_rate(config),
+                'learning_rate': float(config['learning_rate']),
                 'rank': int(config['rank']),
                 'seed': int(config['seed']),
                 'training_dtype': config['training_dtype'],

@@ -304,7 +304,8 @@ class LossWeightingTests(unittest.TestCase):
         import torch
 
         cls.torch = torch
-        cls.sampler_cls = load_module('train_node').ZoneTrainSampler
+        cls.node = load_module('train_node')
+        cls.sampler_cls = cls.node.ZoneTrainSampler
 
     def sampler(self, sigma_floor):
         sampler = self.sampler_cls.__new__(self.sampler_cls)
@@ -333,6 +334,41 @@ class LossWeightingTests(unittest.TestCase):
         quietest, middle, noisiest = self.losses_across_sigmas(0.05)
         self.assertAlmostEqual(middle, quietest, places=6)
         self.assertAlmostEqual(noisiest, quietest, places=6)
+
+    def test_every_probe_measures_the_objective_training_optimises(self):
+        """A probe on raw x0 error ranks adapters by sigma squared, which training does not."""
+        torch = self.torch
+        node = self.node
+        floor = float(node.load_config().get('sigma_floor', 0.0))
+        self.assertGreater(floor, 0.0, 'the shared scale is only meaningful with a floor')
+        sample = torch.zeros((1, 4, 8, 8))
+        for sigma in (0.2, 0.6, 0.95):
+            sigmas = torch.tensor([sigma])
+            shared = node.error_scale(sigmas, sample, floor)
+            sampler = self.sampler_with_floor(floor)
+            self.assertTrue(
+                bool(torch.equal(shared, sampler.error_scale(sigmas, sample))),
+                f'the trainer and the probes disagree at sigma {sigma}',
+            )
+
+    def test_both_probes_take_their_scale_from_the_trainer(self):
+        """Sharing the function is what stops a probe re-deriving a different objective."""
+        import ast
+
+        for name in ('probe_node', 'gradient_node'):
+            source = (NODE_DIR / f'{name}.py').read_text()
+            imported = {
+                alias.name
+                for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.ImportFrom) and node.module == 'train_node'
+                for alias in node.names
+            }
+            self.assertIn('error_scale', imported, f'{name} must scale the way training does')
+
+    def sampler_with_floor(self, floor: float):
+        sampler = self.node.ZoneTrainSampler.__new__(self.node.ZoneTrainSampler)
+        sampler.sigma_floor = floor
+        return sampler
 
     def test_floor_caps_the_amplification_near_zero_noise(self):
         torch = self.torch
