@@ -22,6 +22,7 @@ use dashmap::DashMap;
 use futures::{SinkExt, Stream, StreamExt};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -332,6 +333,13 @@ impl Generation {
             self.cancel.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)
         )
+    }
+
+    fn cancellation(&self) -> broadcast::Sender<()> {
+        CHAT_CANCELLATIONS
+            .get(&(self.chat_id, self.message_id))
+            .map(|sender| sender.value().clone())
+            .expect("active generation cancellation remains registered")
     }
 
     async fn cancelled(&self, stream: &ChatStream) {
@@ -1204,6 +1212,26 @@ async fn wait_media(
     }
 }
 
+async fn await_media<T>(
+    lost: impl Future<Output = ()>,
+    cancellation: broadcast::Sender<()>,
+    operation: impl Future<Output = T>,
+    progress: &tokio::task::JoinHandle<()>,
+) -> Result<T, Box<dyn std::error::Error + Send + Sync>> {
+    tokio::pin!(lost);
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+        _ = &mut lost => {
+            let _ = cancellation.send(());
+            let _ = operation.await;
+            progress.abort();
+            Err("Chat generation ownership was lost".into())
+        }
+        result = &mut operation => Ok(result),
+    }
+}
+
 /// How a finished ComfyUI job names itself in the message it saves and in the
 /// errors it reports, so image, video, and upscale jobs deliver the same way.
 #[derive(Clone, Copy)]
@@ -1468,21 +1496,19 @@ async fn handle_image_generation(
     });
 
     session.store.assert_current(&session.lease).await?;
-    let result = tokio::select! {
-        biased;
-        _ = session.guard.lost() => {
-            progress_task.abort();
-            return Err("Chat generation ownership was lost".into());
-        }
-        result = client
-        .generate(
+    let cancellation = generation.cancellation();
+    let result = await_media(
+        session.guard.lost(),
+        cancellation,
+        client.generate(
             &generation_prompt,
             source.as_ref(),
             &mut generation.cancel,
             progress_tx,
-        )
-        => result,
-    };
+        ),
+        &progress_task,
+    )
+    .await?;
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
@@ -1601,16 +1627,14 @@ async fn handle_video_generation(
     });
 
     session.store.assert_current(&session.lease).await?;
-    let result = tokio::select! {
-        biased;
-        _ = session.guard.lost() => {
-            progress_task.abort();
-            return Err("Chat generation ownership was lost".into());
-        }
-        result = client
-        .generate_video(prompt, source.as_ref(), &mut generation.cancel, progress_tx)
-        => result,
-    };
+    let cancellation = generation.cancellation();
+    let result = await_media(
+        session.guard.lost(),
+        cancellation,
+        client.generate_video(prompt, source.as_ref(), &mut generation.cancel, progress_tx),
+        &progress_task,
+    )
+    .await?;
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
@@ -1750,23 +1774,27 @@ async fn handle_upscale(
     });
 
     session.store.assert_current(&session.lease).await?;
-    let result = tokio::select! {
-        biased;
-        _ = session.guard.lost() => {
-            progress_task.abort();
-            return Err("Chat generation ownership was lost".into());
-        }
-        result = async {
+    let cancellation = generation.cancellation();
+    let result = await_media(
+        session.guard.lost(),
+        cancellation,
+        async {
             match &source {
                 Source::Image(image) => {
-                    client.upscale_image(image, &mut generation.cancel, progress_tx).await
+                    client
+                        .upscale_image(image, &mut generation.cancel, progress_tx)
+                        .await
                 }
                 Source::Video(video) => {
-                    client.upscale_video(video, &mut generation.cancel, progress_tx).await
+                    client
+                        .upscale_video(video, &mut generation.cancel, progress_tx)
+                        .await
                 }
             }
-        } => result,
-    };
+        },
+        &progress_task,
+    )
+    .await?;
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
@@ -1917,14 +1945,14 @@ async fn handle_audio_generation(
     });
 
     session.store.assert_current(&session.lease).await?;
-    let result = tokio::select! {
-        biased;
-        _ = session.guard.lost() => {
-            progress_task.abort();
-            return Err("Chat generation ownership was lost".into());
-        }
-        result = client.generate_audio(prompt, &mut generation.cancel, progress_tx) => result,
-    };
+    let cancellation = generation.cancellation();
+    let result = await_media(
+        session.guard.lost(),
+        cancellation,
+        client.generate_audio(prompt, &mut generation.cancel, progress_tx),
+        &progress_task,
+    )
+    .await?;
     progress_task.abort();
     let _ = progress_task.await;
     if result.is_ok() && generation.cancel.try_recv().is_ok() {
