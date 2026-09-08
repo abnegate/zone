@@ -997,6 +997,10 @@ describe('ChatsPage', () => {
         clear.mockRestore();
       };
       return (elapsed: number): void => {
+        // Advancing a clock nothing is subscribed to reports the timer's
+        // starting text back as if it never moved, which reads as a broken
+        // component rather than a test that measured nothing.
+        expect(ticks.size).toBeGreaterThan(0);
         now.mockReturnValue(elapsed);
         act(() => {
           for (const tick of ticks.values()) tick();

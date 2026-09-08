@@ -2130,7 +2130,13 @@ async fn test_image_status_precedes_stalled_prompt_and_timeout_is_visible() {
     let (_, _, _, mut socket) = image_socket(config).await;
     socket.send(WsMessage::Text(json!({"type":"send", "content":"Generate an image of the same rooster facing the other way"}).to_string().into())).await.unwrap();
     let mut status = false;
-    while let Some(frame) = next_frame(&mut socket, Duration::from_millis(500)).await {
+    // What is asserted is the order -- a status frame before any completion --
+    // and the loop enforces that by breaking on the first status and panicking
+    // on anything terminal. The wait is only how long the server gets to
+    // accept the socket message, start the generation and emit that first
+    // frame; at 500ms a loaded machine runs out of budget before the server is
+    // late, and the empty loop reads as "no progress was ever sent".
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(2)).await {
         match frame["type"].as_str() {
             Some("status") => {
                 status = true;
