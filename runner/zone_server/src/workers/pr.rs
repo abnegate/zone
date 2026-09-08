@@ -6,7 +6,8 @@
 use std::path::Path;
 use uuid::Uuid;
 
-use crate::db::{projects, tasks};
+use crate::db::tasks;
+use crate::services::checkout::Repository;
 use crate::state::AppState;
 use zone_vcs::git::{GitError, GitService};
 use zone_vcs::pull_request::{PrError, PrService};
@@ -54,43 +55,16 @@ pub async fn create_pr_for_task(
         }
     };
 
-    // Get first associated project to find GitHub repo info
-    let project_id = match task.project_ids.first() {
-        Some(id) => *id,
-        None => {
-            tracing::info!("No project associated with task {}", task_id);
-            return PrCreationResult::NoRepository;
-        }
+    let repository = match Repository::resolve(state.db(), &task).await {
+        Ok(Some(repository)) => repository,
+        Ok(None) => return PrCreationResult::NoRepository,
+        Err(error) => return PrCreationResult::Error(error),
     };
-
-    let project = match projects::get_project(state.db(), project_id).await {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            return PrCreationResult::Error(format!("Project {} not found", project_id));
-        }
-        Err(e) => {
-            return PrCreationResult::Error(format!("Failed to get project: {}", e));
-        }
-    };
-
-    // Check if GitHub is configured
-    let repo_url = match &project.github_repo_url {
-        Some(url) => url.clone(),
-        None => {
-            tracing::info!("No GitHub repository configured for project {}", project_id);
-            return PrCreationResult::NoRepository;
-        }
-    };
-
-    let access_token = match &project.github_access_token {
-        Some(token) => token.clone(),
-        None => {
-            tracing::warn!(
-                "No GitHub access token configured for project {}",
-                project_id
-            );
-            return PrCreationResult::Error("No GitHub access token configured".to_string());
-        }
+    let repo_url = repository.url;
+    let Some(access_token) = repository.token else {
+        return PrCreationResult::Error(
+            "No access token configured for the selected repository".to_string(),
+        );
     };
 
     // Check if workspace is a git repo
@@ -101,6 +75,15 @@ pub async fn create_pr_for_task(
         }
         Err(e) => {
             return PrCreationResult::Error(format!("Failed to check git repo: {}", e));
+        }
+    }
+
+    match git_service.get_remote_url(workspace_path, "origin").await {
+        Ok(origin) if origin == repo_url => {}
+        _ => {
+            return PrCreationResult::Error(
+                "Checkout repository no longer matches the task repository".to_string(),
+            );
         }
     }
 

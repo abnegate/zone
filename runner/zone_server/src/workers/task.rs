@@ -5,7 +5,6 @@
 
 use futures::StreamExt;
 use sqlx::PgPool;
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -346,17 +345,20 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
         }
     };
 
-    // Create tool context with safe environment
-    // SECURITY: Only allowlisted env vars are passed to prevent credential leakage
-    // Determine workspace path
-    let workspace_path = if let Some(_github_url) = &task.github_repo_url {
-        // For GitHub repos, we'd clone to a temp directory
-        // For now, just use a temp directory
-        std::env::temp_dir().join(format!("zone-task-{}", task_id))
-    } else {
-        // Use current directory or configured workspace
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
-    };
+    let checkout =
+        match crate::services::checkout::Checkout::prepare(state.db(), &task, run_id).await {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                obs.set_status("failed");
+                if let Err(failure) =
+                    tasks::complete_task_run(state.db(), run_id, "failed", Some(&error), None).await
+                {
+                    tracing::error!(%run_id, %failure, "Failed to record checkout failure");
+                }
+                return;
+            }
+        };
+    let workspace_path = checkout.path().to_path_buf();
 
     let tools = ChatTools::for_task(state, workspace_path.clone()).await;
     let mut system_prompt = agent::system_prompt(&tools, true);

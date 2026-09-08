@@ -6,6 +6,7 @@ pub mod artifact_access;
 pub mod artifacts;
 pub mod character;
 pub mod chat;
+pub mod checkout;
 pub mod completion_tokens;
 pub mod embedding;
 pub mod image_intent;

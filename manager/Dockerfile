@@ -19,6 +19,12 @@ COPY runner/Cargo.toml runner/Cargo.lock ./
 COPY runner/tool_runner ./tool_runner/
 COPY runner/zone_runner ./zone_runner/
 COPY runner/zone_core ./zone_core/
+COPY runner/zone_chat ./zone_chat/
+COPY runner/zone_comfy ./zone_comfy/
+COPY runner/zone_email ./zone_email/
+COPY runner/zone_search ./zone_search/
+COPY runner/zone_vcs ./zone_vcs/
+COPY runner/zone_vision ./zone_vision/
 COPY runner/zone_context ./zone_context/
 COPY runner/zone_server ./zone_server/
 COPY runner/zone_cli ./zone_cli/
@@ -45,11 +51,13 @@ RUN --mount=type=cache,id=zone-manager-registry,target=/usr/local/cargo/registry
 
 # Must match the builder's Debian release so the glibc the binaries were
 # linked against is present. libstdc++6 backs the statically linked ONNX Runtime.
-FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates libssl3t64 libstdc++6 \
+        curl ca-certificates git libssl3t64 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base AS runtime
 
 RUN groupadd --system zone \
     && useradd --system --gid zone --shell /usr/sbin/nologin --no-create-home zone
