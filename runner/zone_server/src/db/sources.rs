@@ -1,9 +1,12 @@
 //! Source database queries
 
+use std::fmt;
+
 use chrono::NaiveDateTime;
 use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
+use zone_core::secret::REDACTED;
 
 use super::DbResult;
 
@@ -120,6 +123,49 @@ pub async fn get_source(
         r#"
         SELECT id, name, source_type, config, credentials_encrypted, description, url,
                is_active, last_verified_at, last_error, created_at, updated_at, workspace_id
+        FROM sources
+        WHERE id = $1 AND workspace_id = $2
+        "#,
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// The credential-bearing columns of a source
+///
+/// `config` may hold a GitHub App configuration under `github_app`, and
+/// `credentials_encrypted` a personal access token. Which of the two a source
+/// carries is decided by `services::github_app::Provider`, not here.
+#[derive(Clone, sqlx::FromRow)]
+pub struct SourceCredentialRow {
+    pub config: serde_json::Value,
+    pub credentials_encrypted: Option<String>,
+}
+
+impl fmt::Debug for SourceCredentialRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SourceCredentialRow")
+            .field("config", &self.config)
+            .field(
+                "credentials_encrypted",
+                &self.credentials_encrypted.as_ref().map(|_| REDACTED),
+            )
+            .finish()
+    }
+}
+
+/// Get the credentials for a source, scoped to its workspace
+pub async fn get_source_credentials(
+    pool: &PgPool,
+    id: Uuid,
+    workspace_id: Uuid,
+) -> DbResult<Option<SourceCredentialRow>> {
+    sqlx::query_as::<_, SourceCredentialRow>(
+        r#"
+        SELECT config, credentials_encrypted
         FROM sources
         WHERE id = $1 AND workspace_id = $2
         "#,
@@ -504,6 +550,22 @@ mod tests {
                 .id;
 
         (org_id, workspace_id, user_id)
+    }
+
+    #[test]
+    fn source_credentials_do_not_render_the_credential_column() {
+        let row = SourceCredentialRow {
+            config: serde_json::json!({ "owner": "zone-dev", "repo": "zone" }),
+            credentials_encrypted: Some("ENC[v1:c2VjcmV0]".to_string()),
+        };
+
+        let rendered = format!("{row:?}");
+        assert!(
+            !rendered.contains("c2VjcmV0"),
+            "the stored credential survived into Debug: {rendered}"
+        );
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(rendered.contains("zone-dev"), "config stays readable");
     }
 
     #[tokio::test]
