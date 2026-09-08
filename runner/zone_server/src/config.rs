@@ -60,6 +60,10 @@ pub struct Config {
     pub monitoring: MonitoringConfig,
     /// Chat execution and context allocations.
     pub chat: crate::services::chat::session::Settings,
+    /// Megabytes one LoRA training upload may carry. Training posts its images
+    /// and clips inline as base64, and the whole body is held in memory while
+    /// it is read, so the ceiling is a memory budget rather than a policy.
+    pub train_upload_limit_mb: u64,
 }
 
 /// Periodic source indexing settings loaded from `SOURCE_RESYNC_*` env vars.
@@ -276,6 +280,7 @@ impl Config {
             comfyui: ComfyUiConfig::from_env(),
             source_index: SourceIndexConfig::from_env(),
             monitoring: MonitoringConfig::from_env(),
+            train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 512, 4, 8192),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -358,6 +363,7 @@ mod tests {
             source_index: SourceIndexConfig::default(),
             monitoring: MonitoringConfig::default(),
             chat: Default::default(),
+            train_upload_limit_mb: 512,
         }
     }
 

@@ -9697,6 +9697,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "chrono",
+ "image",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
@@ -9709,6 +9710,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "zone_core",
+ "zone_vision",
 ]
 
 [[package]]
@@ -9781,6 +9783,7 @@ dependencies = [
  "tool_runner",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

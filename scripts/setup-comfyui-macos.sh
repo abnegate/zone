@@ -184,12 +184,13 @@ mkdir -p \
     "$MODELS_DIR/text_encoders" \
     "$MODELS_DIR/vae" \
     "$MODELS_DIR/loras" \
+    "$MODELS_DIR/upscale_models" \
     "$INSTALL_DIR/models" \
     "$INSTALL_DIR/output" \
     "$INSTALL_DIR/custom_nodes"
 apply_zone_nodes
 if [ "$MODELS_DIR" != "$INSTALL_DIR/models" ]; then
-    for folder in checkpoints diffusion_models text_encoders vae loras; do
+    for folder in checkpoints diffusion_models text_encoders vae loras upscale_models; do
         LINK="$INSTALL_DIR/models/$folder"
         if [ -d "$LINK" ] && [ ! -L "$LINK" ] \
             && [ -n "$(ls -A "$LINK" 2>/dev/null)" ]; then

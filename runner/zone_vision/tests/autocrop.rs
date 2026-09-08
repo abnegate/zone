@@ -107,3 +107,68 @@ fn the_subject_survives_the_crop() {
         coverage * 100.0
     );
 }
+
+#[test]
+fn a_caller_can_weigh_the_map_before_it_is_reduced_to_a_point() {
+    let Some(model) = model() else {
+        eprintln!("skipping: set ZONE_VISION_MODEL to run");
+        return;
+    };
+    let analyzer = Analyzer::open(model).expect("load model");
+
+    // Two equally salient subjects, one left and one right.
+    let mut pixels = vec![226u8; (1280 * 720 * 3) as usize];
+    for centre in [320u32, 960] {
+        for y in 210..510u32 {
+            for x in centre - 150..centre + 150 {
+                let offset = ((y * 1280 + x) * 3) as usize;
+                pixels[offset..offset + 3].copy_from_slice(&[26, 32, 44]);
+            }
+        }
+    }
+    let mut image = Vec::new();
+    image::codecs::png::PngEncoder::new(Cursor::new(&mut image))
+        .write_image(&pixels, 1280, 720, ExtendedColorType::Rgb8)
+        .expect("encode test scene");
+    let raster = zone_vision::decode::decode(&image).expect("decode");
+
+    let unweighted = analyzer
+        .saliency(&raster, |map, content| {
+            zone_vision::gravity::from_saliency_region(map, 320, 320, content).expect("centroid")
+        })
+        .expect("saliency");
+    assert!(
+        (unweighted.0.x - 0.5).abs() < 0.1,
+        "two matching subjects should average out near the middle, got {:?}",
+        unweighted.0
+    );
+
+    // Weighting the right half is what a caller who knows which subject is
+    // theirs would do, and it has to move the answer.
+    let weighted = analyzer
+        .saliency(&raster, |map, content| {
+            let biased: Vec<f32> = map
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let x = (index % 320) as i32;
+                    if x > (content.min_x + content.max_x) / 2 {
+                        value * 2.0
+                    } else {
+                        *value
+                    }
+                })
+                .collect();
+            zone_vision::gravity::from_saliency_region(&biased, 320, 320, content)
+                .expect("centroid")
+        })
+        .expect("saliency");
+    // Two equal masses a quarter-frame apart, one weighted twice: the centre of
+    // mass moves a twelfth of the frame towards it.
+    assert!(
+        (weighted.0.x - (unweighted.0.x + 1.0 / 12.0)).abs() < 0.02,
+        "weighting the right subject should pull the focus right: {:?} -> {:?}",
+        unweighted.0,
+        weighted.0
+    );
+}

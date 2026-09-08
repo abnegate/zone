@@ -61,6 +61,7 @@ pub fn test_config() -> Config {
         source_index: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
+        train_upload_limit_mb: 512,
     }
 }
 
@@ -364,6 +365,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         source_index: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
+        train_upload_limit_mb: 512,
     }
 }
 
