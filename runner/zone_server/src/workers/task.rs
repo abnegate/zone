@@ -57,137 +57,107 @@ fn get_semaphore() -> &'static Arc<Semaphore> {
 ///
 /// Events are persisted asynchronously in spawned tasks to avoid blocking
 /// the agent loop.
+#[derive(Clone)]
 pub struct DatabaseTaskCallback {
     pool: PgPool,
     run_id: Uuid,
+    owner: Option<Uuid>,
 }
 
 impl DatabaseTaskCallback {
     /// Create a new database task callback
     pub fn new(pool: PgPool, run_id: Uuid) -> Self {
-        Self { pool, run_id }
+        Self {
+            pool,
+            run_id,
+            owner: None,
+        }
+    }
+    async fn log(
+        &self,
+        phase: &str,
+        agent: &str,
+        level: &str,
+        message: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        match tasks::add_owned_task_run_log(
+            &self.pool,
+            self.run_id,
+            self.owner,
+            phase,
+            agent,
+            level,
+            message,
+            metadata,
+        )
+        .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("Task execution lost its lease".to_string()),
+            Err(error) => Err(format!("Could not persist task event: {error}")),
+        }
     }
 }
 
 impl AgentCallback for DatabaseTaskCallback {
     fn on_phase_change(&self, phase: AgentPhase, message: Option<&str>) {
-        let pool = self.pool.clone();
-        let run_id = self.run_id;
-        let phase_str = phase.to_string();
-        let message_str = message.map(|s| s.to_string());
-
+        let callback = self.clone();
+        let phase = phase.to_string();
+        let message = message
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Entering {phase} phase"));
         tokio::spawn(async move {
-            // Update task run progress
-            if let Err(e) =
-                tasks::update_task_run_progress(&pool, run_id, Some(&phase_str), None).await
-            {
-                tracing::error!("Failed to update task run progress: {}", e);
-            }
-
-            // Log phase change
-            let log_message =
-                message_str.unwrap_or_else(|| format!("Entering {} phase", phase_str));
-
-            if let Err(e) = tasks::add_task_run_log(
-                &pool,
-                run_id,
-                &phase_str,
-                "agent",
-                "info",
-                &log_message,
-                None,
-            )
-            .await
-            {
-                tracing::error!("Failed to add task run log: {}", e);
-            }
-        });
-    }
-
-    fn on_tool_call(&self, tool_name: &str, args: &str) {
-        let pool = self.pool.clone();
-        let run_id = self.run_id;
-        let tool_name = tool_name.to_string();
-        let args = args.to_string();
-
-        tokio::spawn(async move {
-            let message = format!("Executing tool: {} with args: {}", tool_name, args);
-
-            if let Err(e) = tasks::add_task_run_log(
-                &pool,
-                run_id,
-                "acting",
-                "tool",
-                "info",
-                &message,
-                Some(serde_json::json!({
-                    "tool": tool_name,
-                    "args": args,
-                })),
-            )
-            .await
-            {
-                tracing::error!("Failed to add task run log: {}", e);
-            }
-        });
-    }
-
-    fn on_tool_result(&self, tool_name: &str, result: &ToolResult) {
-        let pool = self.pool.clone();
-        let run_id = self.run_id;
-        let tool_name = tool_name.to_string();
-        let result = result.clone();
-
-        tokio::spawn(async move {
-            let (log_level, message) = if result.success {
-                ("info", format!("Tool {} succeeded", tool_name))
-            } else {
-                (
-                    "error",
-                    format!("Tool {} failed: {:?}", tool_name, result.error),
+            if matches!(
+                tasks::update_owned_task_run_progress(
+                    &callback.pool,
+                    callback.run_id,
+                    callback.owner,
+                    Some(&phase),
+                    None
                 )
-            };
-
-            if let Err(e) = tasks::add_task_run_log(
-                &pool,
-                run_id,
-                "acting",
-                "tool",
-                log_level,
-                &message,
-                Some(serde_json::json!({
-                    "tool": tool_name,
-                    "success": result.success,
-                    "output": result.output,
-                    "error": result.error,
-                })),
-            )
-            .await
-            {
-                tracing::error!("Failed to add task run log: {}", e);
+                .await,
+                Ok(Some(_))
+            ) {
+                let _ = callback.log(&phase, "agent", "info", &message, None).await;
             }
+        });
+    }
+
+    fn on_tool_call(&self, name: &str, arguments: &str) {
+        let callback = self.clone();
+        let name = name.to_string();
+        let arguments = arguments.to_string();
+        tokio::spawn(async move {
+            let _ = callback
+                .log(
+                    "acting",
+                    "tool",
+                    "info",
+                    &format!("Executing tool: {name}"),
+                    Some(serde_json::json!({"tool":name,"args":arguments})),
+                )
+                .await;
+        });
+    }
+
+    fn on_tool_result(&self, name: &str, result: &ToolResult) {
+        let callback = self.clone();
+        let name = name.to_string();
+        let result = result.clone();
+        tokio::spawn(async move {
+            let level = if result.success { "info" } else { "error" };
+            let _ = callback.log("acting", "tool", level, &format!("Tool {name} finished"), Some(serde_json::json!({"tool":name,"success":result.success,"output":result.output,"error":result.error}))).await;
         });
     }
 
     fn on_response(&self, response: &str) {
-        let pool = self.pool.clone();
-        let run_id = self.run_id;
+        let callback = self.clone();
         let response = response.to_string();
-
         tokio::spawn(async move {
-            if let Err(e) = tasks::add_task_run_log(
-                &pool,
-                run_id,
-                "responding",
-                "agent",
-                "info",
-                &response,
-                None,
-            )
-            .await
-            {
-                tracing::error!("Failed to add task run log: {}", e);
-            }
+            let _ = callback
+                .log("responding", "agent", "info", &response, None)
+                .await;
         });
     }
 }
@@ -288,9 +258,10 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
         Err(_) => {
             obs.set_status("semaphore_denied");
             tracing::error!("Task semaphore closed for run {}", run_id);
-            if let Err(e) = tasks::complete_task_run(
+            if let Err(e) = tasks::complete_owned_task_run(
                 state.db(),
                 run_id,
+                Some(owner),
                 "failed",
                 Some("System overload - semaphore closed"),
                 None,
@@ -303,7 +274,10 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
         }
     };
 
-    if !matches!(tasks::start_task_run(state.db(), run_id).await, Ok(true)) {
+    if !matches!(
+        tasks::start_owned_task_run(state.db(), run_id, Some(owner)).await,
+        Ok(true)
+    ) {
         return;
     }
 
@@ -319,9 +293,15 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
         Ok(None) => {
             obs.set_status("not_found");
             tracing::error!("Task {} not found", task_id);
-            if let Err(e) =
-                tasks::complete_task_run(state.db(), run_id, "failed", Some("Task not found"), None)
-                    .await
+            if let Err(e) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some("Task not found"),
+                None,
+            )
+            .await
             {
                 tracing::error!("CRITICAL: Failed to update run {} status: {}", run_id, e);
             }
@@ -330,9 +310,10 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
         Err(e) => {
             obs.set_status("error");
             tracing::error!("Failed to fetch task {}: {}", task_id, e);
-            if let Err(e) = tasks::complete_task_run(
+            if let Err(e) = tasks::complete_owned_task_run(
                 state.db(),
                 run_id,
+                Some(owner),
                 "failed",
                 Some(&format!("Failed to fetch task: {}", e)),
                 None,
@@ -350,8 +331,15 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
             Ok(checkout) => checkout,
             Err(error) => {
                 obs.set_status("failed");
-                if let Err(failure) =
-                    tasks::complete_task_run(state.db(), run_id, "failed", Some(&error), None).await
+                if let Err(failure) = tasks::complete_owned_task_run(
+                    state.db(),
+                    run_id,
+                    Some(owner),
+                    "failed",
+                    Some(&error),
+                    None,
+                )
+                .await
                 {
                     tracing::error!(%run_id, %failure, "Failed to record checkout failure");
                 }
@@ -360,7 +348,14 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
         };
     let workspace_path = checkout.path().to_path_buf();
 
-    let tools = ChatTools::for_task(state, workspace_path.clone(), task.workspace_id, None).await;
+    let run = match tasks::get_task_run(state.db(), run_id).await {
+        Ok(Some(run)) => run,
+        _ => return,
+    };
+    let actor = task.created_by.and(run.triggered_by);
+    let tools = ChatTools::for_task(state, workspace_path.clone(), task.workspace_id, actor)
+        .await
+        .with_task_lease(state.db().clone(), run_id, owner);
     let mut system_prompt = agent::system_prompt(&tools, true);
     system_prompt.push_str(
         "\n\nYou are completing a background coding task. Stay inside the sandboxed working directory.\n",
@@ -463,7 +458,11 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
     {
         llm = llm.with_reasoning(&model, effort);
     }
-    let callback = DatabaseTaskCallback::new(state.db().clone(), run_id);
+    let callback = DatabaseTaskCallback {
+        pool: state.db().clone(),
+        run_id,
+        owner: Some(owner),
+    };
     let messages = vec![LlmMessage::system(system_prompt), LlmMessage::user(prompt)];
 
     let mut context = RunContext::from_messages(messages);
@@ -542,9 +541,15 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
                 artifacts["pr"] = pr;
             }
 
-            if let Err(e) =
-                tasks::complete_task_run(state.db(), run_id, "completed", None, Some(artifacts))
-                    .await
+            if let Err(e) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "completed",
+                None,
+                Some(artifacts),
+            )
+            .await
             {
                 tracing::error!("CRITICAL: Failed to update run {} status: {}", run_id, e);
             }
@@ -553,9 +558,15 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
             obs.set_status("failed");
             // Agent failed with error
             tracing::error!("Task run {} failed: {}", run_id, e);
-            if let Err(e) =
-                tasks::complete_task_run(state.db(), run_id, "failed", Some(&e.to_string()), None)
-                    .await
+            if let Err(e) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some(&e.to_string()),
+                None,
+            )
+            .await
             {
                 tracing::error!("CRITICAL: Failed to update run {} status: {}", run_id, e);
             }
@@ -568,9 +579,10 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
                 run_id,
                 TASK_TIMEOUT_SECS
             );
-            if let Err(e) = tasks::complete_task_run(
+            if let Err(e) = tasks::complete_owned_task_run(
                 state.db(),
                 run_id,
+                Some(owner),
                 "failed",
                 Some(&format!(
                     "Task execution timed out after {} seconds",
@@ -630,17 +642,16 @@ async fn run_task_loop(
                 ..
             } => {
                 if let Some(receipt) = receipt {
-                    tasks::add_task_run_log(
-                        &callback.pool,
-                        callback.run_id,
-                        "acting",
-                        "tool",
-                        "info",
-                        "Workspace action receipt",
-                        Some(serde_json::json!({"action_receipt": receipt})),
-                    )
-                    .await
-                    .map_err(|error| format!("Could not persist action receipt: {error}"))?;
+                    callback
+                        .log(
+                            "acting",
+                            "tool",
+                            "info",
+                            "Workspace action receipt",
+                            Some(serde_json::json!({"action_receipt": receipt})),
+                        )
+                        .await
+                        .map_err(|error| format!("Could not persist action receipt: {error}"))?;
                 }
                 tool_calls += 1;
                 let result = if success {
@@ -652,20 +663,19 @@ async fn run_task_loop(
                 callback.on_phase_change(AgentPhase::Observing, None);
             }
             AgentEvent::Canonical(entry) => {
-                tasks::add_task_run_log(&callback.pool,callback.run_id,"acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":entry.message,"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
+                callback.log("acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":entry.message,"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
             }
             AgentEvent::Checkpoint { summary, .. } => {
-                tasks::add_task_run_log(
-                    &callback.pool,
-                    callback.run_id,
-                    "thinking",
-                    "agent",
-                    "info",
-                    "Conversation checkpoint",
-                    Some(serde_json::to_value(summary).map_err(|error| error.to_string())?),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                callback
+                    .log(
+                        "thinking",
+                        "agent",
+                        "info",
+                        "Conversation checkpoint",
+                        Some(serde_json::to_value(summary).map_err(|error| error.to_string())?),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
             AgentEvent::Finalizing(reason) => {
                 callback.on_phase_change(AgentPhase::Responding, Some(&reason));
@@ -899,6 +909,150 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(outcome.tool_calls, 1);
+        let receipts: Vec<Value> = sqlx::query_scalar("SELECT metadata->'action_receipt' FROM task_run_logs WHERE task_run_id=$1 AND metadata ? 'action_receipt'").bind(run.id).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            receipts.len(),
+            1,
+            "task loop returned without its durable action receipt"
+        );
+        assert_eq!(receipts[0]["actor_id"], user.id.to_string());
+        assert_eq!(receipts[0]["action"], "create_task");
+        assert_eq!(receipts[0]["success"], true);
+        let target = Uuid::parse_str(receipts[0]["target_id"].as_str().unwrap()).unwrap();
+        let written = tasks::get_task(&pool, target).await.unwrap().unwrap();
+        assert_eq!(written.workspace_id, workspace.id);
+        assert_eq!(written.title, "Made by the scoped task");
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_worker_scopes_actions_uses_checkout_and_cleans_up() {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use serde_json::{Value, json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        let database =
+            std::env::var("TEST_DATABASE_URL").expect("explicit disposable TEST_DATABASE_URL");
+        let pool = PgPool::connect(&database).await.unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Task receipts",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Receipts",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Task actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task_as(
+            &pool,
+            workspace.id,
+            &[],
+            "Receipt owner",
+            "Run",
+            None,
+            None,
+            true,
+            None,
+            Some(user.id),
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run_as(&pool, task.id, Some(user.id))
+            .await
+            .unwrap();
+        let provider = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let observed = Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+        let checkout = observed.clone();
+        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            if let Some(messages) = body["messages"].as_array() {
+                for message in messages {
+                    if message["role"] == "tool"
+                        && let Some(content) = message["content"].as_str() {
+                            for line in content.lines() {
+                                if line.starts_with('/') {
+                                    let path = std::path::PathBuf::from(line.trim());
+                                    assert!(path.file_name().unwrap().to_string_lossy().starts_with("zone-run-"), "worker used server cwd instead of a checkout: {}", path.display());
+                                    assert!(path.is_dir(), "checkout disappeared during execution");
+                                    *checkout.lock().unwrap() = Some(path);
+                                }
+                            }
+                    }
+                }
+            }
+            let delta = match count.fetch_add(1, Ordering::SeqCst) {
+                0 => json!({"tool_calls":[{"index":0,"id":"cwd-call","type":"function","function":{"name":"run_command","arguments":r#"{"command":"pwd"}"#}}]}),
+                1 => json!({"tool_calls":[{"index":0,"id":"write-call","type":"function","function":{"name":"write_file","arguments":r#"{"path":"sentinel","content":"isolated"}"#}}]}),
+                2 => json!({"tool_calls":[{"index":0,"id":"receipt-call","type":"function","function":{"name":"create_task","arguments":r#"{"title":"Made by the scoped task","description":"durable result"}"#}}]}),
+                _ => {
+                    let directory = checkout.lock().unwrap().clone().expect("pwd did not return a checkout");
+                    assert_eq!(std::fs::read_to_string(directory.join("sentinel")).unwrap(), "isolated");
+                    json!({"content":"The task was created."})
+                }
+            };
+            let chunk = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            let end = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+            ResponseTemplate::new(200).insert_header("Content-Type", "text/event-stream").set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+        }).mount(&provider).await;
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            execute_task_run(&state, run.id, task.id),
+        )
+        .await
+        .unwrap();
+        let completed = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
+        assert_eq!(
+            completed.status, "completed",
+            "{:?}",
+            completed.error_message
+        );
+        assert_eq!(completed.artifacts.as_ref().unwrap()["tool_calls"], 3);
+        let directory = observed.lock().unwrap().clone().unwrap();
+        assert!(!directory.exists(), "finished checkout leaked");
+        let early: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_run_logs l JOIN task_runs r ON r.id=l.task_run_id WHERE r.id=$1 AND l.metadata ? 'action_receipt' AND l.created_at <= r.completed_at)").bind(run.id).fetch_one(&pool).await.unwrap();
+        assert!(early, "receipt must be durable before terminal state");
         let receipts: Vec<Value> = sqlx::query_scalar("SELECT metadata->'action_receipt' FROM task_run_logs WHERE task_run_id=$1 AND metadata ? 'action_receipt'").bind(run.id).fetch_all(&pool).await.unwrap();
         assert_eq!(
             receipts.len(),

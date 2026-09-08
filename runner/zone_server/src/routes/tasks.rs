@@ -495,8 +495,10 @@ pub async fn update(
     {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
         Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new(
+                "Task has an active run or is no longer available",
+            )),
         )
             .into_response(),
         Err(e) => {
@@ -553,8 +555,10 @@ pub async fn queue(
     match tasks::queue_task(state.db(), id).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
         Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new(
+                "Task has an active run or is no longer available",
+            )),
         )
             .into_response(),
         Err(e) => {

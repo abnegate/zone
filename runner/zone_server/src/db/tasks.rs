@@ -38,7 +38,7 @@ pub struct TaskRow {
 }
 
 /// Task run row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TaskRunRow {
     pub id: Uuid,
     pub task_id: Uuid,
@@ -378,6 +378,15 @@ pub async fn update_task(
     priority: Option<i32>,
     project_ids: Option<&[Uuid]>,
 ) -> DbResult<Option<TaskRow>> {
+    let mut transaction = pool.begin().await?;
+    let active: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if active.is_none() || (status.is_some() && active.flatten().is_some()) {
+        return Ok(None);
+    }
     let row = sqlx::query!(
         r#"
         UPDATE tasks
@@ -400,16 +409,25 @@ pub async fn update_task(
         status,
         priority
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await?;
 
-    match row {
+    let result = match row {
         Some(r) => {
             let mut task = map_task_row!(r);
 
             // Update project associations if provided
             if let Some(pids) = project_ids {
-                set_task_projects(pool, id, pids).await?;
+                sqlx::query("DELETE FROM task_projects WHERE task_id=$1")
+                    .bind(id)
+                    .execute(&mut *transaction)
+                    .await?;
+                for project in pids {
+                    let inserted = sqlx::query("INSERT INTO task_projects(task_id, project_id) SELECT $1, id FROM projects WHERE id=$2 AND workspace_id=$3").bind(id).bind(project).bind(task.workspace_id).execute(&mut *transaction).await?;
+                    if inserted.rows_affected() != 1 {
+                        return Err(sqlx::Error::RowNotFound);
+                    }
+                }
                 task.project_ids = pids.to_vec();
             } else {
                 task.project_ids = get_task_project_ids(pool, task.id).await?;
@@ -418,7 +436,9 @@ pub async fn update_task(
             Ok(Some(task))
         }
         None => Ok(None),
-    }
+    };
+    transaction.commit().await?;
+    result
 }
 
 /// Delete a task
@@ -432,6 +452,15 @@ pub async fn delete_task(pool: &PgPool, id: Uuid) -> DbResult<bool> {
 
 /// Queue a task for execution
 pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
+    let mut transaction = pool.begin().await?;
+    let active: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    if active.is_none() || active.flatten().is_some() {
+        return Ok(None);
+    }
     let row = sqlx::query!(
         r#"
         UPDATE tasks
@@ -446,9 +475,10 @@ pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
         "#,
         id
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await?;
 
+    transaction.commit().await?;
     match row {
         Some(r) => {
             let mut task = map_task_row!(r);
@@ -509,8 +539,21 @@ pub async fn heartbeat_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbR
 }
 
 pub async fn start_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<bool> {
-    Ok(sqlx::query("UPDATE tasks SET status = 'in_progress', started_at = NOW(), updated_at = NOW() WHERE active_run_id = $1 AND EXISTS (SELECT 1 FROM task_runs WHERE id = $1 AND status = 'running')")
-        .bind(run_id).execute(pool).await?.rows_affected() == 1)
+    start_owned_task_run(pool, run_id, None).await
+}
+
+pub async fn start_owned_task_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    owner: Option<Uuid>,
+) -> DbResult<bool> {
+    Ok(sqlx::query("UPDATE tasks SET status = 'in_progress', started_at = NOW(), updated_at = NOW() WHERE active_run_id = $1 AND EXISTS (SELECT 1 FROM task_runs WHERE id = $1 AND status = 'running' AND owner IS NOT DISTINCT FROM $2 AND heartbeat_at > NOW() - INTERVAL '60 seconds')")
+        .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
+}
+
+pub async fn owns_task_run(pool: &PgPool, run_id: Uuid, owner: Option<Uuid>) -> DbResult<bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_runs WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds')")
+        .bind(run_id).bind(owner).fetch_one(pool).await
 }
 
 /// Fail stale runs and their owning tasks without racing a newly admitted run.
@@ -536,40 +579,35 @@ pub async fn update_task_run_progress(
     current_phase: Option<&str>,
     progress_percent: Option<i32>,
 ) -> DbResult<Option<TaskRunRow>> {
-    let row = sqlx::query!(
-        r#"
-        UPDATE task_runs
-        SET current_phase = COALESCE($2, current_phase),
-            progress_percent = COALESCE($3, progress_percent)
-        WHERE id = $1 AND status = 'running' AND (owner IS NULL OR heartbeat_at > NOW() - INTERVAL '60 seconds')
-        RETURNING id, task_id, status, current_phase, progress_percent, started_at,
-                  completed_at, error_message, artifacts, triggered_by
-        "#,
-        run_id,
-        current_phase,
-        progress_percent
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row.map(|r| TaskRunRow {
-        id: r.id,
-        task_id: r.task_id,
-        triggered_by: r.triggered_by,
-        status: r.status,
-        current_phase: r.current_phase,
-        progress_percent: r.progress_percent,
-        started_at: r.started_at,
-        completed_at: r.completed_at,
-        error_message: r.error_message,
-        artifacts: r.artifacts,
-    }))
+    update_owned_task_run_progress(pool, run_id, None, current_phase, progress_percent).await
 }
 
-/// Complete a task run
+pub async fn update_owned_task_run_progress(
+    pool: &PgPool,
+    run_id: Uuid,
+    owner: Option<Uuid>,
+    current_phase: Option<&str>,
+    progress_percent: Option<i32>,
+) -> DbResult<Option<TaskRunRow>> {
+    sqlx::query_as("UPDATE task_runs SET current_phase = COALESCE($3, current_phase), progress_percent = COALESCE($4, progress_percent) WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by")
+        .bind(run_id).bind(owner).bind(current_phase).bind(progress_percent).fetch_optional(pool).await
+}
+
+/// Legacy callers may only finish an unclaimed run.
 pub async fn complete_task_run(
     pool: &PgPool,
     run_id: Uuid,
+    status: &str,
+    error_message: Option<&str>,
+    artifacts: Option<serde_json::Value>,
+) -> DbResult<Option<TaskRunRow>> {
+    complete_owned_task_run(pool, run_id, None, status, error_message, artifacts).await
+}
+
+pub async fn complete_owned_task_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    owner: Option<Uuid>,
     status: &str,
     error_message: Option<&str>,
     artifacts: Option<serde_json::Value>,
@@ -581,48 +619,32 @@ pub async fn complete_task_run(
     .bind(run_id)
     .fetch_optional(&mut *transaction)
     .await?;
-    let row = sqlx::query!(
-        r#"
-        UPDATE task_runs
-        SET status = $2,
-            completed_at = NOW(),
-            error_message = $3,
-            artifacts = COALESCE($4, artifacts),
-            progress_percent = 100
-        WHERE id = $1 AND status = 'running' AND (owner IS NULL OR heartbeat_at > NOW() - INTERVAL '60 seconds')
-        RETURNING id, task_id, status, current_phase, progress_percent, started_at,
-                  completed_at, error_message, artifacts, triggered_by
-        "#,
-        run_id,
-        status,
-        error_message,
-        artifacts
-    )
-    .fetch_optional(&mut *transaction)
-    .await?;
-
+    let row: Option<TaskRunRow> = sqlx::query_as("UPDATE task_runs SET status = $3, completed_at = NOW(), error_message = $4, artifacts = COALESCE($5, artifacts), progress_percent = 100 WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds' RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by")
+        .bind(run_id).bind(owner).bind(status).bind(error_message).bind(artifacts).fetch_optional(&mut *transaction).await?;
     if let Some(run) = &row {
-        let task_status = if status == "completed" {
+        let status = if status == "completed" {
             "review"
         } else {
             "blocked"
         };
-        sqlx::query("UPDATE tasks SET status = $3, completed_at = NOW(), updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2")
-            .bind(run.task_id).bind(run.id).bind(task_status).execute(&mut *transaction).await?;
+        sqlx::query("UPDATE tasks SET status = $3, completed_at = NOW(), updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2").bind(run.task_id).bind(run.id).bind(status).execute(&mut *transaction).await?;
     }
     transaction.commit().await?;
-    Ok(row.map(|r| TaskRunRow {
-        id: r.id,
-        task_id: r.task_id,
-        triggered_by: r.triggered_by,
-        status: r.status,
-        current_phase: r.current_phase,
-        progress_percent: r.progress_percent,
-        started_at: r.started_at,
-        completed_at: r.completed_at,
-        error_message: r.error_message,
-        artifacts: r.artifacts,
-    }))
+    Ok(row)
+}
+
+pub async fn add_owned_task_run_log(
+    pool: &PgPool,
+    run_id: Uuid,
+    owner: Option<Uuid>,
+    phase: &str,
+    agent: &str,
+    level: &str,
+    message: &str,
+    metadata: Option<serde_json::Value>,
+) -> DbResult<bool> {
+    Ok(sqlx::query("INSERT INTO task_run_logs(task_run_id, phase, agent_type, log_level, message, metadata) SELECT id, $3, $4, $5, $6, $7 FROM task_runs WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
+        .bind(run_id).bind(owner).bind(phase).bind(agent).bind(level).bind(message).bind(metadata).execute(pool).await?.rows_affected() == 1)
 }
 
 /// List task runs for a task

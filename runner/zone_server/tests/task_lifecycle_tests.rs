@@ -329,3 +329,181 @@ async fn task_routes_reject_foreign_and_readonly_mutations() {
         "Secret"
     );
 }
+
+#[tokio::test]
+async fn stale_owner_cannot_write_progress_logs_or_terminal_state() {
+    let pool = common::create_test_pool().await;
+    let (_, workspace, _) = common::setup_test_data(&pool).await;
+    let task = tasks::create_task(
+        &pool,
+        workspace,
+        &[],
+        "Ownership",
+        "Regression",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+    let first = uuid::Uuid::new_v4();
+    let second = uuid::Uuid::new_v4();
+    assert!(tasks::claim_task_run(&pool, run.id, first).await.unwrap());
+    sqlx::query("UPDATE task_runs SET owner=$2 WHERE id=$1")
+        .bind(run.id)
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        tasks::update_owned_task_run_progress(&pool, run.id, Some(first), Some("acting"), Some(10))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tasks::update_task_run_progress(&pool, run.id, Some("acting"), Some(10))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !tasks::add_owned_task_run_log(
+            &pool,
+            run.id,
+            Some(first),
+            "acting",
+            "agent",
+            "info",
+            "stale",
+            None
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        tasks::complete_owned_task_run(&pool, run.id, Some(first), "completed", None, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tasks::get_task_run_logs(&pool, run.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        tasks::get_task_run(&pool, run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+    let state = common::create_test_state(common::test_config(), pool.clone());
+    let tools =
+        zone_server::agent::ChatTools::for_task(&state, std::env::temp_dir(), workspace, None)
+            .await
+            .with_task_lease(pool.clone(), run.id, first);
+    assert!(
+        !tools
+            .execute(
+                "run_command",
+                r#"{"command":"echo","args":["must not execute"]}"#
+            )
+            .await
+            .success
+    );
+    assert!(
+        tasks::complete_owned_task_run(&pool, run.id, Some(second), "completed", None, None)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn active_run_owns_task_status_until_completion() {
+    let pool = common::create_test_pool().await;
+    let (_, workspace, _) = common::setup_test_data(&pool).await;
+    let task = tasks::create_task(
+        &pool,
+        workspace,
+        &[],
+        "Active",
+        "Regression",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+    assert!(
+        tasks::update_task(
+            &pool,
+            task.id,
+            None,
+            None,
+            None,
+            Some("complete"),
+            None,
+            None
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(tasks::queue_task(&pool, task.id).await.unwrap().is_none());
+    assert!(
+        tasks::update_task(
+            &pool,
+            task.id,
+            Some("Renamed"),
+            None,
+            None,
+            None,
+            None,
+            None
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+        tasks::get_task(&pool, task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "queued"
+    );
+    tasks::complete_task_run(&pool, run.id, "completed", None, None)
+        .await
+        .unwrap();
+    assert!(
+        tasks::update_task(
+            &pool,
+            task.id,
+            None,
+            None,
+            None,
+            Some("complete"),
+            None,
+            None
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+}

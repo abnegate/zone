@@ -107,6 +107,12 @@ pub enum ToolProfile {
     Task,
 }
 
+struct TaskLease {
+    pool: sqlx::PgPool,
+    run: Uuid,
+    owner: Uuid,
+}
+
 /// The tools offered for one turn, and the context they run in.
 ///
 /// Chat and tasks share workspace tools. Tasks have a sandboxed file/shell
@@ -121,6 +127,7 @@ pub struct ChatTools {
     names: Vec<String>,
     name_set: HashSet<String>,
     definitions: Vec<ToolDefinition>,
+    lease: Option<TaskLease>,
     membership: OnceCell<bool>,
     actor_name: OnceCell<String>,
 }
@@ -158,6 +165,11 @@ impl ChatTools {
             _ => None,
         };
         Self::assemble(scope, ToolProfile::Task, Some(cwd), false).await
+    }
+
+    pub fn with_task_lease(mut self, pool: sqlx::PgPool, run: Uuid, owner: Uuid) -> Self {
+        self.lease = Some(TaskLease { pool, run, owner });
+        self
     }
 
     async fn assemble(
@@ -241,6 +253,7 @@ impl ChatTools {
             names: Vec::new(),
             name_set: HashSet::new(),
             definitions: Vec::new(),
+            lease: None,
             membership: OnceCell::new(),
             actor_name: OnceCell::new(),
         };
@@ -295,6 +308,14 @@ impl ChatTools {
     /// A failed tool is an observation the model can recover from, so nothing
     /// here aborts the turn.
     pub async fn execute(&self, name: &str, arguments: &str) -> ToolResult {
+        if let Some(lease) = &self.lease
+            && !matches!(
+                crate::db::tasks::owns_task_run(&lease.pool, lease.run, Some(lease.owner)).await,
+                Ok(true)
+            )
+        {
+            return ToolResult::error("Task execution lost its lease");
+        }
         let Some(tool) = self.registry.get(name) else {
             return ToolResult::error(format!(
                 "Unknown tool '{}'. Available tools: {}.",
