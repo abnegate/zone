@@ -1192,7 +1192,7 @@ pub struct StandingInstruction {
 
 /// Stored standing instruction as read back for prompt assembly.
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct StandingInstructionRow {
+pub struct LearnedEntryRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub title: String,
@@ -1203,14 +1203,14 @@ pub struct StandingInstructionRow {
 
 /// What an upsert did, so callers can log promotions without re-reading the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StandingInstructionOutcome {
+pub enum KnowledgeUpsertOutcome {
     Created,
     Superseded,
     Unchanged,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-struct StandingInstructionUpsertRow {
+struct KnowledgeUpsertRow {
     id: Uuid,
     created: bool,
     superseded: bool,
@@ -1226,34 +1226,37 @@ fn advisory_lock_key(workspace_id: Uuid, fingerprint: &str) -> i64 {
     i64::from_be_bytes(bytes)
 }
 
-/// Create or supersede the standing instruction identified by its promotion fingerprint.
+/// One learned entry, addressed by the fingerprint of whatever it was derived from.
+struct LearnedEntry<'a> {
+    workspace_id: Uuid,
+    category: &'a str,
+    fingerprint: &'a str,
+    identity_tag: &'a str,
+    title: &'a str,
+    content: &'a str,
+    tags: &'a [String],
+}
+
+/// Create or supersede the knowledge entry a learning pass derived.
 ///
-/// The fingerprint is the identity key, so re-promoting the same question cluster updates
-/// one row instead of accumulating near-duplicates. The advisory lock keeps concurrent
-/// server instances from racing the existence check.
-pub async fn upsert_standing_instruction(
+/// The fingerprint is the identity key, so re-deriving the same fact updates one row
+/// instead of accumulating near-duplicates, and an unchanged derivation reports
+/// [`KnowledgeUpsertOutcome::Unchanged`] without writing. The advisory lock keeps
+/// concurrent server instances from racing the existence check.
+async fn upsert_learned_entry(
     pool: &PgPool,
-    instruction: &StandingInstruction,
-) -> DbResult<(Uuid, StandingInstructionOutcome)> {
-    let tags = instruction.provenance.tags();
-    let promotion_tag = tag(PROMOTION_TAG, &instruction.provenance.fingerprint);
-    let token_count = instruction
-        .content
-        .chars()
-        .count()
-        .div_ceil(CHARACTERS_PER_TOKEN) as i32;
+    entry: LearnedEntry<'_>,
+) -> DbResult<(Uuid, KnowledgeUpsertOutcome)> {
+    let token_count = entry.content.chars().count().div_ceil(CHARACTERS_PER_TOKEN) as i32;
 
     let mut transaction = pool.begin().await?;
 
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(advisory_lock_key(
-            instruction.workspace_id,
-            &instruction.provenance.fingerprint,
-        ))
+        .bind(advisory_lock_key(entry.workspace_id, entry.fingerprint))
         .execute(&mut *transaction)
         .await?;
 
-    let row: StandingInstructionUpsertRow = sqlx::query_as(
+    let row: KnowledgeUpsertRow = sqlx::query_as(
         r#"
         WITH existing AS (
             SELECT id, title, content, tags, is_active
@@ -1296,12 +1299,12 @@ pub async fn upsert_standing_instruction(
             EXISTS (SELECT 1 FROM superseded) AS superseded
         "#,
     )
-    .bind(instruction.workspace_id)
-    .bind(STANDING_INSTRUCTION_CATEGORY)
-    .bind(&promotion_tag)
-    .bind(&instruction.title)
-    .bind(&instruction.content)
-    .bind(&tags)
+    .bind(entry.workspace_id)
+    .bind(entry.category)
+    .bind(entry.identity_tag)
+    .bind(entry.title)
+    .bind(entry.content)
+    .bind(entry.tags)
     .bind(token_count)
     .fetch_one(&mut *transaction)
     .await?;
@@ -1309,20 +1312,43 @@ pub async fn upsert_standing_instruction(
     transaction.commit().await?;
 
     let outcome = match (row.created, row.superseded) {
-        (true, _) => StandingInstructionOutcome::Created,
-        (_, true) => StandingInstructionOutcome::Superseded,
-        _ => StandingInstructionOutcome::Unchanged,
+        (true, _) => KnowledgeUpsertOutcome::Created,
+        (_, true) => KnowledgeUpsertOutcome::Superseded,
+        _ => KnowledgeUpsertOutcome::Unchanged,
     };
 
     Ok((row.id, outcome))
+}
+
+/// Create or supersede the standing instruction identified by its promotion fingerprint.
+pub async fn upsert_standing_instruction(
+    pool: &PgPool,
+    instruction: &StandingInstruction,
+) -> DbResult<(Uuid, KnowledgeUpsertOutcome)> {
+    let tags = instruction.provenance.tags();
+    let identity_tag = tag(PROMOTION_TAG, &instruction.provenance.fingerprint);
+
+    upsert_learned_entry(
+        pool,
+        LearnedEntry {
+            workspace_id: instruction.workspace_id,
+            category: STANDING_INSTRUCTION_CATEGORY,
+            fingerprint: &instruction.provenance.fingerprint,
+            identity_tag: &identity_tag,
+            title: &instruction.title,
+            content: &instruction.content,
+            tags: &tags,
+        },
+    )
+    .await
 }
 
 /// Active standing instructions for a workspace, most recently confirmed first.
 pub async fn list_standing_instructions(
     pool: &PgPool,
     workspace_id: Uuid,
-) -> DbResult<Vec<StandingInstructionRow>> {
-    sqlx::query_as::<_, StandingInstructionRow>(
+) -> DbResult<Vec<LearnedEntryRow>> {
+    sqlx::query_as::<_, LearnedEntryRow>(
         r#"
         SELECT id, workspace_id, title, content, tags, updated_at
         FROM knowledge_entries
@@ -1357,7 +1383,7 @@ pub async fn retire_standing_instruction(pool: &PgPool, id: Uuid) -> DbResult<bo
 }
 
 /// Render standing instructions as a system-prompt section. Empty when there are none.
-pub fn render_standing_instructions(instructions: &[StandingInstructionRow]) -> String {
+pub fn render_standing_instructions(instructions: &[LearnedEntryRow]) -> String {
     if instructions.is_empty() {
         return String::new();
     }
@@ -1391,6 +1417,340 @@ pub async fn standing_instructions_prompt(pool: &PgPool, workspace_id: Uuid) -> 
     Ok(render_standing_instructions(&instructions))
 }
 
+const LEARNED_TAG: &str = "learned";
+const OBSERVATIONS_TAG: &str = "observations";
+const RUNS_TAG: &str = "runs";
+const CONFIDENCE_TAG: &str = "confidence";
+
+const MAX_LEARNED_FACTS: i64 = 40;
+
+/// What a learning pass concluded about a workspace.
+///
+/// Each variant is its own `knowledge_entries` category, so a kind of lesson can be
+/// listed, rendered and retired without touching the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LearnedCategory {
+    /// How this repository is arranged, read out of the diffs its runs produced.
+    RepositoryConvention,
+    /// Which way of working produced well-received changes here.
+    StrategyLesson,
+}
+
+impl LearnedCategory {
+    pub const ALL: [LearnedCategory; 2] = [
+        LearnedCategory::RepositoryConvention,
+        LearnedCategory::StrategyLesson,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LearnedCategory::RepositoryConvention => "repository-convention",
+            LearnedCategory::StrategyLesson => "strategy-lesson",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|value| value.as_str() == text)
+    }
+
+    /// The heading the facts appear under in a system prompt.
+    pub fn heading(self) -> &'static str {
+        match self {
+            LearnedCategory::RepositoryConvention => "Repository conventions",
+            LearnedCategory::StrategyLesson => "What has worked here",
+        }
+    }
+
+    fn preamble(self) -> &'static str {
+        match self {
+            LearnedCategory::RepositoryConvention => {
+                "These were read out of changes this repository has already accepted. \
+                 Follow them unless the task says otherwise, and say so when you depart from one."
+            }
+            LearnedCategory::StrategyLesson => {
+                "These describe how past changes to this repository were made and how well \
+                 they were received. They are observations, not instructions."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for LearnedCategory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Where a learned fact came from, so it can be inspected and argued with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LearningProvenance {
+    /// Identity of the fact's subject, not of its current answer, so a repository that
+    /// changes its mind supersedes one entry instead of gaining a second.
+    pub fingerprint: String,
+    pub observations: usize,
+    pub distinct_runs: usize,
+    pub confidence: f32,
+    pub last_confirmed: chrono::NaiveDate,
+}
+
+impl LearningProvenance {
+    /// Confidence is rendered to two places so an unchanged derivation produces
+    /// byte-identical tags and the upsert reports no change.
+    pub fn tags(&self, category: LearnedCategory) -> Vec<String> {
+        vec![
+            category.as_str().to_string(),
+            tag(LEARNED_TAG, &self.fingerprint),
+            tag(OBSERVATIONS_TAG, &self.observations.to_string()),
+            tag(RUNS_TAG, &self.distinct_runs.to_string()),
+            tag(CONFIDENCE_TAG, &format!("{:.2}", self.confidence)),
+            tag(CONFIRMED_TAG, &self.last_confirmed.to_string()),
+        ]
+    }
+
+    pub fn from_tags(tags: &[String]) -> Option<Self> {
+        Some(Self {
+            fingerprint: tag_value(tags, LEARNED_TAG)?.to_string(),
+            observations: tag_value(tags, OBSERVATIONS_TAG)?.parse().ok()?,
+            distinct_runs: tag_value(tags, RUNS_TAG)?.parse().ok()?,
+            confidence: tag_value(tags, CONFIDENCE_TAG)?.parse().ok()?,
+            last_confirmed: tag_value(tags, CONFIRMED_TAG)?.parse().ok()?,
+        })
+    }
+}
+
+/// A fact a learning pass derived, ready to be written to the knowledge store.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LearnedFact {
+    pub workspace_id: Uuid,
+    pub category: LearnedCategory,
+    pub title: String,
+    pub content: String,
+    pub provenance: LearningProvenance,
+}
+
+/// Create or supersede one learned fact.
+pub async fn upsert_learned_fact(
+    pool: &PgPool,
+    fact: &LearnedFact,
+) -> DbResult<(Uuid, KnowledgeUpsertOutcome)> {
+    let tags = fact.provenance.tags(fact.category);
+    let identity_tag = tag(LEARNED_TAG, &fact.provenance.fingerprint);
+
+    upsert_learned_entry(
+        pool,
+        LearnedEntry {
+            workspace_id: fact.workspace_id,
+            category: fact.category.as_str(),
+            fingerprint: &fact.provenance.fingerprint,
+            identity_tag: &identity_tag,
+            title: &fact.title,
+            content: &fact.content,
+            tags: &tags,
+        },
+    )
+    .await
+}
+
+/// Active learned facts of one kind, most recently confirmed first.
+pub async fn list_learned_facts(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    category: LearnedCategory,
+) -> DbResult<Vec<LearnedEntryRow>> {
+    sqlx::query_as::<_, LearnedEntryRow>(
+        r#"
+        SELECT id, workspace_id, title, content, tags, updated_at
+        FROM knowledge_entries
+        WHERE workspace_id = $1 AND category = $2 AND is_active = TRUE
+        ORDER BY updated_at DESC NULLS LAST, id
+        LIMIT $3
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(category.as_str())
+    .bind(MAX_LEARNED_FACTS)
+    .fetch_all(pool)
+    .await
+}
+
+/// Withdraw a learned fact. Learning is reversible: a later pass re-derives it only
+/// while the evidence still supports it.
+pub async fn retire_learned_fact(pool: &PgPool, id: Uuid) -> DbResult<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE knowledge_entries
+        SET is_active = FALSE, updated_at = NOW()
+        WHERE id = $1 AND category = ANY($2) AND is_active = TRUE
+        "#,
+    )
+    .bind(id)
+    .bind(
+        LearnedCategory::ALL
+            .iter()
+            .map(|category| category.as_str().to_string())
+            .collect::<Vec<_>>(),
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Render learned facts as a system-prompt section. Empty when there are none.
+pub fn render_learned_facts(category: LearnedCategory, facts: &[LearnedEntryRow]) -> String {
+    if facts.is_empty() {
+        return String::new();
+    }
+
+    let mut rendered = format!("\n\n# {}\n{}\n", category.heading(), category.preamble());
+
+    for fact in facts {
+        rendered.push_str(&format!("\n- {}", fact.content.trim()));
+        if let Some(provenance) = LearningProvenance::from_tags(&fact.tags) {
+            rendered.push_str(&format!(
+                " (seen {} times across {} runs, confidence {:.2}, last confirmed {})",
+                provenance.observations,
+                provenance.distinct_runs,
+                provenance.confidence,
+                provenance.last_confirmed
+            ));
+        }
+        rendered.push('\n');
+    }
+
+    rendered
+}
+
+/// Everything a workspace has learned, ready to append to a system prompt.
+pub async fn learned_facts_prompt(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    let mut rendered = String::new();
+    for category in LearnedCategory::ALL {
+        let facts = list_learned_facts(pool, workspace_id, category).await?;
+        rendered.push_str(&render_learned_facts(category, &facts));
+    }
+    Ok(rendered)
+}
+
+#[cfg(test)]
+mod learned_fact_tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn provenance(
+        observations: usize,
+        distinct_runs: usize,
+        confidence: f32,
+    ) -> LearningProvenance {
+        LearningProvenance {
+            fingerprint: "5f2c9a".to_string(),
+            observations,
+            distinct_runs,
+            confidence,
+            last_confirmed: NaiveDate::from_ymd_opt(2026, 9, 4).unwrap(),
+        }
+    }
+
+    fn row(content: &str, tags: Vec<String>) -> LearnedEntryRow {
+        LearnedEntryRow {
+            id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            title: "Convention".to_string(),
+            content: content.to_string(),
+            tags,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn provenance_round_trips_through_tags() {
+        let original = provenance(9, 4, 0.82);
+        let parsed =
+            LearningProvenance::from_tags(&original.tags(LearnedCategory::RepositoryConvention))
+                .expect("provenance should parse back from its own tags");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn provenance_tags_are_byte_identical_for_an_unchanged_derivation() {
+        let category = LearnedCategory::RepositoryConvention;
+        assert_eq!(
+            provenance(9, 4, 0.823_456).tags(category),
+            provenance(9, 4, 0.821_111).tags(category),
+            "confidence noise below the recorded precision must not rewrite the row"
+        );
+    }
+
+    #[test]
+    fn provenance_tags_carry_the_category_marker() {
+        for category in LearnedCategory::ALL {
+            assert!(
+                provenance(5, 3, 0.7)
+                    .tags(category)
+                    .iter()
+                    .any(|entry| entry == category.as_str()),
+                "{category} entries must be findable by their category tag"
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_rejects_incomplete_tags() {
+        assert!(LearningProvenance::from_tags(&[]).is_none());
+        assert!(LearningProvenance::from_tags(&["learned:5f2c9a".to_string()]).is_none());
+    }
+
+    #[test]
+    fn category_names_round_trip() {
+        for category in LearnedCategory::ALL {
+            assert_eq!(LearnedCategory::parse(category.as_str()), Some(category));
+        }
+        assert_eq!(LearnedCategory::parse("standing-instruction"), None);
+    }
+
+    #[test]
+    fn learned_categories_do_not_collide_with_standing_instructions() {
+        for category in LearnedCategory::ALL {
+            assert_ne!(
+                category.as_str(),
+                STANDING_INSTRUCTION_CATEGORY,
+                "a learned fact must never be listed as a standing instruction"
+            );
+        }
+    }
+
+    #[test]
+    fn render_is_empty_without_facts() {
+        assert!(render_learned_facts(LearnedCategory::RepositoryConvention, &[]).is_empty());
+    }
+
+    #[test]
+    fn render_discloses_the_evidence_behind_each_fact() {
+        let rendered = render_learned_facts(
+            LearnedCategory::RepositoryConvention,
+            &[row(
+                "Files in `src/db` are named in snake_case.",
+                provenance(9, 4, 0.82).tags(LearnedCategory::RepositoryConvention),
+            )],
+        );
+
+        assert!(rendered.contains("# Repository conventions"));
+        assert!(rendered.contains("Files in `src/db` are named in snake_case."));
+        assert!(
+            rendered.contains("seen 9 times across 4 runs, confidence 0.82"),
+            "a learned fact must show what it was derived from: {rendered}"
+        );
+        assert!(rendered.contains("last confirmed 2026-09-04"));
+    }
+
+    #[test]
+    fn render_survives_missing_provenance_tags() {
+        let rendered =
+            render_learned_facts(LearnedCategory::StrategyLesson, &[row("Body", Vec::new())]);
+        assert!(rendered.contains("Body"));
+        assert!(!rendered.contains("seen "));
+    }
+}
+
 #[cfg(test)]
 mod standing_instruction_tests {
     use super::*;
@@ -1405,8 +1765,8 @@ mod standing_instruction_tests {
         }
     }
 
-    fn row(title: &str, content: &str, tags: Vec<String>) -> StandingInstructionRow {
-        StandingInstructionRow {
+    fn row(title: &str, content: &str, tags: Vec<String>) -> LearnedEntryRow {
+        LearnedEntryRow {
             id: Uuid::nil(),
             workspace_id: Uuid::nil(),
             title: title.to_string(),

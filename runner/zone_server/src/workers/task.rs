@@ -1025,6 +1025,15 @@ async fn guidance(state: &AppState, task: &tasks::TaskRow) -> String {
         ),
     }
 
+    match crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await {
+        Ok(facts) => guidance.push_str(&facts),
+        Err(error) => tracing::warn!(
+            task_id = %task.id,
+            %error,
+            "Failed to load learned facts; continuing without them"
+        ),
+    }
+
     guidance
 }
 
