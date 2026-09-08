@@ -658,7 +658,7 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
                              docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres valkey && \
                              until docker exec postgres pg_isready -U postgres > /dev/null 2>&1; do sleep 1; done && \
                              docker exec postgres psql -U postgres -c \"CREATE DATABASE zone_test;\" 2>/dev/null || true && \
-                             cd {server_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test sqlx migrate run && \
+                             cd {server_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test SQLX_OFFLINE=true cargo run -p zone_server --bin zone-server --no-default-features -- --migrate-only && \
                              cd {working_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test cargo test -p zone_server",
                             root = root.display(),
                             server_dir = server_dir.display(),

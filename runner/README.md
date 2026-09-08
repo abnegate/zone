@@ -99,9 +99,13 @@ cd zone/runner
 cp .env.example .env
 # Edit .env with your database and API credentials
 
+# The server does not load .env. Export its DATABASE_URL value into this shell.
+# Replace this example with your configured credentials and database.
+export DATABASE_URL='postgres://user:password@localhost:5432/zone'
+
 # Run migrations
 sqlx database create
-sqlx migrate run
+SQLX_OFFLINE=true cargo run -p zone_server --bin zone-server --no-default-features -- --migrate-only
 
 # Build all crates
 cargo build
@@ -110,7 +114,7 @@ cargo build
 cargo test
 
 # Start the server
-cargo run --bin zone_server
+cargo run --bin zone-server
 ```
 
 ### Running the CLI

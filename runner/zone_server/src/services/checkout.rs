@@ -174,56 +174,84 @@ impl Checkout {
         Self::recover_root(pool, &Self::root(pool)).await
     }
 
-    async fn recover_root(pool: &PgPool, root: &Path) -> Result<u64, String> {
+    async fn filesystem<T: Send + 'static>(
+        operation: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+    ) -> Result<T, String> {
+        tokio::task::spawn_blocking(operation)
+            .await
+            .map_err(|_| "Checkout filesystem worker stopped".to_string())?
+            .map_err(|error| format!("Checkout filesystem operation failed ({:?})", error.kind()))
+    }
+
+    fn entries(root: &Path) -> std::io::Result<Vec<(Uuid, PathBuf)>> {
         match Self::validate_root(root) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(error.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
         }
-        let mut removed = 0;
-        for entry in std::fs::read_dir(root).map_err(|error| error.to_string())? {
-            let entry = entry.map_err(|error| error.to_string())?;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
             let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
+            let Some(name) = name.to_str() else { continue };
             let Some((run, owner)) = name.split_once('.') else {
                 continue;
             };
             let (Ok(run_id), Ok(owner_id)) = (Uuid::parse_str(run), Uuid::parse_str(owner)) else {
                 continue;
             };
-            if run_id.to_string() != run || owner_id.to_string() != owner {
-                continue;
+            if run_id.to_string() == run && owner_id.to_string() == owner {
+                entries.push((run_id, entry.path()));
             }
+        }
+        Ok(entries)
+    }
+
+    async fn recover_root(pool: &PgPool, root: &Path) -> Result<u64, String> {
+        let directory = root.to_path_buf();
+        let entries = Self::filesystem(move || Self::entries(&directory)).await?;
+        let mut removed = 0;
+        for (run, path) in entries {
             let status: Option<String> =
                 sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
-                    .bind(run_id)
+                    .bind(run)
                     .fetch_optional(pool)
                     .await
-                    .map_err(|error| error.to_string())?;
-            // A deleted task cascades to its runs. Its generated local checkout
-            // remains owned by this service and has no execution to preserve.
+                    .map_err(|_| "Cannot inspect task checkout ownership".to_string())?;
+            // Deleted tasks cascade to runs; their generated paths are reclaimable.
             if status
                 .as_deref()
                 .is_some_and(|status| !matches!(status, "completed" | "failed" | "cancelled"))
             {
                 continue;
             }
-            Self::validate_root(root).map_err(|error| error.to_string())?;
-            let kind = entry.file_type().map_err(|error| error.to_string())?;
-            let result = if kind.is_symlink() {
-                std::fs::remove_file(entry.path())
-            } else if kind.is_dir() {
-                std::fs::remove_dir_all(entry.path())
-            } else {
-                continue;
-            };
+            let directory = root.to_path_buf();
+            let result = Self::filesystem(move || {
+                Self::validate_root(&directory)?;
+                let kind = match std::fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata.file_type(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(error),
+                };
+                let result = if kind.is_symlink() {
+                    std::fs::remove_file(&path)
+                } else if kind.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    return Ok(false);
+                };
+                match result {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(error) => Err(error),
+                }
+            })
+            .await;
             match result {
-                Ok(()) => removed += 1,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(true) => removed += 1,
+                Ok(false) => {}
                 Err(error) => {
-                    tracing::error!(path = %entry.path().display(), %error, "Failed to recover task checkout; will retry")
+                    tracing::error!(%run, %error, "Failed to recover task checkout; will retry")
                 }
             }
         }
@@ -247,7 +275,7 @@ impl Drop for Checkout {
         if let Err(error) = std::fs::remove_dir_all(&self.path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
-            tracing::error!(path = %self.path.display(), "Failed to remove task checkout");
+            tracing::error!(path = %self.path.display(), kind = ?error.kind(), "Failed to remove task checkout");
         }
     }
 }
@@ -255,6 +283,27 @@ impl Drop for Checkout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_filesystem_does_not_block_the_async_executor() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let notified = started.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let responder = tokio::spawn(async move {
+            notified.notified().await;
+            let _ = sender.send(());
+        });
+        let responsive = Checkout::filesystem(move || {
+            started.notify_one();
+            Ok(receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_ok())
+        })
+        .await
+        .unwrap();
+        responder.await.unwrap();
+        assert!(responsive, "filesystem work blocked the async executor");
+    }
 
     #[tokio::test]
     async fn recovery_removes_abandoned_checkout() {
@@ -313,7 +362,7 @@ mod tests {
             pool.clone(),
             None,
         );
-        crate::workers::task::spawn_recovery(state);
+        let recovery = crate::workers::task::spawn_recovery(state);
         let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while path.exists() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -321,6 +370,8 @@ mod tests {
         })
         .await
         .is_ok();
+        recovery.abort();
+        let _ = recovery.await;
         if path.exists() {
             std::fs::remove_dir_all(&path).unwrap();
         }

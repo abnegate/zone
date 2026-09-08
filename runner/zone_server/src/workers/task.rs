@@ -162,6 +162,26 @@ impl AgentCallback for DatabaseTaskCallback {
     }
 }
 
+/// Recover orphaned runs and their abandoned local checkouts.
+pub fn spawn_recovery(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = tasks::sweep_task_runs(state.db()).await {
+                tracing::error!(%error, "Could not recover orphaned task runs");
+            }
+            if let Err(error) = crate::db::recovery::reconcile(state.db()).await {
+                tracing::error!(%error, "Could not reconcile terminal task runs");
+            }
+            if let Err(error) = crate::services::checkout::Checkout::recover(state.db()).await {
+                tracing::error!(%error, "Could not recover abandoned task checkouts");
+            }
+        }
+    })
+}
+
 /// Execute a task run
 ///
 /// This function runs the complete task execution pipeline:
@@ -175,22 +195,6 @@ impl AgentCallback for DatabaseTaskCallback {
 ///
 /// All events are persisted to the database via DatabaseTaskCallback for monitoring.
 /// Run recovery is durable across restarts and independent of agent progress.
-pub fn spawn_recovery(state: AppState) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if let Err(error) = tasks::sweep_task_runs(state.db()).await {
-                tracing::error!(%error, "Could not recover orphaned task runs");
-            }
-            if let Err(error) = crate::services::checkout::Checkout::recover(state.db()).await {
-                tracing::error!(%error, "Could not recover abandoned task checkouts");
-            }
-        }
-    });
-}
-
 pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     let owner = Uuid::new_v4();
     let run = match tasks::get_task_run(state.db(), run_id).await {

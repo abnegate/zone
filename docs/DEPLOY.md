@@ -386,7 +386,7 @@ sequenceDiagram
 
 ## 7. Control plane
 
-### 7.1 Data model — `runner/zone_server/migrations/018_deployments.sql`
+### 7.1 Data model — `runner/zone_server/migrations/022_deployments.sql`
 
 Split: **`releases`** = identity + desired/observed state, one row per target + name; **`deployments`** = attempts (the state machine the API and UI expose); **`deployment_events`** = append-only step log. Helm revisions are referenced by integer, never copied. Targets without native revisions (stores, git-backed repos, docker) use `deployments` history plus recorded digests as their rollback coordinate.
 
@@ -910,7 +910,7 @@ Operations:
 | Phase | Deliverable | Verified by |
 |---|---|---|
 | 0 | `task_runs` heartbeat + orphan sweep; per-run workspace dir + `GitService::clone`; `git` in the image; `tasks.created_by` set and `tasks.status` advancing; `ws/auth.rs` membership on task WS; task `WorkspaceScope` + receipts persisted | kill the server mid-run → row `failed('orphaned')` within 2 min; checkout visible on disk; restarted server removes abandoned local checkouts without touching live runs; a foreign-workspace JWT gets `forbidden`; task run log shows receipt rows |
-| 1 | Migration 018 (`make sqlx-prepare`); targets + runners CRUD, Targets tab, Runners page; `zone-runner connect` (WS, registration, capability detection, `Run` step, clone, upload, logs); `deploy_artifacts` + `persist_bundle` | the Mac shows online with detected capabilities; a `Run` job clones a repo, runs `cargo --version`, uploads a bundle, streams logs |
+| 1 | Migration 022 (`make sqlx-prepare`); targets + runners CRUD, Targets tab, Runners page; `zone-runner connect` (WS, registration, capability detection, `Run` step, clone, upload, logs); `deploy_artifacts` + `persist_bundle` | the Mac shows online with detected capabilities; a `Run` job clones a repo, runs `cargo --version`, uploads a bundle, streams logs |
 | 2 | `deployments` core: manifest validation, state machine, `POST /deployments`, approve/cancel/reject, events, `/ws/deployments`, Notifier (Discord / email / in-app), Deployments UI | request → Discord alert with deep link → approve → `approved`; idempotent re-POST returns the same id; non-admin approve → 403 |
 | 3 | Container path: `helm/zone-app`, `helm/zone-build`, `KubeHelmDriver`, `DockerComposeDriver`, docker-proxy, tools stage, `workers/deploy.rs`, `CheckLadder` + `feedback()`, instrumentation script served | a known-good image → `live` on kind and on docker; kill the server mid-deploy → lease reclaimed, finishes; bad `smoke.path` → `rolled_back` with evidence and `helm history` showing the rollback revision; the fix loop receives `feedback()` |
 | 4 | `desktop_app` / `cli`: builders lifted from `package-tauri.sh`, `package-deb.sh`, the cask template; `github_release`, `homebrew_tap`, `apt_repo` drivers; launch-marker, Xvfb and `--version` checks | zone's own desktop client shipped to a scratch tap, apt repo and GitHub prerelease; rollback = revert commit visible in the tap |
@@ -943,3 +943,13 @@ Operations:
 - **Kubernetes health is classified from pod state, not inferred from `helm status`** — Edge's classifier turns a timeout into a named cause in seconds.
 - **Multi-target delivery records `partial` as a first-class outcome** — a release that reached three of four targets is neither success nor failure, and pretending otherwise hides the fourth.
 - **Alerting follows a written contract and every phase ships a rollback drill** — the conventions cost nothing on day one; Cloud's un-asserted drill hid a broken rollback for months.
+
+## Task execution schema upgrade
+
+Phase 0 uses migrations 017–021. Migration 017 commits metadata-only columns and unvalidated foreign keys before any scans. It installs a temporary database fence for new running task admissions, including old server binaries; existing runs can finish and unrelated writes remain available. This admission pause lasts through reconciliation and concurrent index builds. Stop and drain old task workers before transferring execution to the new server: old binaries lack execution leases and their external Git/PR effects cannot be fenced by this migration. The migration tolerates concurrent legacy database completion as a defense; it does not make mixed-version task execution safe. Deploy the new server to complete the upgrade before admitting new tasks.
+
+Migration 018 locks tasks then live runs in a stable order and reconciles duplicate active runs without overwriting a concurrent terminal result. Startup and periodic recovery reconcile committed terminal runs with their matching task pointers using the same task-before-run lock order as normal completion. Leased runs retain application-level ownership checks. Migrations 019 and 020 each build one index concurrently outside a transaction. Migration 021 validates both foreign keys and the exact valid index definitions before atomically removing the admission fence. Metadata lock acquisition has a five-second timeout; a busy database fails the upgrade rather than accumulating an unbounded blocking DDL queue.
+
+The server migration runner holds SQLx's existing advisory lock on one dedicated connection across checksum validation, narrowly scoped invalid-index repair and migration execution. On interruption, restart the server: only an invalid index with the exact expected definition from an unfinished migration is dropped and rebuilt. Valid and unrelated indexes are never dropped. Checksum mismatches, dirty versions or unexpected index definitions fail closed, retaining the fence. Use the server migration runner for both clean installations and interrupted-index repair. Phase 1 starts at migration 022.
+
+Use `zone-server --migrate-only` (or `make db-migrate` in the Compose environment) for standalone upgrades. It uses the same locked repair path as server startup and requires only `DATABASE_URL`. The Make target builds the current manager image before running it. Local builds before the schema exists use `SQLX_OFFLINE=true`. The dedicated migration session checks disconnected clients every second during active queries on supported PostgreSQL hosts; this covers process cancellation, not arbitrary network partitions.
