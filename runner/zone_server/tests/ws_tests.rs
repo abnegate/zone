@@ -400,12 +400,15 @@ async fn test_ws_connect_task_run_not_found() {
         .expect("send");
 
     // Do not distinguish missing runs from runs in another workspace.
-    if let Some(Ok(Message::Text(text))) = ws_stream.next().await {
-        let text_str: &str = text.as_ref();
-        let msg: serde_json::Value = serde_json::from_str(text_str).expect("parse");
-        assert_eq!(msg["type"], "error");
-        assert_eq!(msg["message"], "Forbidden");
-    }
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await
+        .expect("forbidden response timed out")
+        .expect("socket closed without denial")
+        .expect("socket error");
+    let message: serde_json::Value =
+        serde_json::from_str(response.to_text().expect("text denial frame")).expect("parse");
+    assert_eq!(message["type"], "error");
+    assert_eq!(message["message"], "Forbidden");
 }
 
 #[tokio::test]

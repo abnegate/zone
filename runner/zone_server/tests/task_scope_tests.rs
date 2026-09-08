@@ -10,7 +10,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 use zone_server::agent::ChatTools;
 use zone_server::auth::jwt::create_access_token;
-use zone_server::db::{tasks, workspace_members};
+use zone_server::db::{task_access, tasks, workspace_members};
 use zone_server::state::AppState;
 
 async fn fixture() -> (PgPool, AppState, Uuid, Uuid, Uuid) {
@@ -269,6 +269,7 @@ async fn websocket_case(status: &str, authorized: bool, token_valid: bool) {
     }
     socket.close(None).await.ok();
     server.abort();
+    let _ = server.await;
     cleanup(&pool, organization, user).await;
     cleanup(&pool, foreign_organization, foreign_user).await;
 }
@@ -376,11 +377,143 @@ async fn later_smaller_log_uuid_is_streamed_once_before_completion() {
     })
     .await
     .unwrap();
+    assert!(completed, "socket closed before the terminal event");
     assert_eq!(
         count, 1,
         "terminal state was sent before the final receipt log"
     );
     socket.close(None).await.ok();
     server.abort();
+    let _ = server.await;
     cleanup(&pool, organization, user).await;
+}
+
+#[tokio::test]
+async fn task_snapshot_rechecks_membership_after_prior_authorization() {
+    let (pool, _, organization, workspace, user) = fixture().await;
+    let task = tasks::create_task(
+        &pool,
+        workspace,
+        &[],
+        "Private task",
+        "Private state",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+    tasks::add_task_run_log(
+        &pool,
+        run.id,
+        "acting",
+        "tool",
+        "info",
+        "DO NOT LEAK",
+        Some(json!({"action_receipt":{"success":true}})),
+    )
+    .await
+    .unwrap();
+    let member = workspace_members::get_member(&pool, workspace, user)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(member.is_active, "the earlier authorization succeeded");
+    sqlx::query(
+        "UPDATE workspace_members SET is_active = false WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let revoked = task_access::read(&pool, run.id, user).await.unwrap();
+    cleanup(&pool, organization, user).await;
+    assert!(
+        revoked.is_none(),
+        "revocation after authentication must prevent state and log disclosure"
+    );
+}
+
+#[tokio::test]
+async fn task_snapshot_orders_disclosure_after_pending_revocation() {
+    let (pool, _, organization, workspace, user) = fixture().await;
+    let task = tasks::create_task(
+        &pool,
+        workspace,
+        &[],
+        "Private task",
+        "Private state",
+        None,
+        None,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+    tasks::add_task_run_log(&pool, run.id, "acting", "tool", "info", "DO NOT LEAK", None)
+        .await
+        .unwrap();
+    assert!(
+        task_access::read(&pool, run.id, user)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let application = format!("task-snapshot-{}", Uuid::new_v4());
+    let reader = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            (*pool.connect_options())
+                .clone()
+                .application_name(&application),
+        )
+        .await
+        .unwrap();
+    let mut revocation = pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE workspace_members SET is_active = false WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(user)
+    .execute(&mut *revocation)
+    .await
+    .unwrap();
+    let reading = {
+        let reader = reader.clone();
+        tokio::spawn(async move { task_access::read(&reader, run.id, user).await })
+    };
+    let blocked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if reading.is_finished() {
+                return false;
+            }
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock')")
+                .bind(&application).fetch_one(&pool).await.unwrap();
+            if waiting {
+                return true;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    revocation.commit().await.unwrap();
+    let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), reading)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    reader.close().await;
+    cleanup(&pool, organization, user).await;
+    assert!(
+        blocked.unwrap(),
+        "disclosure must wait for the pending membership mutation"
+    );
+    assert!(
+        snapshot.is_none(),
+        "the committed revocation must deny the waiting read"
+    );
 }

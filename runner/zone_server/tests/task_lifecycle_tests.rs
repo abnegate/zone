@@ -414,14 +414,16 @@ async fn stale_owner_cannot_write_progress_logs_or_terminal_state() {
         zone_server::agent::ChatTools::for_task(&state, std::env::temp_dir(), workspace, None)
             .await
             .with_task_lease(pool.clone(), run.id, first);
-    assert!(
-        !tools
-            .execute(
-                "run_command",
-                r#"{"command":"echo","args":["must not execute"]}"#
-            )
-            .await
-            .success
+    let denied = tools
+        .execute(
+            "run_command",
+            r#"{"command":"echo","args":["must not execute"]}"#,
+        )
+        .await;
+    assert!(!denied.success);
+    assert_eq!(
+        denied.error.as_deref(),
+        Some("Task execution lost its lease")
     );
     assert!(
         tasks::complete_owned_task_run(&pool, run.id, Some(second), "completed", None, None)

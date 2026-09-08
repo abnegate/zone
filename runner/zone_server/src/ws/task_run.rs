@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::auth::validate_token;
-use crate::db::{tasks, workspace_members};
+use crate::db::task_access;
 use crate::state::AppState;
 
 /// Progress message sent to clients
@@ -144,7 +144,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                     Ok(ClientMessage::Auth { token }) => {
                         match validate_token(&token, state.config().jwt_secret()) {
                             Ok(claims) => match Uuid::parse_str(&claims.sub) {
-                                Ok(user_id) if authorized(&state, run_id, user_id).await => {
+                                Ok(user_id) => {
                                     actor = Some(user_id);
                                     true
                                 }
@@ -198,23 +198,28 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     };
 
     // Verify task run exists and get initial state
-    let task_run = match tasks::get_task_run(state.db(), run_id).await {
-        Ok(Some(run)) => run,
+    let snapshot = match task_access::read(state.db(), run_id, actor).await {
+        Ok(Some(snapshot)) => snapshot,
         Ok(None) => {
             let msg = ProgressMessage::Error {
-                message: "Task run not found".to_string(),
+                message: "Forbidden".to_string(),
             };
             let _ = sender.send(msg.to_ws_message()).await;
+            let _ = sender.close().await;
             return;
         }
-        Err(e) => {
+        Err(error) => {
+            tracing::error!(%error, %run_id, "Could not read authorized task snapshot");
             let msg = ProgressMessage::Error {
-                message: format!("Database error: {}", e),
+                message: "Internal server error".to_string(),
             };
             let _ = sender.send(msg.to_ws_message()).await;
+            let _ = sender.close().await;
             return;
         }
     };
+
+    let task_run = snapshot.run;
 
     // Send initial state
     let init_msg = ProgressMessage::Init {
@@ -230,20 +235,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     // UUID order does not reflect log creation order.
     let mut sent = HashSet::new();
     // Send existing logs
-    if let Ok(logs) = tasks::get_task_run_logs(state.db(), run_id).await {
-        for log in logs {
-            sent.insert(log.id);
-            let log_msg = ProgressMessage::Log {
-                id: log.id,
-                phase: log.phase,
-                agent_type: log.agent_type,
-                log_level: log.log_level,
-                message: log.message,
-                metadata: log.metadata,
-            };
-            if sender.send(log_msg.to_ws_message()).await.is_err() {
-                return;
-            }
+    for log in snapshot.logs {
+        sent.insert(log.id);
+        let log_msg = ProgressMessage::Log {
+            id: log.id,
+            phase: log.phase,
+            agent_type: log.agent_type,
+            log_level: log.log_level,
+            message: log.message,
+            metadata: log.metadata,
+        };
+        if sender.send(log_msg.to_ws_message()).await.is_err() {
+            return;
         }
     }
 
@@ -275,27 +278,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if !authorized(&state, run_id, actor).await {
-                    let _ = sender.send(ProgressMessage::Error { message: "Forbidden".into() }.to_ws_message()).await;
-                    let _ = sender.close().await;
-                    return;
-                }
-                // A terminal snapshot guarantees its awaited receipts are visible
-                // when we load logs before announcing completion.
-                let run = match tasks::get_task_run(state.db(), run_id).await {
-                    Ok(Some(run)) => run,
+                // The same locked membership read covers the run and its logs.
+                // Reading terminal state first includes every awaited receipt.
+                let snapshot = match task_access::read(state.db(), run_id, actor).await {
+                    Ok(Some(snapshot)) => snapshot,
                     Ok(None) => {
-                        let _ = sender.send(ProgressMessage::Error {
-                            message: "Task run not found".into(),
-                        }.to_ws_message()).await;
+                        let _ = sender.send(ProgressMessage::Error { message: "Forbidden".into() }.to_ws_message()).await;
+                        let _ = sender.close().await;
                         return;
                     }
-                    Err(_) => continue,
+                    Err(error) => {
+                        tracing::error!(%error, %run_id, "Could not read authorized task snapshot");
+                        let _ = sender.send(ProgressMessage::Error { message: "Internal server error".into() }.to_ws_message()).await;
+                        return;
+                    }
                 };
-                let logs = match tasks::get_task_run_logs(state.db(), run_id).await {
-                    Ok(logs) => logs,
-                    Err(_) => continue,
-                };
+                let run = snapshot.run;
+                let logs = snapshot.logs;
                 for log in logs {
                     if !sent.insert(log.id) {
                         continue;
@@ -346,16 +345,4 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
             }
         }
     }
-}
-
-/// Authorize before exposing whether a run exists, its state, or any log.
-async fn authorized(state: &AppState, run: Uuid, user: Uuid) -> bool {
-    let workspace = sqlx::query_scalar::<_, Uuid>(
-        "SELECT tasks.workspace_id FROM task_runs JOIN tasks ON tasks.id = task_runs.task_id WHERE task_runs.id = $1",
-    ).bind(run).fetch_optional(state.db()).await;
-    let workspace = match workspace {
-        Ok(Some(workspace)) => workspace,
-        _ => return false,
-    };
-    matches!(workspace_members::get_member(state.db(), workspace, user).await, Ok(Some(member)) if member.is_active)
 }
