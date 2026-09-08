@@ -552,9 +552,18 @@ async fn frames_endpoint_rejects_a_file_that_is_not_a_video() {
 }
 
 async fn post_frames(router: axum::Router, secret: &str, body: Value) -> (StatusCode, Value) {
+    post_json(router, secret, "/api/models/train/frames", body).await
+}
+
+async fn post_json(
+    router: axum::Router,
+    secret: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     let request = axum::http::Request::builder()
         .method("POST")
-        .uri("/api/models/train/frames")
+        .uri(uri)
         .header("Authorization", format!("Bearer {}", token(secret)))
         .header("Content-Type", "application/json")
         .body(Body::from(body.to_string()))
@@ -735,6 +744,99 @@ async fn train_bases_lists_flux_when_checkpoint_present() {
         bases
             .iter()
             .any(|base| base["id"] == "flux-schnell" && base["edit"] == false)
+    );
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn captions_report_configuration_and_preserve_user_drafts() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let (disabled, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let body = json!({
+        "trigger": "ohwx",
+        "images": [{
+            "filename": "portrait.png",
+            "bytes_base64": TINY_PNG,
+            "caption": "ohwx, side light",
+            "group": 4
+        }]
+    });
+    let (status, error) = post_json(
+        disabled,
+        &secret,
+        "/api/models/train/captions",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("COMFYUI_CAPTION_MODEL"))
+    );
+
+    let (enabled, secret) = router_tuned(&ollama, &catalog, models_dir.clone(), None, |comfyui| {
+        comfyui.caption_model = "vision".to_string()
+    })
+    .await;
+    let (status, response) = post_json(enabled, &secret, "/api/models/train/captions", body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["captions"], json!(["ohwx, side light"]));
+    let _ = fs::remove_dir_all(models_dir);
+}
+
+#[tokio::test]
+async fn train_maps_disabled_invalid_and_runner_failures() {
+    let models_dir = temp_models();
+    let ollama = mock_ollama().await;
+    let catalog = start_catalog(split_catalog).await;
+    let request = json!({
+        "name": "studio-style",
+        "base": "flux-schnell",
+        "trigger": "ohwx",
+        "images": [{
+            "filename": "a.png",
+            "caption": "a portrait",
+            "bytes_base64": TINY_PNG
+        }]
+    });
+
+    let (disabled, secret) = router_with(&ollama, &catalog, models_dir.clone(), None).await;
+    let (status, body) = post_json(disabled, &secret, "/api/models/train", request.clone()).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        body["error"],
+        "LoRA training is not configured on this server"
+    );
+
+    let (invalid, secret) = router_with(
+        &ollama,
+        &catalog,
+        models_dir.clone(),
+        Some("printf trained > \"$ZONE_TRAIN_OUTPUT\"".into()),
+    )
+    .await;
+    let mut invalid_request = request.clone();
+    invalid_request["name"] = Value::String("../escape".to_string());
+    let (status, body) = post_json(invalid, &secret, "/api/models/train", invalid_request).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
+    );
+
+    let (failed, secret) =
+        router_with(&ollama, &catalog, models_dir.clone(), Some("exit 7".into())).await;
+    let (status, body) = post_json(failed, &secret, "/api/models/train", request).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|message| message == "trainer exited 7"),
+        "{body}"
     );
     let _ = fs::remove_dir_all(models_dir);
 }
