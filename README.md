@@ -143,7 +143,7 @@ OLLAMA_BASE_URL=http://ollama:11434
 | `vpn` | Gluetun, SearXNG | Full-tunnel VPN for stack internet traffic |
 | `monitoring` | Prometheus, Grafana | Metrics and dashboards |
 | `bundled-ollama` | Ollama | In-compose engine (Linux NVIDIA / CPU) |
-| `bundled-comfyui` | ComfyUI | Bundled NVIDIA image/video/audio runtime |
+| `bundled-comfyui` | ComfyUI | Bundled NVIDIA image/video/audio/upscale runtime |
 
 Combine any of them in one command. Overlay files for `dev` and `vpn` are selected automatically:
 
@@ -412,14 +412,17 @@ zone/
 │   │   ├── src/session/     # Session management
 │   │   └── src/types/       # Shared domain types
 │   ├── zone_comfy/          # ComfyUI generation, model inventory, LoRA training
-│   │   ├── src/client.rs    # Image, video, and audio generation
+│   │   ├── src/client.rs    # Image, video, and audio generation, and upscaling
 │   │   ├── src/recipe.rs    # Workflow recipes and catalog
 │   │   ├── src/inventory.rs # Installed weights on disk
 │   │   ├── src/lora.rs      # LoRA training jobs
+│   │   ├── src/video.rs     # Training frames pulled out of a submitted clip
+│   │   ├── src/subject.rs   # Subject-aware framing for training crops
 │   │   └── src/caption.rs   # Vision captioning for training sets
 │   ├── zone_email/          # Transactional email over SMTP
 │   ├── zone_search/         # SearXNG web search client
 │   ├── zone_vcs/            # Local git operations and GitHub pull requests
+│   ├── zone_vision/         # Subject detection and subject-aware cropping
 │   ├── zone_server/         # HTTP/WS server
 │   │   ├── src/routes/      # API endpoints
 │   │   ├── src/db/          # Database queries (sqlx)
