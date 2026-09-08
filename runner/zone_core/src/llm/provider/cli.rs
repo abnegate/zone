@@ -326,7 +326,34 @@ mod tests {
         drop(file);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("the fake agent to be executable");
+        wait_until_executable(&path);
         path
+    }
+
+    /// Linux refuses to exec a file any process still holds open for writing.
+    /// The descriptor here is closed, but a sibling test forking between its
+    /// own open and exec inherits it for that window, so a freshly written
+    /// script can hit ETXTBSY under a parallel run. Production never meets this:
+    /// a provider execs an installed binary, not one it just wrote.
+    fn wait_until_executable(path: &std::path::Path) {
+        for _ in 0..50 {
+            match std::process::Command::new(path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                Err(error) if error.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => return,
+            }
+        }
     }
 
     fn settings(directory: &TempDir, script: &str) -> CliSettings {
