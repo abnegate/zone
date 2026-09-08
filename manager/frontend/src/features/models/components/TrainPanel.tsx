@@ -3,9 +3,11 @@ import { type FormEvent, type ReactElement, useEffect, useState } from 'react';
 import {
   type DatasetConcern,
   type DatasetFinding,
+  type DropReason,
   modelsApi,
   type TrainQuality,
   type TrainResult,
+  type TrainScreening,
 } from '../../../api/models';
 import './TrainPanel.css';
 
@@ -44,7 +46,26 @@ const BANDS: Record<Band, { label: string; meaning: string }> = {
 const CONCERNS: Record<DatasetConcern, string> = {
   too_few: 'Too few images',
   low_variety: 'Images too alike',
+  low_pose_variety: 'Cannot be prompted into new poses',
   mixed_subjects: 'More than one subject',
+};
+
+const REASONS: Record<DropReason, { singular: string; plural: string; meaning: string }> = {
+  duplicate: {
+    singular: 'near-duplicate',
+    plural: 'near-duplicates',
+    meaning: 'Near-duplicate frames teach one pose over and over.',
+  },
+  blurred: {
+    singular: 'blurred frame',
+    plural: 'blurred frames',
+    meaning: 'Motion blur is learned as part of the subject.',
+  },
+  small: {
+    singular: 'undersized image',
+    plural: 'undersized images',
+    meaning: 'Below training resolution there is no detail left to learn.',
+  },
 };
 
 function band(improvement: number): Band {
@@ -78,6 +99,48 @@ function Quality({ quality }: { quality: TrainQuality | null }): ReactElement {
         <span className="train-checkpoint">measured at {quality.checkpoint}</span>
       </div>
       <p className="train-quality-meaning">{BANDS[level].meaning}</p>
+    </div>
+  );
+}
+
+function label(reason: DropReason, count: number): string {
+  const { singular, plural } = REASONS[reason];
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function Screening({ screening }: { screening: TrainScreening | null }): ReactElement | null {
+  if (!screening?.dropped?.length) return null;
+
+  const groups = (Object.keys(REASONS) as DropReason[])
+    .map((reason) => ({
+      reason,
+      filenames: screening.dropped
+        .filter((image) => image.reason === reason)
+        .map((image) => image.filename),
+    }))
+    .filter((group) => group.filenames.length > 0);
+
+  if (groups.length === 0) return null;
+
+  return (
+    <div className="train-screening">
+      <p className="train-screening-title">Screened before training</p>
+      <p className="train-screening-summary">
+        Trained on {screening.kept} of {screening.kept + screening.dropped.length} images. These
+        were set aside:
+      </p>
+      <ul className="train-screening-list">
+        {groups.map((group) => (
+          <li className="train-screening-item" key={group.reason}>
+            <span className="tag train-drop">{label(group.reason, group.filenames.length)}</span>
+            <span>{REASONS[group.reason].meaning}</span>
+            <span className="train-screening-files">{group.filenames.join(', ')}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="train-screening-note">
+        Your originals are untouched. Screening only decides what a run learns from.
+      </p>
     </div>
   );
 }
@@ -219,6 +282,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             Training finished{result.filename ? `: ${result.filename}` : ''}
           </h3>
           <Quality quality={result.quality} />
+          <Screening screening={result.screening ?? null} />
           <Advice findings={result.dataset ?? []} />
         </div>
       )}

@@ -22,17 +22,30 @@ export type TrainQuality = {
   measured: boolean;
 };
 
-export type DatasetConcern = 'too_few' | 'low_variety' | 'mixed_subjects';
+export type DatasetConcern = 'too_few' | 'low_variety' | 'low_pose_variety' | 'mixed_subjects';
 
 export type DatasetFinding = {
   concern: DatasetConcern;
   detail: string;
 };
 
+export type DropReason = 'duplicate' | 'blurred' | 'small';
+
+export type DroppedImage = {
+  filename: string;
+  reason: DropReason;
+};
+
+export type TrainScreening = {
+  kept: number;
+  dropped: DroppedImage[];
+};
+
 export type TrainResult = {
   filename: string | null;
   quality: TrainQuality | null;
   dataset?: DatasetFinding[];
+  screening?: TrainScreening | null;
 };
 
 /**
