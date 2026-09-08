@@ -805,6 +805,18 @@
   color: var(--ui-warning, #b45309);
 }
 
+.citation--observed .citation-evidence {
+  color: var(--ui-text-secondary);
+}
+
+.citation-provenance {
+  padding: 0 var(--ui-space-1);
+  border: 1px solid var(--ui-warning, #b45309);
+  border-radius: var(--ui-radius-sm, 3px);
+  color: var(--ui-warning, #b45309);
+  font-weight: 600;
+}
+
 .citation-note {
   margin: var(--ui-space-1) 0 0;
   color: var(--ui-text-secondary);

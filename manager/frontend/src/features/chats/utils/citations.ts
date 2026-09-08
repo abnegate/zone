@@ -1,4 +1,4 @@
-import type { Citation } from '../types';
+import type { Citation, CitationProvenance } from '../types';
 
 export type CitationEvidence = 'passing' | 'failed' | 'pending' | 'incomplete' | 'observed';
 
@@ -8,6 +8,7 @@ const KIND_LABELS: Record<Citation['kind'], string> = {
   github_issue: 'GitHub issue',
   github_file: 'GitHub file',
   workspace_document: 'Workspace document',
+  behavioral_verification: 'Behavioral verification',
 };
 
 export function citationKindLabel(kind: Citation['kind']): string {
@@ -36,6 +37,12 @@ export function citationEvidenceLabel(evidence: CitationEvidence): string {
     default:
       return 'Incomplete evidence';
   }
+}
+
+/// Server-proven evidence is the norm and gets no chrome; a model's claim is
+/// the exception a reader has to know about.
+export function citationProvenanceLabel(provenance: CitationProvenance): string | null {
+  return provenance === 'model_asserted' ? 'Claimed by the model, not verified' : null;
 }
 
 export function citationHref(citation: Pick<Citation, 'url' | 'kind'>): string | null {

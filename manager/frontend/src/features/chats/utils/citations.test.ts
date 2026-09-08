@@ -16,6 +16,7 @@ const citation = (overrides: Partial<Citation> = {}): Citation => ({
   observed_at: '2026-09-05T00:00:00+00:00',
   complete: true,
   outcome: 'success',
+  provenance: 'server_execution',
   ...overrides,
 });
 

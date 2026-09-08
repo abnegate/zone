@@ -18,6 +18,26 @@ export const ToolCallRecordSchema = z.object({
   reasoning: z.string().optional(),
 });
 
+/**
+ * Keeps the elements that validate and drops the ones that do not.
+ *
+ * A citation, tool call or receipt the backend has learned to emit and this
+ * client has not must cost that one chip, never the message it arrived on.
+ * These arrays sit inside the chat response, so a single unrecognised value
+ * would otherwise throw for the whole GET and leave the chat permanently
+ * unopenable, since the value is persisted in messages.metadata.
+ */
+function tolerantArray<T extends z.ZodTypeAny>(element: T) {
+  return z
+    .array(z.unknown())
+    .transform((items) =>
+      items
+        .map((item) => element.safeParse(item))
+        .filter((result): result is { success: true; data: z.infer<T> } => result.success)
+        .map((result) => result.data),
+    );
+}
+
 export const CitationSchema = z.object({
   kind: z.enum([
     'github_build',
@@ -25,6 +45,7 @@ export const CitationSchema = z.object({
     'github_issue',
     'github_file',
     'workspace_document',
+    'behavioral_verification',
   ]),
   title: z.string(),
   url: z.string(),
@@ -32,6 +53,14 @@ export const CitationSchema = z.object({
   observed_at: z.string(),
   complete: z.boolean(),
   outcome: z.enum(['success', 'failure', 'pending', 'incomplete', 'observed']),
+  // Absent means a citation stored before the field existed, which the server
+  // also reads as server-proven. A value this client does not recognise is
+  // demoted to a claim instead: an unreadable provenance must never be
+  // presented as proof.
+  provenance: z
+    .enum(['server_execution', 'model_asserted'])
+    .catch('model_asserted')
+    .default('server_execution'),
   note: z.string().nullish(),
 });
 
@@ -54,9 +83,9 @@ export const ActionReceiptSchema = z.object({
 export const MessageMetadataSchema = z
   .object({
     attachments: z.array(MessageAttachmentSchema).optional(),
-    tool_calls: z.array(ToolCallRecordSchema).optional(),
-    citations: z.array(CitationSchema).optional(),
-    action_receipts: z.array(ActionReceiptSchema).optional(),
+    tool_calls: tolerantArray(ToolCallRecordSchema).optional(),
+    citations: tolerantArray(CitationSchema).optional(),
+    action_receipts: tolerantArray(ActionReceiptSchema).optional(),
     web_search: z.boolean().optional(),
     reasoning: z.string().optional(),
   })
