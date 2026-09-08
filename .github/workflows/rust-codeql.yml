@@ -7,11 +7,13 @@ on:
       - 'runner/**'
       - '.github/workflows/rust-codeql.yml'
       - '.github/codeql/**'
+      - 'scripts/test-dependencies.py'
   pull_request:
     paths:
       - 'runner/**'
       - '.github/workflows/rust-codeql.yml'
       - '.github/codeql/**'
+      - 'scripts/test-dependencies.py'
   schedule:
     # Run weekly on Sunday at midnight UTC
     - cron: '0 0 * * 0'
@@ -55,7 +57,7 @@ jobs:
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         continue-on-error: true
         with:
-          category: "/language:rust"
+          category: '/language:rust'
 
   # Additional security checks using cargo-audit
   audit:
@@ -96,6 +98,9 @@ jobs:
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
 
+      - name: Verify dependency policy boundaries
+        run: python3 ../scripts/test-dependencies.py
+
       - name: Check dependencies
-        run: cargo deny check
-        continue-on-error: true
+        # cargo-deny 0.20 uses CLI overrides for the existing advisory warning policy.
+        run: cargo deny --locked check --warn unmaintained --warn notice
