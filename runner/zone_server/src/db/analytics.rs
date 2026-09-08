@@ -70,7 +70,15 @@ pub async fn reportable_workspaces(
     .await
 }
 
-/// The workspace's runs that stopped inside `[start, end)`, oldest first.
+/// The workspace's runs that stopped inside `[start, end)`, newest first.
+///
+/// Newest first because `limit` is a cap, not a promise: over it, the rows past
+/// the cap are dropped silently. Every period summarised from these rows ends
+/// at `now`, so dropping the oldest costs the longest period some of its early
+/// history, while dropping the newest -- what ascending order did -- empties
+/// the day and week windows entirely on exactly the busiest workspaces.
+/// Nothing downstream reads these in order; each consumer filters or weights
+/// by `finished_at`.
 pub async fn finished_runs(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -94,7 +102,7 @@ pub async fn finished_runs(
           AND run.status <> 'running'
           AND COALESCE(run.completed_at, run.started_at) >= $2
           AND COALESCE(run.completed_at, run.started_at) < $3
-        ORDER BY COALESCE(run.completed_at, run.started_at), run.id
+        ORDER BY COALESCE(run.completed_at, run.started_at) DESC, run.id DESC
         LIMIT $4
         "#,
     )

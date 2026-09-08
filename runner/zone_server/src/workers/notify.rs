@@ -133,7 +133,18 @@ fn smtp(environment: &NotifyEnvironment) -> Option<SmtpConfig> {
         port: environment
             .smtp_port
             .as_deref()
-            .and_then(|value| value.trim().parse().ok())
+            .and_then(|value| match value.trim().parse() {
+                Ok(port) => Some(port),
+                Err(_) => {
+                    tracing::warn!(
+                        value,
+                        default = DEFAULT_SMTP_PORT,
+                        "SMTP_PORT could not be read; every send will fail against the default \
+                         port and retry forever with no log naming the cause"
+                    );
+                    None
+                }
+            })
             .unwrap_or(DEFAULT_SMTP_PORT),
         user: trimmed(environment.smtp_user.as_deref())?,
         password: SecretValue::new(environment.smtp_password.clone()?),

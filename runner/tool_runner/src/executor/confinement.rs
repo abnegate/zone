@@ -23,6 +23,7 @@
 use crate::protocol::{ConfinementRequest, ProcessTreeRequest};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -104,8 +105,8 @@ pub enum ConfinementError {
     #[error("Confinement is not supported on this platform")]
     UnsupportedPlatform,
 
-    #[error("Confinement backend is not an executable file: {0}")]
-    BackendMissing(String),
+    #[error("Confinement backend is unusable: {path}: {reason}")]
+    BackendUnusable { path: String, reason: String },
 
     #[error("Confined path must be absolute: {0}")]
     RelativePath(String),
@@ -559,13 +560,38 @@ fn canonical_roots(roots: &[PathBuf]) -> Result<Vec<PathBuf>, ConfinementError> 
 }
 
 fn backend_executable(backend: Backend) -> Result<PathBuf, ConfinementError> {
-    let path = Path::new(backend.executable());
-    match fs::metadata(path) {
-        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => {
-            Ok(path.to_path_buf())
+    usable_backend(Path::new(backend.executable()))
+}
+
+fn usable_backend(path: &Path) -> Result<PathBuf, ConfinementError> {
+    let unusable = |reason: String| ConfinementError::BackendUnusable {
+        path: path.display().to_string(),
+        reason,
+    };
+
+    // Reporting every one of these as "not installed" sends an operator to
+    // reinstall a backend that is already on disk. A confined job cannot run
+    // without one, so the message is the whole of the remedy.
+    let metadata = fs::metadata(path).map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => unusable("not installed".to_string()),
+        io::ErrorKind::PermissionDenied => {
+            unusable("its directory is not searchable by this user".to_string())
         }
-        _ => Err(ConfinementError::BackendMissing(path.display().to_string())),
+        _ => unusable(format!("cannot be inspected: {error}")),
+    })?;
+
+    if !metadata.is_file() {
+        return Err(unusable("not a regular file".to_string()));
     }
+
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(unusable(format!(
+            "not executable (mode {:04o})",
+            metadata.permissions().mode() & 0o7777
+        )));
+    }
+
+    Ok(path.to_path_buf())
 }
 
 fn executable_file(path: &Path) -> Option<PathBuf> {
@@ -1089,6 +1115,48 @@ mod tests {
             text(Path::new("/tmp/a\nb")),
             Err(ConfinementError::ControlCharacterInPath(_))
         ));
+    }
+
+    #[test]
+    fn an_unusable_backend_says_which_way_it_is_unusable() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+
+        let absent = directory.path().join("sandbox-exec");
+        assert_eq!(
+            usable_backend(&absent),
+            Err(ConfinementError::BackendUnusable {
+                path: absent.display().to_string(),
+                reason: "not installed".to_string(),
+            })
+        );
+
+        let not_a_file = directory.path().join("subdirectory");
+        fs::create_dir(&not_a_file).expect("directory is created");
+        assert_eq!(
+            usable_backend(&not_a_file),
+            Err(ConfinementError::BackendUnusable {
+                path: not_a_file.display().to_string(),
+                reason: "not a regular file".to_string(),
+            })
+        );
+
+        // The case the old message got wrong: the backend is installed, so
+        // "not installed" sends the operator to reinstall what is already here.
+        let unreadable = directory.path().join("not-executable");
+        fs::write(&unreadable, b"#!/bin/sh\n").expect("file is written");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644))
+            .expect("permissions are set");
+        assert_eq!(
+            usable_backend(&unreadable),
+            Err(ConfinementError::BackendUnusable {
+                path: unreadable.display().to_string(),
+                reason: "not executable (mode 0644)".to_string(),
+            })
+        );
+
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755))
+            .expect("permissions are set");
+        assert_eq!(usable_backend(&unreadable), Ok(unreadable));
     }
 
     #[test]

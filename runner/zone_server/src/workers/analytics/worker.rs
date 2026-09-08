@@ -63,6 +63,17 @@ pub async fn load_runs(
     let rows =
         analytics::finished_runs(pool, workspace_id, window.start, window.end, limit).await?;
 
+    // Truncation is invisible in the gauges it produces -- they stay plausible,
+    // just computed from part of the window -- so it has to be said out loud.
+    if rows.len() as i64 >= limit {
+        tracing::warn!(
+            %workspace_id,
+            limit,
+            "Analytics hit its run cap; the oldest runs in this window are excluded \
+             and the longest period is computed from a partial history"
+        );
+    }
+
     Ok(rows.iter().filter_map(AgentRun::from_row).collect())
 }
 

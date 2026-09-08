@@ -17,7 +17,7 @@ use std::sync::Arc;
 use chrono::{NaiveDateTime, Utc, Weekday};
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_notify::Fanout;
+use zone_notify::{Fanout, Report};
 
 use super::digest::{Digest, generate};
 use super::schedule::{Cadence, Due, Schedule, due};
@@ -80,14 +80,34 @@ impl Default for ReportSettings {
     }
 }
 
+/// A setting the operator wrote that could not be understood.
+///
+/// Falling back silently means a digest arrives on a day nobody chose, and the
+/// only record that the stated schedule was discarded is its absence.
+fn or_default<T>(variable: &str, raw: Option<&str>, parsed: Option<T>, fallback: T) -> T {
+    match (raw, parsed) {
+        (Some(raw), None) => {
+            tracing::warn!(
+                variable,
+                value = raw,
+                "Value could not be read; falling back to the default"
+            );
+            fallback
+        }
+        (_, Some(value)) => value,
+        (None, None) => fallback,
+    }
+}
+
 impl ReportSettings {
     pub fn resolve(environment: &ReportEnvironment) -> Self {
         let defaults = Self::default();
-        let cadence = environment
-            .cadence
-            .as_deref()
-            .and_then(Cadence::parse)
-            .unwrap_or(defaults.schedule.cadence);
+        let cadence = or_default(
+            CADENCE_VARIABLE,
+            environment.cadence.as_deref(),
+            environment.cadence.as_deref().and_then(Cadence::parse),
+            defaults.schedule.cadence,
+        );
 
         Self {
             enabled: environment
@@ -97,23 +117,35 @@ impl ReportSettings {
                 .unwrap_or(defaults.enabled),
             schedule: Schedule {
                 cadence,
-                hour: environment
-                    .hour
-                    .as_deref()
-                    .and_then(|value| value.trim().parse::<u32>().ok())
-                    .filter(|hour| *hour < 24)
-                    .unwrap_or(defaults.schedule.hour),
-                weekday: environment
-                    .weekday
-                    .as_deref()
-                    .and_then(|value| Weekday::from_str(value.trim()).ok())
-                    .unwrap_or(defaults.schedule.weekday),
-                day_of_month: environment
-                    .day_of_month
-                    .as_deref()
-                    .and_then(|value| value.trim().parse::<u32>().ok())
-                    .filter(|day| (1..=31).contains(day))
-                    .unwrap_or(defaults.schedule.day_of_month),
+                hour: or_default(
+                    HOUR_VARIABLE,
+                    environment.hour.as_deref(),
+                    environment
+                        .hour
+                        .as_deref()
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                        .filter(|hour| *hour < 24),
+                    defaults.schedule.hour,
+                ),
+                weekday: or_default(
+                    WEEKDAY_VARIABLE,
+                    environment.weekday.as_deref(),
+                    environment
+                        .weekday
+                        .as_deref()
+                        .and_then(|value| Weekday::from_str(value.trim()).ok()),
+                    defaults.schedule.weekday,
+                ),
+                day_of_month: or_default(
+                    DAY_OF_MONTH_VARIABLE,
+                    environment.day_of_month.as_deref(),
+                    environment
+                        .day_of_month
+                        .as_deref()
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                        .filter(|day| (1..=31).contains(day)),
+                    defaults.schedule.day_of_month,
+                ),
             },
             ..defaults
         }
@@ -172,15 +204,7 @@ pub async fn build(
         &settings.regression,
         now,
     )
-    .await
-    .unwrap_or_else(|error| {
-        tracing::warn!(
-            workspace_id = %workspace.workspace_id,
-            %error,
-            "Regression scan failed; the digest goes out without it"
-        );
-        Vec::new()
-    });
+    .await?;
 
     Ok(generate(
         workspace.name.clone(),
@@ -198,7 +222,7 @@ pub async fn build(
 /// Returns whether anyone at all received it. A fan-out with nothing registered
 /// counts as delivered: a workspace that has configured no channels has not
 /// failed, and retrying forever would only build a backlog nobody reads.
-pub async fn deliver(fanout: &Fanout, digest: &Digest) -> bool {
+pub async fn deliver(fanout: &Fanout, digest: &Digest) -> Report {
     let report = fanout.deliver(&digest.to_notification()).await;
 
     for delivery in report.deliveries() {
@@ -212,7 +236,21 @@ pub async fn deliver(fanout: &Fanout, digest: &Digest) -> bool {
         );
     }
 
+    report
+}
+
+/// Whether the digest reached anyone, or had nobody to reach.
+fn delivered(report: &Report) -> bool {
     report.is_empty() || report.any_delivered()
+}
+
+/// Whether another tick could plausibly deliver what this one did not.
+///
+/// A revoked webhook answers 404 forever. Holding the slot back for it re-runs
+/// the two heaviest analytics queries every tick against a window that grows,
+/// because its start is frozen at the slot that never advanced.
+fn worth_retrying(report: &Report) -> bool {
+    report.retryable().next().is_some()
 }
 
 /// Look once at every workspace's schedule, and deliver whatever is owed.
@@ -245,7 +283,19 @@ pub async fn run_cycle(
             }
         };
 
-        if deliver(fanout, &digest).await {
+        let report = deliver(fanout, &digest).await;
+        let delivered = delivered(&report);
+        if !delivered && !worth_retrying(&report) {
+            ledger.insert(workspace.workspace_id, due.slot);
+            tracing::error!(
+                workspace_id = %workspace.workspace_id,
+                slot = %due.slot,
+                "Every channel refused this report permanently; the slot is closed rather than \
+                 retried, so this digest is lost. Check the workspace's configured channels."
+            );
+            continue;
+        }
+        if delivered {
             ledger.insert(workspace.workspace_id, due.slot);
             tracing::info!(
                 workspace_id = %workspace.workspace_id,
@@ -434,7 +484,7 @@ mod tests {
             .with(Recorder::working(Channel::SLACK, Arc::clone(&seen)))
             .with(Recorder::working(Channel::EMAIL, Arc::clone(&seen)));
 
-        assert!(deliver(&fanout, &digest(Vec::new(), 0)).await);
+        assert!(delivered(&deliver(&fanout, &digest(Vec::new(), 0)).await));
         assert_eq!(
             seen.lock().expect("no panic held the lock").len(),
             2,
@@ -451,7 +501,7 @@ mod tests {
             .with(Recorder::working(Channel::EMAIL, Arc::clone(&seen)));
 
         assert!(
-            deliver(&fanout, &digest(Vec::new(), 0)).await,
+            delivered(&deliver(&fanout, &digest(Vec::new(), 0)).await),
             "one dead webhook is not a failed report"
         );
         assert_eq!(
@@ -464,17 +514,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_permanent_refusal_closes_the_slot_rather_than_retrying_forever() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let fanout = Fanout::new().with(Recorder::broken(Channel::DISCORD, seen));
+        let report = deliver(&fanout, &digest(Vec::new(), 0)).await;
+
+        assert!(!delivered(&report), "a 404 did not deliver anything");
+        assert!(
+            !worth_retrying(&report),
+            "a revoked webhook answers 404 every tick, so holding the slot back \
+             re-runs the heaviest queries against a window that only grows"
+        );
+    }
+
+    #[tokio::test]
     async fn a_report_nobody_took_is_not_marked_delivered() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let fanout = Fanout::new().with(Recorder::broken(Channel::DISCORD, seen));
 
-        assert!(!deliver(&fanout, &digest(Vec::new(), 0)).await);
+        assert!(!delivered(&deliver(&fanout, &digest(Vec::new(), 0)).await));
     }
 
     #[tokio::test]
     async fn a_workspace_with_no_channels_is_not_a_failed_delivery() {
         assert!(
-            deliver(&Fanout::new(), &digest(Vec::new(), 0)).await,
+            delivered(&deliver(&Fanout::new(), &digest(Vec::new(), 0)).await),
             "nowhere to send is not the same as failing to send"
         );
     }

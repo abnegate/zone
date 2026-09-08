@@ -131,10 +131,17 @@ async fn consider_source(
         match adapter.get_sync_state(&core).await {
             Ok(sync) => sync.version,
             Err(e) => {
-                tracing::debug!(
+                // Indistinguishable downstream from an adapter that exposes no
+                // version at all, and the schedule can be up to seven days, so
+                // a source whose credentials expired goes stale for a week
+                // while serving indexed content that has moved on. Falling back
+                // to the schedule is right -- forcing a resync would hammer a
+                // remote that is already failing -- but it must be visible.
+                tracing::warn!(
                     source_id = %source.id,
                     error = %e,
-                    "could not read remote sync state; falling back to schedule"
+                    "Could not read remote sync state; this source falls back to its schedule \
+                     and will not notice a remote change until the interval elapses"
                 );
                 None
             }

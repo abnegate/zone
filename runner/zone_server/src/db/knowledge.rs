@@ -1134,6 +1134,42 @@ pub async fn update_document(
 /// Category marking a knowledge entry as a promoted standing instruction.
 pub const STANDING_INSTRUCTION_CATEGORY: &str = "standing-instruction";
 
+/// Categories and tag prefixes the learning loop owns.
+///
+/// A row in one of these is rendered into every system prompt under an
+/// assertion that it was earned — "these answers have already been given
+/// repeatedly in this workspace". The promotion and learning workers earn that
+/// by clearing an occurrence, distinct-run and agreement bar. A client posting
+/// to the knowledge route earns nothing, so it must not be able to write here.
+pub const RESERVED_CATEGORIES: &[&str] = &[
+    STANDING_INSTRUCTION_CATEGORY,
+    "repository-convention",
+    "strategy-lesson",
+];
+
+const RESERVED_TAG_PREFIXES: &[&str] = &[PROMOTION_TAG, OCCURRENCES_TAG, CHATS_TAG, CONFIRMED_TAG];
+
+/// Why a client-supplied category or tag set was refused.
+pub fn reserved_namespace(category: Option<&str>, tags: &[String]) -> Option<String> {
+    if let Some(category) = category.map(str::trim)
+        && RESERVED_CATEGORIES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(category))
+    {
+        return Some(format!(
+            "The category {category} is written by the learning loop and cannot be set directly"
+        ));
+    }
+
+    tags.iter().find_map(|entry| {
+        let prefix = entry.split_once(':')?.0.trim();
+        RESERVED_TAG_PREFIXES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(prefix))
+            .then(|| format!("The tag prefix {prefix}: is reserved for promoted entries"))
+    })
+}
+
 const PROMOTION_TAG: &str = "promoted";
 const OCCURRENCES_TAG: &str = "occurrences";
 const CHATS_TAG: &str = "chats";
@@ -1251,6 +1287,12 @@ async fn upsert_learned_entry(
 
     let mut transaction = pool.begin().await?;
 
+    // The advisory lock serialises this function against itself, but nothing
+    // else takes it: delete_knowledge, retire_standing_instruction and the
+    // knowledge DELETE route all run without it. FOR UPDATE closes that gap —
+    // a delete committing between the snapshot and the update leaves `existing`
+    // empty on re-read, so the insert fires instead of the caller receiving a
+    // success carrying the id of a row that no longer exists.
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(advisory_lock_key(entry.workspace_id, entry.fingerprint))
         .execute(&mut *transaction)
@@ -1264,6 +1306,17 @@ async fn upsert_learned_entry(
             WHERE workspace_id = $1 AND category = $2 AND $3 = ANY(tags)
             ORDER BY created_at, id
             LIMIT 1
+            FOR UPDATE
+        ),
+        retired AS (
+            UPDATE knowledge_entries AS extra
+            SET is_active = FALSE, updated_at = NOW()
+            WHERE extra.workspace_id = $1
+              AND extra.category = $2
+              AND $3 = ANY(extra.tags)
+              AND extra.is_active
+              AND extra.id <> (SELECT id FROM existing)
+            RETURNING extra.id
         ),
         superseded AS (
             UPDATE knowledge_entries AS entry

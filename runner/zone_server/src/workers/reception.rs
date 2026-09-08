@@ -43,11 +43,16 @@ WHERE task.pr_url IS NOT NULL
   AND run.completed_at IS NOT NULL
   AND run.completed_at > NOW() - make_interval(days => $1::int)
   AND (run.artifacts -> 'pr' ->> 'merged_at') IS NULL
-ORDER BY run.completed_at DESC
+ORDER BY run.completed_at ASC
 LIMIT $2::bigint
 "#;
 
 /// Runs whose change has a pull request that has not been recorded as merged.
+///
+/// Oldest first. Newest-first with a per-cycle cap re-fetches the same recent
+/// runs every sweep once more than `MAXIMUM_PER_CYCLE` are outstanding, and the
+/// older ones age out of the lookback window unrecorded — leaving fix-quality
+/// scoring to judge them on evidence that was never collected.
 pub async fn pending(state: &AppState) -> DbResult<Vec<PendingRun>> {
     let rows = sqlx::query(PENDING_QUERY)
         .bind(LOOKBACK_DAYS)

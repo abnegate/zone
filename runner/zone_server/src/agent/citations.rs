@@ -138,9 +138,11 @@ const SERVER_OBSERVED_TOOLS: &[&str] = &[
     "list_deployments",
     "list_documents",
     "list_issues",
+    "list_projects",
     "read_check_logs",
     "read_document",
     "read_repository_file",
+    "search_knowledge",
 ];
 
 fn provenance_of(name: &str) -> Provenance {
@@ -158,8 +160,17 @@ fn provenance_of(name: &str) -> Provenance {
 /// omits.
 fn parse_citations(value: &Value, provenance: Provenance) -> Option<Vec<Citation>> {
     let parsed: Vec<Citation> = serde_json::from_value(value.clone()).ok()?;
+    // The tool's own standing is a ceiling, never an assignment. An allowlisted
+    // tool observes server-side, so its citations may be authoritative — but a
+    // payload that calls itself advisory is believed, because believing it can
+    // only weaken the claim. A tool that is not allowlisted is advisory
+    // whatever it says.
     let attributed = parsed.into_iter().map(|mut citation| {
-        citation.provenance = provenance;
+        citation.provenance = if citation.provenance.advisory() {
+            Provenance::ModelAsserted
+        } else {
+            provenance
+        };
         citation
     });
     let finished = finish(attributed.collect());
@@ -943,6 +954,39 @@ mod tests {
         assert_eq!(smuggled.outcome, CitationOutcome::Observed);
         assert!(!smuggled.passing());
         assert_eq!(smuggled.note.as_deref(), Some(ADVISORY_NOTE));
+    }
+
+    /// The allowlist is keyed by string with no compile-time link to the tools
+    /// that emit citations, so a new emitter is misclassified silently. This
+    /// reads the tool sources and fails when one grows a citations key without
+    /// a decision about its provenance.
+    #[test]
+    fn every_tool_that_emits_citations_has_a_stated_provenance() {
+        const SOURCES: [(&str, &str); 2] = [
+            ("tools.rs", include_str!("tools.rs")),
+            ("integrations.rs", include_str!("integrations.rs")),
+        ];
+
+        for (file, source) in SOURCES {
+            let emits = source
+                .lines()
+                .filter(|line| line.contains("\"citations\":"))
+                .count();
+            assert!(
+                emits > 0,
+                "{file} no longer emits citations; drop it from this test or the allowlist entry \
+                 it was covering is now dead"
+            );
+        }
+
+        for tool in ["search_knowledge", "list_projects", "read_check_logs"] {
+            assert_eq!(
+                provenance_of(tool),
+                Provenance::ServerExecution,
+                "{tool} emits citations built from a server-side observation, so it must be \
+                 listed in SERVER_OBSERVED_TOOLS or its citations are demoted to advisory"
+            );
+        }
     }
 
     #[test]
