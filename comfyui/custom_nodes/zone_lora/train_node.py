@@ -40,6 +40,22 @@ from .train_config import (
 )
 
 
+def checkpoint_interval(steps: int, settings: dict) -> int:
+    """Keep the count of intermediates bounded rather than the gap between them.
+
+    A fixed gap costs a fixed amount per step, so raising the step ceiling raises
+    the disk bill with it — at rank 32 an intermediate is 220 MB, and a long run
+    would write hundreds of them.
+    """
+    every = int(settings.get('checkpoint_every', 0))
+    if not every:
+        return 0
+    most = int(settings.get('checkpoints_per_run', 8))
+    if most < 1:
+        return every
+    return max(every, -(-steps // most))
+
+
 def error_scale(sigmas, sample, sigma_floor: float):
     """Flow matching makes the x0 error exactly sigma times the velocity error.
 
@@ -362,7 +378,7 @@ class ZoneTrainLoRA(io.ComfyNode):
             losses = []
             stem = Path(save_name).name.removesuffix('.safetensors')
             output_dir = Path(folder_paths.get_output_directory()) / 'loras'
-            every = int(settings.get('checkpoint_every', 0))
+            every = checkpoint_interval(steps, settings)
 
             def loss_callback(loss):
                 losses.append(loss)

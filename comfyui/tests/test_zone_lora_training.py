@@ -380,3 +380,28 @@ class LossWeightingTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipUnless(AVAILABLE, f'ComfyUI runtime not installed at {COMFY_DIR}')
+class CheckpointCadenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.node = load_module('train_node')
+
+    def interval(self, steps: int, **settings) -> int:
+        base = {'checkpoint_every': 50, 'checkpoints_per_run': 8}
+        base.update(settings)
+        return self.node.checkpoint_interval(steps, base)
+
+    def test_a_long_run_writes_no_more_intermediates_than_a_short_one(self):
+        """An intermediate is 220 MB, so a fixed gap bills the disk per step."""
+        for steps in (400, 1900, 5700, 6000):
+            self.assertLessEqual(
+                steps // self.interval(steps), 8, f'{steps} steps writes too many intermediates'
+            )
+
+    def test_a_short_run_keeps_the_configured_gap(self):
+        self.assertEqual(self.interval(300), 50)
+
+    def test_checkpointing_can_be_turned_off(self):
+        self.assertEqual(self.interval(6000, checkpoint_every=0), 0)
