@@ -133,6 +133,7 @@ pub fn merge(existing: &mut Vec<Citation>, incoming: impl IntoIterator<Item = Ci
 /// deliberately added here.
 const SERVER_OBSERVED_TOOLS: &[&str] = &[
     "assess_pull_requests",
+    "assess_release_pipelines",
     "get_build_status",
     "list_deployments",
     "list_documents",
