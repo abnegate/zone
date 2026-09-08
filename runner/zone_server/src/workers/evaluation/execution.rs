@@ -96,11 +96,17 @@ pub async fn capture(
         timeout_ms: Some(timeout.as_millis().min(u128::from(u64::MAX)) as u64),
         max_output_bytes: Some(settings.capture_limit),
         working_dir: None,
-        // Not confined. The sandbox grants process-exec for a single literal
-        // command, which suits a verification recipe but not a build tool that
-        // forks rustc, a linker and test binaries. Confining this needs the
-        // confinement to admit a process tree first; until then the executor's
-        // session isolation, timeout and output caps are what bound it.
+        // Not confined, and no longer for want of a process tree: the runner
+        // now has one, and a real `cargo test` builds, links and runs its test
+        // binaries under it with the network still denied. What is missing is
+        // here, not there. Confining a tool needs its toolchain named — the
+        // directories holding `rustc`, the linker and the package manager, plus
+        // a HOME the tool can find its own cache under. Detection reports a bare
+        // program name, so none of that is derivable yet, and a root set guessed
+        // wrong does not fail loudly: the tool reports unresolved dependencies
+        // and the parser records a regression that never happened. Until
+        // detection carries a toolchain, the executor's session isolation,
+        // timeout and output caps are what bound this.
         confinement: None,
     };
 

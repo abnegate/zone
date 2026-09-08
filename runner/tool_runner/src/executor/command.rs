@@ -181,7 +181,7 @@ impl CommandExecutor {
         // sandbox fails the spawn instead of falling back.
         let mut process = match &confinement {
             Some(request) => {
-                Confinement::probe().await?;
+                Confinement::probe(request.mode()).await?;
                 let invocation = Confinement::new(&command, args.clone(), cwd)
                     .with_roots(request)
                     .with_environment(env.clone())

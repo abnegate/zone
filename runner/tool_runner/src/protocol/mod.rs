@@ -9,5 +9,5 @@ mod messages;
 pub use codec::NdjsonCodec;
 pub use messages::{
     Capability, ConfinementRequest, ErrorCode, InboundMessage, LogLevel, OutboundMessage,
-    PROTOCOL_VERSION,
+    PROTOCOL_VERSION, ProcessTreeRequest,
 };

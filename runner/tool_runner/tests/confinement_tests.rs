@@ -10,6 +10,7 @@
 use base64::prelude::*;
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,9 +20,11 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 use tool_runner::error::ExecutorError;
-use tool_runner::executor::{Backend, CommandExecutor, Confinement, ConfinementError};
+use tool_runner::executor::{
+    Backend, CommandExecutor, Confinement, ConfinementError, ConfinementMode,
+};
 use tool_runner::protocol::{
-    Capability, ConfinementRequest, ErrorCode, InboundMessage, OutboundMessage,
+    Capability, ConfinementRequest, ErrorCode, InboundMessage, OutboundMessage, ProcessTreeRequest,
 };
 
 const SECRET: &str = "secret\n";
@@ -57,6 +60,7 @@ fn request(root: &Path) -> ConfinementRequest {
     ConfinementRequest {
         read_roots: vec![root.to_path_buf()],
         write_roots: vec![root.to_path_buf()],
+        process_tree: None,
     }
 }
 
@@ -78,7 +82,7 @@ fn confined_run(job_id: &str, root: &Path, target: &Path) -> InboundMessage {
         timeout_ms: Some(15000),
         max_output_bytes: None,
         working_dir: None,
-        confinement: Some(request(root)),
+        confinement: Some(Box::new(request(root))),
     }
 }
 
@@ -259,6 +263,7 @@ fn test_seatbelt_profile_rejects_a_newline_root_instead_of_injecting_a_clause() 
     let confinement = Confinement::new("/bin/cat", vec![], &base).with_roots(&ConfinementRequest {
         read_roots: vec![root],
         write_roots: vec![],
+        process_tree: None,
     });
 
     assert!(matches!(
@@ -274,6 +279,7 @@ fn test_confinement_rejects_a_root_that_does_not_exist() {
         Confinement::new("/bin/cat", vec![], &workspace.root).with_roots(&ConfinementRequest {
             read_roots: vec![workspace.root.join("missing")],
             write_roots: vec![],
+            process_tree: None,
         });
 
     assert!(matches!(
@@ -289,6 +295,7 @@ fn test_confinement_rejects_a_relative_root() {
         Confinement::new("/bin/cat", vec![], &workspace.root).with_roots(&ConfinementRequest {
             read_roots: vec![PathBuf::from("relative/root")],
             write_roots: vec![],
+            process_tree: None,
         });
 
     assert!(matches!(
@@ -482,10 +489,11 @@ async fn test_spawn_fails_closed_when_confinement_cannot_be_established() {
         timeout_ms: Some(15000),
         max_output_bytes: None,
         working_dir: None,
-        confinement: Some(ConfinementRequest {
+        confinement: Some(Box::new(ConfinementRequest {
             read_roots: vec![workspace.root.join("does-not-exist")],
             write_roots: vec![],
-        }),
+            process_tree: None,
+        })),
     };
 
     let result = CommandExecutor::new().spawn(&request, tx).await;
@@ -508,8 +516,8 @@ async fn test_spawn_fails_closed_when_confinement_cannot_be_established() {
 
 #[tokio::test]
 async fn test_probe_result_is_cached() {
-    let first = Confinement::probe().await;
-    let second = Confinement::probe().await;
+    let first = Confinement::probe(ConfinementMode::SingleCommand).await;
+    let second = Confinement::probe(ConfinementMode::SingleCommand).await;
 
     assert_eq!(first, second);
 }
@@ -522,7 +530,10 @@ async fn run_confined(request: &InboundMessage) -> Vec<OutboundMessage> {
 
 #[tokio::test]
 async fn test_confined_command_reads_a_granted_root() {
-    if Confinement::probe().await.is_err() {
+    if Confinement::probe(ConfinementMode::SingleCommand)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -540,7 +551,10 @@ async fn test_confined_command_reads_a_granted_root() {
 
 #[tokio::test]
 async fn test_confined_command_cannot_read_outside_its_roots() {
-    if Confinement::probe().await.is_err() {
+    if Confinement::probe(ConfinementMode::SingleCommand)
+        .await
+        .is_err()
+    {
         return;
     }
 
@@ -592,7 +606,7 @@ async fn attempt_connection(root: &Path, client: &str, confined: bool) -> (bool,
         timeout_ms: Some(15000),
         max_output_bytes: None,
         working_dir: None,
-        confinement: confined.then(|| request(root)),
+        confinement: confined.then(|| Box::new(request(root))),
     })
     .await;
 
@@ -604,7 +618,10 @@ async fn attempt_connection(root: &Path, client: &str, confined: bool) -> (bool,
 
 #[tokio::test]
 async fn test_confinement_blocks_a_connection_that_otherwise_succeeds() {
-    if Confinement::probe().await.is_err() {
+    if Confinement::probe(ConfinementMode::SingleCommand)
+        .await
+        .is_err()
+    {
         return;
     }
     let Some(client) = ["/usr/bin/nc", "/bin/nc", "/usr/bin/curl"]
@@ -625,4 +642,557 @@ async fn test_confinement_blocks_a_connection_that_otherwise_succeeds() {
     let (confined, code) = attempt_connection(&workspace.root, client, true).await;
     assert!(!confined, "a confined command reached a local TCP listener");
     assert_ne!(code, Some(0));
+}
+
+const SHELL: &str = "/bin/sh";
+const SHELL_DIRECTORY: &str = "/bin";
+const PARENT_SCRIPT: &str = "parent.sh";
+const CHILD_SCRIPT: &str = "child.sh";
+const PARENT_IDENTIFIER: &str = "parent.pid";
+const CHILD_IDENTIFIER: &str = "child.pid";
+
+fn tree_request(root: &Path, execute_roots: Vec<PathBuf>) -> ConfinementRequest {
+    ConfinementRequest {
+        read_roots: vec![root.to_path_buf()],
+        write_roots: vec![root.to_path_buf()],
+        process_tree: Some(ProcessTreeRequest { execute_roots }),
+    }
+}
+
+fn tree_confinement(root: &Path, execute_roots: Vec<PathBuf>) -> Confinement {
+    Confinement::new("/bin/cat", vec![], root).with_roots(&tree_request(root, execute_roots))
+}
+
+/// A parent that forks a child, so the two recorded process identifiers differ
+/// only if a real fork happened.
+fn write_forking_scripts(root: &Path, child_body: &str) {
+    fs::write(
+        root.join(PARENT_SCRIPT),
+        format!(
+            "printf '%s' \"$$\" > {PARENT_IDENTIFIER}\n{SHELL} {CHILD_SCRIPT} &\nwait $!\nexit $?\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join(CHILD_SCRIPT),
+        format!("printf '%s' \"$$\" > {CHILD_IDENTIFIER}\n{child_body}"),
+    )
+    .unwrap();
+}
+
+fn marker(root: &Path, name: &str) -> Option<String> {
+    fs::read_to_string(root.join(name))
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+fn confined_tree_run(
+    job_id: &str,
+    root: &Path,
+    script: &str,
+    execute_roots: Vec<PathBuf>,
+) -> InboundMessage {
+    InboundMessage::RunStart {
+        job_id: job_id.to_string(),
+        workspace: root.to_path_buf(),
+        command: SHELL.to_string(),
+        args: vec![script.to_string()],
+        env: HashMap::new(),
+        timeout_ms: Some(20000),
+        max_output_bytes: None,
+        working_dir: None,
+        confinement: Some(Box::new(tree_request(root, execute_roots))),
+    }
+}
+
+#[test]
+fn test_seatbelt_tree_profile_admits_a_bounded_tree() {
+    let workspace = workspace();
+    let profile = seatbelt_profile(&tree_confinement(
+        &workspace.root,
+        vec![PathBuf::from(SHELL_DIRECTORY)],
+    ));
+
+    assert!(profile.contains("(allow process-fork)"), "{profile}");
+    assert!(
+        profile.contains(&format!(
+            "(allow process-exec (subpath \"{SHELL_DIRECTORY}\"))"
+        )),
+        "{profile}"
+    );
+    assert!(
+        profile.contains(&format!(
+            "(allow file-read* (subpath \"{SHELL_DIRECTORY}\"))"
+        )),
+        "an execute root the tree cannot read is an execute root it cannot use\n{profile}"
+    );
+    assert!(profile.contains("(deny network*)"), "{profile}");
+}
+
+#[test]
+fn test_seatbelt_tree_profile_narrows_signals_to_the_trees_own_children() {
+    let workspace = workspace();
+    let profile = seatbelt_profile(&tree_confinement(
+        &workspace.root,
+        vec![PathBuf::from(SHELL_DIRECTORY)],
+    ));
+
+    let denied = profile.find("(deny signal)").expect("{profile}");
+    let allowed = profile
+        .find("(allow signal (target children))")
+        .expect("{profile}");
+    assert!(
+        denied < allowed,
+        "a later clause wins in seatbelt, so the narrowing must follow the blanket deny\n{profile}"
+    );
+}
+
+#[test]
+fn test_seatbelt_single_command_profile_still_admits_no_tree() {
+    let workspace = workspace();
+    let profile = seatbelt_profile(&confinement(&workspace.root, vec![]));
+
+    assert!(
+        !profile.contains("(allow process-fork)"),
+        "single-command mode must not gain the right to fork\n{profile}"
+    );
+    assert!(
+        !profile.contains("(allow process-exec (subpath"),
+        "single-command mode execs one literal command and nothing else\n{profile}"
+    );
+    assert!(
+        !profile.contains("(allow signal"),
+        "single-command mode signals nothing\n{profile}"
+    );
+    assert!(profile.contains("(deny signal)"), "{profile}");
+}
+
+#[test]
+fn test_seatbelt_tree_profile_does_not_make_a_write_root_executable() {
+    let workspace = workspace();
+    let profile = seatbelt_profile(&tree_confinement(
+        &workspace.root,
+        vec![PathBuf::from(SHELL_DIRECTORY)],
+    ));
+    let root = text(&workspace.root);
+
+    assert!(
+        profile.contains(&format!("(allow file-write* (subpath \"{root}\"))")),
+        "{profile}"
+    );
+    assert!(
+        !profile.contains(&format!("(allow process-exec (subpath \"{root}\"))")),
+        "a writable root must not become executable by implication\n{profile}"
+    );
+}
+
+#[test]
+fn test_bubblewrap_tree_arguments_bind_the_execute_roots() {
+    let workspace = workspace();
+    let arguments = bubblewrap_arguments(&tree_confinement(
+        &workspace.root,
+        vec![PathBuf::from(SHELL_DIRECTORY)],
+    ));
+
+    assert!(
+        window(&arguments, &["--ro-bind", SHELL_DIRECTORY, SHELL_DIRECTORY]),
+        "{arguments:?}"
+    );
+    assert!(
+        arguments.contains(&"--unshare-net".to_string()),
+        "the network stays unshared for the whole namespace, tree or not\n{arguments:?}"
+    );
+    assert!(
+        arguments.contains(&"--unshare-all".to_string()),
+        "{arguments:?}"
+    );
+}
+
+#[test]
+fn test_bubblewrap_tree_arguments_bind_an_execute_root_read_only() {
+    let base = TempDir::new().unwrap();
+    let toolchain = fs::canonicalize(base.path()).unwrap().join("toolchain");
+    fs::create_dir(&toolchain).unwrap();
+    let workspace = workspace();
+
+    let arguments =
+        bubblewrap_arguments(&tree_confinement(&workspace.root, vec![toolchain.clone()]));
+    let toolchain = text(&toolchain);
+
+    assert!(
+        window(&arguments, &["--ro-bind", &toolchain, &toolchain]),
+        "{arguments:?}"
+    );
+    assert!(
+        !window(&arguments, &["--bind", &toolchain, &toolchain]),
+        "a toolchain a tree may execute is not a toolchain it may rewrite\n{arguments:?}"
+    );
+}
+
+#[test]
+fn test_a_process_tree_without_execute_roots_is_refused() {
+    let workspace = workspace();
+    let confinement = tree_confinement(&workspace.root, vec![]);
+
+    assert_eq!(
+        confinement.invocation(Some(Backend::Seatbelt)),
+        Err(ConfinementError::ProcessTreeWithoutExecuteRoots)
+    );
+    assert_eq!(
+        confinement.invocation(Some(Backend::Bubblewrap)),
+        Err(ConfinementError::ProcessTreeWithoutExecuteRoots)
+    );
+}
+
+#[test]
+fn test_an_execute_root_of_the_filesystem_root_is_refused() {
+    let workspace = workspace();
+    let confinement = tree_confinement(&workspace.root, vec![PathBuf::from("/")]);
+
+    assert_eq!(
+        confinement.invocation(Some(Backend::Seatbelt)),
+        Err(ConfinementError::UnboundedExecuteRoot("/".to_string())),
+        "an execute root of / is 'allow every exec', which is not a bound"
+    );
+}
+
+#[test]
+fn test_an_execute_root_that_does_not_exist_is_refused() {
+    let workspace = workspace();
+    let confinement = tree_confinement(&workspace.root, vec![workspace.root.join("no-toolchain")]);
+
+    assert!(matches!(
+        confinement.invocation(Some(Backend::Seatbelt)),
+        Err(ConfinementError::UnusablePath { .. })
+    ));
+}
+
+#[test]
+fn test_unsupported_platform_yields_an_error_for_a_tree_too() {
+    let workspace = workspace();
+    let confinement = tree_confinement(&workspace.root, vec![PathBuf::from(SHELL_DIRECTORY)]);
+
+    assert_eq!(
+        confinement.invocation(None),
+        Err(ConfinementError::UnsupportedPlatform),
+        "a host with no backend refuses the tree rather than running it unconfined"
+    );
+}
+
+#[test]
+fn test_run_start_carries_a_process_tree_request() {
+    let json = r#"{
+        "type": "RunStart",
+        "job_id": "tree",
+        "workspace": "/tmp",
+        "command": "cargo",
+        "confinement": {
+            "read_roots": ["/tmp/source"],
+            "write_roots": ["/tmp/source/target"],
+            "process_tree": { "execute_roots": ["/usr/bin", "/tmp/source/target/debug/deps"] }
+        }
+    }"#;
+
+    let message: InboundMessage = serde_json::from_str(json).unwrap();
+    match message {
+        InboundMessage::RunStart { confinement, .. } => {
+            let confinement = confinement.unwrap();
+            let tree = confinement.process_tree.as_ref().unwrap();
+            assert_eq!(
+                tree.execute_roots,
+                vec![
+                    PathBuf::from("/usr/bin"),
+                    PathBuf::from("/tmp/source/target/debug/deps")
+                ]
+            );
+        }
+        _ => panic!("Wrong message type"),
+    }
+}
+
+#[test]
+fn test_a_confinement_request_without_a_process_tree_stays_single_command() {
+    let json = r#"{"read_roots": ["/tmp"], "write_roots": []}"#;
+    let request: ConfinementRequest = serde_json::from_str(json).unwrap();
+
+    assert!(request.process_tree.is_none());
+    assert_eq!(request.mode(), ConfinementMode::SingleCommand);
+}
+
+#[test]
+fn test_a_single_command_request_serialises_without_the_tree_field() {
+    let request = ConfinementRequest {
+        read_roots: vec![PathBuf::from("/tmp")],
+        write_roots: vec![],
+        process_tree: None,
+    };
+    let json = serde_json::to_string(&request).unwrap();
+
+    assert!(
+        !json.contains("process_tree"),
+        "the field is additive and absent by default, so a client that predates it is unaffected: {json}"
+    );
+}
+
+#[test]
+fn test_the_process_tree_capability_is_advertised_only_when_a_backend_exists() {
+    let advertised = Capability::supported().contains(&"confinement_process_tree".to_string());
+
+    assert_eq!(advertised, Confinement::is_available());
+    assert!(Capability::all().contains(&"confinement_process_tree".to_string()));
+}
+
+#[tokio::test]
+async fn test_the_tree_probe_verdict_is_cached() {
+    let first = Confinement::probe(ConfinementMode::ProcessTree).await;
+    let second = Confinement::probe(ConfinementMode::ProcessTree).await;
+
+    assert_eq!(first, second);
+}
+
+/// The self-test that carries the whole claim: on a host with a backend the
+/// tree probe must pass, and on a host without one it must fail rather than
+/// quietly downgrade.
+#[tokio::test]
+async fn test_the_tree_probe_proves_or_refuses_the_tree_claim() {
+    let verdict = Confinement::probe(ConfinementMode::ProcessTree).await;
+
+    if Confinement::is_available() {
+        assert_eq!(
+            verdict,
+            Ok(()),
+            "this host has a backend, so the tree claim must be provable"
+        );
+    } else {
+        assert!(
+            verdict.is_err(),
+            "a host without a backend must refuse the tree, not assume it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_a_confined_tree_really_forks() {
+    if Confinement::probe(ConfinementMode::ProcessTree)
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let workspace = workspace();
+    write_forking_scripts(&workspace.root, "printf 'ran' > child.marker\n");
+
+    let messages = run_confined(&confined_tree_run(
+        "tree-forks",
+        &workspace.root,
+        PARENT_SCRIPT,
+        vec![PathBuf::from(SHELL_DIRECTORY)],
+    ))
+    .await;
+
+    assert_eq!(exit_code(&messages), Some(0), "{messages:?}");
+    assert_eq!(
+        marker(&workspace.root, "child.marker").as_deref(),
+        Some("ran")
+    );
+    let parent = marker(&workspace.root, PARENT_IDENTIFIER).expect("parent identifier");
+    let child = marker(&workspace.root, CHILD_IDENTIFIER).expect("child identifier");
+    assert_ne!(
+        parent, child,
+        "the child ran in the parent's process, so this proves nothing about a tree"
+    );
+}
+
+#[tokio::test]
+async fn test_single_command_mode_still_cannot_fork() {
+    if Confinement::probe(ConfinementMode::SingleCommand)
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let workspace = workspace();
+    write_forking_scripts(&workspace.root, "printf 'ran' > child.marker\n");
+
+    let messages = run_confined(&InboundMessage::RunStart {
+        job_id: "single-cannot-fork".to_string(),
+        workspace: workspace.root.clone(),
+        command: SHELL.to_string(),
+        args: vec![PARENT_SCRIPT.to_string()],
+        env: HashMap::new(),
+        timeout_ms: Some(20000),
+        max_output_bytes: None,
+        working_dir: None,
+        confinement: Some(Box::new(request(&workspace.root))),
+    })
+    .await;
+
+    assert_ne!(exit_code(&messages), Some(0), "{messages:?}");
+    assert_eq!(
+        marker(&workspace.root, "child.marker"),
+        None,
+        "single-command mode let its command start a second process"
+    );
+}
+
+#[tokio::test]
+async fn test_a_confined_tree_cannot_execute_outside_its_execute_roots() {
+    if Confinement::probe(ConfinementMode::ProcessTree)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if !Backend::Seatbelt.enforces_execute_roots() {
+        return;
+    }
+
+    let workspace = workspace();
+    // A shebang script, not a copy of a system binary: macOS kills a copied
+    // system binary for its lost code signature, which would make this test
+    // pass without the sandbox refusing anything.
+    let planted = workspace.root.join("planted.sh");
+    fs::write(&planted, format!("#!{SHELL}\nexit 0\n")).unwrap();
+    fs::set_permissions(&planted, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        workspace.root.join(PARENT_SCRIPT),
+        "./planted.sh && printf 'ran' > planted.marker\n",
+    )
+    .unwrap();
+
+    let granted = run_confined(&confined_tree_run(
+        "tree-exec-granted",
+        &workspace.root,
+        PARENT_SCRIPT,
+        vec![PathBuf::from(SHELL_DIRECTORY), workspace.root.clone()],
+    ))
+    .await;
+    assert_eq!(
+        exit_code(&granted),
+        Some(0),
+        "the planted executable must run when its directory is an execute root, or the refusal below proves nothing: {granted:?}"
+    );
+    assert_eq!(
+        marker(&workspace.root, "planted.marker").as_deref(),
+        Some("ran")
+    );
+    fs::remove_file(workspace.root.join("planted.marker")).unwrap();
+
+    let refused = run_confined(&confined_tree_run(
+        "tree-exec-bound",
+        &workspace.root,
+        PARENT_SCRIPT,
+        vec![PathBuf::from(SHELL_DIRECTORY)],
+    ))
+    .await;
+
+    assert_ne!(exit_code(&refused), Some(0), "{refused:?}");
+    assert_eq!(
+        marker(&workspace.root, "planted.marker"),
+        None,
+        "a tree executed a file it had written into its own workspace"
+    );
+}
+
+/// The tree-mode counterpart of the single-command network test: the process
+/// that reaches for the listener is a forked descendant.
+#[tokio::test]
+async fn test_a_confined_tree_blocks_a_grandchild_connection_that_otherwise_succeeds() {
+    if Confinement::probe(ConfinementMode::ProcessTree)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let Some(client) = ["/usr/bin/nc", "/bin/nc", "/usr/bin/curl"]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).is_file())
+    else {
+        return;
+    };
+    let client_directory = Path::new(client).parent().unwrap().to_path_buf();
+
+    for confined in [false, true] {
+        let workspace = workspace();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connected = Arc::new(AtomicBool::new(false));
+        let accepted = connected.clone();
+        let acceptor = tokio::spawn(async move {
+            if listener.accept().await.is_ok() {
+                accepted.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let attempt = if client.ends_with("curl") {
+            format!("{client} --silent --max-time 2 http://127.0.0.1:{port}/\n")
+        } else {
+            format!("{client} -w 1 127.0.0.1 {port} < /dev/null\n")
+        };
+        write_forking_scripts(&workspace.root, &attempt);
+
+        let mut request = confined_tree_run(
+            "tree-network",
+            &workspace.root,
+            PARENT_SCRIPT,
+            vec![PathBuf::from(SHELL_DIRECTORY), client_directory.clone()],
+        );
+        if let InboundMessage::RunStart {
+            confinement: slot, ..
+        } = &mut request
+            && !confined
+        {
+            *slot = None;
+        }
+
+        let messages = run_confined(&request).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        acceptor.abort();
+
+        let parent = marker(&workspace.root, PARENT_IDENTIFIER);
+        let child = marker(&workspace.root, CHILD_IDENTIFIER);
+        assert!(
+            parent.is_some() && child.is_some() && parent != child,
+            "the grandchild never ran, so this case proves nothing (confined={confined})"
+        );
+
+        if confined {
+            assert!(
+                !connected.load(Ordering::SeqCst),
+                "a forked grandchild of a confined tree reached a local TCP listener"
+            );
+            assert_ne!(exit_code(&messages), Some(0));
+        } else {
+            assert!(
+                connected.load(Ordering::SeqCst),
+                "the unconfined control never reached the listener, so this test proves nothing"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_spawn_fails_closed_when_a_tree_cannot_be_bounded() {
+    let workspace = workspace();
+    let (tx, mut rx) = mpsc::channel(100);
+
+    let request = confined_tree_run("unbounded", &workspace.root, PARENT_SCRIPT, vec![]);
+    let result = CommandExecutor::new().spawn(&request, tx).await;
+
+    match result {
+        Err(error @ ExecutorError::ConfinementUnavailable(_)) => {
+            assert_eq!(error.to_error_code(), ErrorCode::ConfinementUnavailable);
+        }
+        Err(error) => panic!("Wrong error type: {error:?}"),
+        Ok(_) => panic!("An unbounded tree must not spawn the command"),
+    }
+
+    assert!(
+        collect_messages(&mut rx, Duration::from_millis(200))
+            .await
+            .is_empty(),
+        "A refused spawn must not report a started process"
+    );
 }

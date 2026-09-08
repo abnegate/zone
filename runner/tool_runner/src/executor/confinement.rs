@@ -4,13 +4,23 @@
 //! bubblewrap on Linux — with an explicit set of readable and writable roots and
 //! no network access at all.
 //!
+//! There are two shapes of confined job. [`ConfinementMode::SingleCommand`] runs
+//! exactly one executable, which may neither fork nor exec: right for a
+//! verification recipe, wrong for a build tool.
+//! [`ConfinementMode::ProcessTree`] lets the command fork and exec, bounded by
+//! an explicit set of executable directories, so `cargo test` can reach `rustc`,
+//! a linker and the test binaries it just built without the sandbox admitting
+//! anything else.
+//!
 //! Confinement is never assumed to work. [`Confinement::probe`] executes real
 //! commands inside the sandbox and asserts that a denied file stays unreadable
-//! and that a connection to a live local listener never arrives. A host that
-//! cannot prove those properties refuses to run confined jobs rather than
-//! running them unconfined.
+//! and that a connection to a live local listener never arrives. Tree mode is
+//! probed separately and more strictly: it forks before reaching for the
+//! network, so the denial is proven for a descendant rather than for the one
+//! process the sandbox was applied to. A host that cannot prove those
+//! properties refuses to run confined jobs rather than running them unconfined.
 
-use crate::protocol::ConfinementRequest;
+use crate::protocol::{ConfinementRequest, ProcessTreeRequest};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -29,6 +39,11 @@ const SEATBELT: &str = "/usr/bin/sandbox-exec";
 const BUBBLEWRAP: &str = "/usr/bin/bwrap";
 
 const SEATBELT_READ_TREES: [&str; 4] = ["/System", "/dev", "/usr/lib", "/usr/share"];
+
+/// `/bin/sh` resolves which shell binary to become by reading this directory,
+/// so a tree driven through a shell cannot start without it. Single-command
+/// mode does not need it because nothing re-execs.
+const SEATBELT_TREE_READ_TREES: [&str; 1] = ["/private/var/select"];
 
 /// Name resolution and account enumeration stay denied even though `system.sb`
 /// grants a broad read of the system volume.
@@ -56,6 +71,22 @@ const PROBE_ALLOWED_CONTENT: &str = "allowed\n";
 const PROBE_DENIED_CONTENT: &str = "secret\n";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const PROBE_SETTLE: Duration = Duration::from_millis(25);
+
+/// The shell the tree probe uses to build a real parent/child chain.
+const PROBE_SHELL: &str = "/bin/sh";
+
+const PROBE_PARENT_SCRIPT: &str = "parent.sh";
+const PROBE_CHILD_SCRIPT: &str = "child.sh";
+const PROBE_EXECUTE_SCRIPT: &str = "execute.sh";
+const PROBE_PARENT_IDENTIFIER: &str = "parent.pid";
+const PROBE_CHILD_IDENTIFIER: &str = "child.pid";
+const PROBE_NETWORK_STATUS: &str = "network.status";
+const PROBE_EXECUTE_STATUS: &str = "execute.status";
+/// The planted executable is a script, not a copy of a system binary: macOS
+/// kills a copied system binary on sight for its lost code signature, which
+/// would make the execute-root check pass without the sandbox doing anything.
+const PROBE_PLANTED_COMMAND: &str = "planted.sh";
+const PROBE_PLANTED_MODE: u32 = 0o755;
 
 /// Commands able to open a TCP connection, in preference order. The probe needs
 /// exactly one of them to exist; a host with none cannot prove its sandbox.
@@ -91,8 +122,25 @@ pub enum ConfinementError {
     #[error("Confined command not found: {0}")]
     CommandNotFound(String),
 
+    #[error("A confined process tree needs at least one execute root")]
+    ProcessTreeWithoutExecuteRoots,
+
+    #[error("Execute root would admit every executable on the host: {0}")]
+    UnboundedExecuteRoot(String),
+
     #[error("Confinement could not be proven: {0}")]
     Unproven(String),
+}
+
+/// How much of a process tree a confined job may create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfinementMode {
+    /// One executable runs and nothing else. Forking and further execs are
+    /// denied outright.
+    SingleCommand,
+    /// The command may fork and exec, bounded by an explicit set of executable
+    /// directories.
+    ProcessTree,
 }
 
 /// The OS mechanism used to confine a command.
@@ -127,6 +175,21 @@ impl Backend {
             Backend::Bubblewrap => "/etc/hosts",
         }
     }
+
+    /// Whether the backend can refuse an exec of a file the tree can otherwise
+    /// see.
+    ///
+    /// Seatbelt filters `process-exec` by path, so a binary dropped into a
+    /// writable root stays unrunnable. Bubblewrap has no exec filter: its bound
+    /// is the mount namespace, where an executable outside every bind does not
+    /// exist at all. Both bound the executable set; only seatbelt can be asked
+    /// to prove it against a file that is present.
+    pub const fn enforces_execute_roots(self) -> bool {
+        match self {
+            Backend::Seatbelt => true,
+            Backend::Bubblewrap => false,
+        }
+    }
 }
 
 /// A backend executable and the argument vector that runs a command inside it.
@@ -148,6 +211,8 @@ pub struct Confinement {
     working_dir: PathBuf,
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
+    execute_roots: Vec<PathBuf>,
+    mode: ConfinementMode,
     environment: BTreeMap<String, String>,
 }
 
@@ -157,6 +222,8 @@ struct Resolved {
     working_dir: PathBuf,
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
+    execute_roots: Vec<PathBuf>,
+    mode: ConfinementMode,
     environment: BTreeMap<String, String>,
 }
 
@@ -172,6 +239,8 @@ impl Confinement {
             working_dir: working_dir.into(),
             read_roots: Vec::new(),
             write_roots: Vec::new(),
+            execute_roots: Vec::new(),
+            mode: ConfinementMode::SingleCommand,
             environment: BTreeMap::new(),
         }
     }
@@ -180,7 +249,18 @@ impl Confinement {
     pub fn with_roots(mut self, request: &ConfinementRequest) -> Self {
         self.read_roots = request.read_roots.clone();
         self.write_roots = request.write_roots.clone();
+        self.mode = request.mode();
+        self.execute_roots = request
+            .process_tree
+            .as_ref()
+            .map(|tree| tree.execute_roots.clone())
+            .unwrap_or_default();
         self
+    }
+
+    /// How much of a process tree this confinement admits.
+    pub fn mode(&self) -> ConfinementMode {
+        self.mode
     }
 
     /// Set the environment handed to the confined command.
@@ -221,10 +301,16 @@ impl Confinement {
     }
 
     /// Prove that this host's confinement actually confines, caching the
-    /// verdict for the lifetime of the process.
-    pub async fn probe() -> Result<(), ConfinementError> {
-        static OUTCOME: OnceCell<Result<(), ConfinementError>> = OnceCell::const_new();
-        OUTCOME.get_or_init(run_probe).await.clone()
+    /// verdict per mode for the lifetime of the process.
+    ///
+    /// A tree is a strictly larger claim than a single command, so its verdict
+    /// is cached separately: a host that can prove one is not thereby taken to
+    /// have proven the other.
+    pub async fn probe(mode: ConfinementMode) -> Result<(), ConfinementError> {
+        match mode {
+            ConfinementMode::SingleCommand => probe_single_command().await,
+            ConfinementMode::ProcessTree => probe_process_tree().await,
+        }
     }
 
     fn resolve(&self) -> Result<Resolved, ConfinementError> {
@@ -232,6 +318,7 @@ impl Confinement {
         let working_dir = canonical(&self.working_dir)?;
         let read_roots = canonical_roots(&self.read_roots)?;
         let write_roots = canonical_roots(&self.write_roots)?;
+        let execute_roots = resolve_execute_roots(self.mode, &self.execute_roots)?;
         let environment = complete_environment(
             &self.environment,
             &command,
@@ -244,9 +331,39 @@ impl Confinement {
             working_dir,
             read_roots,
             write_roots,
+            execute_roots,
+            mode: self.mode,
             environment,
         })
     }
+}
+
+/// Canonicalise and bound the executable directories a tree may launch from.
+///
+/// Single-command mode has no execute roots by construction. A tree needs at
+/// least one, and none of them may be the filesystem root: an execute root of
+/// `/` is "allow every exec on the host", which is the thing this mode exists
+/// to avoid.
+fn resolve_execute_roots(
+    mode: ConfinementMode,
+    roots: &[PathBuf],
+) -> Result<Vec<PathBuf>, ConfinementError> {
+    if mode == ConfinementMode::SingleCommand {
+        return Ok(Vec::new());
+    }
+    if roots.is_empty() {
+        return Err(ConfinementError::ProcessTreeWithoutExecuteRoots);
+    }
+
+    let execute_roots = canonical_roots(roots)?;
+    for root in &execute_roots {
+        if root.parent().is_none() {
+            return Err(ConfinementError::UnboundedExecuteRoot(
+                root.display().to_string(),
+            ));
+        }
+    }
+    Ok(execute_roots)
 }
 
 fn seatbelt_arguments(resolved: &Resolved) -> Result<Vec<String>, ConfinementError> {
@@ -263,10 +380,17 @@ fn seatbelt_arguments(resolved: &Resolved) -> Result<Vec<String>, ConfinementErr
 
 fn seatbelt_profile(resolved: &Resolved) -> Result<String, ConfinementError> {
     let command = text(&resolved.command)?;
+    let tree = resolved.mode == ConfinementMode::ProcessTree;
 
     let mut trees: BTreeSet<&str> = SEATBELT_READ_TREES.into_iter().collect();
     for root in resolved.read_roots.iter().chain(&resolved.write_roots) {
         trees.insert(text(root)?);
+    }
+    if tree {
+        trees.extend(SEATBELT_TREE_READ_TREES);
+        for root in &resolved.execute_roots {
+            trees.insert(text(root)?);
+        }
     }
 
     let mut metadata: BTreeSet<&Path> = BTreeSet::new();
@@ -289,6 +413,19 @@ fn seatbelt_profile(resolved: &Resolved) -> Result<String, ConfinementError> {
         "(deny signal)".to_string(),
         "(allow sysctl-read)".to_string(),
     ];
+    if tree {
+        // A later clause overrides an earlier one, so this narrows the blanket
+        // `(deny signal)` above to the tree's own descendants: `cargo` may stop
+        // a test binary it started, and may not touch anything else on the host.
+        lines.push("(allow process-fork)".to_string());
+        lines.push("(allow signal (target children))".to_string());
+        for root in &resolved.execute_roots {
+            lines.push(format!(
+                "(allow process-exec (subpath {}))",
+                escape(text(root)?)
+            ));
+        }
+    }
     for tree in &trees {
         lines.push(format!("(allow file-read* (subpath {}))", escape(tree)));
     }
@@ -353,6 +490,13 @@ fn bubblewrap_arguments(resolved: &Resolved) -> Result<Vec<String>, ConfinementE
     for root in &resolved.write_roots {
         let path = text(root)?.to_string();
         arguments.extend(["--bind".to_string(), path.clone(), path]);
+    }
+    // Bubblewrap has no exec filter, so a tree's executable set is bounded by
+    // what the mount namespace contains: a toolchain outside every bind is not
+    // merely forbidden, it is absent.
+    for root in &resolved.execute_roots {
+        let path = text(root)?.to_string();
+        arguments.extend(["--ro-bind".to_string(), path.clone(), path]);
     }
     for (name, value) in &resolved.environment {
         arguments.extend(["--setenv".to_string(), name.clone(), value.clone()]);
@@ -529,7 +673,17 @@ fn probe_failure(error: std::io::Error) -> ConfinementError {
     ConfinementError::Unproven(error.to_string())
 }
 
-async fn run_probe() -> Result<(), ConfinementError> {
+async fn probe_single_command() -> Result<(), ConfinementError> {
+    static OUTCOME: OnceCell<Result<(), ConfinementError>> = OnceCell::const_new();
+    OUTCOME.get_or_init(run_single_command_probe).await.clone()
+}
+
+async fn probe_process_tree() -> Result<(), ConfinementError> {
+    static OUTCOME: OnceCell<Result<(), ConfinementError>> = OnceCell::const_new();
+    OUTCOME.get_or_init(run_process_tree_probe).await.clone()
+}
+
+async fn run_single_command_probe() -> Result<(), ConfinementError> {
     let backend = HOST_BACKEND.ok_or(ConfinementError::UnsupportedPlatform)?;
     backend_executable(backend)?;
     if executable_file(Path::new(PROBE_COMMAND)).is_none() {
@@ -612,6 +766,207 @@ async fn probe_network(backend: Backend, root: &Path) -> Result<(), ConfinementE
     Ok(())
 }
 
+/// Prove the tree claim: everything single-command mode proves, plus that a
+/// forked descendant really runs, really cannot reach the network, and really
+/// cannot exec outside the granted directories.
+async fn run_process_tree_probe() -> Result<(), ConfinementError> {
+    probe_single_command().await?;
+
+    let backend = HOST_BACKEND.ok_or(ConfinementError::UnsupportedPlatform)?;
+    if executable_file(Path::new(PROBE_SHELL)).is_none() {
+        return Err(ConfinementError::Unproven(format!(
+            "probe shell {PROBE_SHELL} is unavailable, so no process tree can be built"
+        )));
+    }
+
+    let workspace = ProbeWorkspace::create()?;
+    probe_tree_network(backend, &workspace.root).await?;
+    probe_tree_execute_bound(backend, &workspace.root).await
+}
+
+/// The tree-mode counterpart of [`probe_network`]: the process that reaches for
+/// the listener is a forked descendant, not the process the sandbox was applied
+/// to, so a backend that confines only the direct child cannot pass this.
+async fn probe_tree_network(backend: Backend, root: &Path) -> Result<(), ConfinementError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(probe_failure)?;
+    let port = listener.local_addr().map_err(probe_failure)?.port();
+
+    let connected = Arc::new(AtomicBool::new(false));
+    let accepted = connected.clone();
+    let acceptor = tokio::spawn(async move {
+        if listener.accept().await.is_ok() {
+            accepted.store(true, Ordering::SeqCst);
+        }
+    });
+
+    let outcome = match network_probe_command(port) {
+        Some((command, arguments)) => {
+            run_tree_network_client(backend, root, &command, &arguments).await
+        }
+        None => Err(ConfinementError::Unproven(
+            "no command able to open a TCP connection is installed".to_string(),
+        )),
+    };
+
+    tokio::time::sleep(PROBE_SETTLE).await;
+    acceptor.abort();
+    outcome?;
+
+    if read_probe_marker(&root.join(PROBE_PARENT_IDENTIFIER))?
+        == read_probe_marker(&root.join(PROBE_CHILD_IDENTIFIER))?
+    {
+        return Err(ConfinementError::Unproven(
+            "the tree probe never forked, so it proves nothing about a descendant".to_string(),
+        ));
+    }
+    if connected.load(Ordering::SeqCst) {
+        return Err(ConfinementError::Unproven(
+            "a forked descendant of a confined command reached a local TCP listener".to_string(),
+        ));
+    }
+    if read_probe_marker(&root.join(PROBE_NETWORK_STATUS))? == "0" {
+        return Err(ConfinementError::Unproven(
+            "a forked descendant reported a successful network connection".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Run the network client as a forked grandchild of the sandbox entry point.
+async fn run_tree_network_client(
+    backend: Backend,
+    root: &Path,
+    command: &str,
+    arguments: &[String],
+) -> Result<std::process::Output, ConfinementError> {
+    let execute_roots = vec![parent_directory(PROBE_SHELL)?, parent_directory(command)?];
+    write_tree_scripts(root, command, arguments)?;
+    run_confined_tree(
+        backend,
+        root,
+        PROBE_SHELL,
+        vec![PROBE_PARENT_SCRIPT.to_string()],
+        execute_roots,
+    )
+    .await
+}
+
+/// Plant a runnable executable inside a writable root and assert the tree can
+/// start it only when that directory is named an execute root.
+///
+/// Both directions are checked. Asserting only the refusal would pass just as
+/// happily if the planted file could never run at all, which is the failure
+/// this whole probe exists to catch.
+async fn probe_tree_execute_bound(backend: Backend, root: &Path) -> Result<(), ConfinementError> {
+    if !backend.enforces_execute_roots() {
+        return Ok(());
+    }
+
+    let planted = root.join(PROBE_PLANTED_COMMAND);
+    fs::write(&planted, format!("#!{PROBE_SHELL}\nexit 0\n")).map_err(probe_failure)?;
+    fs::set_permissions(&planted, fs::Permissions::from_mode(PROBE_PLANTED_MODE))
+        .map_err(probe_failure)?;
+    fs::write(
+        root.join(PROBE_EXECUTE_SCRIPT),
+        format!("./{PROBE_PLANTED_COMMAND}\nprintf '%s' \"$?\" > {PROBE_EXECUTE_STATUS}\n"),
+    )
+    .map_err(probe_failure)?;
+
+    let granted = probe_planted_status(
+        backend,
+        root,
+        vec![parent_directory(PROBE_SHELL)?, root.to_path_buf()],
+    )
+    .await?;
+    if granted != "0" {
+        return Err(ConfinementError::Unproven(format!(
+            "the planted executable did not run even from a granted execute root ({granted}), so the refusal below would prove nothing"
+        )));
+    }
+
+    let refused = probe_planted_status(backend, root, vec![parent_directory(PROBE_SHELL)?]).await?;
+    if refused == "0" {
+        return Err(ConfinementError::Unproven(
+            "a confined tree executed a file from a writable root that was not an execute root"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn probe_planted_status(
+    backend: Backend,
+    root: &Path,
+    execute_roots: Vec<PathBuf>,
+) -> Result<String, ConfinementError> {
+    let status = root.join(PROBE_EXECUTE_STATUS);
+    let _ = fs::remove_file(&status);
+    run_confined_tree(
+        backend,
+        root,
+        PROBE_SHELL,
+        vec![PROBE_EXECUTE_SCRIPT.to_string()],
+        execute_roots,
+    )
+    .await?;
+    read_probe_marker(&status)
+}
+
+/// The parent forks, the child execs the network client. The recorded process
+/// identifiers are what later proves the fork happened rather than the shell
+/// collapsing the chain into a single exec.
+fn write_tree_scripts(
+    root: &Path,
+    command: &str,
+    arguments: &[String],
+) -> Result<(), ConfinementError> {
+    let parent = format!(
+        "printf '%s' \"$$\" > {PROBE_PARENT_IDENTIFIER}\n\
+         {shell} {PROBE_CHILD_SCRIPT} &\n\
+         wait $!\n",
+        shell = shell_quote(PROBE_SHELL),
+    );
+    let client = std::iter::once(shell_quote(command))
+        .chain(arguments.iter().map(|argument| shell_quote(argument)))
+        .collect::<Vec<String>>()
+        .join(" ");
+    let child = format!(
+        "printf '%s' \"$$\" > {PROBE_CHILD_IDENTIFIER}\n\
+         {client} < /dev/null\n\
+         printf '%s' \"$?\" > {PROBE_NETWORK_STATUS}\n"
+    );
+
+    fs::write(root.join(PROBE_PARENT_SCRIPT), parent).map_err(probe_failure)?;
+    fs::write(root.join(PROBE_CHILD_SCRIPT), child).map_err(probe_failure)?;
+    Ok(())
+}
+
+fn read_probe_marker(path: &Path) -> Result<String, ConfinementError> {
+    fs::read_to_string(path)
+        .map(|value| value.trim().to_string())
+        .map_err(|error| {
+            ConfinementError::Unproven(format!(
+                "the tree probe did not record {}: {error}",
+                path.display()
+            ))
+        })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+fn parent_directory(command: &str) -> Result<PathBuf, ConfinementError> {
+    let resolved = executable_file(Path::new(command))
+        .ok_or_else(|| ConfinementError::CommandNotFound(command.to_string()))?;
+    resolved
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| ConfinementError::CommandNotFound(command.to_string()))
+}
+
 fn network_probe_command(port: u16) -> Option<(String, Vec<String>)> {
     let command = NETWORK_PROBE_COMMANDS
         .into_iter()
@@ -640,9 +995,37 @@ async fn run_confined(
     command: &str,
     arguments: Vec<String>,
 ) -> Result<std::process::Output, ConfinementError> {
+    run_in_sandbox(backend, root, command, arguments, None).await
+}
+
+async fn run_confined_tree(
+    backend: Backend,
+    root: &Path,
+    command: &str,
+    arguments: Vec<String>,
+    execute_roots: Vec<PathBuf>,
+) -> Result<std::process::Output, ConfinementError> {
+    run_in_sandbox(
+        backend,
+        root,
+        command,
+        arguments,
+        Some(ProcessTreeRequest { execute_roots }),
+    )
+    .await
+}
+
+async fn run_in_sandbox(
+    backend: Backend,
+    root: &Path,
+    command: &str,
+    arguments: Vec<String>,
+    process_tree: Option<ProcessTreeRequest>,
+) -> Result<std::process::Output, ConfinementError> {
     let request = ConfinementRequest {
         read_roots: vec![root.to_path_buf()],
         write_roots: vec![root.to_path_buf()],
+        process_tree,
     };
     let invocation = Confinement::new(command, arguments, root)
         .with_roots(&request)
