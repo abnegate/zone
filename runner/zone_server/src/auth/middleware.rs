@@ -12,7 +12,7 @@ use axum::{
 };
 use serde_json::json;
 
-use super::jwt::{Claims, extract_bearer_token, validate_token};
+use super::jwt::{Claims, extract_bearer_token, validate_access_token};
 use crate::state::AppState;
 
 /// Auth error response
@@ -70,8 +70,9 @@ where
         })?;
 
         // Validate the token
-        let claims =
-            validate_token(token, app_state.config().jwt_secret()).map_err(|e| AuthError {
+        let claims = validate_access_token(token, app_state.config().jwt_secret())
+            .map(|access| access.claims)
+            .map_err(|e| AuthError {
                 status: StatusCode::UNAUTHORIZED,
                 message: format!("Invalid token: {}", e),
             })?;
@@ -137,13 +138,15 @@ pub async fn require_auth(
     })?;
 
     // Validate the token
-    let claims = validate_token(token, state.config().jwt_secret()).map_err(|e| {
-        crate::metrics::record_auth_failure("invalid_token");
-        AuthError {
-            status: StatusCode::UNAUTHORIZED,
-            message: format!("Invalid token: {}", e),
-        }
-    })?;
+    let claims = validate_access_token(token, state.config().jwt_secret())
+        .map(|access| access.claims)
+        .map_err(|e| {
+            crate::metrics::record_auth_failure("invalid_token");
+            AuthError {
+                status: StatusCode::UNAUTHORIZED,
+                message: format!("Invalid token: {}", e),
+            }
+        })?;
 
     // Add claims to request extensions
     request.extensions_mut().insert(claims);

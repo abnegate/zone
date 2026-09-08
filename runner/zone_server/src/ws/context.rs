@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-use crate::auth::validate_token;
+use crate::auth::validate_access_token;
 use crate::db::{context_gatherings, gathering_events, workspace_members};
 use crate::state::AppState;
 
@@ -136,8 +136,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, gathering_id: Uuid) {
     {
         Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
             Ok(ClientMessage::Auth { token }) => {
-                match validate_token(&token, state.config().jwt_secret()) {
-                    Ok(claims) => claims,
+                match validate_access_token(&token, state.config().jwt_secret()) {
+                    Ok(access) => access.claims,
                     Err(e) => {
                         // CRITICAL-1: Don't leak JWT configuration details to client
                         tracing::warn!(

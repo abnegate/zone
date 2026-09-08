@@ -12,7 +12,10 @@ pub mod organization_guard;
 pub mod password;
 pub mod workspace_guard;
 
-pub use jwt::{create_access_token, create_refresh_token, validate_token};
+pub use jwt::{
+    AccessClaims, create_access_token, create_refresh_token, create_session_access_token,
+    validate_access_token,
+};
 pub use middleware::{AuthUser, require_auth};
 pub use organization_guard::{OrgAdmin, OrgMember, OrgOwner};
 pub use password::{hash_password, verify_password};

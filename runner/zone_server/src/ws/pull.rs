@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
-use crate::auth::validate_token;
+use crate::auth::validate_access_token;
 use crate::pull::{ComfyPull, Event, Pull, PullRegistry, PullStart};
 use crate::state::AppState;
 use zone_comfy::recipe::RecipeCatalog;
@@ -62,17 +62,13 @@ pub async fn handle_pull_ws(
 async fn handle(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let authenticated = match tokio::time::timeout(HANDSHAKE_TIMEOUT, receiver.next()).await {
-        Ok(Some(Ok(Message::Text(text)))) => {
-            match serde_json::from_str::<Authentication>(&text) {
-                Ok(Authentication::Auth { token }) => {
-                    validate_token(&token, state.config().jwt_secret()).is_ok_and(|claims| {
-                        // Refresh tokens carry no email and must not authorize a download.
-                        !claims.email.is_empty() && claims.user_id().is_ok()
-                    })
-                }
-                Err(_) => false,
+        Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<Authentication>(&text) {
+            Ok(Authentication::Auth { token }) => {
+                validate_access_token(&token, state.config().jwt_secret())
+                    .is_ok_and(|access| access.claims.user_id().is_ok())
             }
-        }
+            Err(_) => false,
+        },
         _ => false,
     };
     if !authenticated {

@@ -31,7 +31,7 @@ use zone_comfy::MediaType;
 use zone_core::llm::{Message as LlmMessage, Role as LlmRole};
 
 use crate::agent::{self, ActionReceipt, AgentEvent, AgentRun, Citation, ToolCallRecord};
-use crate::auth::validate_token;
+use crate::auth::validate_access_token;
 use crate::db::{ai_settings, chats, knowledge, workspace_members, workspaces};
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
@@ -751,8 +751,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
     {
         Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
             Ok(ClientMessage::Auth { token }) => {
-                match validate_token(&token, state.config().jwt_secret()) {
-                    Ok(claims) => claims,
+                match validate_access_token(&token, state.config().jwt_secret()) {
+                    Ok(access) => access.claims,
                     Err(e) => {
                         crate::metrics::record_ws_chat("rejected", "auth_failed");
                         tracing::warn!("Authentication failed for chat {}: {}", chat_id, e);
