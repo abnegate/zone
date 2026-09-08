@@ -186,6 +186,7 @@ async fn main() {
     zone_server::workers::knowledge_refresh::start_refresh_worker(state.clone());
     zone_server::workers::source_resync::start_resync_worker(state.clone());
     zone_server::workers::reminders::spawn(state.clone());
+    zone_server::workers::task::spawn_recovery(state.clone());
     tracing::info!("Started knowledge refresh and source resync workers");
 
     // Configure CORS based on environment

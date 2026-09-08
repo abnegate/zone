@@ -25,6 +25,8 @@ const MAX_CONCURRENT_TASKS: usize = 5;
 
 // Timeout for task execution (1 hour)
 const TASK_TIMEOUT_SECS: u64 = 3600;
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // LLM configuration defaults (overridable via environment variables)
 fn default_temperature() -> f32 {
@@ -203,7 +205,82 @@ impl AgentCallback for DatabaseTaskCallback {
 /// 7. Updates status to "completed" or "failed"
 ///
 /// All events are persisted to the database via DatabaseTaskCallback for monitoring.
+/// Run recovery is durable across restarts and independent of agent progress.
+pub fn spawn_recovery(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = tasks::sweep_task_runs(state.db()).await {
+                tracing::error!(%error, "Could not recover orphaned task runs");
+            }
+        }
+    });
+}
+
 pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
+    let owner = Uuid::new_v4();
+    let run = match tasks::get_task_run(state.db(), run_id).await {
+        Ok(Some(run)) if run.task_id == task_id => run,
+        _ => return,
+    };
+    if let Some(actor) = run.triggered_by {
+        let allowed = match tasks::get_task(state.db(), task_id).await {
+            Ok(Some(task)) => crate::db::workspace_members::has_role_or_higher(
+                state.db(),
+                actor,
+                task.workspace_id,
+                crate::db::workspace_members::WorkspaceRole::Member,
+            )
+            .await
+            .unwrap_or(false),
+            _ => false,
+        };
+        if !allowed {
+            let _ = tasks::complete_task_run(
+                state.db(),
+                run_id,
+                "failed",
+                Some("Workspace write access required"),
+                None,
+            )
+            .await;
+            return;
+        }
+    }
+    if !matches!(
+        tasks::claim_task_run(state.db(), run.id, owner).await,
+        Ok(true)
+    ) {
+        return;
+    }
+    let heartbeat = async {
+        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if !matches!(
+                tokio::time::timeout(
+                    HEARTBEAT_TIMEOUT,
+                    tasks::heartbeat_task_run(state.db(), run_id, owner)
+                )
+                .await,
+                Ok(Ok(true))
+            ) {
+                tracing::warn!(%run_id, "Task execution lost its lease; cancelling pipeline");
+                return;
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        () = heartbeat => {},
+        () = execute_owned_task_run(state, run_id, task_id, owner) => {},
+    }
+}
+
+async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, owner: Uuid) {
     let mut obs = crate::metrics::TaskObs::new();
 
     // Acquire semaphore permit to limit concurrent executions
@@ -226,6 +303,10 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             return;
         }
     };
+
+    if !matches!(tasks::start_task_run(state.db(), run_id).await, Ok(true)) {
+        return;
+    }
 
     tracing::info!(
         "Starting task execution: run_id={}, task_id={}",
@@ -409,6 +490,12 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             );
 
             // Attempt PR creation if there are code changes
+            if !matches!(
+                tasks::heartbeat_task_run(state.db(), run_id, owner).await,
+                Ok(true)
+            ) {
+                return;
+            }
             let pr_info = match create_pr_for_task(state, task_id, &workspace_path).await {
                 PrCreationResult::Created {
                     pr_url,
@@ -590,9 +677,7 @@ mod tests {
 
     #[test]
     fn test_semaphore_initialization() {
-        let sem = get_semaphore();
-        // Should have MAX_CONCURRENT_TASKS permits available initially
-        assert_eq!(sem.available_permits(), MAX_CONCURRENT_TASKS);
+        assert!(Arc::ptr_eq(get_semaphore(), get_semaphore()));
     }
 
     #[tokio::test]
@@ -601,6 +686,106 @@ mod tests {
         let run_id = Uuid::new_v4();
         let callback = DatabaseTaskCallback::new(pool, run_id);
         assert_eq!(callback.run_id, run_id);
+    }
+
+    #[tokio::test]
+    async fn capacity_waits_keep_heartbeats_and_stop_on_lease_loss() {
+        let url = std::env::var("TEST_DATABASE_URL").expect("isolated TEST_DATABASE_URL");
+        let pool = PgPool::connect(&url).await.unwrap();
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO organizations(id, name, slug) VALUES ($1, 'Heartbeat test', $1::text)",
+        )
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO workspaces(id, organization_id, name, slug) VALUES ($1, $2, 'Heartbeat test', $1::text)").bind(workspace).bind(organization).execute(&pool).await.unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace,
+            &[],
+            "Capacity",
+            "Must not run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let permit = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+            .await
+            .unwrap();
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let execution = tokio::spawn(async move {
+            execute_task_run(&state, run.id, task.id).await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let claimed: bool =
+                    sqlx::query_scalar("SELECT owner IS NOT NULL FROM task_runs WHERE id = $1")
+                        .bind(run.id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if claimed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let first: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT heartbeat_at FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+        let refreshed: bool =
+            sqlx::query_scalar("SELECT heartbeat_at > $2 FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .bind(first)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(refreshed, "capacity waiting must not look orphaned");
+        assert_eq!(
+            tasks::get_task(&pool, task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
+        );
+        sqlx::query("UPDATE task_runs SET owner = $2 WHERE id = $1")
+            .bind(run.id)
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(16), execution)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tasks::get_task_run_logs(&pool, run.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        drop(permit);
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     // Integration tests are in zone_server/tests/task_execution_tests.rs

@@ -300,7 +300,7 @@ pub async fn start_task(
     }
     transaction.commit().await?;
 
-    let task = super::tasks::create_task(
+    let task = super::tasks::create_task_as(
         pool,
         workspace_id,
         &input.project_ids,
@@ -310,9 +310,10 @@ pub async fn start_task(
         input.priority,
         true,
         input.source_id,
+        Some(user_id),
     )
     .await?;
-    let run = super::tasks::create_task_run(pool, task.id).await?;
+    let run = super::tasks::create_task_run_as(pool, task.id, Some(user_id)).await?;
     Ok(json!({
         "task_id": task.id,
         "run_id": run.id,

@@ -171,11 +171,7 @@ enum Project {
 
 impl Project {
     fn all() -> Vec<Project> {
-        vec![
-            Project::ManagerFrontend,
-            Project::Runner,
-            Project::Server,
-        ]
+        vec![Project::ManagerFrontend, Project::Runner, Project::Server]
     }
 
     fn display_name(&self) -> &'static str {

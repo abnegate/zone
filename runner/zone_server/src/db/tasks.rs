@@ -11,6 +11,7 @@ use super::DbResult;
 pub struct TaskRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
+    pub created_by: Option<Uuid>,
     pub project_ids: Vec<Uuid>, // Associated projects via task_projects join table
     pub title: String,
     pub description: String,
@@ -41,6 +42,7 @@ pub struct TaskRow {
 pub struct TaskRunRow {
     pub id: Uuid,
     pub task_id: Uuid,
+    pub triggered_by: Option<Uuid>,
     pub status: String,
     pub current_phase: Option<String>,
     pub progress_percent: Option<i32>,
@@ -69,6 +71,7 @@ macro_rules! map_task_row {
         TaskRow {
             id: $r.id,
             workspace_id: $r.workspace_id,
+            created_by: $r.created_by,
             project_ids: Vec::new(), // Populated separately from task_projects join table
             title: $r.title,
             description: $r.description,
@@ -173,7 +176,7 @@ pub async fn list_tasks(
                 SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,
                        t.model_name, t.dependencies, t.is_agentic, t.github_repo_url, t.source_id, t.source_ids,
                        t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,
-                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at
+                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at, t.created_by
                 FROM tasks t
                 INNER JOIN task_projects tp ON t.id = tp.task_id
                 WHERE t.workspace_id = $1 AND tp.project_id = $2 AND t.status = $3
@@ -196,7 +199,7 @@ pub async fn list_tasks(
                 SELECT DISTINCT t.id, t.title, t.description, t.acceptance_criteria, t.status, t.priority,
                        t.model_name, t.dependencies, t.is_agentic, t.github_repo_url, t.source_id, t.source_ids,
                        t.workspace_id, t.worker_id, t.queued_at, t.started_at, t.completed_at, t.created_at, t.updated_at,
-                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at
+                       t.pr_url, t.branch_name, t.pr_status, t.pr_created_at, t.created_by
                 FROM tasks t
                 INNER JOIN task_projects tp ON t.id = tp.task_id
                 WHERE t.workspace_id = $1 AND tp.project_id = $2
@@ -217,7 +220,7 @@ pub async fn list_tasks(
                 SELECT id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                        workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                       pr_url, branch_name, pr_status, pr_created_at
+                       pr_url, branch_name, pr_status, pr_created_at, created_by
                 FROM tasks
                 WHERE workspace_id = $1 AND status = $2
                 ORDER BY created_at DESC
@@ -237,7 +240,7 @@ pub async fn list_tasks(
                 SELECT id, title, description, acceptance_criteria, status, priority,
                        model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                        workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                       pr_url, branch_name, pr_status, pr_created_at
+                       pr_url, branch_name, pr_status, pr_created_at, created_by
                 FROM tasks
                 WHERE workspace_id = $1
                 ORDER BY created_at DESC
@@ -267,7 +270,7 @@ pub async fn get_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
         SELECT id, title, description, acceptance_criteria, status, priority,
                model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-               pr_url, branch_name, pr_status, pr_created_at
+               pr_url, branch_name, pr_status, pr_created_at, created_by
         FROM tasks
         WHERE id = $1
         "#,
@@ -298,14 +301,44 @@ pub async fn create_task(
     is_agentic: bool,
     source_id: Option<Uuid>,
 ) -> DbResult<TaskRow> {
+    create_task_as(
+        pool,
+        workspace_id,
+        project_ids,
+        title,
+        description,
+        acceptance_criteria,
+        priority,
+        is_agentic,
+        source_id,
+        None,
+    )
+    .await
+}
+
+/// Create a task with its authenticated actor in the same transaction.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_task_as(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    project_ids: &[Uuid],
+    title: &str,
+    description: &str,
+    acceptance_criteria: Option<&str>,
+    priority: Option<i32>,
+    is_agentic: bool,
+    source_id: Option<Uuid>,
+    actor: Option<Uuid>,
+) -> DbResult<TaskRow> {
+    let mut transaction = pool.begin().await?;
     let row = sqlx::query!(
         r#"
-        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, source_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, source_id, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at
+                  pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
         workspace_id,
         title,
@@ -313,18 +346,23 @@ pub async fn create_task(
         acceptance_criteria,
         priority,
         is_agentic,
-        source_id
+        source_id,
+        actor
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *transaction)
     .await?;
 
     let mut task = map_task_row!(row);
 
-    // Add project associations if any
-    if !project_ids.is_empty() {
-        add_task_projects(pool, task.id, project_ids).await?;
-        task.project_ids = project_ids.to_vec();
+    for project in project_ids {
+        let inserted = sqlx::query("INSERT INTO task_projects(task_id, project_id) SELECT $1, id FROM projects WHERE id = $2 AND workspace_id = $3")
+            .bind(task.id).bind(project).bind(workspace_id).execute(&mut *transaction).await?;
+        if inserted.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
     }
+    task.project_ids = project_ids.to_vec();
+    transaction.commit().await?;
 
     Ok(task)
 }
@@ -353,7 +391,7 @@ pub async fn update_task(
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at
+                  pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
         id,
         title,
@@ -404,7 +442,7 @@ pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at
+                  pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
         id
     )
@@ -423,21 +461,31 @@ pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
 
 /// Create a new task run
 pub async fn create_task_run(pool: &PgPool, task_id: Uuid) -> DbResult<TaskRunRow> {
-    let row = sqlx::query!(
-        r#"
-        INSERT INTO task_runs (task_id, status)
-        VALUES ($1, 'running')
-        RETURNING id, task_id, status, current_phase, progress_percent, started_at,
-                  completed_at, error_message, artifacts
-        "#,
-        task_id
-    )
-    .fetch_one(pool)
-    .await?;
+    create_task_run_as(pool, task_id, None).await
+}
 
+/// Admit one run while holding the task row, shared with terminal transitions.
+pub async fn create_task_run_as(
+    pool: &PgPool,
+    task_id: Uuid,
+    actor: Option<Uuid>,
+) -> DbResult<TaskRunRow> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+        .bind(task_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+    let row = sqlx::query!(
+        "INSERT INTO task_runs (task_id, status, triggered_by) VALUES ($1, 'running', $2) RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by",
+        task_id, actor
+    ).fetch_one(&mut *transaction).await?;
+    sqlx::query("UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), completed_at = NULL, updated_at = NOW() WHERE id = $1")
+        .bind(task_id).bind(row.id).execute(&mut *transaction).await?;
+    transaction.commit().await?;
     Ok(TaskRunRow {
         id: row.id,
         task_id: row.task_id,
+        triggered_by: row.triggered_by,
         status: row.status,
         current_phase: row.current_phase,
         progress_percent: row.progress_percent,
@@ -446,6 +494,39 @@ pub async fn create_task_run(pool: &PgPool, task_id: Uuid) -> DbResult<TaskRunRo
         error_message: row.error_message,
         artifacts: row.artifacts,
     })
+}
+
+/// Claim a newly admitted run exactly once, before waiting for capacity.
+pub async fn claim_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query("UPDATE task_runs SET owner = $2, heartbeat_at = NOW() WHERE id = $1 AND status = 'running' AND owner IS NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
+        .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
+}
+
+/// Refresh only the live lease held by this execution.
+pub async fn heartbeat_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query("UPDATE task_runs SET heartbeat_at = NOW() WHERE id = $1 AND owner = $2 AND status = 'running' AND heartbeat_at > NOW() - INTERVAL '60 seconds'")
+        .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
+}
+
+pub async fn start_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query("UPDATE tasks SET status = 'in_progress', started_at = NOW(), updated_at = NOW() WHERE active_run_id = $1 AND EXISTS (SELECT 1 FROM task_runs WHERE id = $1 AND status = 'running')")
+        .bind(run_id).execute(pool).await?.rows_affected() == 1)
+}
+
+/// Fail stale runs and their owning tasks without racing a newly admitted run.
+pub async fn sweep_task_runs(pool: &PgPool) -> DbResult<u64> {
+    let mut transaction = pool.begin().await?;
+    let locked: Vec<Option<Uuid>> = sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE active_run_id IN (SELECT id FROM task_runs WHERE status = 'running' AND heartbeat_at <= NOW() - INTERVAL '60 seconds') ORDER BY id FOR UPDATE")
+        .fetch_all(&mut *transaction).await?;
+    let runs: Vec<Uuid> = locked.into_iter().flatten().collect();
+    let failed: Vec<(Uuid, Uuid)> = sqlx::query_as("UPDATE task_runs SET status = 'failed', error_message = 'orphaned', completed_at = NOW() WHERE id = ANY($1) AND status = 'running' AND heartbeat_at <= NOW() - INTERVAL '60 seconds' RETURNING id, task_id")
+        .bind(&runs).fetch_all(&mut *transaction).await?;
+    for (run, task) in &failed {
+        sqlx::query("UPDATE tasks SET status = 'blocked', completed_at = NOW(), updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2")
+            .bind(task).bind(run).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+    Ok(failed.len() as u64)
 }
 
 /// Update task run progress
@@ -460,9 +541,9 @@ pub async fn update_task_run_progress(
         UPDATE task_runs
         SET current_phase = COALESCE($2, current_phase),
             progress_percent = COALESCE($3, progress_percent)
-        WHERE id = $1
+        WHERE id = $1 AND status = 'running' AND (owner IS NULL OR heartbeat_at > NOW() - INTERVAL '60 seconds')
         RETURNING id, task_id, status, current_phase, progress_percent, started_at,
-                  completed_at, error_message, artifacts
+                  completed_at, error_message, artifacts, triggered_by
         "#,
         run_id,
         current_phase,
@@ -474,6 +555,7 @@ pub async fn update_task_run_progress(
     Ok(row.map(|r| TaskRunRow {
         id: r.id,
         task_id: r.task_id,
+        triggered_by: r.triggered_by,
         status: r.status,
         current_phase: r.current_phase,
         progress_percent: r.progress_percent,
@@ -492,6 +574,13 @@ pub async fn complete_task_run(
     error_message: Option<&str>,
     artifacts: Option<serde_json::Value>,
 ) -> DbResult<Option<TaskRunRow>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "SELECT id FROM tasks WHERE id = (SELECT task_id FROM task_runs WHERE id = $1) FOR UPDATE",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
     let row = sqlx::query!(
         r#"
         UPDATE task_runs
@@ -500,21 +589,32 @@ pub async fn complete_task_run(
             error_message = $3,
             artifacts = COALESCE($4, artifacts),
             progress_percent = 100
-        WHERE id = $1
+        WHERE id = $1 AND status = 'running' AND (owner IS NULL OR heartbeat_at > NOW() - INTERVAL '60 seconds')
         RETURNING id, task_id, status, current_phase, progress_percent, started_at,
-                  completed_at, error_message, artifacts
+                  completed_at, error_message, artifacts, triggered_by
         "#,
         run_id,
         status,
         error_message,
         artifacts
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await?;
 
+    if let Some(run) = &row {
+        let task_status = if status == "completed" {
+            "review"
+        } else {
+            "blocked"
+        };
+        sqlx::query("UPDATE tasks SET status = $3, completed_at = NOW(), updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2")
+            .bind(run.task_id).bind(run.id).bind(task_status).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
     Ok(row.map(|r| TaskRunRow {
         id: r.id,
         task_id: r.task_id,
+        triggered_by: r.triggered_by,
         status: r.status,
         current_phase: r.current_phase,
         progress_percent: r.progress_percent,
@@ -530,7 +630,7 @@ pub async fn list_task_runs(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<TaskRu
     let rows = sqlx::query!(
         r#"
         SELECT id, task_id, status, current_phase, progress_percent, started_at,
-               completed_at, error_message, artifacts
+               completed_at, error_message, artifacts, triggered_by
         FROM task_runs
         WHERE task_id = $1
         ORDER BY started_at DESC
@@ -545,6 +645,7 @@ pub async fn list_task_runs(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<TaskRu
         .map(|r| TaskRunRow {
             id: r.id,
             task_id: r.task_id,
+            triggered_by: r.triggered_by,
             status: r.status,
             current_phase: r.current_phase,
             progress_percent: r.progress_percent,
@@ -561,7 +662,7 @@ pub async fn get_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<Option<TaskRu
     let row = sqlx::query!(
         r#"
         SELECT id, task_id, status, current_phase, progress_percent, started_at,
-               completed_at, error_message, artifacts
+               completed_at, error_message, artifacts, triggered_by
         FROM task_runs
         WHERE id = $1
         "#,
@@ -573,6 +674,7 @@ pub async fn get_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<Option<TaskRu
     Ok(row.map(|r| TaskRunRow {
         id: r.id,
         task_id: r.task_id,
+        triggered_by: r.triggered_by,
         status: r.status,
         current_phase: r.current_phase,
         progress_percent: r.progress_percent,
@@ -670,7 +772,7 @@ pub async fn update_task_pr(
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at
+                  pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
         task_id,
         pr_url,
@@ -706,7 +808,7 @@ pub async fn update_task_branch(
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at
+                  pr_url, branch_name, pr_status, pr_created_at, created_by
         "#,
         task_id,
         branch_name

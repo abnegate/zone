@@ -10,10 +10,120 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{sources, tasks};
+use crate::db::{sources, tasks, workspace_members};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
+
+async fn authorize_workspace(
+    state: &AppState,
+    auth: &AuthUser,
+    workspace: Uuid,
+    write: bool,
+) -> Result<Uuid, (StatusCode, Json<ErrorResponse>)> {
+    let actor = Uuid::parse_str(&auth.0.sub).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse::new("Invalid user")),
+        )
+    })?;
+    let role = workspace_members::get_role(state.db(), actor, workspace)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Could not authorize task access");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+        })?;
+    if role.is_none_or(|role| write && role < workspace_members::WorkspaceRole::Member) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new("Workspace access required")),
+        ));
+    }
+    Ok(actor)
+}
+
+async fn authorize_task(
+    state: &AppState,
+    auth: &AuthUser,
+    id: Uuid,
+    write: bool,
+) -> Result<tasks::TaskRow, (StatusCode, Json<ErrorResponse>)> {
+    let task = tasks::get_task(state.db(), id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Could not resolve task");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Task not found")),
+            )
+        })?;
+    authorize_workspace(state, auth, task.workspace_id, write).await?;
+    Ok(task)
+}
+
+async fn authorize_run(
+    state: &AppState,
+    auth: &AuthUser,
+    id: Uuid,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let run = tasks::get_task_run(state.db(), id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Could not resolve task run");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::new("Task run not found")),
+            )
+        })?;
+    authorize_task(state, auth, run.task_id, false).await?;
+    Ok(())
+}
+
+async fn validate_projects(
+    state: &AppState,
+    workspace: Uuid,
+    projects: &[Uuid],
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    for project in projects {
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = $1 AND workspace_id = $2)",
+        )
+        .bind(project)
+        .bind(workspace)
+        .fetch_one(state.db())
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+        })?;
+        if !valid {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::new(
+                    "Project is not available in this workspace",
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Task response
 #[derive(Debug, Serialize)]
@@ -160,6 +270,7 @@ pub struct TaskRunLogData {
     agent_type: String,
     log_level: String,
     message: String,
+    metadata: Option<serde_json::Value>,
     created_at: String,
 }
 
@@ -177,6 +288,7 @@ impl From<tasks::TaskRunLogRow> for TaskRunLogData {
             agent_type: row.agent_type,
             log_level: row.log_level,
             message: row.message,
+            metadata: row.metadata,
             created_at: row
                 .created_at
                 .map(|dt| dt.and_utc().to_rfc3339())
@@ -227,10 +339,15 @@ pub struct UpdateTaskRequest {
 /// GET /api/workspaces/:workspace_id/tasks
 pub async fn list(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
+    let _actor = match authorize_workspace(&state, &auth, workspace_id, false).await {
+        Ok(actor) => actor,
+        Err(response) => return response.into_response(),
+    };
+
     match tasks::list_tasks(
         state.db(),
         workspace_id,
@@ -257,10 +374,18 @@ pub async fn list(
 /// POST /api/workspaces/:workspace_id/tasks
 pub async fn create(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
     Json(request): Json<CreateTaskRequest>,
 ) -> impl IntoResponse {
+    let actor = match authorize_workspace(&state, &auth, workspace_id, true).await {
+        Ok(actor) => actor,
+        Err(response) => return response.into_response(),
+    };
+    if let Err(response) = validate_projects(&state, workspace_id, &request.project_ids).await {
+        return response.into_response();
+    }
+
     if let Some(source_id) = request.source_id {
         match sources::get_source(state.db(), source_id, workspace_id).await {
             Ok(Some(_)) => {}
@@ -284,7 +409,7 @@ pub async fn create(
         }
     }
 
-    match tasks::create_task(
+    match tasks::create_task_as(
         state.db(),
         workspace_id,
         &request.project_ids,
@@ -294,6 +419,7 @@ pub async fn create(
         request.priority,
         request.is_agentic.unwrap_or(false),
         request.source_id,
+        Some(actor),
     )
     .await
     {
@@ -312,9 +438,14 @@ pub async fn create(
 /// GET /api/tasks/:id
 pub async fn get(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    let _task = match authorize_task(&state, &auth, id, false).await {
+        Ok(task) => task,
+        Err(response) => return response.into_response(),
+    };
+
     match tasks::get_task(state.db(), id).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
         Ok(None) => (
@@ -336,10 +467,20 @@ pub async fn get(
 /// PUT /api/tasks/:id
 pub async fn update(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTaskRequest>,
 ) -> impl IntoResponse {
+    let task = match authorize_task(&state, &auth, id, true).await {
+        Ok(task) => task,
+        Err(response) => return response.into_response(),
+    };
+    if let Some(projects) = &req.project_ids
+        && let Err(response) = validate_projects(&state, task.workspace_id, projects).await
+    {
+        return response.into_response();
+    }
+
     match tasks::update_task(
         state.db(),
         id,
@@ -372,9 +513,14 @@ pub async fn update(
 /// DELETE /api/tasks/:id
 pub async fn delete(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    let _task = match authorize_task(&state, &auth, id, true).await {
+        Ok(task) => task,
+        Err(response) => return response.into_response(),
+    };
+
     match tasks::delete_task(state.db(), id).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
@@ -396,9 +542,14 @@ pub async fn delete(
 /// POST /api/tasks/:id/queue
 pub async fn queue(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    let _task = match authorize_task(&state, &auth, id, true).await {
+        Ok(task) => task,
+        Err(response) => return response.into_response(),
+    };
+
     match tasks::queue_task(state.db(), id).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
         Ok(None) => (
@@ -420,9 +571,14 @@ pub async fn queue(
 /// GET /api/tasks/:id/runs
 pub async fn list_runs(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    let _task = match authorize_task(&state, &auth, id, false).await {
+        Ok(task) => task,
+        Err(response) => return response.into_response(),
+    };
+
     match tasks::list_task_runs(state.db(), id).await {
         Ok(runs) => Json(TaskRunsListResponse {
             runs: runs.into_iter().map(TaskRunData::from).collect(),
@@ -442,34 +598,16 @@ pub async fn list_runs(
 /// POST /api/tasks/:id/runs
 pub async fn create_run(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    // Check if there's already a running task run for this task
-    // This prevents duplicate concurrent executions
-    match tasks::list_task_runs(state.db(), id).await {
-        Ok(runs) => {
-            let active_run = runs
-                .iter()
-                .find(|r| r.status == "running" || r.status == "pending");
-            if let Some(existing) = active_run {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::new(format!(
-                        "Task already has an active run (id: {}, status: {})",
-                        existing.id, existing.status
-                    ))),
-                )
-                    .into_response();
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to check existing runs: {}", e);
-            // Continue anyway - better to potentially have duplicates than fail entirely
-        }
-    }
+    let _task = match authorize_task(&state, &auth, id, true).await {
+        Ok(task) => task,
+        Err(response) => return response.into_response(),
+    };
+    let actor = Uuid::parse_str(&auth.0.sub).expect("authorized actor UUID");
 
-    match tasks::create_task_run(state.db(), id).await {
+    match tasks::create_task_run_as(state.db(), id, Some(actor)).await {
         Ok(run) => {
             let run_id = run.id;
             let task_id = id;
@@ -483,6 +621,16 @@ pub async fn create_run(
             (StatusCode::CREATED, Json(TaskRunResponse::from(run))).into_response()
         }
         Err(e) => {
+            if e.as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::new("Task already has an active run")),
+                )
+                    .into_response();
+            }
+
             tracing::error!("Database error: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -496,9 +644,13 @@ pub async fn create_run(
 /// GET /api/tasks/runs/:run_id
 pub async fn get_run(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_run(&state, &auth, run_id).await {
+        return response.into_response();
+    }
+
     match tasks::get_task_run(state.db(), run_id).await {
         Ok(Some(run)) => Json(TaskRunResponse::from(run)).into_response(),
         Ok(None) => (
@@ -520,9 +672,13 @@ pub async fn get_run(
 /// GET /api/tasks/runs/:run_id/logs
 pub async fn get_run_logs(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
+    if let Err(response) = authorize_run(&state, &auth, run_id).await {
+        return response.into_response();
+    }
+
     match tasks::get_task_run_logs(state.db(), run_id).await {
         Ok(logs) => Json(TaskRunLogsListResponse {
             logs: logs.into_iter().map(TaskRunLogData::from).collect(),
@@ -551,6 +707,7 @@ mod tests {
         tasks::TaskRow {
             id: Uuid::from_u128(1),
             workspace_id: Uuid::from_u128(2),
+            created_by: None,
             project_ids: if populated {
                 vec![Uuid::from_u128(3)]
             } else {

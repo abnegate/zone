@@ -26,6 +26,14 @@ async fn creation_preserves_source_and_rejects_other_workspaces() {
 async fn check_creation() {
     let pool = common::create_test_pool().await;
     let (_, workspace_id, user_id) = common::setup_test_data(&pool).await;
+    sqlx::query(
+        "INSERT INTO workspace_members(workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+    )
+    .bind(workspace_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let (_, other_workspace_id, _) = common::setup_test_data(&pool).await;
     let source = sources::create_source(
         &pool,
@@ -43,7 +51,7 @@ async fn check_creation() {
     for (workspace, source_id, expected) in [
         (workspace_id, Some(source.id), StatusCode::CREATED),
         (workspace_id, None, StatusCode::CREATED),
-        (other_workspace_id, Some(source.id), StatusCode::BAD_REQUEST),
+        (other_workspace_id, Some(source.id), StatusCode::FORBIDDEN),
         (workspace_id, Some(Uuid::new_v4()), StatusCode::BAD_REQUEST),
     ] {
         let request: CreateTaskRequest = serde_json::from_value(json!({
@@ -73,6 +81,7 @@ async fn check_creation() {
             let id = Uuid::parse_str(body["task"]["id"].as_str().unwrap()).unwrap();
             let persisted = tasks::get_task(&pool, id).await.unwrap().unwrap();
             assert_eq!(persisted.source_id, source_id);
+            assert_eq!(persisted.created_by, Some(user_id));
         }
     }
     let count: i64 = sqlx::query_scalar(

@@ -386,7 +386,7 @@ sequenceDiagram
 
 ## 7. Control plane
 
-### 7.1 Data model — `runner/zone_server/migrations/017_deployments.sql`
+### 7.1 Data model — `runner/zone_server/migrations/018_deployments.sql`
 
 Split: **`releases`** = identity + desired/observed state, one row per target + name; **`deployments`** = attempts (the state machine the API and UI expose); **`deployment_events`** = append-only step log. Helm revisions are referenced by integer, never copied. Targets without native revisions (stores, git-backed repos, docker) use `deployments` history plus recorded digests as their rollback coordinate.
 
@@ -910,7 +910,7 @@ Operations:
 | Phase | Deliverable | Verified by |
 |---|---|---|
 | 0 | `task_runs` heartbeat + orphan sweep; per-run workspace dir + `GitService::clone`; `git` in the image; `tasks.created_by` set and `tasks.status` advancing; `ws/auth.rs` membership on task WS; task `WorkspaceScope` + receipts persisted | kill the server mid-run → row `failed('orphaned')` within 2 min; checkout visible on disk; a foreign-workspace JWT gets `forbidden`; task run log shows receipt rows |
-| 1 | Migration 017 (`make sqlx-prepare`); targets + runners CRUD, Targets tab, Runners page; `zone-runner connect` (WS, registration, capability detection, `Run` step, clone, upload, logs); `deploy_artifacts` + `persist_bundle` | the Mac shows online with detected capabilities; a `Run` job clones a repo, runs `cargo --version`, uploads a bundle, streams logs |
+| 1 | Migration 018 (`make sqlx-prepare`); targets + runners CRUD, Targets tab, Runners page; `zone-runner connect` (WS, registration, capability detection, `Run` step, clone, upload, logs); `deploy_artifacts` + `persist_bundle` | the Mac shows online with detected capabilities; a `Run` job clones a repo, runs `cargo --version`, uploads a bundle, streams logs |
 | 2 | `deployments` core: manifest validation, state machine, `POST /deployments`, approve/cancel/reject, events, `/ws/deployments`, Notifier (Discord / email / in-app), Deployments UI | request → Discord alert with deep link → approve → `approved`; idempotent re-POST returns the same id; non-admin approve → 403 |
 | 3 | Container path: `helm/zone-app`, `helm/zone-build`, `KubeHelmDriver`, `DockerComposeDriver`, docker-proxy, tools stage, `workers/deploy.rs`, `CheckLadder` + `feedback()`, instrumentation script served | a known-good image → `live` on kind and on docker; kill the server mid-deploy → lease reclaimed, finishes; bad `smoke.path` → `rolled_back` with evidence and `helm history` showing the rollback revision; the fix loop receives `feedback()` |
 | 4 | `desktop_app` / `cli`: builders lifted from `package-tauri.sh`, `package-deb.sh`, the cask template; `github_release`, `homebrew_tap`, `apt_repo` drivers; launch-marker, Xvfb and `--version` checks | zone's own desktop client shipped to a scratch tap, apt repo and GitHub prerelease; rollback = revert commit visible in the tap |
