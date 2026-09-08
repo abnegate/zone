@@ -120,7 +120,7 @@ class DownloadModelsTest(unittest.TestCase):
     def test_parse_args_accepts_every_valid_bundle(self) -> None:
         self.assertEqual(
             download_models.VALID_BUNDLES,
-            {"audio", "image", "image-dev", "image-edit", "video", "vision"},
+            {"audio", "image", "image-dev", "image-edit", "upscale", "video", "vision"},
         )
         for bundle in [*sorted(download_models.VALID_BUNDLES), "all"]:
             with self.subTest(bundle=bundle):
@@ -201,7 +201,7 @@ class ModelManifestTest(unittest.TestCase):
             with self.subTest(model=model.get("id")):
                 self.assertIn(
                     download_models.model_bundle(model),
-                    {"audio", "image", "image-dev", "image-edit", "video", "vision"},
+                    {"audio", "image", "image-dev", "image-edit", "upscale", "video", "vision"},
                 )
 
     def test_every_bundle_selects_at_least_one_entry(self) -> None:
