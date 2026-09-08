@@ -58,7 +58,7 @@ impl Notification {
         self.link = Url::parse(&link)
             .ok()
             .filter(|parsed| matches!(parsed.scheme(), "http" | "https"))
-            .map(|_| link);
+            .map(String::from);
         self
     }
 

@@ -15,6 +15,9 @@ use crate::error::NotifyError;
 use crate::notification::Notification;
 use crate::notifier::Notifier;
 
+/// Implicit-TLS submissions port, the one port relay() is built for.
+const SUBMISSIONS_PORT: u16 = 465;
+
 /// Delivers to a fixed set of recipients through one SMTP relay.
 ///
 /// This is a separate transport from `zone_email`, which owns the account
@@ -52,7 +55,17 @@ impl Email {
 
         let credentials =
             Credentials::new(config.user.clone(), config.password.expose().to_string());
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)
+        // relay() sets implicit TLS and port 465. Pointing that at 587, the
+        // submission port every mainstream relay serves with STARTTLS -- and
+        // the workspace default -- sends a ClientHello to a plaintext
+        // listener. starttls_relay refuses to send credentials if the upgrade
+        // fails, so this stays downgrade-safe.
+        let builder = if config.port == SUBMISSIONS_PORT {
+            AsyncSmtpTransport::<Tokio1Executor>::relay(&config.host)
+        } else {
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.host)
+        };
+        let transport = builder
             .map_err(|error| NotifyError::Smtp {
                 host: config.host.clone(),
                 message: describe(error),

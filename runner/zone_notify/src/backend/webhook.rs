@@ -119,11 +119,10 @@ fn strip_url(error: reqwest::Error) -> String {
 fn retry_after(response: &Response) -> Option<Duration> {
     let header = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
     let seconds: f64 = header.trim().parse().ok()?;
-    if seconds.is_finite() && seconds >= 0.0 {
-        Some(Duration::from_secs_f64(seconds))
-    } else {
-        None
-    }
+    // try_from_secs_f64 rejects negative, NaN, infinite and overflowing values
+    // in one call. The header is the least trusted input in this crate, and
+    // from_secs_f64 panics rather than erroring on overflow.
+    Duration::try_from_secs_f64(seconds).ok()
 }
 
 #[cfg(test)]
@@ -306,12 +305,11 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreachable_host_never_names_the_url() {
-        let server = MockServer::start().await;
-        let uri = server.uri();
-        drop(server);
-
+        // Port 1 is privileged, so no concurrent test can bind it and answer.
+        // Freeing an ephemeral port instead races every other test's mock
+        // server, which then answers 200 and the assertion never runs.
         let webhook = Webhook::new(
-            Endpoint::for_test(&format!("{uri}/services/T000/B000/xxxxSECRETxxxx")),
+            Endpoint::for_test("http://127.0.0.1:1/services/T000/B000/xxxxSECRETxxxx"),
             Duration::from_millis(500),
         )
         .expect("client");

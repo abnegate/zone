@@ -97,7 +97,7 @@ impl Slack {
         if let Some(link) = notification.url() {
             blocks.push(json!({
                 "type": "context",
-                "elements": [{ "type": "mrkdwn", "text": format!("<{link}|Open in Zone>") }],
+                "elements": [{ "type": "mrkdwn", "text": format!("<{}|Open in Zone>", escape(link)) }],
             }));
         }
 
