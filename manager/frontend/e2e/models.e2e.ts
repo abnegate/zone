@@ -31,7 +31,14 @@ type TrainRequest = {
 type TrainResult = {
   filename: string;
   quality: { improvement: number; checkpoint: string; measured: boolean } | null;
-  dataset?: Array<{ concern: 'too_few' | 'low_variety' | 'mixed_subjects'; detail: string }>;
+  dataset?: Array<{
+    concern: 'too_few' | 'low_variety' | 'low_pose_variety' | 'mixed_subjects';
+    detail: string;
+  }>;
+  screening?: {
+    kept: number;
+    dropped: Array<{ filename: string; reason: 'duplicate' | 'blurred' | 'small' }>;
+  } | null;
 };
 
 const mockInstalledModels: InstalledModel[] = [
@@ -489,6 +496,94 @@ test.describe('Models Page', () => {
     await expect(result).toContainText('measured at step800');
     await expect(panel.locator('.train-advice')).toHaveCount(0);
     await expect(panel.getByText('Worth checking')).toHaveCount(0);
+  });
+
+  test('receipts every image screening dropped, grouped by why', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.36, checkpoint: 'step400', measured: true },
+      screening: {
+        kept: 11,
+        dropped: [
+          { filename: 'IMG_4402.jpg', reason: 'duplicate' },
+          { filename: 'IMG_4407.jpg', reason: 'blurred' },
+          { filename: 'thumb.png', reason: 'small' },
+          { filename: 'IMG_4405.jpg', reason: 'duplicate' },
+        ],
+      },
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const screening = panel.locator('.train-screening');
+    await expect(screening).toContainText('Screened before training');
+    await expect(screening).toContainText('Trained on 11 of 15 images');
+
+    const items = screening.locator('.train-screening-item');
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText('2 near-duplicates');
+    await expect(items.nth(0)).toContainText('teach one pose over and over');
+    await expect(items.nth(0)).toContainText('IMG_4402.jpg, IMG_4405.jpg');
+    await expect(items.nth(1)).toContainText('1 blurred frame');
+    await expect(items.nth(1)).toContainText('learned as part of the subject');
+    await expect(items.nth(1)).toContainText('IMG_4407.jpg');
+    await expect(items.nth(2)).toContainText('1 undersized image');
+    await expect(items.nth(2)).toContainText('no detail left to learn');
+    await expect(items.nth(2)).toContainText('thumb.png');
+
+    await expect(screening).toContainText('Your originals are untouched');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+    await expect(panel.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('says nothing about screening when nothing was dropped', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.36, checkpoint: 'step400', measured: true },
+      screening: null,
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const result = panel.locator('.train-result');
+    await expect(result).toContainText('Healthy');
+    await expect(panel.locator('.train-screening')).toHaveCount(0);
+    await expect(panel.getByText('Screened before training')).toHaveCount(0);
+
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.36, checkpoint: 'step800', measured: true },
+      screening: { kept: 12, dropped: [] },
+    });
+    await trainOnce(page, panel, 'portrait-2.png');
+
+    await expect(result).toContainText('measured at step800');
+    await expect(panel.locator('.train-screening')).toHaveCount(0);
+    await expect(panel.getByText('Screened before training')).toHaveCount(0);
+  });
+
+  test('names what a set with no pose variety cannot be prompted to do', async ({ page }) => {
+    const panel = trainPanel(page);
+    await routeTrainResult(page, {
+      filename: 'zoneface.safetensors',
+      quality: { improvement: 0.36, checkpoint: 'step400', measured: true },
+      dataset: [
+        { concern: 'low_pose_variety', detail: 'every image is the same head-on standing pose' },
+      ],
+    });
+
+    await page.getByRole('tab', { name: 'Train' }).click();
+    await trainOnce(page, panel);
+
+    const advice = panel.locator('.train-advice');
+    await expect(advice).toContainText('Cannot be prompted into new poses');
+    await expect(advice).toContainText('every image is the same head-on standing pose');
+    await expect(panel.locator('.error-placeholder')).toHaveCount(0);
+    await expect(panel.getByRole('alert')).toHaveCount(0);
   });
 
   test('displays installed models', async ({ page }) => {
