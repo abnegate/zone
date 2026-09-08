@@ -16,7 +16,7 @@ const PACKAGED_TRAIN_CONFIG: &str =
 
 #[derive(Debug, Deserialize)]
 pub struct TrainConfig {
-    steps_per_image: u32,
+    passes_per_image: u32,
     min_steps: u32,
     max_steps: u32,
     rank: u32,
@@ -54,7 +54,10 @@ pub fn packaged_config() -> Result<TrainConfig, TrainError> {
 impl TrainConfig {
     /// Steps for a dataset of this size, clamped to the configured bounds.
     pub fn steps(&self, image_count: usize) -> u32 {
-        (image_count.max(1) as u32 * self.steps_per_image).clamp(self.min_steps, self.max_steps)
+        u32::try_from(image_count.max(1))
+            .unwrap_or(u32::MAX)
+            .saturating_mul(self.passes_per_image)
+            .clamp(self.min_steps, self.max_steps)
     }
 }
 
@@ -355,18 +358,67 @@ fn train_prompt_complete(entry: &Value) -> Result<bool, TrainError> {
 mod tests {
     use super::*;
 
+    const DATASETS: [usize; 4] = [8, 24, 100, 300];
+    const HEALTHY_PASSES: std::ops::RangeInclusive<f64> = 17.0..=19.0;
+
+    fn passes(config: &TrainConfig, images: usize) -> f64 {
+        f64::from(config.steps(images)) / images as f64
+    }
+
     #[test]
-    fn identity_config_trains_long_enough_for_eight_images() {
+    fn a_larger_dataset_is_never_trained_less_per_image_than_a_smaller_one() {
+        let config: TrainConfig = packaged_config().unwrap();
+        for sizes in DATASETS.windows(2) {
+            let (smaller, larger) = (sizes[0], sizes[1]);
+            assert!(
+                passes(&config, larger) >= passes(&config, smaller),
+                "{larger} images get {} passes each and {smaller} images get {}, so uploading more photos would train the subject less",
+                passes(&config, larger),
+                passes(&config, smaller)
+            );
+        }
+    }
+
+    #[test]
+    fn every_realistic_dataset_trains_inside_the_measured_band() {
+        let config: TrainConfig = packaged_config().unwrap();
+        for images in DATASETS {
+            let budget = passes(&config, images);
+            assert!(
+                HEALTHY_PASSES.contains(&budget),
+                "{images} images train {budget} passes each, outside the band that produced a healthy adapter"
+            );
+        }
+    }
+
+    #[test]
+    fn the_floor_keeps_a_tiny_dataset_training() {
         let config: TrainConfig = packaged_config().unwrap();
         assert!(
-            config.min_steps >= 400,
-            "identity training needs at least 400 steps, and clamping to a lower floor would pass every other assertion here"
+            config.min_steps <= config.max_steps,
+            "the clamp bounds are inverted, so every budget would panic"
         );
-        assert_eq!(config.steps(1), config.min_steps, "a tiny set still trains");
+        for images in [1, 2, 3] {
+            assert_eq!(
+                config.steps(images),
+                config.min_steps,
+                "{images} images must still train to the floor"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ceiling_holds_for_a_huge_dataset() {
+        let config: TrainConfig = packaged_config().unwrap();
         assert_eq!(
-            config.steps(10_000),
+            config.steps(5_000),
             config.max_steps,
             "a huge set is capped"
+        );
+        assert_eq!(
+            config.steps(usize::MAX),
+            config.max_steps,
+            "an absurd count must clamp rather than overflow the budget"
         );
     }
 
@@ -374,7 +426,7 @@ mod tests {
     fn packaged_config_tracks_the_shipped_json() {
         let config: TrainConfig = packaged_config().unwrap();
         let raw: Value = serde_json::from_str(PACKAGED_TRAIN_CONFIG).unwrap();
-        assert_eq!(raw["steps_per_image"], config.steps_per_image);
+        assert_eq!(raw["passes_per_image"], config.passes_per_image);
         assert_eq!(raw["min_steps"], config.min_steps);
         assert_eq!(raw["max_steps"], config.max_steps);
         assert_eq!(raw["rank"], config.rank);

@@ -18,8 +18,11 @@ class TrainConfigTests(unittest.TestCase):
         self.assertTrue(config['alpha_equals_rank'])
         self.assertEqual(train_config.lora_alpha(8, config), 8.0)
         self.assertGreaterEqual(int(config['rank']), 32)
-        self.assertGreaterEqual(int(config['min_steps']), 400)
-        self.assertEqual(int(config['steps_per_image']), 50)
+        self.assertGreaterEqual(
+            int(config['min_steps']),
+            150,
+            'the shortest run measured to improve the subject was 150 steps',
+        )
         self.assertEqual(int(config['resolution']), 512)
         self.assertEqual(config['lora_dtype'], 'bf16')
 

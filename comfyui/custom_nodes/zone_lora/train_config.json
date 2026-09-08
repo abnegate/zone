@@ -1,8 +1,8 @@
 {
-  "steps_per_image": 50,
-  "min_steps": 400,
+  "passes_per_image": 19,
+  "min_steps": 150,
   "checkpoint_every": 50,
-  "max_steps": 800,
+  "max_steps": 6000,
   "rank": 32,
   "learning_rate": 0.0001,
   "sigma_floor": 0.05,

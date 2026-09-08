@@ -25,10 +25,8 @@ def train_steps(image_count: int, config: dict) -> int:
     override = env('ZONE_TRAIN_STEPS')
     if override:
         return int(override)
-    return min(
-        int(config['max_steps']),
-        max(int(config['min_steps']), max(image_count, 1) * int(config['steps_per_image'])),
-    )
+    budget = max(image_count, 1) * int(config['passes_per_image'])
+    return min(int(config['max_steps']), max(int(config['min_steps']), budget))
 
 
 def env(name: str, default: str = '') -> str:
