@@ -1,7 +1,7 @@
 //! Task database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -70,7 +70,7 @@ pub struct TaskRunRow {
 }
 
 /// Task run log row
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TaskRunLogRow {
     pub id: Uuid,
     pub task_run_id: Uuid,
@@ -333,6 +333,15 @@ pub async fn create_task(
     .await
 }
 
+fn distinct_projects(projects: &[Uuid]) -> Vec<Uuid> {
+    let mut seen = std::collections::HashSet::new();
+    projects
+        .iter()
+        .copied()
+        .filter(|project| seen.insert(*project))
+        .collect()
+}
+
 /// Create a task with its authenticated actor in the same transaction.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_task_as(
@@ -348,6 +357,64 @@ pub async fn create_task_as(
     actor: Option<Uuid>,
 ) -> DbResult<TaskRow> {
     let mut transaction = pool.begin().await?;
+    let task = create_task_in(
+        &mut transaction,
+        workspace_id,
+        project_ids,
+        title,
+        description,
+        acceptance_criteria,
+        priority,
+        is_agentic,
+        source_id,
+        actor,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(task)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn create_task_in(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    project_ids: &[Uuid],
+    title: &str,
+    description: &str,
+    acceptance_criteria: Option<&str>,
+    priority: Option<i32>,
+    is_agentic: bool,
+    source_id: Option<Uuid>,
+    actor: Option<Uuid>,
+) -> DbResult<TaskRow> {
+    if let Some(actor) = actor {
+        super::actions::authorize(connection, workspace_id, actor, true).await?;
+    }
+    if let Some(source) = source_id {
+        let active: Option<Option<bool>> = sqlx::query_scalar(
+            "SELECT is_active FROM sources WHERE id=$1 AND workspace_id=$2 FOR SHARE",
+        )
+        .bind(source)
+        .bind(workspace_id)
+        .fetch_optional(&mut *connection)
+        .await?;
+        if !matches!(active, Some(None) | Some(Some(true))) {
+            return Err(super::actions::invalid(
+                "Source not found in this workspace or inactive",
+            ));
+        }
+    }
+    let projects = distinct_projects(project_ids);
+    // Stable lock order keeps overlapping multi-project admissions from deadlocking.
+    let mut locked = projects.clone();
+    locked.sort_unstable();
+    for project in locked {
+        sqlx::query("SELECT id FROM projects WHERE id=$1 AND workspace_id=$2 FOR SHARE")
+            .bind(project)
+            .bind(workspace_id)
+            .fetch_one(&mut *connection)
+            .await?;
+    }
     let row = sqlx::query!(
         r#"
         INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, source_id, created_by)
@@ -366,20 +433,19 @@ pub async fn create_task_as(
         source_id,
         actor
     )
-    .fetch_one(&mut *transaction)
+    .fetch_one(&mut *connection)
     .await?;
 
     let mut task = map_task_row!(row);
 
-    for project in project_ids {
+    for project in &projects {
         let inserted = sqlx::query("INSERT INTO task_projects(task_id, project_id) SELECT $1, id FROM projects WHERE id = $2 AND workspace_id = $3")
-            .bind(task.id).bind(project).bind(workspace_id).execute(&mut *transaction).await?;
+            .bind(task.id).bind(project).bind(workspace_id).execute(&mut *connection).await?;
         if inserted.rows_affected() != 1 {
             return Err(sqlx::Error::RowNotFound);
         }
     }
-    task.project_ids = project_ids.to_vec();
-    transaction.commit().await?;
+    task.project_ids = projects;
 
     Ok(task)
 }
@@ -395,7 +461,35 @@ pub async fn update_task(
     priority: Option<i32>,
     project_ids: Option<&[Uuid]>,
 ) -> DbResult<Option<TaskRow>> {
+    update_task_as(
+        pool,
+        id,
+        title,
+        description,
+        acceptance_criteria,
+        status,
+        priority,
+        project_ids,
+        None,
+    )
+    .await
+}
+
+pub async fn update_task_as(
+    pool: &PgPool,
+    id: Uuid,
+    title: Option<&str>,
+    description: Option<&str>,
+    acceptance_criteria: Option<&str>,
+    status: Option<&str>,
+    priority: Option<i32>,
+    project_ids: Option<&[Uuid]>,
+    actor: Option<Uuid>,
+) -> DbResult<Option<TaskRow>> {
     let mut transaction = pool.begin().await?;
+    if let Some(actor) = actor {
+        authorize_task_in(&mut transaction, id, actor, true).await?;
+    }
     let active: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id=$1 FOR UPDATE")
             .bind(id)
@@ -435,19 +529,34 @@ pub async fn update_task(
 
             // Update project associations if provided
             if let Some(pids) = project_ids {
+                let mut projects = distinct_projects(pids);
+                projects.sort_unstable();
+                for project in projects {
+                    sqlx::query(
+                        "SELECT id FROM projects WHERE id=$1 AND workspace_id=$2 FOR SHARE",
+                    )
+                    .bind(project)
+                    .bind(task.workspace_id)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                }
                 sqlx::query("DELETE FROM task_projects WHERE task_id=$1")
                     .bind(id)
                     .execute(&mut *transaction)
                     .await?;
-                for project in pids {
+                for project in &distinct_projects(pids) {
                     let inserted = sqlx::query("INSERT INTO task_projects(task_id, project_id) SELECT $1, id FROM projects WHERE id=$2 AND workspace_id=$3").bind(id).bind(project).bind(task.workspace_id).execute(&mut *transaction).await?;
                     if inserted.rows_affected() != 1 {
                         return Err(sqlx::Error::RowNotFound);
                     }
                 }
-                task.project_ids = pids.to_vec();
+                task.project_ids = distinct_projects(pids);
             } else {
-                task.project_ids = get_task_project_ids(pool, task.id).await?;
+                task.project_ids =
+                    sqlx::query_scalar("SELECT project_id FROM task_projects WHERE task_id=$1")
+                        .bind(task.id)
+                        .fetch_all(&mut *transaction)
+                        .await?;
             }
 
             Ok(Some(task))
@@ -460,16 +569,36 @@ pub async fn update_task(
 
 /// Delete a task
 pub async fn delete_task(pool: &PgPool, id: Uuid) -> DbResult<bool> {
+    delete_task_as(pool, id, None).await
+}
+
+pub async fn delete_task_as(pool: &PgPool, id: Uuid, actor: Option<Uuid>) -> DbResult<bool> {
+    let mut transaction = pool.begin().await?;
+    if let Some(actor) = actor {
+        authorize_task_in(&mut transaction, id, actor, true).await?;
+    }
     let result = sqlx::query!("DELETE FROM tasks WHERE id = $1", id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
 
+    transaction.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
 /// Queue a task for execution
 pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
+    queue_task_as(pool, id, None).await
+}
+
+pub async fn queue_task_as(
+    pool: &PgPool,
+    id: Uuid,
+    actor: Option<Uuid>,
+) -> DbResult<Option<TaskRow>> {
     let mut transaction = pool.begin().await?;
+    if let Some(actor) = actor {
+        authorize_task_in(&mut transaction, id, actor, true).await?;
+    }
     let active: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id=$1 FOR UPDATE")
             .bind(id)
@@ -495,15 +624,34 @@ pub async fn queue_task(pool: &PgPool, id: Uuid) -> DbResult<Option<TaskRow>> {
     .fetch_optional(&mut *transaction)
     .await?;
 
-    transaction.commit().await?;
-    match row {
+    let result = match row {
         Some(r) => {
             let mut task = map_task_row!(r);
-            task.project_ids = get_task_project_ids(pool, task.id).await?;
+            task.project_ids =
+                sqlx::query_scalar("SELECT project_id FROM task_projects WHERE task_id=$1")
+                    .bind(task.id)
+                    .fetch_all(&mut *transaction)
+                    .await?;
             Ok(Some(task))
         }
         None => Ok(None),
-    }
+    };
+    transaction.commit().await?;
+    result
+}
+
+/// Membership locks always precede task locks in user-triggered operations.
+async fn authorize_task_in(
+    connection: &mut PgConnection,
+    task: Uuid,
+    actor: Uuid,
+    write: bool,
+) -> DbResult<()> {
+    let workspace: Uuid = sqlx::query_scalar("SELECT workspace_id FROM tasks WHERE id=$1")
+        .bind(task)
+        .fetch_one(&mut *connection)
+        .await?;
+    super::actions::authorize(connection, workspace, actor, write).await
 }
 
 /// Create a new task run
@@ -518,17 +666,29 @@ pub async fn create_task_run_as(
     actor: Option<Uuid>,
 ) -> DbResult<TaskRunRow> {
     let mut transaction = pool.begin().await?;
+    let run = create_task_run_in(&mut transaction, task_id, actor).await?;
+    transaction.commit().await?;
+    Ok(run)
+}
+
+pub(super) async fn create_task_run_in(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+    actor: Option<Uuid>,
+) -> DbResult<TaskRunRow> {
+    if let Some(actor) = actor {
+        authorize_task_in(connection, task_id, actor, true).await?;
+    }
     sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&mut *connection)
         .await?;
     let row = sqlx::query!(
         "INSERT INTO task_runs (task_id, status, triggered_by) VALUES ($1, 'running', $2) RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by",
         task_id, actor
-    ).fetch_one(&mut *transaction).await?;
+    ).fetch_one(&mut *connection).await?;
     sqlx::query("UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), completed_at = NULL, updated_at = NOW() WHERE id = $1")
-        .bind(task_id).bind(row.id).execute(&mut *transaction).await?;
-    transaction.commit().await?;
+        .bind(task_id).bind(row.id).execute(&mut *connection).await?;
     Ok(TaskRunRow {
         id: row.id,
         task_id: row.task_id,
@@ -666,6 +826,18 @@ pub async fn add_owned_task_run_log(
 
 /// List task runs for a task
 pub async fn list_task_runs(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<TaskRunRow>> {
+    list_task_runs_as(pool, task_id, None).await
+}
+
+pub async fn list_task_runs_as(
+    pool: &PgPool,
+    task_id: Uuid,
+    actor: Option<Uuid>,
+) -> DbResult<Vec<TaskRunRow>> {
+    let mut transaction = pool.begin().await?;
+    if let Some(actor) = actor {
+        authorize_task_in(&mut transaction, task_id, actor, false).await?;
+    }
     let rows = sqlx::query!(
         r#"
         SELECT id, task_id, status, current_phase, progress_percent, started_at,
@@ -676,9 +848,10 @@ pub async fn list_task_runs(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<TaskRu
         "#,
         task_id
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *transaction)
     .await?;
 
+    transaction.commit().await?;
     Ok(rows
         .into_iter()
         .map(|r| TaskRunRow {
@@ -697,7 +870,13 @@ pub async fn list_task_runs(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<TaskRu
 }
 
 /// Get task run by ID
-pub async fn get_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<Option<TaskRunRow>> {
+pub async fn get_task_run<'connection, E>(
+    connection: E,
+    run_id: Uuid,
+) -> DbResult<Option<TaskRunRow>>
+where
+    E: sqlx::Executor<'connection, Database = sqlx::Postgres>,
+{
     let row = sqlx::query!(
         r#"
         SELECT id, task_id, status, current_phase, progress_percent, started_at,
@@ -707,7 +886,7 @@ pub async fn get_task_run(pool: &PgPool, run_id: Uuid) -> DbResult<Option<TaskRu
         "#,
         run_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(connection)
     .await?;
 
     Ok(row.map(|r| TaskRunRow {
@@ -763,32 +942,15 @@ pub async fn add_task_run_log(
 }
 
 /// Get logs for a task run
-pub async fn get_task_run_logs(pool: &PgPool, task_run_id: Uuid) -> DbResult<Vec<TaskRunLogRow>> {
-    let rows = sqlx::query!(
-        r#"
-        SELECT id, task_run_id, phase, agent_type, log_level, message, metadata, created_at
-        FROM task_run_logs
-        WHERE task_run_id = $1
-        ORDER BY created_at ASC
-        "#,
-        task_run_id
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|r| TaskRunLogRow {
-            id: r.id,
-            task_run_id: r.task_run_id,
-            phase: r.phase,
-            agent_type: r.agent_type,
-            log_level: r.log_level,
-            message: r.message,
-            metadata: r.metadata,
-            created_at: r.created_at,
-        })
-        .collect())
+pub async fn get_task_run_logs<'connection, E>(
+    connection: E,
+    task_run_id: Uuid,
+) -> DbResult<Vec<TaskRunLogRow>>
+where
+    E: sqlx::Executor<'connection, Database = sqlx::Postgres>,
+{
+    sqlx::query_as("SELECT id,task_run_id,phase,agent_type,log_level,message,metadata,created_at FROM task_run_logs WHERE task_run_id=$1 ORDER BY created_at ASC,id ASC")
+        .bind(task_run_id).fetch_all(connection).await
 }
 
 /// Store publication metadata only while the same writer still owns the run.

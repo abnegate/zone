@@ -15,6 +15,29 @@ use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
 
+fn database_error(error: sqlx::Error) -> axum::response::Response {
+    if matches!(&error, sqlx::Error::Protocol(message) if message == "Workspace access denied") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new("Workspace access required")),
+        )
+            .into_response();
+    }
+    if matches!(error, sqlx::Error::RowNotFound) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new("Task or related resource not found")),
+        )
+            .into_response();
+    }
+    tracing::error!(%error, "Task database operation failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse::new("Internal server error")),
+    )
+        .into_response()
+}
+
 async fn authorize_workspace(
     state: &AppState,
     auth: &AuthUser,
@@ -50,7 +73,7 @@ async fn authorize_task(
     auth: &AuthUser,
     id: Uuid,
     write: bool,
-) -> Result<tasks::TaskRow, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(Uuid, tasks::TaskRow), (StatusCode, Json<ErrorResponse>)> {
     let task = tasks::get_task(state.db(), id)
         .await
         .map_err(|error| {
@@ -66,15 +89,15 @@ async fn authorize_task(
                 Json(ErrorResponse::new("Task not found")),
             )
         })?;
-    authorize_workspace(state, auth, task.workspace_id, write).await?;
-    Ok(task)
+    let actor = authorize_workspace(state, auth, task.workspace_id, write).await?;
+    Ok((actor, task))
 }
 
 async fn authorize_run(
     state: &AppState,
     auth: &AuthUser,
     id: Uuid,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<tasks::TaskRunRow, (StatusCode, Json<ErrorResponse>)> {
     let run = tasks::get_task_run(state.db(), id)
         .await
         .map_err(|error| {
@@ -91,7 +114,7 @@ async fn authorize_run(
             )
         })?;
     authorize_task(state, auth, run.task_id, false).await?;
-    Ok(())
+    Ok(run)
 }
 
 async fn validate_projects(
@@ -360,14 +383,7 @@ pub async fn list(
             tasks: items.into_iter().map(TaskData::from).collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => database_error(error),
     }
 }
 
@@ -424,14 +440,7 @@ pub async fn create(
     .await
     {
         Ok(task) => (StatusCode::CREATED, Json(TaskResponse::from(task))).into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => database_error(error),
     }
 }
 
@@ -441,27 +450,12 @@ pub async fn get(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let _task = match authorize_task(&state, &auth, id, false).await {
+    let (_actor, task) = match authorize_task(&state, &auth, id, false).await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
 
-    match tasks::get_task(state.db(), id).await {
-        Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+    Json(TaskResponse::from(task)).into_response()
 }
 
 /// PUT /api/tasks/:id
@@ -471,7 +465,7 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTaskRequest>,
 ) -> impl IntoResponse {
-    let task = match authorize_task(&state, &auth, id, true).await {
+    let (actor, task) = match authorize_task(&state, &auth, id, true).await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
@@ -481,7 +475,7 @@ pub async fn update(
         return response.into_response();
     }
 
-    match tasks::update_task(
+    match tasks::update_task_as(
         state.db(),
         id,
         req.title.as_deref(),
@@ -490,6 +484,7 @@ pub async fn update(
         req.status.as_deref(),
         req.priority,
         req.project_ids.as_deref(),
+        Some(actor),
     )
     .await
     {
@@ -501,14 +496,7 @@ pub async fn update(
             )),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => database_error(error),
     }
 }
 
@@ -518,26 +506,19 @@ pub async fn delete(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let _task = match authorize_task(&state, &auth, id, true).await {
+    let (actor, _task) = match authorize_task(&state, &auth, id, true).await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
 
-    match tasks::delete_task(state.db(), id).await {
+    match tasks::delete_task_as(state.db(), id, Some(actor)).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Task not found")),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => database_error(error),
     }
 }
 
@@ -547,12 +528,12 @@ pub async fn queue(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let _task = match authorize_task(&state, &auth, id, true).await {
+    let (actor, _task) = match authorize_task(&state, &auth, id, true).await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
 
-    match tasks::queue_task(state.db(), id).await {
+    match tasks::queue_task_as(state.db(), id, Some(actor)).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
         Ok(None) => (
             StatusCode::CONFLICT,
@@ -561,14 +542,7 @@ pub async fn queue(
             )),
         )
             .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => database_error(error),
     }
 }
 
@@ -578,24 +552,17 @@ pub async fn list_runs(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let _task = match authorize_task(&state, &auth, id, false).await {
+    let (actor, _task) = match authorize_task(&state, &auth, id, false).await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
 
-    match tasks::list_task_runs(state.db(), id).await {
+    match tasks::list_task_runs_as(state.db(), id, Some(actor)).await {
         Ok(runs) => Json(TaskRunsListResponse {
             runs: runs.into_iter().map(TaskRunData::from).collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => database_error(error),
     }
 }
 
@@ -605,11 +572,10 @@ pub async fn create_run(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let _task = match authorize_task(&state, &auth, id, true).await {
+    let (actor, _task) = match authorize_task(&state, &auth, id, true).await {
         Ok(task) => task,
         Err(response) => return response.into_response(),
     };
-    let actor = Uuid::parse_str(&auth.0.sub).expect("authorized actor UUID");
 
     match tasks::create_task_run_as(state.db(), id, Some(actor)).await {
         Ok(run) => {
@@ -651,25 +617,9 @@ pub async fn get_run(
     auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_run(&state, &auth, run_id).await {
-        return response.into_response();
-    }
-
-    match tasks::get_task_run(state.db(), run_id).await {
-        Ok(Some(run)) => Json(TaskRunResponse::from(run)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task run not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+    match authorize_run(&state, &auth, run_id).await {
+        Ok(run) => Json(TaskRunResponse::from(run)).into_response(),
+        Err(response) => response.into_response(),
     }
 }
 
@@ -688,14 +638,7 @@ pub async fn get_run_logs(
             logs: logs.into_iter().map(TaskRunLogData::from).collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => database_error(error),
     }
 }
 

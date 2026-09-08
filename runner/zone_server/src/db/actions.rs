@@ -287,21 +287,8 @@ pub async fn start_task(
     }
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, true).await?;
-    if let Some(source_id) = input.source_id {
-        let active: Option<Option<bool>> =
-            sqlx::query_scalar("SELECT is_active FROM sources WHERE id = $1 AND workspace_id = $2")
-                .bind(source_id)
-                .bind(workspace_id)
-                .fetch_optional(&mut *transaction)
-                .await?;
-        if !matches!(active, Some(None) | Some(Some(true))) {
-            return Err(invalid("Source not found in this workspace or inactive"));
-        }
-    }
-    transaction.commit().await?;
-
-    let task = super::tasks::create_task_as(
-        pool,
+    let task = super::tasks::create_task_in(
+        &mut transaction,
         workspace_id,
         &input.project_ids,
         input.title.trim(),
@@ -313,7 +300,8 @@ pub async fn start_task(
         Some(user_id),
     )
     .await?;
-    let run = super::tasks::create_task_run_as(pool, task.id, Some(user_id)).await?;
+    let run = super::tasks::create_task_run_in(&mut transaction, task.id, Some(user_id)).await?;
+    transaction.commit().await?;
     Ok(json!({
         "task_id": task.id,
         "run_id": run.id,
@@ -332,20 +320,19 @@ pub async fn get_task_run(
 ) -> DbResult<Value> {
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, false).await?;
+    let (run, title): (super::tasks::TaskRunRow, String) = {
+        let task: (Uuid, String) = sqlx::query_as("SELECT t.id,t.title FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE r.id=$1 AND t.workspace_id=$2 FOR SHARE OF t")
+            .bind(run_id).bind(workspace_id).fetch_one(&mut *transaction).await?;
+        let run = super::tasks::get_task_run(&mut *transaction, run_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        (run, task.1)
+    };
     transaction.commit().await?;
-    let run = super::tasks::get_task_run(pool, run_id)
-        .await?
-        .ok_or_else(|| invalid("Task run not found"))?;
-    let task = super::tasks::get_task(pool, run.task_id)
-        .await?
-        .ok_or_else(|| invalid("Task run not found"))?;
-    if task.workspace_id != workspace_id {
-        return Err(invalid("Task run not found"));
-    }
     Ok(json!({
         "id": run.id,
         "task_id": run.task_id,
-        "title": task.title,
+        "title": title,
         "status": run.status,
         "current_phase": run.current_phase,
         "progress_percent": run.progress_percent,
@@ -364,24 +351,28 @@ pub async fn tail_task_log(
 ) -> DbResult<Value> {
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, false).await?;
+    let (run, _title): (super::tasks::TaskRunRow, String) = {
+        let task: (Uuid, String) = sqlx::query_as("SELECT t.id,t.title FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE r.id=$1 AND t.workspace_id=$2 FOR SHARE OF t")
+            .bind(input.run_id).bind(workspace_id).fetch_one(&mut *transaction).await?;
+        let run = super::tasks::get_task_run(&mut *transaction, input.run_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        (run, task.1)
+    };
+    let logs = super::tasks::get_task_run_logs(&mut *transaction, run.id).await?;
     transaction.commit().await?;
-    let run = super::tasks::get_task_run(pool, input.run_id)
-        .await?
-        .ok_or_else(|| invalid("Task run not found"))?;
-    let task = super::tasks::get_task(pool, run.task_id)
-        .await?
-        .ok_or_else(|| invalid("Task run not found"))?;
-    if task.workspace_id != workspace_id {
-        return Err(invalid("Task run not found"));
-    }
-    let logs = super::tasks::get_task_run_logs(pool, run.id).await?;
     let after = input.after_log_id;
     let limit = input.limit.unwrap_or(50).clamp(1, 200) as usize;
-    let selected: Vec<_> = logs
-        .into_iter()
-        .filter(|log| after.is_none_or(|id| log.id > id))
-        .take(limit + 1)
-        .collect();
+    let offset = match after {
+        Some(id) => {
+            logs.iter()
+                .position(|log| log.id == id)
+                .ok_or_else(|| invalid("Log cursor not found in this run"))?
+                + 1
+        }
+        None => 0,
+    };
+    let selected: Vec<_> = logs.into_iter().skip(offset).take(limit + 1).collect();
     let has_more = selected.len() > limit;
     let lines: Vec<Value> = selected
         .into_iter()
@@ -689,6 +680,413 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(pending, 0);
+        cleanup(&pool, organization, user).await;
+    }
+    #[tokio::test]
+    async fn admission_rolls_back_task_when_run_insert_fails() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let name = format!("admission_{}", workspace.simple());
+        let function = format!(
+            "CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM tasks WHERE id=NEW.task_id AND workspace_id='{workspace}') THEN RAISE EXCEPTION 'injected admission failure'; END IF; RETURN NEW; END $$"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(function))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TRIGGER {name} BEFORE INSERT ON task_runs FOR EACH ROW EXECUTE FUNCTION {name}()"))).execute(&pool).await.unwrap();
+        let result = start_task(
+            &pool,
+            workspace,
+            user,
+            serde_json::from_value(
+                json!({"title":"atomic admission","description":"Inject a run failure"}),
+            )
+            .unwrap(),
+        )
+        .await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE workspace_id=$1")
+            .bind(workspace)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP TRIGGER {name} ON task_runs"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP FUNCTION {name}()")))
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected admission failure")
+        );
+        assert_eq!(count, 0, "failed run admission left a committed task");
+    }
+
+    #[tokio::test]
+    async fn admission_rechecks_concurrent_revocation() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let mut revocation = pool.begin().await.unwrap();
+        sqlx::query(
+            "UPDATE workspace_members SET is_active=false WHERE workspace_id=$1 AND user_id=$2",
+        )
+        .bind(workspace)
+        .bind(user)
+        .execute(&mut *revocation)
+        .await
+        .unwrap();
+        let connection = pool.clone();
+        let creation = tokio::spawn(async move {
+            super::super::tasks::create_task_as(
+                &connection,
+                workspace,
+                &[],
+                "revoked",
+                "",
+                None,
+                None,
+                true,
+                None,
+                Some(user),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        revocation.commit().await.unwrap();
+        let result = creation.await.unwrap();
+        cleanup(&pool, organization, user).await;
+        assert!(
+            result.is_err(),
+            "admission bypassed the concurrent membership revocation"
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_deduplicates_projects_and_preserves_order() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        for project in [first, second] {
+            sqlx::query("INSERT INTO projects(id,workspace_id,name) VALUES($1,$2,'Admission')")
+                .bind(project)
+                .bind(workspace)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let result = super::super::tasks::create_task_as(
+            &pool,
+            workspace,
+            &[second, first, second],
+            "projects",
+            "",
+            None,
+            None,
+            true,
+            None,
+            Some(user),
+        )
+        .await;
+        let result = match result {
+            Ok(task) => super::super::tasks::update_task(
+                &pool,
+                task.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&[first, second, first]),
+            )
+            .await
+            .map(|updated| (task, updated)),
+            Err(error) => Err(error),
+        };
+        cleanup(&pool, organization, user).await;
+        let (created, updated) = result.expect("duplicate project IDs must be accepted");
+        assert_eq!(created.project_ids, vec![second, first]);
+        assert_eq!(updated.unwrap().project_ids, vec![first, second]);
+    }
+    #[tokio::test]
+    async fn admission_cursor_uses_log_order_and_rejects_foreign_ids() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let task = super::super::tasks::create_task_as(
+            &pool,
+            workspace,
+            &[],
+            "cursor",
+            "",
+            None,
+            None,
+            true,
+            None,
+            Some(user),
+        )
+        .await
+        .unwrap();
+        let run = super::super::tasks::create_task_run_as(&pool, task.id, Some(user))
+            .await
+            .unwrap();
+        let high = Uuid::from_u128(u128::MAX - 1);
+        let low = Uuid::from_u128(1);
+        for (id, offset) in [(high, 0), (low, 1)] {
+            sqlx::query("INSERT INTO task_run_logs(id,task_run_id,phase,agent_type,log_level,message,created_at) VALUES($1,$2,'test','test','info','line',TIMESTAMP '2026-01-01' + $3 * INTERVAL '1 second')").bind(id).bind(run.id).bind(offset).execute(&pool).await.unwrap();
+        }
+        let page = tail_task_log(
+            &pool,
+            workspace,
+            user,
+            TaskRunLookup {
+                run_id: run.id,
+                after_log_id: Some(high),
+                limit: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+        let unknown = tail_task_log(
+            &pool,
+            workspace,
+            user,
+            TaskRunLookup {
+                run_id: run.id,
+                after_log_id: Some(Uuid::new_v4()),
+                limit: None,
+            },
+        )
+        .await;
+        let other = super::super::tasks::create_task_as(
+            &pool,
+            workspace,
+            &[],
+            "other",
+            "",
+            None,
+            None,
+            true,
+            None,
+            Some(user),
+        )
+        .await
+        .unwrap();
+        let other_run = super::super::tasks::create_task_run_as(&pool, other.id, Some(user))
+            .await
+            .unwrap();
+        let foreign = tail_task_log(
+            &pool,
+            workspace,
+            user,
+            TaskRunLookup {
+                run_id: other_run.id,
+                after_log_id: Some(high),
+                limit: None,
+            },
+        )
+        .await;
+        cleanup(&pool, organization, user).await;
+        assert_eq!(
+            page["logs"][0]["id"],
+            low.to_string(),
+            "UUID value must not determine chronological pagination"
+        );
+        assert!(unknown.is_err(), "unknown cursor was accepted");
+        assert!(foreign.is_err(), "another run's cursor was accepted");
+    }
+
+    #[tokio::test]
+    async fn admission_revoked_actor_cannot_mutate_existing_tasks() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let task = super::super::tasks::create_task_as(
+            &pool,
+            workspace,
+            &[],
+            "protected",
+            "",
+            None,
+            None,
+            true,
+            None,
+            Some(user),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE workspace_members SET is_active=false WHERE workspace_id=$1 AND user_id=$2",
+        )
+        .bind(workspace)
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let updated = super::super::tasks::update_task_as(
+            &pool,
+            task.id,
+            Some("changed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(user),
+        )
+        .await;
+        let queued = super::super::tasks::queue_task_as(&pool, task.id, Some(user)).await;
+        let admitted = super::super::tasks::create_task_run_as(&pool, task.id, Some(user)).await;
+        let deleted = super::super::tasks::delete_task_as(&pool, task.id, Some(user)).await;
+        let row = super::super::tasks::get_task(&pool, task.id).await.unwrap();
+        cleanup(&pool, organization, user).await;
+        assert!(updated.is_err() && queued.is_err() && admitted.is_err() && deleted.is_err());
+        assert_eq!(row.unwrap().title, "protected");
+    }
+
+    #[tokio::test]
+    async fn admission_update_deduplicates_and_rejects_foreign_projects() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let project = Uuid::new_v4();
+        let foreign_workspace = Uuid::new_v4();
+        let foreign_project = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Foreign',$1::text)",
+        )
+        .bind(foreign_workspace)
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO projects(id,workspace_id,name) VALUES($1,$2,'Foreign')")
+            .bind(foreign_project)
+            .bind(foreign_workspace)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects(id,workspace_id,name) VALUES($1,$2,'Project')")
+            .bind(project)
+            .bind(workspace)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let task = super::super::tasks::create_task_as(
+            &pool,
+            workspace,
+            &[],
+            "projects",
+            "",
+            None,
+            None,
+            true,
+            None,
+            Some(user),
+        )
+        .await
+        .unwrap();
+        let update = super::super::tasks::update_task(
+            &pool,
+            task.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&[project, project]),
+        )
+        .await;
+        let foreign = super::super::tasks::update_task(
+            &pool,
+            task.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&[foreign_project]),
+        )
+        .await;
+        let associations = super::super::tasks::get_task_project_ids(&pool, task.id)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+        assert_eq!(update.unwrap().unwrap().project_ids, vec![project]);
+        assert!(matches!(foreign, Err(sqlx::Error::RowNotFound)));
+        assert_eq!(
+            associations,
+            vec![project],
+            "invalid update must preserve associations"
+        );
+    }
+    #[tokio::test]
+    async fn admission_reads_hold_membership_until_scoped_snapshot() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let task = super::super::tasks::create_task_as(
+            &pool,
+            workspace,
+            &[],
+            "snapshot",
+            "",
+            None,
+            None,
+            true,
+            None,
+            Some(user),
+        )
+        .await
+        .unwrap();
+        let run = super::super::tasks::create_task_run_as(&pool, task.id, Some(user))
+            .await
+            .unwrap();
+        for tail in [false, true] {
+            sqlx::query(
+                "UPDATE workspace_members SET is_active=true WHERE workspace_id=$1 AND user_id=$2",
+            )
+            .bind(workspace)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut blocker = pool.begin().await.unwrap();
+            sqlx::query("SELECT id FROM tasks WHERE id=$1 FOR UPDATE")
+                .bind(task.id)
+                .fetch_one(&mut *blocker)
+                .await
+                .unwrap();
+            let connection = pool.clone();
+            let reader = tokio::spawn(async move {
+                if tail {
+                    tail_task_log(
+                        &connection,
+                        workspace,
+                        user,
+                        TaskRunLookup {
+                            run_id: run.id,
+                            after_log_id: None,
+                            limit: None,
+                        },
+                    )
+                    .await
+                } else {
+                    get_task_run(&connection, workspace, user, run.id).await
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let connection = pool.clone();
+            let revocation = tokio::spawn(async move {
+                sqlx::query("UPDATE workspace_members SET is_active=false WHERE workspace_id=$1 AND user_id=$2").bind(workspace).bind(user).execute(&connection).await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let held = !reader.is_finished() && !revocation.is_finished();
+            blocker.commit().await.unwrap();
+            reader.await.unwrap().unwrap();
+            revocation.await.unwrap().unwrap();
+            if !held {
+                cleanup(&pool, organization, user).await;
+                panic!("scoped read released authorization before its snapshot completed");
+            }
+        }
         cleanup(&pool, organization, user).await;
     }
 }
