@@ -46,6 +46,7 @@ pub struct TrainImage {
 pub struct TrainOutcome {
     pub path: PathBuf,
     pub quality: Option<Quality>,
+    pub dataset: Vec<crate::dataset::Finding>,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,9 +136,10 @@ pub async fn train(
             )
         })
         .collect();
-    Captioner::new(config, litellm_host, litellm_key)
+    let described = Captioner::new(config, litellm_host, litellm_key)
         .fill(&mut drafts, trigger.trim())
         .await;
+    let findings = crate::dataset::inspect(&described, request.images.len());
     for (image, (_, drafted)) in request.images.iter_mut().zip(drafts) {
         if image.caption.trim().is_empty() {
             image.caption = drafted;
@@ -249,6 +251,7 @@ pub async fn train(
     Ok(TrainOutcome {
         path: output,
         quality,
+        dataset: findings,
     })
 }
 

@@ -554,6 +554,7 @@ pub async fn train(
         Ok(outcome) => Json(serde_json::json!({
             "filename": outcome.path.file_name().and_then(|name| name.to_str()),
             "quality": outcome.quality,
+            "dataset": outcome.dataset,
         }))
         .into_response(),
         Err(lora::TrainError::Disabled) => (
