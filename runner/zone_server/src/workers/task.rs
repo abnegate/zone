@@ -764,6 +764,8 @@ async fn run_task_loop(
 mod tests {
     use super::*;
 
+    static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn test_semaphore_initialization() {
         assert!(Arc::ptr_eq(get_semaphore(), get_semaphore()));
@@ -779,6 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn capacity_waits_keep_heartbeats_and_stop_on_lease_loss() {
+        let _execution = EXECUTION.lock().await;
         let url = std::env::var("TEST_DATABASE_URL").expect("isolated TEST_DATABASE_URL");
         let pool = PgPool::connect(&url).await.unwrap();
         let organization = Uuid::new_v4();
@@ -999,6 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_worker_scopes_actions_uses_checkout_and_cleans_up() {
+        let _execution = EXECUTION.lock().await;
         use crate::db::{organizations, users, workspace_members, workspaces};
         use serde_json::{Value, json};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1073,7 +1077,15 @@ mod tests {
                             for line in content.lines() {
                                 if line.starts_with('/') {
                                     let path = std::path::PathBuf::from(line.trim());
-                                    assert!(path.file_name().unwrap().to_string_lossy().starts_with("zone-run-"), "worker used server cwd instead of a checkout: {}", path.display());
+                                    let name = path.file_name().unwrap().to_str().unwrap();
+                                    let (identity, owner) = name.split_once('.').expect("checkout must identify its run and owner");
+                                    assert_eq!(identity, run.id.to_string());
+                                    assert_eq!(Uuid::parse_str(owner).unwrap().to_string(), owner);
+                                    let root = path.parent().unwrap();
+                                    let namespace = root.file_name().unwrap().to_str().unwrap().strip_prefix("zone-checkouts-v1-").expect("database checkout namespace");
+                                    assert_eq!(namespace.len(), 64);
+                                    assert!(namespace.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+                                    assert_eq!(root.parent().unwrap().canonicalize().unwrap(), std::env::temp_dir().canonicalize().unwrap());
                                     assert!(path.is_dir(), "checkout disappeared during execution");
                                     *checkout.lock().unwrap() = Some(path);
                                 }
@@ -1113,6 +1125,15 @@ mod tests {
         );
         assert_eq!(completed.artifacts.as_ref().unwrap()["tool_calls"], 3);
         let directory = observed.lock().unwrap().clone().unwrap();
+        let owner: Uuid = sqlx::query_scalar("SELECT owner FROM task_runs WHERE id=$1")
+            .bind(run.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            directory.file_name().unwrap().to_str().unwrap(),
+            format!("{}.{}", run.id, owner)
+        );
         assert!(!directory.exists(), "finished checkout leaked");
         let early: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_run_logs l JOIN task_runs r ON r.id=l.task_run_id WHERE r.id=$1 AND l.metadata ? 'action_receipt' AND l.created_at <= r.completed_at)").bind(run.id).fetch_one(&pool).await.unwrap();
         assert!(early, "receipt must be durable before terminal state");
@@ -1142,6 +1163,7 @@ mod tests {
     }
     #[tokio::test]
     async fn writer_revocation_cancels_waiting_and_running_tasks() {
+        let _execution = EXECUTION.lock().await;
         use crate::db::{organizations, users, workspace_members, workspaces};
         use axum::{
             Json, Router,
