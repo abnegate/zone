@@ -1,21 +1,23 @@
-//! Background worker for refreshing web-linked knowledge entries
+//! Refreshing web-linked knowledge entries.
 //!
-//! Periodically checks for knowledge entries that have source URLs and
-//! are due for refresh based on their refresh_interval_minutes setting.
+//! One pass takes the entries whose `refresh_interval_minutes` has elapsed and
+//! re-fetches each one. The cadence belongs to
+//! [`crate::workers::housekeeping`]; what is due, and what refreshing an entry
+//! means, belongs here.
 
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-use crate::db::knowledge;
+use crate::db::{DbResult, knowledge};
 use crate::state::AppState;
 
 /// Maximum concurrent refresh operations
 const MAX_CONCURRENT_REFRESHES: usize = 3;
 
 /// Interval between refresh checks (5 minutes)
-const REFRESH_CHECK_INTERVAL_SECS: u64 = 300;
+pub const REFRESH_CHECK_INTERVAL_SECS: u64 = 300;
 
 /// Maximum entries to process per cycle
 const MAX_ENTRIES_PER_CYCLE: i64 = 50;
@@ -26,64 +28,47 @@ const HTTP_TIMEOUT_SECS: u64 = 30;
 /// Maximum content size (1MB)
 const MAX_CONTENT_SIZE: usize = 1_048_576;
 
-/// Start the knowledge refresh worker
+/// The concurrency one pass shares across the entries it starts.
 ///
-/// This spawns a background task that periodically checks for knowledge
-/// entries that need refreshing and updates their content.
-pub fn start_refresh_worker(state: AppState) {
-    tokio::spawn(async move {
-        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REFRESHES));
+/// Held by the worker rather than created per pass, so a pass that starts while
+/// the previous one still has fetches in flight cannot double the load on the
+/// sites being refreshed.
+pub fn permits() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(MAX_CONCURRENT_REFRESHES))
+}
 
-        loop {
-            // Sleep before checking (allows server startup to complete)
-            tokio::time::sleep(Duration::from_secs(REFRESH_CHECK_INTERVAL_SECS)).await;
+/// Start a refresh for every entry that has come due.
+pub async fn run_cycle(state: &AppState, permits: &Arc<Semaphore>) -> DbResult<()> {
+    tracing::debug!("Knowledge refresh worker: checking for entries to refresh");
 
-            tracing::debug!("Knowledge refresh worker: checking for entries to refresh");
+    let entries =
+        knowledge::list_entries_due_for_refresh(state.db(), MAX_ENTRIES_PER_CYCLE).await?;
 
-            // Find entries due for refresh
-            let entries =
-                match knowledge::list_entries_due_for_refresh(state.db(), MAX_ENTRIES_PER_CYCLE)
-                    .await
-                {
-                    Ok(entries) => entries,
-                    Err(e) => {
-                        tracing::error!("Failed to list entries for refresh: {}", e);
-                        continue;
-                    }
-                };
+    if entries.is_empty() {
+        tracing::debug!("Knowledge refresh worker: no entries due for refresh");
+        return Ok(());
+    }
 
-            if entries.is_empty() {
-                tracing::debug!("Knowledge refresh worker: no entries due for refresh");
-                continue;
-            }
+    tracing::info!(
+        "Knowledge refresh worker: found {} entries to refresh",
+        entries.len()
+    );
 
-            tracing::info!(
-                "Knowledge refresh worker: found {} entries to refresh",
-                entries.len()
-            );
+    for entry in entries {
+        let state = state.clone();
+        let permits = Arc::clone(permits);
 
-            // Process entries concurrently with semaphore limiting
-            for entry in entries {
-                let state_clone = state.clone();
-                let semaphore_clone = semaphore.clone();
+        tokio::spawn(async move {
+            let Ok(_permit) = permits.acquire().await else {
+                tracing::error!("Failed to acquire refresh semaphore for entry {}", entry.id);
+                return;
+            };
 
-                tokio::spawn(async move {
-                    let _permit = match semaphore_clone.acquire().await {
-                        Ok(p) => p,
-                        Err(_) => {
-                            tracing::error!(
-                                "Failed to acquire refresh semaphore for entry {}",
-                                entry.id
-                            );
-                            return;
-                        }
-                    };
+            refresh_entry(&state, entry).await;
+        });
+    }
 
-                    refresh_entry(&state_clone, entry).await;
-                });
-            }
-        }
-    });
+    Ok(())
 }
 
 /// Refresh a single knowledge entry

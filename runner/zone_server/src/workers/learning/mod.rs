@@ -36,4 +36,4 @@ pub use observation::{ChangeType, ConventionKind, ConventionSignal, FileChange};
 pub use quality::{ChangeReception, QualityBand, QualityScore, QualityWeights};
 pub use review::{ClassifiedComment, ReviewCategory};
 pub use strategy::{FixApproach, StrategyFingerprint, ToolInvocation, ToolKind};
-pub use worker::{LearningOutcome, LearningPolicy, LearningReport, WorkspaceEvidence, spawn};
+pub use worker::{LearningOutcome, LearningPolicy, LearningReport, WorkspaceEvidence};

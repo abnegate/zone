@@ -13,7 +13,6 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{NaiveDateTime, Utc, Weekday};
 use sqlx::PgPool;
@@ -26,12 +25,11 @@ use crate::db::DbResult;
 use crate::db::analytics::{self, ReportableWorkspace};
 use crate::state::AppState;
 use crate::workers::analytics::load_runs;
-use crate::workers::notify;
 use crate::workers::regression::{
     RecurrenceChecker, RegressionChecker, RegressionSettings, ReopenChecker, scan_workspace,
 };
 
-const REPORT_TICK_SECONDS: u64 = 15 * 60;
+pub const REPORT_TICK_SECONDS: u64 = 15 * 60;
 const MAXIMUM_RUNS_PER_WORKSPACE: i64 = 10_000;
 
 const ENABLED_VARIABLE: &str = "ZONE_REPORT_ENABLED";
@@ -217,7 +215,8 @@ pub async fn deliver(fanout: &Fanout, digest: &Digest) -> bool {
     report.is_empty() || report.any_delivered()
 }
 
-async fn run_cycle(
+/// Look once at every workspace's schedule, and deliver whatever is owed.
+pub async fn run_cycle(
     state: &AppState,
     settings: &ReportSettings,
     checkers: &[Arc<dyn RegressionChecker>],
@@ -267,43 +266,21 @@ async fn run_cycle(
     Ok(())
 }
 
-/// Deliver digests on their schedule.
-///
-/// The tick is far shorter than any cadence, because the tick only decides when
-/// to *look*; [`due`] decides what is owed. A slot is therefore delivered within
-/// one tick of passing, and a slot that passed while the process was down is
-/// delivered on the way back up rather than skipped.
-pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let settings = ReportSettings::from_process_environment();
-        if !settings.enabled {
-            tracing::info!(
-                "Scheduled reports are off; set {ENABLED_VARIABLE}=true to turn them on"
-            );
-            return;
-        }
+/// The checkers a digest's regression section runs.
+pub fn checkers(settings: &ReportSettings) -> Vec<Arc<dyn RegressionChecker>> {
+    vec![
+        Arc::new(RecurrenceChecker::new(settings.regression.policy)),
+        Arc::new(ReopenChecker::new(settings.regression.policy)),
+    ]
+}
 
-        let checkers: Vec<Arc<dyn RegressionChecker>> = vec![
-            Arc::new(RecurrenceChecker::new(settings.regression.policy)),
-            Arc::new(ReopenChecker::new(settings.regression.policy)),
-        ];
-        let fanout = notify::from_process_environment();
-        if fanout.is_empty() {
-            tracing::warn!("Scheduled reports are on but no notification channel is configured");
-        }
-
-        let mut ledger = Ledger::new();
-        let mut interval = tokio::time::interval(Duration::from_secs(REPORT_TICK_SECONDS));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            interval.tick().await;
-            if let Err(error) = run_cycle(&state, &settings, &checkers, &fanout, &mut ledger).await
-            {
-                tracing::warn!(%error, "Scheduled report cycle failed");
-            }
-        }
-    })
+/// Say why reports will not go out, if they will not.
+pub fn announce(settings: &ReportSettings, fanout: &Fanout) {
+    if !settings.enabled {
+        tracing::info!("Scheduled reports are off; set {ENABLED_VARIABLE}=true to turn them on");
+    } else if fanout.is_empty() {
+        tracing::warn!("Scheduled reports are on but no notification channel is configured");
+    }
 }
 
 #[cfg(test)]
