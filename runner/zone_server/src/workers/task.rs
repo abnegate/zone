@@ -184,6 +184,9 @@ pub fn spawn_recovery(state: AppState) {
             if let Err(error) = tasks::sweep_task_runs(state.db()).await {
                 tracing::error!(%error, "Could not recover orphaned task runs");
             }
+            if let Err(error) = crate::services::checkout::Checkout::recover(state.db()).await {
+                tracing::error!(%error, "Could not recover abandoned task checkouts");
+            }
         }
     });
 }
@@ -380,26 +383,32 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
         return;
     }
 
-    let checkout =
-        match crate::services::checkout::Checkout::prepare(state.db(), &task, run_id).await {
-            Ok(checkout) => checkout,
-            Err(error) => {
-                obs.set_status("failed");
-                if let Err(failure) = tasks::complete_owned_task_run(
-                    state.db(),
-                    run_id,
-                    Some(owner),
-                    "failed",
-                    Some(&error),
-                    None,
-                )
-                .await
-                {
-                    tracing::error!(%run_id, %failure, "Failed to record checkout failure");
-                }
-                return;
+    let checkout = match crate::services::checkout::Checkout::prepare(
+        state.db(),
+        &task,
+        run_id,
+        owner,
+    )
+    .await
+    {
+        Ok(checkout) => checkout,
+        Err(error) => {
+            obs.set_status("failed");
+            if let Err(failure) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some(&error),
+                None,
+            )
+            .await
+            {
+                tracing::error!(%run_id, %failure, "Failed to record checkout failure");
             }
-        };
+            return;
+        }
+    };
     let workspace_path = checkout.path().to_path_buf();
 
     let run = match tasks::get_task_run(state.db(), run_id).await {

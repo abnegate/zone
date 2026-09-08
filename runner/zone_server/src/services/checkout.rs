@@ -1,12 +1,18 @@
 //! Per-run workspaces. The guard owns the directory until publication finishes
-//! and removes it when execution completes, fails, or is cancelled.
+//! and removes it when execution completes, fails, or is cancelled. Durable run
+//! and owner identifiers also let recovery remove local directories after a crash.
 
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use zone_vcs::git::GitService;
 
-use crate::db::{projects, tasks::TaskRow};
+use crate::db::{
+    projects,
+    tasks::{self, TaskRow},
+};
+
+const ROOT: &str = "zone-checkouts";
 
 pub struct Repository {
     pub url: String,
@@ -65,9 +71,23 @@ pub struct Checkout {
 }
 
 impl Checkout {
-    pub async fn prepare(pool: &PgPool, task: &TaskRow, run: Uuid) -> Result<Self, String> {
+    pub async fn prepare(
+        pool: &PgPool,
+        task: &TaskRow,
+        run: Uuid,
+        owner: Uuid,
+    ) -> Result<Self, String> {
         let repository = Repository::resolve(pool, task).await?;
-        let checkout = Self::create(run).map_err(|_| "Cannot create task checkout".to_string())?;
+        if !tasks::owns_task_run(pool, run, Some(owner))
+            .await
+            .map_err(|_| "Cannot verify checkout ownership")?
+        {
+            return Err("Task execution lost its lease".to_string());
+        }
+        // The run and owner are durable before a directory can exist. Recovery
+        // derives names only from these identifiers, never from a stored path.
+        let checkout = Self::create(&Self::root(), run, owner)
+            .map_err(|_| "Cannot create task checkout".to_string())?;
         if let Some(repository) = repository {
             GitService::new()
                 .clone_repository(
@@ -81,16 +101,109 @@ impl Checkout {
         Ok(checkout)
     }
 
-    fn create(run: Uuid) -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!("zone-run-{run}-{}", Uuid::new_v4()));
+    fn root() -> PathBuf {
+        std::env::temp_dir().join(ROOT)
+    }
+
+    fn validate_root(root: &Path) -> std::io::Result<()> {
+        let metadata = std::fs::symlink_metadata(root)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::other("Checkout root is not a directory"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0 {
+                return Err(std::io::Error::other(
+                    "Checkout root is not private to this user",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn directory(path: &Path) -> std::io::Result<()> {
         let mut directory = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             directory.mode(0o700);
         }
-        directory.create(&path)?;
+        directory.create(path)
+    }
+
+    fn create(root: &Path, run: Uuid, owner: Uuid) -> std::io::Result<Self> {
+        match Self::directory(root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        Self::validate_root(root)?;
+        let path = root.join(format!("{run}.{owner}"));
+        Self::directory(&path)?;
         Ok(Self { path })
+    }
+
+    /// Reap only this host's generated directories whose runs cannot execute.
+    /// Failed removals remain discoverable and are retried on the next sweep.
+    pub async fn recover(pool: &PgPool) -> Result<u64, String> {
+        Self::recover_root(pool, &Self::root()).await
+    }
+
+    async fn recover_root(pool: &PgPool, root: &Path) -> Result<u64, String> {
+        match Self::validate_root(root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.to_string()),
+        }
+        let mut removed = 0;
+        for entry in std::fs::read_dir(root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some((run, owner)) = name.split_once('.') else {
+                continue;
+            };
+            let (Ok(run_id), Ok(owner_id)) = (Uuid::parse_str(run), Uuid::parse_str(owner)) else {
+                continue;
+            };
+            if run_id.to_string() != run || owner_id.to_string() != owner {
+                continue;
+            }
+            let status: Option<String> =
+                sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
+                    .bind(run_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            // A deleted task cascades to its runs. Its generated local checkout
+            // remains owned by this service and has no execution to preserve.
+            if status
+                .as_deref()
+                .is_some_and(|status| !matches!(status, "completed" | "failed" | "cancelled"))
+            {
+                continue;
+            }
+            Self::validate_root(root).map_err(|error| error.to_string())?;
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            let result = if kind.is_symlink() {
+                std::fs::remove_file(entry.path())
+            } else if kind.is_dir() {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                continue;
+            };
+            match result {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::error!(path = %entry.path().display(), %error, "Failed to recover task checkout; will retry")
+                }
+            }
+        }
+        Ok(removed)
     }
 
     pub fn path(&self) -> &Path {
@@ -100,6 +213,13 @@ impl Checkout {
 
 impl Drop for Checkout {
     fn drop(&mut self) {
+        let Some(root) = self.path.parent() else {
+            return;
+        };
+        if Self::validate_root(root).is_err() {
+            tracing::error!(path = %root.display(), "Refusing cleanup through an unsafe checkout root");
+            return;
+        }
         if let Err(error) = std::fs::remove_dir_all(&self.path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -112,11 +232,91 @@ impl Drop for Checkout {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn recovery_removes_abandoned_checkout() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO organizations(id,name,slug) VALUES($1,'Checkout recovery',$1::text)",
+        )
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Checkout recovery',$1::text)").bind(workspace).bind(organization).execute(&pool).await.unwrap();
+        let task = crate::db::tasks::create_task(
+            &pool,
+            workspace,
+            &[],
+            "Recover checkout",
+            "Regression",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = crate::db::tasks::create_task_run(&pool, task.id)
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4();
+        assert!(
+            crate::db::tasks::claim_task_run(&pool, run.id, owner)
+                .await
+                .unwrap()
+        );
+        let checkout = Checkout::create(&Checkout::root(), run.id, owner).unwrap();
+        let path = checkout.path().to_path_buf();
+        std::fs::write(path.join("private.txt"), "Private repository content").unwrap();
+        std::mem::forget(checkout);
+        crate::db::tasks::complete_owned_task_run(
+            &pool,
+            run.id,
+            Some(owner),
+            "failed",
+            Some("orphaned"),
+            None,
+        )
+        .await
+        .unwrap();
+        let state = crate::state::AppState::new(
+            crate::state::AppState::for_tests().config().clone(),
+            pool.clone(),
+            None,
+        );
+        crate::workers::task::spawn_recovery(state);
+        let recovered = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if path.exists() {
+            std::fs::remove_dir_all(&path).unwrap();
+        }
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            recovered,
+            "production recovery must remove a checkout when Drop never ran"
+        );
+    }
+
     #[test]
     fn empty_checkout_exists_and_is_isolated_for_each_run() {
         let run = Uuid::new_v4();
-        let first = Checkout::create(run).unwrap();
-        let second = Checkout::create(run).unwrap();
+        let root = std::env::temp_dir().join(format!("zone-checkout-test-{}", Uuid::new_v4()));
+        let first = Checkout::create(&root, run, Uuid::new_v4()).unwrap();
+        let second = Checkout::create(&root, run, Uuid::new_v4()).unwrap();
         assert!(first.path().is_dir());
         assert!(second.path().is_dir());
         assert_ne!(first.path(), second.path());
@@ -126,6 +326,106 @@ mod tests {
         drop(first);
         assert!(!path.exists());
         assert!(second.path().exists());
+        drop(second);
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_active_and_unrelated_paths() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO organizations(id,name,slug) VALUES($1,'Checkout safety',$1::text)",
+        )
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Checkout safety',$1::text)").bind(workspace).bind(organization).execute(&pool).await.unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace,
+            &[],
+            "Active checkout",
+            "Regression",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let root = std::env::temp_dir().join(format!("zone-checkout-test-{}", Uuid::new_v4()));
+        Checkout::directory(&root).unwrap();
+        let live = root.join(format!("{}.{}", run.id, Uuid::new_v4()));
+        Checkout::directory(&live).unwrap();
+        let unrelated = root.join("unrelated");
+        Checkout::directory(&unrelated).unwrap();
+        std::fs::write(unrelated.join("keep.txt"), "Unrelated content").unwrap();
+        assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 0);
+        assert!(live.exists());
+        assert!(unrelated.join("keep.txt").exists());
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .unwrap();
+        assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 1);
+        assert!(!live.exists());
+        assert!(unrelated.join("keep.txt").exists());
+        assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recovery_refuses_root_symlinks_and_never_follows_entry_links() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let root = std::env::temp_dir().join(format!("zone-checkout-test-{}", Uuid::new_v4()));
+        let outside =
+            std::env::temp_dir().join(format!("zone-checkout-outside-{}", Uuid::new_v4()));
+        let alias = std::env::temp_dir().join(format!("zone-checkout-alias-{}", Uuid::new_v4()));
+        Checkout::directory(&root).unwrap();
+        Checkout::directory(&outside).unwrap();
+        std::fs::write(outside.join("keep.txt"), "Outside content").unwrap();
+        symlink(&outside, &alias).unwrap();
+        assert!(Checkout::recover_root(&pool, &alias).await.is_err());
+        let link = root.join(format!("{}.{}", Uuid::new_v4(), Uuid::new_v4()));
+        symlink(&outside, &link).unwrap();
+        assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 1);
+        assert!(!link.exists());
+        assert!(outside.join("keep.txt").exists());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Checkout::recover_root(&pool, &root).await.is_err());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Root bypasses Unix mode bits, so permission-failure injection only
+        // applies to the unprivileged runtime used by the server image.
+        if !nix::unistd::geteuid().is_root() {
+            let pending = root.join(format!("{}.{}", Uuid::new_v4(), Uuid::new_v4()));
+            Checkout::directory(&pending).unwrap();
+            std::fs::write(pending.join("private.txt"), "Retry content").unwrap();
+            std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 0);
+            assert!(pending.exists());
+            std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(Checkout::recover_root(&pool, &root).await.unwrap(), 1);
+            assert!(!pending.exists());
+        }
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
