@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ActionReceiptSchema } from '../chats/schemas';
 
 export const TaskStatusSchema = z.enum([
   'created',
@@ -53,6 +54,11 @@ export const TaskRunSchema = z.object({
   completed_at: z.string().nullable().optional(),
 });
 
+const TaskRunMetadataSchema = z
+  .object({ action_receipt: ActionReceiptSchema.optional() })
+  .passthrough()
+  .nullish();
+
 export const TaskRunLogSchema = z
   .object({
     id: z.string(),
@@ -62,6 +68,7 @@ export const TaskRunLogSchema = z
     log_level: LogLevelSchema.optional(),
     level: LogLevelSchema.optional(),
     message: z.string(),
+    metadata: TaskRunMetadataSchema,
     created_at: z.string(),
   })
   .transform(({ log_level, level, ...log }, context) => {
@@ -152,6 +159,7 @@ export const TaskProgressMessageSchema = z.discriminatedUnion('type', [
     agent_type: z.string(),
     log_level: LogLevelSchema,
     message: z.string(),
+    metadata: TaskRunMetadataSchema,
   }),
   z.object({ type: z.literal('completed'), status: RunStatusSchema }),
   z.object({ type: z.literal('failed'), error: z.string() }),
