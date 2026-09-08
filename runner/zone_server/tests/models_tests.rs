@@ -278,6 +278,26 @@ async fn start_huggingface_catalog_server() -> String {
     panic!("HuggingFace catalog mock did not become ready at {url}");
 }
 
+async fn start_huggingface_details_server() -> String {
+    let router = Router::new().route(
+        "/api/models/{owner}/{repo}",
+        get(|| async {
+            Json(json!({
+                "id": "Owner/Repo",
+                "modelId": "Owner/Repo",
+                "gguf": {"totalFileSize": 4096_u64, "architecture": "llama"},
+                "siblings": [{"rfilename": "repo.Q4_0.gguf", "size": 4096_u64}]
+            }))
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    format!("http://{address}/api/models")
+}
+
 async fn create_test_router_with_huggingface(catalog: &str) -> Router {
     let mut config = common::test_config_with_ollama_host("http://localhost:9999");
     config.huggingface_models_url = catalog.to_string();
@@ -332,6 +352,13 @@ async fn create_test_router_with_hosts(
     let pool = common::create_test_pool().await;
     let state = common::create_test_state(config, pool);
     common::create_test_router(state)
+}
+
+async fn create_test_router_tuned(tune: impl FnOnce(&mut zone_server::config::Config)) -> Router {
+    let mut config = common::test_config_with_ollama_host("http://127.0.0.1:59999");
+    tune(&mut config);
+    let pool = common::create_test_pool().await;
+    common::create_test_router(common::create_test_state(config, pool))
 }
 
 // =============================================================================
@@ -606,6 +633,57 @@ async fn test_list_models_unknown_source() {
 }
 
 #[tokio::test]
+async fn browse_sources_map_invalid_and_unreachable_proxy_failures() {
+    let invalid = create_test_router_tuned(|config| {
+        config.model_search_proxy_url = Some("://not-a-proxy".to_string());
+    })
+    .await;
+    let token = get_auth_token(&invalid).await;
+    for source in ["ollama", "gpt4all", "huggingface", "openrouter"] {
+        let response = invalid
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/models?source={source}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{source}");
+    }
+
+    let unreachable = create_test_router_tuned(|config| {
+        config.model_search_proxy_url = Some("http://127.0.0.1:59999".to_string());
+    })
+    .await;
+    let token = get_auth_token(&unreachable).await;
+    for source in ["ollama", "gpt4all", "huggingface", "openrouter"] {
+        let response = unreachable
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/models?source={source}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{source}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("Failed to connect")),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_list_models_unauthorized() {
     let router = create_test_router_with_ollama("http://localhost:9999").await;
 
@@ -734,6 +812,37 @@ async fn test_get_model_not_found() {
 }
 
 #[tokio::test]
+async fn ollama_miss_falls_back_to_huggingface_download_details() {
+    let ollama = start_mock_ollama_server().await;
+    let huggingface = start_huggingface_details_server().await;
+    let probe = reqwest::get(format!("{huggingface}/Owner/Repo?blobs=true"))
+        .await
+        .unwrap();
+    assert_eq!(probe.status(), StatusCode::OK);
+    let router = create_test_router_tuned(|config| {
+        config.ollama_host = format!("http://{ollama}");
+        config.huggingface_models_url = huggingface;
+    })
+    .await;
+    let token = get_auth_token(&router).await;
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/hf.co%2FOwner%2FRepo:Q4_0")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let details: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(details["gguf_size"], 4096);
+    assert!(details["content"].is_null());
+}
+
+#[tokio::test]
 async fn test_get_model_unauthorized() {
     let router = create_test_router_with_ollama("http://localhost:9999").await;
 
@@ -745,6 +854,44 @@ async fn test_get_model_unauthorized() {
 
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn get_and_delete_reject_invalid_model_names_before_ollama() {
+    let router = create_test_router_with_ollama("http://127.0.0.1:59999").await;
+    let token = get_auth_token(&router).await;
+    for (method, name, expected) in [
+        ("GET", "bad%20model".to_string(), "Invalid characters"),
+        ("DELETE", "bad%20model".to_string(), "Invalid characters"),
+        ("GET", "a".repeat(257), "Invalid model name length"),
+        ("DELETE", "a".repeat(257), "Invalid model name length"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(format!("/api/models/{name}"))
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{method} {name}"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains(expected)),
+            "{method} {name}: {error}"
+        );
+    }
 }
 
 #[tokio::test]
