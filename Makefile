@@ -1,4 +1,5 @@
 .PHONY: help setup up down restart logs logs-follow ps health check vision-model test-vision \
+	test-lora-live \
 	pull-models clean clean-volumes backup restore \
 	setup-auth add-user setup-comfyui-macos setup-comfyui-model \
 	setup-comfyui-video-model setup-comfyui-audio-model \
@@ -461,6 +462,18 @@ test-vision: vision-model ## Run zone_vision tests against the real model
 	cd runner && ZONE_VISION_MODEL=$(CURDIR)/$(VISION_MODEL) \
 		cargo test --package zone_vision --features saliency
 	@echo "$(GREEN)zone_vision tests passed!$(NC)"
+
+COMFYUI_INSTALL_DIR ?= $(HOME)/Library/Application Support/Zone/ComfyUI
+COMFYUI_PYTHON := $(COMFYUI_INSTALL_DIR)/.venv/bin/python
+
+test-lora-live: ## Train a Zone LoRA against the running ComfyUI and score it against its base
+	@echo "$(BLUE)Running live Zone LoRA training test...$(NC)"
+	@test -x "$(COMFYUI_PYTHON)" || \
+		{ echo "$(RED)No ComfyUI venv at $(COMFYUI_PYTHON). Run 'make setup-comfyui-macos' first$(NC)"; exit 1; }
+	cd comfyui && ZONE_LIVE_TRAIN=1 \
+		COMFYUI_INSTALL_DIR="$(COMFYUI_INSTALL_DIR)" \
+		"$(COMFYUI_PYTHON)" -m unittest -v tests.test_live_training
+	@echo "$(GREEN)Live Zone LoRA training test passed!$(NC)"
 
 setup-runner-coverage: ## Install dependencies for Rust code coverage
 	@echo "$(BLUE)Setting up Rust code coverage tools...$(NC)"
