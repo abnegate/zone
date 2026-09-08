@@ -292,8 +292,22 @@ wants request metrics installs a hook with `zone_comfy::observe_requests`.
 Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
 Defaults live in `train_config.json`: rank 32, alpha equal to rank, every 2-D
 linear in the transformer blocks except the modulation layers (228 adapters on
-FLUX.1 Dev), 512px, and at least 400 steps. An adapter is written every 50
-steps as well as at the end, so a long run can be judged before it finishes.
+FLUX.1 Dev), 512px, and at least 150 steps. Checkpoints are spaced at least 50
+steps apart and capped at eight per run, plus the final adapter.
+
+The recipe catalog explicitly declares which base architecture a training job
+uses. The supported contracts are FLUX (`CheckpointLoaderSimple`) and Qwen
+Image Edit (`UNETLoader`, `CLIPLoader` with `qwen_image`, and `VAELoader`). A
+recipe without that metadata is rejected; recipe names, prompts, and the global
+`COMFYUI_CHECKPOINT` are never used to guess a trainer.
+
+For FLUX, put each target in `<train dir>/targets/NNNN.png` with its caption in
+`NNNN.txt`. For Qwen Image Edit, the target is the desired edited image and an
+additional same-index source image is required at
+`<train dir>/control_1/NNNN.png`; the target's `.txt` is the edit instruction.
+The indexed manifest, target latent, source reference, and instruction are
+mapped together by ComfyUI's list execution. Missing, reordered, or extra pairs
+fail before training.
 
 ### Train on Dev, not Schnell
 
@@ -402,13 +416,18 @@ Renders answer whether an adapter looks right, which is slow and subjective. The
 probe nodes answer whether it *is* right, in minutes.
 
 `ZoneProbeLoss` reports the training loss at fixed noise levels for the base and
-for each adapter, over the images the adapter trained on. An adapter that has
-learned its subject scores below its base on those images; one that has not
-scores above. A zero adapter measures byte-identical to the base, which is what
-makes the comparison worth anything.
+for each adapter, over the images the adapter trained on. An adapter that fits
+the paired set scores below its base on those images; one that has not scores
+above. A zero adapter measures byte-identical to the base, which is what makes
+the comparison worth anything. FLUX results use the measured FLUX health bands.
+Qwen results may rank checkpoints, but are explicitly reported as
+`uncalibrated` and must never be interpreted using those FLUX bands. Live Qwen
+identity retention outside its training pairs has not yet been proven.
 
 ```bash
 ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_ARCHITECTURE=flux \
+ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
 COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/probe_lora.py my_lora-step150.safetensors my_lora.safetensors
 ```
@@ -422,6 +441,8 @@ shows up as a loss that will not move however long the descent runs.
 ZONE_PROBE_MODE=gradient \
 ZONE_PROBE_LEARNING_RATE=0.0001 \
 ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_ARCHITECTURE=flux \
+ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
 COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/probe_lora.py
 ```
@@ -442,10 +463,16 @@ running:
 ```bash
 ZONE_TRAIN_STEPS=100 \
 ZONE_TRAIN_DIR=/tmp/my-train-set \
+ZONE_TRAIN_ARCHITECTURE=flux \
+ZONE_TRAIN_CHECKPOINT=flux1-dev-fp8.safetensors \
 ZONE_TRAIN_OUTPUT="$HOME/Library/Application Support/Zone/ComfyUI/models/loras/probe.safetensors" \
 COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
 python3 comfyui/train_lora.py
 ```
+
+For a standalone Qwen edit diagnostic, set
+`ZONE_TRAIN_ARCHITECTURE=qwen_edit` and provide the exact catalog filenames in
+`ZONE_TRAIN_UNET`, `ZONE_TRAIN_CLIP`, and `ZONE_TRAIN_VAE`.
 
 ## Workflow contract
 

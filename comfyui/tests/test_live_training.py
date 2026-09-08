@@ -64,6 +64,7 @@ VARIABLES = (
     'ZONE_PROBE_RESOLUTION',
     'ZONE_PROBE_TIMEOUT',
     'ZONE_TRAIN_CHECKPOINT',
+    'ZONE_TRAIN_ARCHITECTURE',
     'ZONE_TRAIN_DIR',
     'ZONE_TRAIN_OUTPUT',
     'ZONE_TRAIN_STEPS',
@@ -142,8 +143,8 @@ def synthesise(targets: Path) -> None:
         ImageDraw.Draw(image).polygon(
             corners(centre, 150 + (index % 4) * 24, index * math.pi / 7), fill=SUBJECT
         )
-        image.save(targets / f'{index:02d}.png')
-        (targets / f'{index:02d}.txt').write_text(
+        image.save(targets / f'{index:04d}.png')
+        (targets / f'{index:04d}.txt').write_text(
             f'a photo of {TRIGGER}, a solid red triangle on a {name} background'
         )
 
@@ -201,8 +202,8 @@ class LiveTrainingTests(unittest.TestCase):
         return {
             'ZONE_COMFY_INPUT': str(self.staging),
             'ZONE_TRAIN_DIR': str(self.workspace),
-            'ZONE_PROBE_NAME': self.name,
-            'ZONE_PROBE_CHECKPOINT': CHECKPOINT,
+            'ZONE_TRAIN_ARCHITECTURE': 'flux',
+            'ZONE_TRAIN_CHECKPOINT': CHECKPOINT,
             'ZONE_PROBE_RESOLUTION': str(RESOLUTION),
             'ZONE_PROBE_TIMEOUT': setting('ZONE_PROBE_TIMEOUT', TIMEOUT),
         }
@@ -223,8 +224,14 @@ class LiveTrainingTests(unittest.TestCase):
             ZONE_PROBE_MODE='gradient',
             ZONE_PROBE_ITERATIONS=setting('ZONE_PROBE_ITERATIONS', ITERATIONS),
         ):
-            folder, captions = self.probe.dataset()
-            report = self.measure(self.probe.gradient_graph(folder, captions, RESOLUTION))
+            model = self.trainer.TrainingModel.from_environment()
+            run, manifest, _ = self.probe.dataset(model)
+            try:
+                report = self.measure(
+                    self.probe.gradient_graph(model, run.folder, manifest, RESOLUTION)
+                )
+            finally:
+                shutil.rmtree(self.staging / run.folder, ignore_errors=True)
         summary = self.announce(
             f'gradient norm={report["gradient_norms"][0]:.6f} '
             f'adapters={report["adapters"]} '
@@ -258,12 +265,20 @@ class LiveTrainingTests(unittest.TestCase):
         if self.adapter is None:
             self.skipTest('training has to produce an adapter before it can be scored')
         minimum = float(setting('ZONE_LIVE_TRAIN_MIN_IMPROVEMENT', MINIMUM_IMPROVEMENT))
-        with environment(**self.shared(), ZONE_PROBE_FOLDER=f'zone-train-{self.name}'):
-            folder, captions = self.probe.dataset()
-            base = self.measure(self.probe.loss_graph(folder, captions, RESOLUTION, ''))
-            trained = self.measure(
-                self.probe.loss_graph(folder, captions, RESOLUTION, self.adapter.name)
-            )
+        with environment(**self.shared()):
+            model = self.trainer.TrainingModel.from_environment()
+            run, manifest, _ = self.probe.dataset(model)
+            try:
+                base = self.measure(
+                    self.probe.loss_graph(model, run.folder, manifest, RESOLUTION, '')
+                )
+                trained = self.measure(
+                    self.probe.loss_graph(
+                        model, run.folder, manifest, RESOLUTION, self.adapter.name
+                    )
+                )
+            finally:
+                shutil.rmtree(self.staging / run.folder, ignore_errors=True)
         improvement = (base['mean'] - trained['mean']) / base['mean'] * 100
         summary = self.announce(
             f'base={base["mean"]:.5f} adapter={trained["mean"]:.5f} '

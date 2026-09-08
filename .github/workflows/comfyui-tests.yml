@@ -53,6 +53,14 @@ jobs:
           git -C .comfyui-runtime fetch --depth 1 origin ${{ steps.comfyui.outputs.commit }}
           git -C .comfyui-runtime checkout FETCH_HEAD
 
+      - name: Verify exact ComfyUI revision
+        run: test "$(git -C .comfyui-runtime rev-parse HEAD)" = "${{ steps.comfyui.outputs.commit }}"
+
+      - name: Install repository extension
+        run: |
+          rm -rf .comfyui-runtime/custom_nodes/zone_lora
+          cp -R comfyui/custom_nodes/zone_lora .comfyui-runtime/custom_nodes/zone_lora
+
       - name: Install CPU PyTorch
         run: pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
 

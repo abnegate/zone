@@ -21,6 +21,9 @@
       "defaults": {
         "checkpoint": "flux1-schnell-fp8.safetensors"
       },
+      "training": {
+        "architecture": "flux"
+      },
       "files": [
         "flux1-schnell-fp8.safetensors"
       ],
@@ -91,6 +94,9 @@
       },
       "defaults": {
         "checkpoint": "flux1-dev-fp8.safetensors"
+      },
+      "training": {
+        "architecture": "flux"
       },
       "files": [
         "flux1-dev-fp8.safetensors"
@@ -234,6 +240,9 @@
         "unet": "qwen_image_edit_2511_fp8mixed.safetensors",
         "clip": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
         "vae": "qwen_image_vae.safetensors"
+      },
+      "training": {
+        "architecture": "qwen_edit"
       },
       "files": [
         "qwen_image_edit_2511_fp8mixed.safetensors",

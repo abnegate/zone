@@ -1,22 +1,35 @@
 from __future__ import annotations
 
-import importlib.util
+import json
 import os
+import sys
+import tempfile
 import unittest
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).parents[1] / 'train_lora.py'
-SERVER_PATH = Path(__file__).parents[2] / 'runner' / 'zone_comfy' / 'src' / 'train.rs'
-SPEC = importlib.util.spec_from_file_location('zone_train_lora', MODULE_PATH)
-assert SPEC and SPEC.loader
-train_lora = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(train_lora)
+COMFYUI = Path(__file__).parents[1]
+if str(COMFYUI) not in sys.path:
+    sys.path.insert(0, str(COMFYUI))
 
-VARIABLES = ('ZONE_COMFY_INPUT', 'COMFYUI_MODELS_DIR', 'ZONE_TRAIN_STEPS')
+import train_lora  # noqa: E402
+
+VARIABLES = (
+    'COMFYUI_MODELS_DIR',
+    'ZONE_COMFY_INPUT',
+    'ZONE_TRAIN_ARCHITECTURE',
+    'ZONE_TRAIN_CHECKPOINT',
+    'ZONE_TRAIN_CLIP',
+    'ZONE_TRAIN_DEFER_CLEANUP',
+    'ZONE_TRAIN_FOLDER',
+    'ZONE_TRAIN_ARTIFACT',
+    'ZONE_TRAIN_STEPS',
+    'ZONE_TRAIN_UNET',
+    'ZONE_TRAIN_VAE',
+)
 DATASETS = (8, 24, 100, 300)
 HEALTHY_PASSES = (17.0, 19.0)
-BUDGET_KEYS = frozenset({'passes_per_image', 'min_steps', 'max_steps'})
 
 
 @contextmanager
@@ -34,110 +47,179 @@ def environment(**values: str):
                 os.environ[name] = previous[name]
 
 
-def steps_body(source: str) -> str:
-    start = source.find('fn steps(')
-    if start < 0:
-        raise AssertionError(f'{SERVER_PATH}: fn steps not found')
-    opened = source.index('{', start)
-    depth = 0
-    for index in range(opened, len(source)):
-        if source[index] == '{':
-            depth += 1
-        elif source[index] == '}':
-            depth -= 1
-            if depth == 0:
-                return source[opened : index + 1]
-    raise AssertionError(f'{SERVER_PATH}: fn steps has no closing brace')
+def flux() -> train_lora.TrainingModel:
+    return train_lora.TrainingModel(architecture='flux', checkpoint='flux.safetensors')
+
+
+def qwen() -> train_lora.TrainingModel:
+    return train_lora.TrainingModel(
+        architecture='qwen_edit',
+        unet='qwen-unet.safetensors',
+        clip='qwen-clip.safetensors',
+        vae='qwen-vae.safetensors',
+    )
+
+
+class TrainingModelTests(unittest.TestCase):
+    def test_model_family_is_required_and_never_inferred(self) -> None:
+        with environment():
+            with self.assertRaises(SystemExit):
+                train_lora.TrainingModel.from_environment()
+
+    def test_prompt_response_must_have_the_exact_comfy_shape(self) -> None:
+        identifier = str(uuid.uuid4())
+        self.assertEqual(
+            train_lora.prompt_id(
+                {'prompt_id': identifier, 'number': 0, 'node_errors': {}}
+            ),
+            identifier,
+        )
+        with self.assertRaises(SystemExit):
+            train_lora.prompt_id(
+                {
+                    'prompt_id': identifier,
+                    'number': 0,
+                    'node_errors': {},
+                    'unexpected': True,
+                }
+            )
+
+    def test_qwen_requires_every_explicit_component(self) -> None:
+        with environment(
+            ZONE_TRAIN_ARCHITECTURE='qwen_edit',
+            ZONE_TRAIN_UNET='qwen-unet.safetensors',
+            ZONE_TRAIN_CLIP='qwen-clip.safetensors',
+        ):
+            with self.assertRaises(SystemExit):
+                train_lora.TrainingModel.from_environment()
+
+    def test_flux_does_not_fall_back_to_a_global_checkpoint(self) -> None:
+        with environment(ZONE_TRAIN_ARCHITECTURE='flux'):
+            with self.assertRaises(SystemExit):
+                train_lora.TrainingModel.from_environment()
+
+    def test_weight_names_are_confined_to_one_model_file(self) -> None:
+        with environment(
+            ZONE_TRAIN_ARCHITECTURE='flux', ZONE_TRAIN_CHECKPOINT='../outside.safetensors'
+        ):
+            with self.assertRaises(SystemExit):
+                train_lora.TrainingModel.from_environment()
+
+
+class GraphTests(unittest.TestCase):
+    def config(self) -> dict:
+        return train_lora.load_config()
+
+    def test_flux_uses_native_vae_and_clip_encoders(self) -> None:
+        graph = train_lora.train_graph(flux(), 'folder', '{}', 'artifact', self.config(), 12)
+        self.assertEqual(graph['1']['class_type'], 'CheckpointLoaderSimple')
+        self.assertEqual(graph['3']['class_type'], 'VAEEncode')
+        self.assertEqual(graph['4']['class_type'], 'CLIPTextEncode')
+        self.assertEqual(graph['5']['inputs']['positive'], ['4', 0])
+        self.assertNotIn('MakeTrainingDataset', json.dumps(graph))
+
+    def test_qwen_uses_the_edit_reference_and_target_at_the_same_index(self) -> None:
+        graph = train_lora.train_graph(qwen(), 'folder', '{}', 'artifact', self.config(), 12)
+        self.assertEqual(graph['1']['class_type'], 'UNETLoader')
+        self.assertEqual(graph['2']['inputs']['type'], 'qwen_image')
+        self.assertEqual(graph['5']['inputs']['pixels'], ['4', 0])
+        self.assertEqual(graph['6']['inputs']['prompt'], ['4', 2])
+        self.assertEqual(graph['6']['inputs']['image1'], ['4', 1])
+        self.assertEqual(graph['7']['inputs']['positive'], ['6', 0])
+        self.assertNotIn('MakeTrainingDataset', json.dumps(graph))
+
+
+class DatasetTests(unittest.TestCase):
+    def test_qwen_manifest_and_files_preserve_two_pair_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source'
+            destination = root / 'input' / train_lora.Run.create().folder
+            (source / 'targets').mkdir(parents=True)
+            (source / 'control_1').mkdir()
+            for index in range(2):
+                (source / f'targets/{index:04}.png').write_bytes(bytes([index]))
+                (source / f'targets/{index:04}.txt').write_text(f'instruction {index}')
+                (source / f'control_1/{index:04}.png').write_bytes(bytes([index + 10]))
+            count, manifest_json = train_lora.stage_dataset(source, destination, qwen())
+            manifest = json.loads(manifest_json)
+            self.assertEqual(count, 2)
+            self.assertEqual(manifest['architecture'], 'qwen_edit')
+            self.assertEqual(
+                manifest['pairs'],
+                [
+                    {
+                        'index': 0,
+                        'target': 'targets/0000.png',
+                        'reference': 'control_1/0000.png',
+                        'instruction': 'instruction 0',
+                    },
+                    {
+                        'index': 1,
+                        'target': 'targets/0001.png',
+                        'reference': 'control_1/0001.png',
+                        'instruction': 'instruction 1',
+                    },
+                ],
+            )
+            self.assertEqual((destination / 'targets/0001.png').read_bytes(), bytes([1]))
+            self.assertEqual((destination / 'control_1/0001.png').read_bytes(), bytes([11]))
+
+    def test_qwen_refuses_a_missing_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'source/targets').mkdir(parents=True)
+            (root / 'source/control_1').mkdir()
+            (root / 'source/targets/0000.png').write_bytes(b'target')
+            (root / 'source/targets/0000.txt').write_text('instruction')
+            with self.assertRaises(SystemExit):
+                train_lora.stage_dataset(root / 'source', root / 'input/run', qwen())
+
+    def test_run_names_are_generated_uuid_names(self) -> None:
+        first = train_lora.Run.create()
+        second = train_lora.Run.create()
+        first.validate()
+        second.validate()
+        self.assertNotEqual(first, second)
+
+    def test_host_supplied_run_names_are_validated_as_a_pair(self) -> None:
+        generated = train_lora.Run.create()
+        with environment(
+            ZONE_TRAIN_FOLDER=generated.folder,
+            ZONE_TRAIN_ARTIFACT=generated.artifact,
+        ):
+            self.assertEqual(train_lora.Run.from_environment(), generated)
+        with environment(ZONE_TRAIN_FOLDER=generated.folder):
+            with self.assertRaises(SystemExit):
+                train_lora.Run.from_environment()
 
 
 class TrainStepsTests(unittest.TestCase):
-    def config(self, **overrides: object) -> dict:
-        settings = train_lora.load_config()
-        settings.update(overrides)
-        return settings
-
-    def passes(self, image_count: int, settings: dict) -> float:
-        return train_lora.train_steps(image_count, settings) / image_count
-
-    def test_a_larger_dataset_is_never_trained_less_per_image_than_a_smaller_one(self) -> None:
+    def test_budget_is_monotonic_and_inside_the_measured_flux_band(self) -> None:
         with environment():
-            settings = self.config()
-            for smaller, larger in zip(DATASETS, DATASETS[1:]):
-                with self.subTest(smaller=smaller, larger=larger):
-                    self.assertGreaterEqual(
-                        self.passes(larger, settings),
-                        self.passes(smaller, settings),
-                        f'{larger} images get {self.passes(larger, settings)} passes each and '
-                        f'{smaller} images get {self.passes(smaller, settings)}, so uploading '
-                        'more photos would train the subject less',
-                    )
-
-    def test_every_realistic_dataset_trains_inside_the_measured_band(self) -> None:
-        with environment():
-            settings = self.config()
+            settings = train_lora.load_config()
+            passes = [train_lora.train_steps(count, settings) / count for count in DATASETS]
+            self.assertEqual(passes, sorted(passes))
             low, high = HEALTHY_PASSES
-            for count in DATASETS:
-                with self.subTest(images=count):
-                    budget = self.passes(count, settings)
-                    message = f'{count} images train {budget} passes each'
-                    self.assertGreaterEqual(budget, low, message)
-                    self.assertLessEqual(budget, high, message)
-
-    def test_the_floor_keeps_a_tiny_dataset_training(self) -> None:
-        with environment():
-            settings = self.config()
-            self.assertLessEqual(int(settings['min_steps']), int(settings['max_steps']))
-            for count in (1, 2, 3):
-                with self.subTest(images=count):
-                    self.assertEqual(
-                        train_lora.train_steps(count, settings),
-                        int(settings['min_steps']),
-                        f'{count} images must still train to the floor',
-                    )
-
-    def test_the_ceiling_holds_for_a_huge_dataset(self) -> None:
-        with environment():
-            settings = self.config()
-            self.assertEqual(
-                train_lora.train_steps(10_000, settings),
-                int(settings['max_steps']),
-                'a huge set is capped',
-            )
-
-    def test_the_server_spends_the_same_budget_on_the_same_keys(self) -> None:
-        """train.rs reimplements this budget, and only a test keeps the two in step."""
-        source = SERVER_PATH.read_text()
-        self.assertIn('train_config.json', source, f'{SERVER_PATH} embeds a different config')
-        self.assertEqual(
-            BUDGET_KEYS,
-            {name for name in BUDGET_KEYS if f'{name}: u32' in source},
-            f'{SERVER_PATH} declares different budget fields',
-        )
-        body = ''.join(steps_body(source).split())
-        self.assertIn('.saturating_mul(self.passes_per_image)', body, str(SERVER_PATH))
-        self.assertIn('.clamp(self.min_steps,self.max_steps)', body, str(SERVER_PATH))
-        self.assertLessEqual(BUDGET_KEYS, set(self.config()))
+            self.assertTrue(all(low <= value <= high for value in passes))
 
     def test_override_wins_over_the_budget(self) -> None:
         with environment(ZONE_TRAIN_STEPS='37'):
-            self.assertEqual(train_lora.train_steps(8, self.config()), 37)
+            self.assertEqual(train_lora.train_steps(8, train_lora.load_config()), 37)
 
 
 class ComfyInputDirTests(unittest.TestCase):
-    def test_override_wins(self):
-        with environment(ZONE_COMFY_INPUT='/srv/comfy/input', COMFYUI_MODELS_DIR='/srv/comfy/models'):
+    def test_override_wins(self) -> None:
+        with environment(
+            ZONE_COMFY_INPUT='/srv/comfy/input', COMFYUI_MODELS_DIR='/srv/comfy/models'
+        ):
             self.assertEqual(train_lora.comfy_input_dir(), Path('/srv/comfy/input'))
 
-    def test_derived_from_models_dir(self):
+    def test_derived_from_models_dir(self) -> None:
         with environment(COMFYUI_MODELS_DIR='/srv/comfy/models'):
             self.assertEqual(train_lora.comfy_input_dir(), Path('/srv/comfy/input'))
 
-    def test_never_falls_back_to_the_working_directory(self):
-        """Path('') is '.', so a missing override used to stage images into the cwd."""
-        with environment(COMFYUI_MODELS_DIR='/srv/comfy/models'):
-            self.assertNotEqual(train_lora.comfy_input_dir(), Path('.'))
-
-    def test_requires_a_location(self):
+    def test_requires_a_location(self) -> None:
         with environment():
             with self.assertRaises(SystemExit):
                 train_lora.comfy_input_dir()

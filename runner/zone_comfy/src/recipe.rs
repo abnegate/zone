@@ -89,6 +89,30 @@ pub struct RequiredFile {
     pub directory: String,
 }
 
+/// The exact model components a supported training graph loads.
+///
+/// This is resolved only from the catalog's explicit `training` metadata. A
+/// recipe id, prompt mode, or process-wide checkpoint is never enough to select
+/// a trainer because those are presentation and inference concerns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrainingModel {
+    Flux {
+        checkpoint: String,
+    },
+    QwenEdit {
+        unet: String,
+        clip: String,
+        vae: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TrainingArchitecture {
+    Flux,
+    QwenEdit,
+}
+
 #[derive(Debug, Clone)]
 pub struct Recipe {
     pub id: String,
@@ -99,6 +123,7 @@ pub struct Recipe {
     pub defaults: HashMap<String, String>,
     pub hf_bases: Vec<String>,
     pub required_files: Vec<RequiredFile>,
+    training: Option<TrainingArchitecture>,
     bare: Value,
     with_source: Option<Value>,
     slots: RecipeSlots,
@@ -154,6 +179,13 @@ struct CatalogRecipe {
     hf_bases: Vec<String>,
     #[serde(default)]
     required_files: Vec<RequiredFile>,
+    #[serde(default)]
+    training: Option<CatalogTraining>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CatalogTraining {
+    architecture: TrainingArchitecture,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +261,7 @@ impl RecipeCatalog {
             for hint in spec.filename_hints {
                 hints.push((hint.to_ascii_lowercase(), spec.id.clone()));
             }
-            recipes.push(Recipe {
+            let recipe = Recipe {
                 id: spec.id,
                 kind: spec.kind,
                 label: spec.label,
@@ -238,10 +270,15 @@ impl RecipeCatalog {
                 defaults: spec.defaults,
                 hf_bases: spec.hf_bases,
                 required_files: spec.required_files,
+                training: spec.training.map(|training| training.architecture),
                 bare,
                 with_source,
                 slots,
-            });
+            };
+            if recipe.training.is_some() {
+                recipe.training_model()?;
+            }
+            recipes.push(recipe);
         }
 
         if !recipes
@@ -344,6 +381,31 @@ impl RecipeCatalog {
 }
 
 impl Recipe {
+    pub fn training_model(&self) -> Result<TrainingModel, Error> {
+        let architecture = self.training.ok_or(Error::Configuration(
+            "recipe does not declare a supported training architecture",
+        ))?;
+        match architecture {
+            TrainingArchitecture::Flux => Ok(TrainingModel::Flux {
+                checkpoint: self.training_weight("checkpoint")?,
+            }),
+            TrainingArchitecture::QwenEdit => Ok(TrainingModel::QwenEdit {
+                unet: self.training_weight("unet")?,
+                clip: self.training_weight("clip")?,
+                vae: self.training_weight("vae")?,
+            }),
+        }
+    }
+
+    fn training_weight(&self, name: &str) -> Result<String, Error> {
+        self.defaults
+            .get(name)
+            .ok_or(Error::Configuration(
+                "training metadata references a missing model weight",
+            ))
+            .and_then(|filename| sanitize_weight_filename(filename))
+    }
+
     pub fn has_lora_slot(&self) -> bool {
         self.slots.weights.contains_key("lora")
     }
@@ -605,6 +667,56 @@ mod tests {
         ] {
             assert!(packaged_workflow(name).is_some(), "{name}");
         }
+    }
+
+    #[test]
+    fn training_model_is_explicit_and_uses_only_catalog_defaults() {
+        let catalog = catalog();
+        assert_eq!(
+            catalog.get("flux-dev").unwrap().training_model().unwrap(),
+            TrainingModel::Flux {
+                checkpoint: "flux1-dev-fp8.safetensors".into()
+            }
+        );
+        assert_eq!(
+            catalog
+                .get("qwen-image-edit")
+                .unwrap()
+                .training_model()
+                .unwrap(),
+            TrainingModel::QwenEdit {
+                unet: "qwen_image_edit_2511_fp8mixed.safetensors".into(),
+                clip: "qwen_2.5_vl_7b_fp8_scaled.safetensors".into(),
+                vae: "qwen_image_vae.safetensors".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn training_never_infers_a_family_from_recipe_identity_or_prompt_mode() {
+        let catalog = catalog();
+        assert!(
+            catalog
+                .get("qwen-image-edit-adapter")
+                .unwrap()
+                .training_model()
+                .is_err()
+        );
+        assert!(catalog.get("sd15").unwrap().training_model().is_err());
+    }
+
+    #[test]
+    fn declared_training_fails_closed_when_a_weight_is_missing_or_pathful() {
+        let catalog = catalog();
+        let mut missing = catalog.get("qwen-image-edit").unwrap().clone();
+        missing.defaults.remove("clip");
+        assert!(missing.training_model().is_err());
+
+        let mut pathful = catalog.get("flux-schnell").unwrap().clone();
+        pathful
+            .defaults
+            .insert("checkpoint".into(), "../outside.safetensors".into());
+        assert!(pathful.training_model().is_err());
     }
 
     #[test]
