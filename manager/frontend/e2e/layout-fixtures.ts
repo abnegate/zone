@@ -1,7 +1,8 @@
 import type { Page } from '@playwright/test';
+import type { AiSettings } from '../src/features/settings/workspace/types';
 import {
-  createMockJwt,
   adminPermissions,
+  createMockJwt,
   mockAdminUser,
   routeApi,
 } from './test-utils';
@@ -25,6 +26,25 @@ const mockWorkspace = {
   is_active: true,
   created_at: '2024-01-01T00:00:00Z',
   updated_at: '2024-01-01T00:00:00Z',
+};
+
+const mockAiSettings: AiSettings = {
+  provider: 'self_hosted',
+  has_litellm_key: false,
+  litellm_host: 'http://ollama:11434',
+  has_openai_api_key: false,
+  openai_base_url: null,
+  has_anthropic_api_key: false,
+  anthropic_base_url: null,
+  bedrock_region: null,
+  bedrock_use_iam_role: false,
+  has_bedrock_credentials: false,
+  model_fast: 'llama3.2:latest',
+  model_reasoning: 'llama3.2:latest',
+  model_embedding: null,
+  model_image: null,
+  model_video: null,
+  model_audio: null,
 };
 
 const mockMembers = [
@@ -318,6 +338,12 @@ export async function setupCommonRoutes(
     }
     if (path.endsWith('/members'))
       body = { members: populated ? mockMembers : [] };
+    else if (/\/organizations\/[^/]+\/settings\/ai$/.test(path))
+      body = mockAiSettings;
+    else if (
+      /\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/ai(?:\/effective)?$/.test(path)
+    )
+      body = mockAiSettings;
     else if (path === '/api/organizations')
       body = { organizations: [mockOrganization] };
     else if (/\/organizations\/[^/]+\/workspaces$/.test(path))
