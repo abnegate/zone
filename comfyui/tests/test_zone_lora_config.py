@@ -13,23 +13,13 @@ SPEC.loader.exec_module(train_config)
 
 
 class TrainConfigTests(unittest.TestCase):
-    def test_steps_scale_with_images_and_clamp(self):
-        config = train_config.load_config()
-        self.assertGreaterEqual(train_config.train_steps(1, config), int(config['min_steps']))
-        self.assertEqual(
-            train_config.train_steps(8, config),
-            max(int(config['min_steps']), 8 * int(config['steps_per_image'])),
-        )
-        self.assertLessEqual(train_config.train_steps(10_000, config), int(config['max_steps']))
-
     def test_identity_defaults_use_full_blocks_and_rank_alpha(self):
         config = train_config.load_config()
         self.assertTrue(config['alpha_equals_rank'])
         self.assertEqual(train_config.lora_alpha(8, config), 8.0)
-        self.assertEqual(int(config['rank']), 8)
+        self.assertGreaterEqual(int(config['rank']), 32)
         self.assertGreaterEqual(int(config['min_steps']), 400)
         self.assertEqual(int(config['steps_per_image']), 50)
-        self.assertEqual(train_config.train_steps(8, config), 400)
         self.assertEqual(int(config['resolution']), 512)
         self.assertEqual(config['lora_dtype'], 'bf16')
 
@@ -45,6 +35,16 @@ class TrainConfigTests(unittest.TestCase):
         )
         self.assertFalse(train_config.is_transformer_block('diffusion_model.img_in'))
         self.assertTrue(train_config.is_output_module('diffusion_model.final_layer.linear'))
+
+    def test_checkpoints_land_often_enough_to_judge_a_run_early(self):
+        config = train_config.load_config()
+        every = int(config['checkpoint_every'])
+        self.assertGreater(every, 0, 'a long run must be testable before it ends')
+        self.assertLessEqual(
+            every,
+            int(config['min_steps']) // 2,
+            'at least two checkpoints before the shortest run finishes',
+        )
 
     def test_modulation_layers_are_left_alone_by_default(self):
         config = train_config.load_config()

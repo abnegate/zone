@@ -114,7 +114,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       <h2>Train a LoRA</h2>
       <p className="help-text">
         Drop images, pick an installed base, and set a unique trigger word. Zone trains every
-        transformer block (rank 8, alpha equals rank, 400+ steps) so the LoRA can keep that
+        transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that
         identity.
       </p>
       {error && <div className="error-placeholder">{error}</div>}

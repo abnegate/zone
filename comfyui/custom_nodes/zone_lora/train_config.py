@@ -16,14 +16,6 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return json.loads(source.read_text())
 
 
-def train_steps(image_count: int, config: dict[str, Any] | None = None) -> int:
-    settings = config or load_config()
-    per_image = int(settings['steps_per_image'])
-    minimum = int(settings['min_steps'])
-    maximum = int(settings['max_steps'])
-    return min(maximum, max(minimum, max(image_count, 1) * per_image))
-
-
 def lora_alpha(rank: int, config: dict[str, Any] | None = None) -> float:
     settings = config or load_config()
     if settings.get('alpha_equals_rank', True):

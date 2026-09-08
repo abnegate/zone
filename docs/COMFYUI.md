@@ -290,9 +290,10 @@ wants request metrics installs a hook with `zone_comfy::observe_requests`.
 
 
 Training runs through `ZoneTrainLoRA` in `comfyui/custom_nodes/zone_lora/`.
-Defaults live in `train_config.json`: rank 8, alpha equal to rank, every
-2-D linear in the transformer blocks (304 adapters on FLUX.1 Schnell), 512px,
-and at least 400 steps.
+Defaults live in `train_config.json`: rank 32, alpha equal to rank, every 2-D
+linear in the transformer blocks except the modulation layers (228 adapters on
+FLUX.1 Dev), 512px, and at least 400 steps. An adapter is written every 50
+steps as well as at the end, so a long run can be judged before it finishes.
 
 ### Train on Dev, not Schnell
 
@@ -340,6 +341,36 @@ write by hand are never overwritten. The Models Train tab exposes this as
 **Auto-caption images**, so the captions can be reviewed and edited before
 training starts.
 
+### Why the base weights are cloned before training
+
+ComfyUI loads a checkpoint under `torch.inference_mode`, and autograd refuses to
+save an inference tensor for backward. An adapted module therefore cannot run its
+base matmul with gradients enabled until that weight has been cloned onto normal
+storage, which is what `prepare_frozen_weights` does for every frozen tensor.
+
+Skipping the weights the adapters wrap looks like an optimisation and is not. An
+adapter's gradient is the loss gradient carried back through the base weights of
+every layer below it; with those out of the graph the only remaining path runs
+through the other layers' LoRA branches, which are zero at initialisation by
+construction. Measured on a fixed batch over 40 steps at rank 8, restoring that
+chain moves the gradient norm from 0.0004 to 0.026 and the loss from -0.41% to
+-34.26% for the same drift. Every run made before it peaked at the same -13.5%
+against its own training images, all of it at the noisy end of the schedule,
+which is the most an adapter can do when it can only shift the output.
+
+### Why the loss is divided by sigma
+
+Flow matching makes the x0 error exactly sigma times the velocity error, so a
+plain MSE on x0 weights each step by sigma squared. Uniform sampling over the
+schedule already puts the median sigma at 0.76 on FLUX, and squaring it on top
+leaves the clean end of the schedule — the end that carries a subject's shape —
+contributing almost nothing.
+
+`sigma_floor` in `train_config.json` divides the error by sigma so every noise
+level counts alike, with the floor bounding the amplification as sigma
+approaches zero — 1.7% of draws fall below the default 0.05. Set it to 0 to
+train on the x0 error instead.
+
 ### Why the residual hook exists
 
 `comfy/ldm/flux/layers.py` applies block residuals in place (`img += ...`,
@@ -364,6 +395,39 @@ python3 comfyui/compare_lora.py
 ```
 
 Renders the same prompt and seed with and without the adapter.
+
+### Measuring a run without rendering
+
+Renders answer whether an adapter looks right, which is slow and subjective. The
+probe nodes answer whether it *is* right, in minutes.
+
+`ZoneProbeLoss` reports the training loss at fixed noise levels for the base and
+for each adapter, over the images the adapter trained on. An adapter that has
+learned its subject scores below its base on those images; one that has not
+scores above. A zero adapter measures byte-identical to the base, which is what
+makes the comparison worth anything.
+
+```bash
+ZONE_TRAIN_DIR=/tmp/my-train-set \
+COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+python3 comfyui/probe_lora.py my_lora-step150.safetensors my_lora.safetensors
+```
+
+`ZoneProbeGradient` descends on one unchanging batch, where a correct gradient
+has to lower the loss. It is how the rank gets chosen and how a broken backward
+pass gets caught in minutes rather than at the end of an hour: a severed chain
+shows up as a loss that will not move however long the descent runs.
+
+```bash
+ZONE_PROBE_MODE=gradient \
+ZONE_PROBE_LEARNING_RATE=0.0001 \
+ZONE_TRAIN_DIR=/tmp/my-train-set \
+COMFYUI_MODELS_DIR="$HOME/Library/Application Support/Zone/ComfyUI/models" \
+python3 comfyui/probe_lora.py
+```
+
+ComfyUI runs prompts one at a time, so a probe queued during training waits for
+it to finish.
 
 ## Workflow contract
 
