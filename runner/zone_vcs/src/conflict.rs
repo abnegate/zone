@@ -31,6 +31,10 @@ const BASE_REF: &str = "refs/zone/conflict/base";
 /// The line a conflicted file opens each hunk with.
 pub const OURS_MARKER: &str = "<<<<<<<";
 
+/// The identity a repair commits under.
+const IDENTITY_NAME: &str = "Zone";
+const IDENTITY_EMAIL: &str = "zone@users.noreply.github.com";
+
 /// The line diff3-style conflicts use to introduce the merge base.
 pub const BASE_MARKER: &str = "|||||||";
 
@@ -557,10 +561,29 @@ impl ConflictService {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// Run a command whose failure is an answer rather than an error.
+    /// Run a merge whose failure is an answer rather than an error.
+    ///
+    /// Exit 1 is the conflict git was asked to produce. Any other failure —
+    /// a missing ref, an unusable identity, a broken checkout — is an error,
+    /// and reporting it as "merged cleanly" turns a broken environment into a
+    /// silent no-op that looks exactly like a branch needing no repair.
     async fn attempt(&self, checkout: &Path, arguments: &[&str]) -> ConflictResult<bool> {
         let output = self.command(checkout, arguments).output().await?;
-        Ok(output.status.success())
+        if output.status.success() {
+            return Ok(true);
+        }
+        if output.status.code() == Some(1) {
+            return Ok(false);
+        }
+        Err(ConflictError::CommandFailed(format!(
+            "git {} exited with {}: {}",
+            arguments.join(" "),
+            output
+                .status
+                .code()
+                .map_or_else(|| "a signal".to_string(), |code| code.to_string()),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
     }
 
     fn command(&self, checkout: &Path, arguments: &[&str]) -> Command {
@@ -574,6 +597,14 @@ impl ConflictService {
             .env("GIT_ASKPASS", "")
             .env("HOME", checkout)
             .env("LC_ALL", "C")
+            // env_clear removed any identity and the global config is
+            // /dev/null, so git has none to fall back on. A host whose git
+            // cannot synthesise one from the passwd entry refuses to merge or
+            // commit at all, which is most CI runners.
+            .env("GIT_AUTHOR_NAME", IDENTITY_NAME)
+            .env("GIT_AUTHOR_EMAIL", IDENTITY_EMAIL)
+            .env("GIT_COMMITTER_NAME", IDENTITY_NAME)
+            .env("GIT_COMMITTER_EMAIL", IDENTITY_EMAIL)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
