@@ -68,7 +68,7 @@ pub async fn run(
     output: &Path,
     save_name: &str,
     image_count: usize,
-) -> Result<(), TrainError> {
+) -> Result<String, TrainError> {
     if !config.enabled {
         return Err(TrainError::Disabled);
     }
@@ -143,7 +143,7 @@ pub async fn run(
         ));
     }
     fs::write(output, bytes).map_err(|error| TrainError::Failed(error.to_string()))?;
-    Ok(())
+    Ok(folder)
 }
 
 fn train_graph(

@@ -21,16 +21,17 @@
 //! # }
 //! ```
 //!
-//! Training a LoRA writes the dataset, captions any image left blank, and runs
-//! the packaged `ZoneTrainLoRA` graph on the configured ComfyUI server:
+//! Training a LoRA writes the dataset, captions any image left blank, runs the
+//! packaged `ZoneTrainLoRA` graph on the configured ComfyUI server, then scores
+//! every checkpoint the run produced and keeps the best one:
 //!
 //! ```no_run
 //! # async fn example(request: zone_comfy::TrainRequest) -> Result<(), Box<dyn std::error::Error>> {
 //! use zone_comfy::{Config, lora};
 //!
 //! let config = Config::from_env();
-//! let weights = lora::train(&config, litellm_host(), litellm_key(), request).await?;
-//! # let _ = weights;
+//! let outcome = lora::train(&config, litellm_host(), litellm_key(), request).await?;
+//! # let _ = outcome;
 //! # Ok(())
 //! # }
 //! # fn litellm_host() -> String { String::new() }
@@ -48,6 +49,7 @@ pub mod inventory;
 pub mod lora;
 pub mod media;
 pub mod observe;
+pub mod quality;
 pub mod recipe;
 pub mod train;
 
@@ -56,7 +58,10 @@ pub use client::{Client, Error, GeneratedImage, SourceImage};
 pub use config::Config;
 pub use dataset::{Concern, Finding, inspect};
 pub use inventory::{InventoryItem, WeightSidecar, scan};
-pub use lora::{TrainBase, TrainError, TrainImage, TrainRequest, available_bases, train};
+pub use lora::{
+    TrainBase, TrainError, TrainImage, TrainOutcome, TrainRequest, available_bases, train,
+};
 pub use media::MediaType;
 pub use observe::{RequestObserver, observe_requests};
+pub use quality::Quality;
 pub use recipe::{PromptMode, Recipe, RecipeCatalog, sanitize_weight_filename};

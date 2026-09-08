@@ -551,8 +551,9 @@ pub async fn train(
     )
     .await
     {
-        Ok(path) => Json(serde_json::json!({
-            "filename": path.file_name().and_then(|name| name.to_str()),
+        Ok(outcome) => Json(serde_json::json!({
+            "filename": outcome.path.file_name().and_then(|name| name.to_str()),
+            "quality": outcome.quality,
         }))
         .into_response(),
         Err(lora::TrainError::Disabled) => (

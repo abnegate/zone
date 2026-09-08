@@ -3,8 +3,10 @@
 use crate::caption::{Captioner, data_url};
 use crate::config::Config;
 use crate::inventory::WeightSidecar;
+use crate::quality::Quality;
 use crate::recipe::{RecipeCatalog, sanitize_weight_filename};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -36,6 +38,14 @@ pub struct TrainImage {
     pub bytes_base64: String,
     #[serde(default)]
     pub before_base64: Option<String>,
+}
+
+/// A finished run: the adapter on disk and, when ComfyUI could be asked, how
+/// far it beats the base it was trained from.
+#[derive(Debug, Serialize)]
+pub struct TrainOutcome {
+    pub path: PathBuf,
+    pub quality: Option<Quality>,
 }
 
 #[derive(Debug, Serialize)]
@@ -71,7 +81,7 @@ pub async fn train(
     litellm_host: String,
     litellm_key: String,
     mut request: TrainRequest,
-) -> Result<PathBuf, TrainError> {
+) -> Result<TrainOutcome, TrainError> {
     if config.train_command.is_none() && !config.enabled {
         return Err(TrainError::Disabled);
     }
@@ -148,7 +158,13 @@ pub async fn train(
     let output = config.models_dir.join("loras").join(&filename);
     fs::create_dir_all(output.parent().unwrap_or(Path::new(".")))
         .map_err(|error| TrainError::Failed(error.to_string()))?;
-    if let Some(command) = config.train_command.as_deref() {
+    let checkpoint = recipe
+        .defaults
+        .get("checkpoint")
+        .cloned()
+        .unwrap_or_else(|| config.checkpoint.clone());
+    let stem = filename.trim_end_matches(".safetensors").to_string();
+    let folder = if let Some(command) = config.train_command.as_deref() {
         let status = Command::new("sh")
             .arg("-c")
             .arg(command)
@@ -161,14 +177,7 @@ pub async fn train(
                 request.trigger.clone().unwrap_or_default(),
             )
             .env("COMFYUI_BASE_URL", &config.base_url)
-            .env(
-                "ZONE_TRAIN_CHECKPOINT",
-                recipe
-                    .defaults
-                    .get("checkpoint")
-                    .cloned()
-                    .unwrap_or_else(|| config.checkpoint.clone()),
-            )
+            .env("ZONE_TRAIN_CHECKPOINT", &checkpoint)
             .env("ZONE_TRAIN_TIMEOUT", config.train_timeout_secs.to_string())
             .env(
                 "ZONE_COMFY_INPUT",
@@ -192,6 +201,7 @@ pub async fn train(
                 status.code().unwrap_or(1)
             )));
         }
+        format!("zone-train-{stem}")
     } else {
         crate::train::run(
             config,
@@ -201,13 +211,29 @@ pub async fn train(
             &filename,
             request.images.len(),
         )
-        .await?;
-    }
+        .await?
+    };
     if !output.is_file() {
         return Err(TrainError::Failed(
             "trainer did not write a LoRA file".into(),
         ));
     }
+    let captions: HashMap<String, String> = request
+        .images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            (
+                format!("{index:04}.png"),
+                caption(image, request.trigger.as_deref()),
+            )
+        })
+        .collect();
+    let probe = Config {
+        checkpoint,
+        ..config.clone()
+    };
+    let quality = crate::quality::select(&probe, &folder, &output, &captions).await;
     if let Some(adapter) = catalog
         .adapter_recipe_for_base(recipe.hf_bases.first().unwrap_or(&recipe.id))
         .or_else(|| catalog.adapter_recipe_for_filename(&filename))
@@ -220,7 +246,10 @@ pub async fn train(
             },
         );
     }
-    Ok(output)
+    Ok(TrainOutcome {
+        path: output,
+        quality,
+    })
 }
 
 fn caption(image: &TrainImage, trigger: Option<&str>) -> String {
@@ -259,7 +288,7 @@ mod tests {
         };
         use base64::Engine;
         let tiny = base64::engine::general_purpose::STANDARD.encode([137_u8, 80, 78, 71]);
-        let output = train(
+        let outcome = train(
             &config,
             String::new(),
             String::new(),
@@ -277,8 +306,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.file_name().unwrap(), "my-style.safetensors");
-        assert_eq!(fs::read(&output).unwrap(), b"lora");
+        assert_eq!(outcome.path.file_name().unwrap(), "my-style.safetensors");
+        assert_eq!(fs::read(&outcome.path).unwrap(), b"lora");
+        assert!(
+            outcome.quality.is_none(),
+            "a run with no reachable probe reports no score instead of failing"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
