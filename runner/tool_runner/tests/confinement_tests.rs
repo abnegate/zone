@@ -646,6 +646,18 @@ async fn test_confinement_blocks_a_connection_that_otherwise_succeeds() {
 
 const SHELL: &str = "/bin/sh";
 const SHELL_DIRECTORY: &str = "/bin";
+
+/// The execute root as the confinement will name it.
+///
+/// `/bin` is a symlink to `/usr/bin` on a usrmerge Linux, and roots are
+/// canonicalised so containment is a real prefix check rather than a string
+/// one. An assertion that expects the literal passes on macOS and fails on CI.
+fn resolved_shell_directory() -> String {
+    std::fs::canonicalize(SHELL_DIRECTORY)
+        .expect("the shell directory resolves")
+        .display()
+        .to_string()
+}
 const PARENT_SCRIPT: &str = "parent.sh";
 const CHILD_SCRIPT: &str = "child.sh";
 const PARENT_IDENTIFIER: &str = "parent.pid";
@@ -714,16 +726,13 @@ fn test_seatbelt_tree_profile_admits_a_bounded_tree() {
     ));
 
     assert!(profile.contains("(allow process-fork)"), "{profile}");
+    let directory = resolved_shell_directory();
     assert!(
-        profile.contains(&format!(
-            "(allow process-exec (subpath \"{SHELL_DIRECTORY}\"))"
-        )),
+        profile.contains(&format!("(allow process-exec (subpath \"{directory}\"))")),
         "{profile}"
     );
     assert!(
-        profile.contains(&format!(
-            "(allow file-read* (subpath \"{SHELL_DIRECTORY}\"))"
-        )),
+        profile.contains(&format!("(allow file-read* (subpath \"{directory}\"))")),
         "an execute root the tree cannot read is an execute root it cannot use\n{profile}"
     );
     assert!(profile.contains("(deny network*)"), "{profile}");
@@ -794,8 +803,9 @@ fn test_bubblewrap_tree_arguments_bind_the_execute_roots() {
         vec![PathBuf::from(SHELL_DIRECTORY)],
     ));
 
+    let directory = resolved_shell_directory();
     assert!(
-        window(&arguments, &["--ro-bind", SHELL_DIRECTORY, SHELL_DIRECTORY]),
+        window(&arguments, &["--ro-bind", &directory, &directory]),
         "{arguments:?}"
     );
     assert!(
