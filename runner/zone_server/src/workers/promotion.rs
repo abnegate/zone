@@ -552,7 +552,7 @@ pub async fn promote_workspace(
         let (id, outcome) = knowledge::upsert_standing_instruction(pool, &instruction).await?;
 
         match outcome {
-            knowledge::StandingInstructionOutcome::Created => {
+            knowledge::KnowledgeUpsertOutcome::Created => {
                 report.created += 1;
                 tracing::info!(
                     %workspace_id,
@@ -565,7 +565,7 @@ pub async fn promote_workspace(
                     "Promoted a repeated answer to a standing instruction"
                 );
             }
-            knowledge::StandingInstructionOutcome::Superseded => {
+            knowledge::KnowledgeUpsertOutcome::Superseded => {
                 report.superseded += 1;
                 tracing::info!(
                     %workspace_id,
@@ -574,7 +574,7 @@ pub async fn promote_workspace(
                     "Superseded a standing instruction with an updated answer"
                 );
             }
-            knowledge::StandingInstructionOutcome::Unchanged => report.unchanged += 1,
+            knowledge::KnowledgeUpsertOutcome::Unchanged => report.unchanged += 1,
         }
     }
 
