@@ -151,6 +151,9 @@ async fn periodic_error(socket: &mut Socket, count: usize) -> Option<String> {
             WsMessage::Close(_) => return None,
             _ => {}
         }
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
     }
     None
 }
@@ -579,7 +582,7 @@ async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
     .unwrap();
 
     tokio::time::pause();
-    for _ in 0..190 {
+    for _ in 0..199 {
         tokio::time::advance(Duration::from_secs(30)).await;
         for _ in 0..3 {
             tokio::task::yield_now().await;
@@ -592,7 +595,7 @@ async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
     }
     // Reach just before the authorization query while time is paused. SQLx
     // also uses Tokio deadlines, so the query itself must run in real time.
-    tokio::time::advance(Duration::from_millis(269_999)).await;
+    tokio::time::advance(Duration::from_millis(29_999)).await;
     tokio::time::resume();
     tokio::time::sleep(Duration::from_millis(5)).await;
     assert_error(&mut socket, "Access revoked").await;
@@ -612,7 +615,7 @@ async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
     let mut socket = authenticate(&address, chat, &token).await;
 
     tokio::time::pause();
-    for _ in 0..190 {
+    for _ in 0..199 {
         tokio::time::advance(Duration::from_secs(30)).await;
         for _ in 0..3 {
             tokio::task::yield_now().await;
@@ -623,7 +626,7 @@ async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
         }
         tokio::task::yield_now().await;
     }
-    tokio::time::advance(Duration::from_millis(269_999)).await;
+    tokio::time::advance(Duration::from_millis(29_999)).await;
     tokio::time::resume();
     tokio::time::sleep(Duration::from_millis(5)).await;
 
