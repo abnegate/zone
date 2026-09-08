@@ -202,12 +202,13 @@ impl Client {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))?;
-        let _ = catalog.image_recipe_for(&config.checkpoint)?;
-        Ok(Self {
+        let client = Self {
             config,
             client,
             catalog,
-        })
+        };
+        let _ = client.image_recipe()?;
+        Ok(client)
     }
 
     pub fn prompt_mode(&self) -> PromptMode {
@@ -224,6 +225,14 @@ impl Client {
                 && let Some(recipe) = self.catalog.get(&item.recipe_id)
             {
                 return Ok(recipe);
+            }
+            let loras = self.config.models_dir.join("loras");
+            let pending = crate::inventory::publication_marker(&loras, selected)
+                .is_some_and(|marker| std::fs::symlink_metadata(marker).is_ok());
+            if pending || std::fs::symlink_metadata(loras.join(selected)).is_ok() {
+                return Err(Error::Configuration(
+                    "selected LoRA has no complete, coherent sidecar",
+                ));
             }
         }
         self.catalog.image_recipe_for(selected)
@@ -1252,6 +1261,52 @@ mod tests {
     }
 
     #[test]
+    fn local_lora_requires_a_complete_coherent_sidecar() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        let loras = models.join("loras");
+        std::fs::create_dir_all(&loras).unwrap();
+        let weight = loras.join("style.safetensors");
+        std::fs::write(&weight, b"lora").unwrap();
+        let config = Config {
+            checkpoint: "style.safetensors".into(),
+            models_dir: models,
+            ..Default::default()
+        };
+        assert!(matches!(
+            Client::new(config.clone()),
+            Err(Error::Configuration(
+                "selected LoRA has no complete, coherent sidecar"
+            ))
+        ));
+
+        crate::inventory::write_sidecar(
+            &weight,
+            &crate::inventory::WeightSidecar {
+                recipe_id: "flux-schnell-adapter".into(),
+                hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+            },
+        )
+        .unwrap();
+        assert!(Client::new(config.clone()).is_err());
+
+        crate::inventory::write_sidecar(
+            &weight,
+            &crate::inventory::WeightSidecar {
+                recipe_id: "flux-schnell-adapter".into(),
+                hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+            },
+        )
+        .unwrap();
+        assert!(Client::new(config.clone()).is_ok());
+
+        let marker = crate::inventory::publication_marker(&loras, "style.safetensors").unwrap();
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(marker, b"pending").unwrap();
+        assert!(Client::new(config).is_err());
+    }
+
+    #[test]
     fn mime_for_filename_covers_audio_extensions() {
         assert_eq!(mime_for_filename("zone.flac"), "audio/flac");
         assert_eq!(mime_for_filename("ZONE.MP3"), "audio/mpeg");
@@ -1418,6 +1473,20 @@ mod tests {
     #[tokio::test]
     async fn adapter_generate_loads_lora_and_keeps_instruction_prompt() {
         let server = MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models");
+        let loras = models.join("loras");
+        std::fs::create_dir_all(&loras).unwrap();
+        let weight = loras.join("qwen-image-edit-plus-nsfw-lora.safetensors");
+        std::fs::write(&weight, b"lora").unwrap();
+        crate::inventory::write_sidecar(
+            &weight,
+            &crate::inventory::WeightSidecar {
+                recipe_id: "qwen-image-edit-adapter".into(),
+                hf_base: Some("Qwen/Qwen-Image-Edit-2511".into()),
+            },
+        )
+        .unwrap();
         Mock::given(method("POST"))
             .and(path("/prompt"))
             .and(wiremock::matchers::body_string_contains(
@@ -1453,6 +1522,7 @@ mod tests {
             enabled: true,
             base_url: server.uri(),
             checkpoint: "qwen-image-edit-plus-nsfw-lora.safetensors".into(),
+            models_dir: models,
             poll_interval_ms: 50,
             ..Default::default()
         })

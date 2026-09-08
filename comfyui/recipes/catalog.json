@@ -22,7 +22,9 @@
         "checkpoint": "flux1-schnell-fp8.safetensors"
       },
       "training": {
-        "architecture": "flux"
+        "architecture": "flux",
+        "adapter": "flux-schnell-adapter",
+        "hf_base": "black-forest-labs/FLUX.1-schnell"
       },
       "files": [
         "flux1-schnell-fp8.safetensors"
@@ -96,7 +98,9 @@
         "checkpoint": "flux1-dev-fp8.safetensors"
       },
       "training": {
-        "architecture": "flux"
+        "architecture": "flux",
+        "adapter": "flux-dev-adapter",
+        "hf_base": "black-forest-labs/FLUX.1-dev"
       },
       "files": [
         "flux1-dev-fp8.safetensors"
@@ -242,7 +246,9 @@
         "vae": "qwen_image_vae.safetensors"
       },
       "training": {
-        "architecture": "qwen_edit"
+        "architecture": "qwen_edit",
+        "adapter": "qwen-image-edit-adapter",
+        "hf_base": "Qwen/Qwen-Image-Edit-2511"
       },
       "files": [
         "qwen_image_edit_2511_fp8mixed.safetensors",

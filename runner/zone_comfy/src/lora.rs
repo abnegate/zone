@@ -2,7 +2,7 @@
 
 use crate::caption::{Captioner, data_url};
 use crate::config::Config;
-use crate::inventory::WeightSidecar;
+use crate::inventory::{PUBLICATION_DIRECTORY, WeightDocument, WeightSidecar, publication_marker};
 use crate::quality::Quality;
 use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
 use crate::train::Run;
@@ -13,6 +13,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -90,13 +91,18 @@ struct Attempt {
     produced: Option<PathBuf>,
 }
 
+static PUBLICATIONS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 impl Attempt {
     fn create(models: &Path) -> Result<Self, TrainError> {
         require_directory(models, "models directory")?;
         let id = Uuid::new_v4().to_string();
         let training = ensure_child_directory(models, "training")?;
+        sync_directory(models)?;
         let root = training.join(&id);
         fs::create_dir(&root).map_err(failed)?;
+        sync_directory(&training)?;
         let parent = models.parent();
         let attempt = Self {
             artifact: None,
@@ -174,10 +180,7 @@ pub fn available_bases(catalog: &RecipeCatalog, models_dir: &Path) -> Vec<TrainB
         .map(|recipe| TrainBase {
             id: recipe.id.clone(),
             label: recipe.label.clone(),
-            edit: matches!(
-                recipe.prompt_mode,
-                crate::recipe::PromptMode::EditInstruction
-            ),
+            edit: matches!(recipe.training_model(), Ok(TrainingModel::QwenEdit { .. })),
         })
         .collect()
 }
@@ -213,7 +216,6 @@ async fn train_with_screening(
         return Err(TrainError::Invalid("training needs images"));
     }
     let catalog = RecipeCatalog::load(Some(config.workflow_path.as_path()))
-        .or_else(|_| RecipeCatalog::packaged())
         .map_err(|_| TrainError::Invalid("recipe catalog is missing"))?;
     let recipe = catalog
         .get(&request.base)
@@ -343,7 +345,6 @@ async fn train_with_screening(
         }
     }
     let staged = attempt.output();
-    let staged_name = attempt.staged_name();
     let run = if let Some(command) = config.train_command.as_deref() {
         let run = Run::new();
         attempt.register(&run)?;
@@ -351,8 +352,9 @@ async fn train_with_screening(
         process
             .arg("-c")
             .arg(command)
-            .env("ZONE_TRAIN_NAME", &staged_name)
+            .env("ZONE_TRAIN_NAME", &filename)
             .env("ZONE_TRAIN_FINAL_NAME", &filename)
+            .env("ZONE_TRAIN_ATTEMPT", &attempt.id)
             .env("ZONE_TRAIN_BASE", &recipe.id)
             .env("ZONE_TRAIN_DIR", &attempt.root)
             .env("ZONE_TRAIN_OUTPUT", &staged)
@@ -420,29 +422,29 @@ async fn train_with_screening(
     require_regular_file(&attempt.root, &staged).map_err(|_| {
         TrainError::Failed("quality selection did not leave a regular LoRA file".to_string())
     })?;
-    let staged_sidecar = catalog
-        .adapter_recipe_for_base(recipe.hf_bases.first().unwrap_or(&recipe.id))
-        .or_else(|| catalog.adapter_recipe_for_filename(&filename))
-        .map(|adapter| {
-            let path = sidecar_path(&staged);
-            let bytes = serde_json::to_vec_pretty(&WeightSidecar {
-                recipe_id: adapter.id.clone(),
-                hf_base: recipe.hf_bases.first().cloned(),
-            })
-            .map_err(|error| TrainError::Failed(error.to_string()))?;
-            write_new(&attempt.root, &path, &bytes)?;
-            Ok::<PathBuf, TrainError>(path)
-        })
-        .transpose()?;
+    let adapter = recipe
+        .training_adapter()
+        .map_err(|_| TrainError::Invalid("training adapter mapping is missing"))?;
+    let staged_sidecar = sidecar_path(&staged);
+    let bytes = serde_json::to_vec_pretty(&WeightDocument {
+        sidecar: WeightSidecar {
+            recipe_id: adapter.recipe_id.clone(),
+            hf_base: Some(adapter.hf_base.clone()),
+        },
+        generation: Some(attempt.id.clone()),
+    })
+    .map_err(|error| TrainError::Failed(error.to_string()))?;
+    write_new(&attempt.root, &staged_sidecar, &bytes)?;
     validate_output(&loras, &output)?;
     validate_output(&loras, &output_sidecar)?;
     atomic_promote(
         &attempt.root,
         &staged,
-        staged_sidecar.as_deref(),
+        &staged_sidecar,
         &loras,
         &output,
         &output_sidecar,
+        &attempt.id,
     )?;
     Ok(TrainOutcome {
         path: output,
@@ -508,12 +510,28 @@ fn validate_verdict(verdict: &crate::screening::Verdict, count: usize) -> Result
 }
 
 fn identity_caption(caption: &str, trigger: &str) -> String {
-    match (!trigger.is_empty(), caption.contains(trigger)) {
+    match (!trigger.is_empty(), contains_phrase(caption, trigger)) {
         (true, false) => {
             format!("{trigger}, {}", caption.trim())
         }
         _ => caption.trim().to_string(),
     }
+}
+
+/// Trigger matching is Unicode-lowercase and requires a boundary around the
+/// complete phrase. It never treats a trigger as a substring of another token.
+fn contains_phrase(text: &str, phrase: &str) -> bool {
+    let text = text.to_lowercase();
+    let phrase = phrase.to_lowercase();
+    text.match_indices(&phrase).any(|(start, matched)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + matched.len()..].chars().next();
+        !before.is_some_and(is_trigger_character) && !after.is_some_and(is_trigger_character)
+    })
+}
+
+fn is_trigger_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 fn decode_base64(base64: &str) -> Result<Vec<u8>, TrainError> {
@@ -640,46 +658,380 @@ fn validate_output(parent: &Path, output: &Path) -> Result<(), TrainError> {
     }
 }
 
-/// Rename is the adapter commit point. Both paths sit below the configured
-/// models root, and a hard link keeps the previous adapter recoverable until
-/// its staged sidecar has also reached the final name.
+#[derive(Debug, Deserialize, Serialize)]
+struct Publication {
+    schema_version: u32,
+    filename: String,
+    generation: String,
+    previous_weight: bool,
+    previous_sidecar: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationPhase {
+    Weights,
+    Sidecar,
+}
+
+/// A durable marker hides the final name while its two files are replaced.
+/// The process-local lock serializes tasks, and the file lock extends that
+/// guarantee to cooperating Zone processes that share the models directory.
 fn atomic_promote(
     attempt: &Path,
     staged: &Path,
-    staged_sidecar: Option<&Path>,
+    staged_sidecar: &Path,
     parent: &Path,
     output: &Path,
     output_sidecar: &Path,
+    generation: &str,
 ) -> Result<(), TrainError> {
+    promote_with(
+        attempt,
+        staged,
+        staged_sidecar,
+        parent,
+        output,
+        output_sidecar,
+        generation,
+        |_| Ok(()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn promote_with<F>(
+    attempt: &Path,
+    staged: &Path,
+    staged_sidecar: &Path,
+    parent: &Path,
+    output: &Path,
+    output_sidecar: &Path,
+    generation: &str,
+    mut observe: F,
+) -> Result<(), TrainError>
+where
+    F: FnMut(PublicationPhase) -> Result<(), TrainError>,
+{
+    Uuid::parse_str(generation)
+        .map_err(|_| TrainError::Invalid("training attempt id is not valid"))?;
     require_regular_file(attempt, staged)?;
+    require_regular_file(attempt, staged_sidecar)?;
+    if read_generation(staged_sidecar).as_deref() != Some(generation) {
+        return Err(TrainError::Invalid(
+            "staged adapter sidecar does not match its training attempt",
+        ));
+    }
     validate_output(parent, output)?;
-    if let Some(staged_sidecar) = staged_sidecar {
-        require_regular_file(attempt, staged_sidecar)?;
-        validate_output(parent, output_sidecar)?;
-    }
-    let previous = if output.exists() {
-        let previous = attempt.join("previous.safetensors");
-        fs::hard_link(output, &previous).map_err(failed)?;
-        Some(previous)
-    } else {
-        None
+    validate_output(parent, output_sidecar)?;
+    sync_file(staged)?;
+    sync_file(staged_sidecar)?;
+
+    let key = fs::canonicalize(parent).map_err(failed)?.join(
+        output
+            .file_name()
+            .ok_or(TrainError::Invalid("LoRA output has no filename"))?,
+    );
+    let local = publication_lock(&key);
+    let _local = local
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let publications = ensure_child_directory(parent, PUBLICATION_DIRECTORY)?;
+    sync_directory(parent)?;
+    let filename = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(TrainError::Invalid("LoRA output has no filename"))?;
+    let _file = lock_publication(&publications, filename)?;
+    let marker = publication_marker(parent, filename)
+        .ok_or(TrainError::Invalid("invalid LoRA publication name"))?;
+    recover_publication(parent, output, output_sidecar, &marker)?;
+    validate_output(parent, output)?;
+    validate_output(parent, output_sidecar)?;
+
+    let previous_weight = snapshot(output, &attempt.join("previous.safetensors"))?;
+    let previous_sidecar = snapshot(
+        output_sidecar,
+        &attempt.join("previous.safetensors.zone.json"),
+    )?;
+    sync_directory(attempt)?;
+    let publication = Publication {
+        schema_version: 1,
+        filename: filename.to_string(),
+        generation: generation.to_string(),
+        previous_weight,
+        previous_sidecar,
     };
-    fs::rename(staged, output).map_err(failed)?;
-    let Some(staged_sidecar) = staged_sidecar else {
+    let encoded =
+        serde_json::to_vec(&publication).map_err(|error| TrainError::Failed(error.to_string()))?;
+    write_new(&publications, &marker, &encoded)?;
+    sync_file(&marker)?;
+    sync_directory(&publications)?;
+
+    let promoted = (|| {
+        fs::rename(staged, output).map_err(failed)?;
+        sync_directory(parent)?;
+        observe(PublicationPhase::Weights)?;
+        fs::rename(staged_sidecar, output_sidecar).map_err(failed)?;
+        sync_directory(parent)?;
+        observe(PublicationPhase::Sidecar)?;
+        Ok::<(), TrainError>(())
+    })();
+    if let Err(error) = promoted {
+        return rollback_publication(attempt, parent, output, output_sidecar, &marker, error);
+    }
+    if let Err(error) = fs::remove_file(&marker) {
+        return rollback_publication(
+            attempt,
+            parent,
+            output,
+            output_sidecar,
+            &marker,
+            failed(error),
+        );
+    }
+    // Both renames were synced before the marker was removed. If this final
+    // directory sync fails, a restart may still see the marker and complete
+    // the already-consistent generation through `recover_publication`.
+    let _ = sync_directory(&publications);
+    Ok(())
+}
+
+fn publication_lock(key: &Path) -> Arc<Mutex<()>> {
+    let mut publications = PUBLICATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    publications.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = publications.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    publications.insert(key.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+fn lock_publication(directory: &Path, filename: &str) -> Result<fs::File, TrainError> {
+    let filename = sanitize_weight_filename(filename)
+        .map_err(|_| TrainError::Invalid("invalid LoRA publication name"))?;
+    let path = directory.join(format!("{filename}.lock"));
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(&path).map_err(failed)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(TrainError::Invalid(
+                    "LoRA publication lock is not a regular file",
+                ));
+            }
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(failed)?
+        }
+        Err(error) => return Err(failed(error)),
+    };
+    file.lock().map_err(failed)?;
+    Ok(file)
+}
+
+fn snapshot(source: &Path, backup: &Path) -> Result<bool, TrainError> {
+    match fs::symlink_metadata(source) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+            TrainError::Invalid("LoRA publication target is not a regular file"),
+        ),
+        Ok(_) => {
+            fs::hard_link(source, backup).map_err(failed)?;
+            sync_file(backup)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(failed(error)),
+    }
+}
+
+fn recover_publication(
+    parent: &Path,
+    output: &Path,
+    output_sidecar: &Path,
+    marker: &Path,
+) -> Result<(), TrainError> {
+    match fs::symlink_metadata(marker) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(TrainError::Invalid(
+                "LoRA publication marker is not a regular file",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(failed(error)),
+    }
+    let contents = match fs::read(marker) {
+        Ok(contents) => contents,
+        Err(error) => return Err(failed(error)),
+    };
+    let publication: Publication = serde_json::from_slice(&contents)
+        .map_err(|_| TrainError::Invalid("LoRA publication marker is invalid"))?;
+    if publication.schema_version != 1
+        || output.file_name().and_then(|name| name.to_str()) != Some(publication.filename.as_str())
+        || Uuid::parse_str(&publication.generation).is_err()
+    {
+        return Err(TrainError::Invalid("LoRA publication marker is invalid"));
+    }
+    let complete = require_regular_output(parent, output).is_ok()
+        && require_regular_output(parent, output_sidecar).is_ok()
+        && read_generation(output_sidecar).as_deref() == Some(publication.generation.as_str());
+    if complete {
+        fs::remove_file(marker).map_err(failed)?;
+        let publications = marker
+            .parent()
+            .ok_or(TrainError::Invalid("LoRA publication marker has no parent"))?;
+        let _ = sync_directory(publications);
         return Ok(());
-    };
-    if let Err(error) = fs::rename(staged_sidecar, output_sidecar) {
-        let restored = match previous {
-            Some(previous) => fs::rename(previous, output),
-            None => fs::remove_file(output),
-        };
-        return match restored {
-            Ok(()) => Err(failed(error)),
-            Err(restore) => Err(TrainError::Failed(format!(
-                "sidecar promotion failed ({error}); adapter rollback failed ({restore})"
-            ))),
-        };
     }
+    let models = parent
+        .parent()
+        .ok_or(TrainError::Invalid("LoRA directory has no parent"))?;
+    let training = models.join("training");
+    require_directory(&training, "training directory")?;
+    let attempt = training.join(&publication.generation);
+    require_confined_directory(&training, &attempt)?;
+    restore_snapshot(
+        &attempt,
+        &attempt.join("previous.safetensors"),
+        output,
+        publication.previous_weight,
+    )?;
+    restore_snapshot(
+        &attempt,
+        &attempt.join("previous.safetensors.zone.json"),
+        output_sidecar,
+        publication.previous_sidecar,
+    )?;
+    sync_directory(parent)?;
+    fs::remove_file(marker).map_err(failed)?;
+    let publications = marker
+        .parent()
+        .ok_or(TrainError::Invalid("LoRA publication marker has no parent"))?;
+    let _ = sync_directory(publications);
+    Ok(())
+}
+
+fn rollback_publication(
+    attempt: &Path,
+    parent: &Path,
+    output: &Path,
+    output_sidecar: &Path,
+    marker: &Path,
+    error: TrainError,
+) -> Result<(), TrainError> {
+    let publication = fs::read(marker).map_err(failed).and_then(|contents| {
+        serde_json::from_slice::<Publication>(&contents)
+            .map_err(|parse| TrainError::Failed(parse.to_string()))
+    });
+    let restored = publication.and_then(|publication| {
+        restore_snapshot(
+            attempt,
+            &attempt.join("previous.safetensors"),
+            output,
+            publication.previous_weight,
+        )?;
+        restore_snapshot(
+            attempt,
+            &attempt.join("previous.safetensors.zone.json"),
+            output_sidecar,
+            publication.previous_sidecar,
+        )?;
+        sync_directory(parent)?;
+        fs::remove_file(marker).map_err(failed)?;
+        let publications = marker
+            .parent()
+            .ok_or(TrainError::Invalid("LoRA publication marker has no parent"))?;
+        let _ = sync_directory(publications);
+        Ok(())
+    });
+    match restored {
+        Ok(()) => Err(error),
+        Err(restore) => Err(TrainError::Failed(format!(
+            "{error}; adapter rollback failed: {restore}"
+        ))),
+    }
+}
+
+fn restore_snapshot(
+    attempt: &Path,
+    backup: &Path,
+    output: &Path,
+    existed: bool,
+) -> Result<(), TrainError> {
+    if existed {
+        require_regular_file(attempt, backup)?;
+        let backup_name = backup
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(TrainError::Invalid("LoRA backup has no filename"))?;
+        let restore = attempt.join(format!("restore-{backup_name}"));
+        match fs::symlink_metadata(&restore) {
+            Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+                fs::remove_file(&restore).map_err(failed)?;
+            }
+            Ok(_) => {
+                return Err(TrainError::Invalid(
+                    "LoRA restore path is not a regular file",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(failed(error)),
+        }
+        fs::hard_link(backup, &restore).map_err(failed)?;
+        sync_file(&restore)?;
+        sync_directory(attempt)?;
+        fs::rename(restore, output).map_err(failed)
+    } else {
+        match fs::remove_file(output) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(failed(error)),
+        }
+    }
+}
+
+fn require_regular_output(parent: &Path, path: &Path) -> Result<(), TrainError> {
+    validate_output(parent, path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+            TrainError::Invalid("LoRA publication target is not a regular file"),
+        ),
+        Ok(_) => Ok(()),
+        Err(error) => Err(failed(error)),
+    }
+}
+
+fn read_generation(path: &Path) -> Option<String> {
+    let contents = fs::read(path).ok()?;
+    serde_json::from_slice::<WeightDocument>(&contents)
+        .ok()?
+        .generation
+}
+
+fn sync_file(path: &Path) -> Result<(), TrainError> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(failed)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), TrainError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(failed)
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), TrainError> {
     Ok(())
 }
 
@@ -786,6 +1138,31 @@ mod tests {
         entries.flatten().map(|entry| entry.path()).collect()
     }
 
+    fn staged_adapter(
+        config: &Config,
+        generation: &str,
+        contents: &[u8],
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let attempt = config.models_dir.join("training").join(generation);
+        fs::create_dir_all(&attempt).unwrap();
+        let staged = attempt.join(format!("{generation}.safetensors"));
+        let sidecar = sidecar_path(&staged);
+        fs::write(&staged, contents).unwrap();
+        fs::write(
+            &sidecar,
+            serde_json::to_vec(&WeightDocument {
+                sidecar: WeightSidecar {
+                    recipe_id: "flux-schnell-adapter".into(),
+                    hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                },
+                generation: Some(generation.to_string()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        (attempt, staged, sidecar)
+    }
+
     #[tokio::test]
     async fn train_writes_adapter_with_configured_command() {
         let (_root, config) = harness("printf lora > \"$ZONE_TRAIN_OUTPUT\"");
@@ -801,6 +1178,32 @@ mod tests {
         assert!(training_entries(&config).is_empty());
     }
 
+    #[tokio::test]
+    async fn external_trainer_keeps_the_documented_name_inside_an_isolated_attempt() {
+        let command = r#"
+            test "$ZONE_TRAIN_NAME" = "legacy-style.safetensors" || exit 11
+            test "$ZONE_TRAIN_FINAL_NAME" = "$ZONE_TRAIN_NAME" || exit 12
+            test "$ZONE_TRAIN_ATTEMPT" = "$(basename "$ZONE_TRAIN_DIR")" || exit 13
+            test "$(basename "$ZONE_TRAIN_OUTPUT")" = "$ZONE_TRAIN_ATTEMPT.safetensors" || exit 14
+            case "$ZONE_TRAIN_OUTPUT" in "$ZONE_TRAIN_DIR"/*) ;; *) exit 15 ;; esac
+            printf legacy > "$ZONE_TRAIN_OUTPUT"
+        "#;
+        let (_root, config) = harness(command);
+
+        let outcome = train_with_screening(
+            &config,
+            String::new(),
+            String::new(),
+            identity("legacy-style"),
+            keep_all,
+        )
+        .await
+        .expect("compatible external training command");
+
+        assert_eq!(fs::read(outcome.path).unwrap(), b"legacy");
+        assert!(training_entries(&config).is_empty());
+    }
+
     #[test]
     fn caption_prefixes_trigger_for_identity() {
         assert_eq!(identity_caption("a portrait", "ohwx"), "ohwx, a portrait");
@@ -808,6 +1211,23 @@ mod tests {
             identity_caption("ohwx, a portrait", "ohwx"),
             "ohwx, a portrait"
         );
+        assert_eq!(
+            identity_caption("a fox located by a tree", "cat"),
+            "cat, a fox located by a tree"
+        );
+        assert_eq!(
+            identity_caption("A CAT by a tree", "cat"),
+            "A CAT by a tree"
+        );
+        assert_eq!(
+            identity_caption("a BLUE CAT by a tree", "blue cat"),
+            "a BLUE CAT by a tree"
+        );
+        assert_eq!(
+            identity_caption("a blue catapult", "blue cat"),
+            "blue cat, a blue catapult"
+        );
+        assert_eq!(identity_caption("un CAFÉ", "café"), "un CAFÉ");
     }
 
     #[tokio::test]
@@ -869,10 +1289,10 @@ mod tests {
     async fn edit_screening_reindexes_targets_references_and_instructions_together() {
         let command = r#"
             test "$ZONE_TRAIN_IMAGE_COUNT" = "2" || exit 11
+            test "$ZONE_TRAIN_NAME" = "edit-style.safetensors" || exit 31
             test "$ZONE_TRAIN_FINAL_NAME" = "edit-style.safetensors" || exit 12
-            stem=${ZONE_TRAIN_NAME%.safetensors}
-            test "$stem" != "$ZONE_TRAIN_NAME" || exit 13
-            test "$stem" = "$(basename "$ZONE_TRAIN_DIR")" || exit 14
+            test "$ZONE_TRAIN_ATTEMPT" = "$(basename "$ZONE_TRAIN_DIR")" || exit 14
+            test "$(basename "$ZONE_TRAIN_OUTPUT")" = "$ZONE_TRAIN_ATTEMPT.safetensors" || exit 13
             test "$ZONE_TRAIN_ARCHITECTURE" = "qwen_edit" || exit 23
             test "$ZONE_TRAIN_UNET" = "qwen_image_edit_2511_fp8mixed.safetensors" || exit 24
             test "$ZONE_TRAIN_CLIP" = "qwen_2.5_vl_7b_fp8_scaled.safetensors" || exit 25
@@ -1211,6 +1631,245 @@ mod tests {
         assert!(training_entries(&config).is_empty());
     }
 
+    #[test]
+    fn concurrent_same_name_publications_cannot_interleave_weight_and_sidecar() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (_root, config) = harness("unused");
+        let loras = config.models_dir.join("loras");
+        fs::create_dir(&loras).unwrap();
+        let output = loras.join("shared.safetensors");
+        let output_sidecar = sidecar_path(&output);
+        let first_generation = Uuid::new_v4().to_string();
+        let second_generation = Uuid::new_v4().to_string();
+        let (first_attempt, first_weight, first_sidecar) =
+            staged_adapter(&config, &first_generation, b"first");
+        let (second_attempt, second_weight, second_sidecar) =
+            staged_adapter(&config, &second_generation, b"second");
+        let (weights_tx, weights_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_output = output.clone();
+        let first_output_sidecar = output_sidecar.clone();
+        let first_loras = loras.clone();
+        let first = std::thread::spawn(move || {
+            promote_with(
+                &first_attempt,
+                &first_weight,
+                &first_sidecar,
+                &first_loras,
+                &first_output,
+                &first_output_sidecar,
+                &first_generation,
+                |phase| {
+                    if phase == PublicationPhase::Weights {
+                        weights_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }
+                    Ok(())
+                },
+            )
+        });
+        weights_rx.recv().unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let second_output = output.clone();
+        let second_output_sidecar = output_sidecar.clone();
+        let second_loras = loras.clone();
+        let expected_generation = second_generation.clone();
+        let second = std::thread::spawn(move || {
+            let result = atomic_promote(
+                &second_attempt,
+                &second_weight,
+                &second_sidecar,
+                &second_loras,
+                &second_output,
+                &second_output_sidecar,
+                &second_generation,
+            );
+            done_tx.send(()).unwrap();
+            result
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "the second publication must wait at the same final name"
+        );
+        assert!(
+            crate::inventory::scan(&config.models_dir, &RecipeCatalog::packaged().unwrap())
+                .is_empty(),
+            "readers must not observe the first weight before its sidecar"
+        );
+
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        assert_eq!(fs::read(output).unwrap(), b"second");
+        assert_eq!(
+            read_generation(&output_sidecar).as_deref(),
+            Some(expected_generation.as_str())
+        );
+    }
+
+    #[test]
+    fn interrupted_publication_is_hidden_and_recovers_the_previous_generation() {
+        let (_root, config) = harness("unused");
+        let loras = config.models_dir.join("loras");
+        fs::create_dir(&loras).unwrap();
+        let output = loras.join("stable.safetensors");
+        let output_sidecar = sidecar_path(&output);
+        let previous_generation = Uuid::new_v4().to_string();
+        fs::write(&output, b"previous").unwrap();
+        fs::write(
+            &output_sidecar,
+            serde_json::to_vec(&WeightDocument {
+                sidecar: WeightSidecar {
+                    recipe_id: "flux-schnell-adapter".into(),
+                    hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                },
+                generation: Some(previous_generation.clone()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let generation = Uuid::new_v4().to_string();
+        let (attempt, staged, staged_sidecar) = staged_adapter(&config, &generation, b"new");
+        let interrupted = std::panic::catch_unwind(|| {
+            promote_with(
+                &attempt,
+                &staged,
+                &staged_sidecar,
+                &loras,
+                &output,
+                &output_sidecar,
+                &generation,
+                |phase| {
+                    if phase == PublicationPhase::Weights {
+                        panic!("simulated process interruption");
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+        assert!(interrupted.is_err());
+        let marker = publication_marker(&loras, "stable.safetensors").unwrap();
+        assert!(marker.is_file());
+        assert!(
+            crate::inventory::scan(&config.models_dir, &RecipeCatalog::packaged().unwrap())
+                .is_empty(),
+            "an interrupted generation must fail closed"
+        );
+
+        restore_snapshot(
+            &attempt,
+            &attempt.join("previous.safetensors"),
+            &output,
+            true,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"previous");
+        recover_publication(&loras, &output, &output_sidecar, &marker).unwrap();
+        assert_eq!(fs::read(output).unwrap(), b"previous");
+        assert_eq!(
+            read_generation(&output_sidecar).as_deref(),
+            Some(previous_generation.as_str())
+        );
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn publication_error_restores_both_files_before_returning() {
+        let (_root, config) = harness("unused");
+        let loras = config.models_dir.join("loras");
+        fs::create_dir(&loras).unwrap();
+        let output = loras.join("stable.safetensors");
+        let output_sidecar = sidecar_path(&output);
+        let previous_generation = Uuid::new_v4().to_string();
+        fs::write(&output, b"previous").unwrap();
+        fs::write(
+            &output_sidecar,
+            serde_json::to_vec(&WeightDocument {
+                sidecar: WeightSidecar {
+                    recipe_id: "flux-schnell-adapter".into(),
+                    hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                },
+                generation: Some(previous_generation.clone()),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let generation = Uuid::new_v4().to_string();
+        let (attempt, staged, staged_sidecar) = staged_adapter(&config, &generation, b"new");
+
+        let error = promote_with(
+            &attempt,
+            &staged,
+            &staged_sidecar,
+            &loras,
+            &output,
+            &output_sidecar,
+            &generation,
+            |phase| match phase {
+                PublicationPhase::Weights => {
+                    Err(TrainError::Failed("injected publication error".into()))
+                }
+                PublicationPhase::Sidecar => Ok(()),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected publication error"));
+        assert_eq!(fs::read(output).unwrap(), b"previous");
+        assert_eq!(
+            read_generation(&output_sidecar).as_deref(),
+            Some(previous_generation.as_str())
+        );
+        assert!(
+            !publication_marker(&loras, "stable.safetensors")
+                .unwrap()
+                .exists()
+        );
+    }
+
+    #[test]
+    fn mismatched_staged_sidecar_never_reaches_the_final_name() {
+        let (_root, config) = harness("unused");
+        let loras = config.models_dir.join("loras");
+        fs::create_dir(&loras).unwrap();
+        let generation = Uuid::new_v4().to_string();
+        let wrong_generation = Uuid::new_v4().to_string();
+        let (attempt, staged, sidecar) = staged_adapter(&config, &generation, b"new");
+        fs::write(
+            &sidecar,
+            serde_json::to_vec(&WeightDocument {
+                sidecar: WeightSidecar {
+                    recipe_id: "flux-schnell-adapter".into(),
+                    hf_base: Some("black-forest-labs/FLUX.1-schnell".into()),
+                },
+                generation: Some(wrong_generation),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let output = loras.join("stable.safetensors");
+        let output_sidecar = sidecar_path(&output);
+
+        let error = atomic_promote(
+            &attempt,
+            &staged,
+            &sidecar,
+            &loras,
+            &output,
+            &output_sidecar,
+            &generation,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, TrainError::Invalid(_)));
+        assert!(!output.exists());
+        assert!(!output_sidecar.exists());
+    }
+
     #[tokio::test]
     async fn attempt_cleanup_never_removes_another_attempt() {
         let (_root, config) = harness("printf trained > \"$ZONE_TRAIN_OUTPUT\"");
@@ -1251,6 +1910,49 @@ mod tests {
             !config
                 .models_dir
                 .join("loras/unsupported.safetensors")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_overlay_catalog_never_falls_back_to_packaged_training() {
+        let (root, mut config) = harness("printf trained > \"$ZONE_TRAIN_OUTPUT\"");
+        let workflows = root.path().join("workflows");
+        let recipes = root.path().join("recipes");
+        fs::create_dir(&workflows).unwrap();
+        fs::create_dir(&recipes).unwrap();
+        let mut catalog: Value =
+            serde_json::from_str(include_str!("../../../comfyui/recipes/catalog.json")).unwrap();
+        let flux = catalog["recipes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|recipe| recipe["id"] == "flux-schnell")
+            .unwrap();
+        flux["training"].as_object_mut().unwrap().remove("adapter");
+        fs::write(
+            recipes.join("catalog.json"),
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+        config.workflow_path = workflows.join("flux1-schnell-fp8-api.json");
+
+        let error = train_with_screening(
+            &config,
+            String::new(),
+            String::new(),
+            identity("must-not-train"),
+            keep_all,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, TrainError::Invalid(_)));
+        assert!(training_entries(&config).is_empty());
+        assert!(
+            !config
+                .models_dir
+                .join("loras/must-not-train.safetensors")
                 .exists()
         );
     }
