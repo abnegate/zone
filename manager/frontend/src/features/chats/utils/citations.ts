@@ -1,6 +1,12 @@
 import type { Citation, CitationProvenance } from '../types';
 
-export type CitationEvidence = 'passing' | 'failed' | 'pending' | 'incomplete' | 'observed';
+export type CitationEvidence =
+  | 'passing'
+  | 'claimed'
+  | 'failed'
+  | 'pending'
+  | 'incomplete'
+  | 'observed';
 
 const KIND_LABELS: Record<Citation['kind'], string> = {
   github_build: 'GitHub build',
@@ -15,9 +21,14 @@ export function citationKindLabel(kind: Citation['kind']): string {
   return KIND_LABELS[kind] ?? kind;
 }
 
-/// Passing only when the observation is complete and successful.
+/// Passing only when the observation is complete, successful, and something
+/// other than the model saw it. The server's own `passing()` requires all
+/// three; dropping the third here would render a claim as proof in the one
+/// place a human actually reads the verdict.
 export function citationEvidence(citation: Citation): CitationEvidence {
-  if (citation.outcome === 'success' && citation.complete) return 'passing';
+  if (citation.outcome === 'success' && citation.complete) {
+    return citation.provenance === 'server_execution' ? 'passing' : 'claimed';
+  }
   if (citation.outcome === 'failure' && citation.complete) return 'failed';
   if (citation.outcome === 'pending' && citation.complete) return 'pending';
   if (citation.outcome === 'observed' && citation.complete) return 'observed';
@@ -28,6 +39,8 @@ export function citationEvidenceLabel(evidence: CitationEvidence): string {
   switch (evidence) {
     case 'passing':
       return 'Passing';
+    case 'claimed':
+      return 'Claimed';
     case 'failed':
       return 'Failed';
     case 'pending':

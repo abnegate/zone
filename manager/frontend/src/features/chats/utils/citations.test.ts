@@ -68,4 +68,13 @@ describe('citation presentation', () => {
     expect(mergeCitations([first], [first, citation({ title: 'duplicate' })])).toEqual([first]);
     expect(mergeCitations([first], [citation({ revision: 'bbbb' })])).toHaveLength(2);
   });
+
+  it('will not call a model claim passing, however complete and successful', () => {
+    // The server's Citation::passing() is complete && authoritative && success.
+    // This is the only place a human reads the verdict, so dropping the
+    // provenance term here renders an unverified claim as proof.
+    expect(citationEvidence(citation({ provenance: 'model_asserted' }))).toBe('claimed');
+    expect(citationEvidenceLabel('claimed')).toBe('Claimed');
+    expect(citationEvidence(citation({ provenance: 'server_execution' }))).toBe('passing');
+  });
 });
