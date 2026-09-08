@@ -47,6 +47,19 @@ pub struct TrainOutcome {
     pub path: PathBuf,
     pub quality: Option<Quality>,
     pub dataset: Vec<crate::dataset::Finding>,
+    pub screening: Screening,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Screening {
+    pub kept: usize,
+    pub dropped: Vec<Dropped>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Dropped {
+    pub filename: String,
+    pub reason: crate::screening::Rejection,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,9 +158,25 @@ pub async fn train(
             image.caption = drafted;
         }
     }
-    for (index, image) in request.images.iter().enumerate() {
-        let stem = format!("{index:04}");
-        write_decoded(&targets.join(format!("{stem}.png")), &image.bytes_base64)?;
+    let decoded = request
+        .images
+        .iter()
+        .map(|image| decode_base64(&image.bytes_base64))
+        .collect::<Result<Vec<Vec<u8>>, TrainError>>()?;
+    let verdict = crate::screening::screen(&decoded, crate::train::packaged_config()?.resolution());
+    let dropped = verdict
+        .drop
+        .iter()
+        .map(|(index, rejection)| Dropped {
+            filename: request.images[*index].filename.clone(),
+            reason: *rejection,
+        })
+        .collect::<Vec<Dropped>>();
+    for (stem, index) in verdict.keep.iter().enumerate() {
+        let image = &request.images[*index];
+        let stem = format!("{stem:04}");
+        fs::write(targets.join(format!("{stem}.png")), &decoded[*index])
+            .map_err(|error| TrainError::Failed(error.to_string()))?;
         fs::write(
             targets.join(format!("{stem}.txt")),
             caption(image, request.trigger.as_deref()),
@@ -252,6 +281,10 @@ pub async fn train(
         path: output,
         quality,
         dataset: findings,
+        screening: Screening {
+            kept: verdict.keep.len(),
+            dropped,
+        },
     })
 }
 
@@ -264,7 +297,7 @@ fn caption(image: &TrainImage, trigger: Option<&str>) -> String {
     }
 }
 
-fn write_decoded(path: &Path, base64: &str) -> Result<(), TrainError> {
+fn decode_base64(base64: &str) -> Result<Vec<u8>, TrainError> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(base64.trim())
@@ -272,7 +305,11 @@ fn write_decoded(path: &Path, base64: &str) -> Result<(), TrainError> {
     if bytes.is_empty() {
         return Err(TrainError::Invalid("image is empty"));
     }
-    fs::write(path, bytes).map_err(|error| TrainError::Failed(error.to_string()))
+    Ok(bytes)
+}
+
+fn write_decoded(path: &Path, base64: &str) -> Result<(), TrainError> {
+    fs::write(path, decode_base64(base64)?).map_err(|error| TrainError::Failed(error.to_string()))
 }
 
 #[cfg(test)]

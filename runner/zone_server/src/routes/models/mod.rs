@@ -555,6 +555,7 @@ pub async fn train(
             "filename": outcome.path.file_name().and_then(|name| name.to_str()),
             "quality": outcome.quality,
             "dataset": outcome.dataset,
+            "screening": outcome.screening,
         }))
         .into_response(),
         Err(lora::TrainError::Disabled) => (

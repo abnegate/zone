@@ -52,6 +52,10 @@ pub fn packaged_config() -> Result<TrainConfig, TrainError> {
 }
 
 impl TrainConfig {
+    pub fn resolution(&self) -> u32 {
+        self.resolution
+    }
+
     /// Steps for a dataset of this size, clamped to the configured bounds.
     pub fn steps(&self, image_count: usize) -> u32 {
         u32::try_from(image_count.max(1))
