@@ -1,7 +1,8 @@
 //! LLM client for OpenAI-compatible APIs
 
-use reqwest::Client;
+use reqwest::{Client, Url};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -182,11 +183,61 @@ impl LlmClient {
         Ok(body)
     }
 
+    fn validate_outbound_url(&self, url: &str) -> Result<(), LlmError> {
+        let parsed = Url::parse(url).map_err(|_| {
+            LlmError::InvalidConfig("LLM base_url must be a valid absolute URL".to_string())
+        })?;
+
+        match parsed.scheme() {
+            "http" | "https" => {}
+            _ => {
+                return Err(LlmError::InvalidConfig(
+                    "LLM base_url must use http or https".to_string(),
+                ));
+            }
+        }
+
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(LlmError::InvalidConfig(
+                "LLM base_url must not include userinfo".to_string(),
+            ));
+        }
+
+        let host = parsed.host_str().ok_or_else(|| {
+            LlmError::InvalidConfig("LLM base_url must include a host".to_string())
+        })?;
+
+        if host.eq_ignore_ascii_case("localhost") {
+            return Err(LlmError::InvalidConfig(
+                "LLM base_url host is not allowed".to_string(),
+            ));
+        }
+
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            let blocked = match ip {
+                IpAddr::V4(v4) => {
+                    v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+                }
+                IpAddr::V6(v6) => {
+                    v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local()
+                }
+            };
+            if blocked {
+                return Err(LlmError::InvalidConfig(
+                    "LLM base_url IP is not allowed".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     async fn send(
         &self,
         url: &str,
         body: &serde_json::Value,
     ) -> Result<reqwest::Response, LlmError> {
+        self.validate_outbound_url(url)?;
         Ok(self
             .client
             .post(url)
