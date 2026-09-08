@@ -86,6 +86,10 @@ pub fn answer(content: &str) -> ResponseTemplate {
     stream(json!({"content":content}))
 }
 
+pub fn delta(value: Value) -> ResponseTemplate {
+    stream(value)
+}
+
 pub fn tool(id: &str, name: &str, arguments: Value) -> Value {
     json!({"id":id,"type":"function","function":{"name":name,"arguments":arguments.to_string()}})
 }

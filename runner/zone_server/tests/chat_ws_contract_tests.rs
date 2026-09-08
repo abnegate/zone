@@ -302,6 +302,17 @@ async fn authenticated_socket_enforces_control_and_input_contracts() {
 
     socket
         .send(WsMessage::Text(
+            json!({"type":"auth","token":token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Pong(vec![4, 5, 6].into()))
+        .await
+        .unwrap();
+
+    socket
+        .send(WsMessage::Text(
             json!({"type": "approve_tool", "tool_call_id": "unknown", "approved": true})
                 .to_string()
                 .into(),
@@ -338,6 +349,97 @@ async fn authenticated_socket_enforces_control_and_input_contracts() {
         .unwrap();
     assert_error(&mut socket, "Rate limit exceeded").await;
     socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_send_after_membership_revocation_is_rejected_before_persistence() {
+    let pool = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, workspace, chat) = seed(&client).await;
+    let user = validate_token(&token, &config.jwt_secret)
+        .unwrap()
+        .user_id()
+        .unwrap();
+    let address = spawn(config, pool.clone()).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+
+    sqlx::query(
+        "UPDATE workspace_members SET is_active = FALSE WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send","content":"This must not be stored"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_error(&mut socket, "Workspace access denied").await;
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE chat_id = $1")
+        .bind(chat)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0);
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_chat_moved_after_authentication_fails_closed_before_generation() {
+    let pool = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, _, chat) = seed(&client).await;
+    let (_, foreign_workspace, _) = seed(&client).await;
+    let address = spawn(config, pool.clone()).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+
+    sqlx::query("UPDATE chats SET workspace_id = $1 WHERE id = $2")
+        .bind(foreign_workspace)
+        .bind(chat)
+        .execute(&pool)
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type":"send","content":"Do not cross the workspace boundary"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_error(
+        &mut socket,
+        "Conversation evidence was not found in this chat",
+    )
+    .await;
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn closing_before_authentication_releases_the_connection_slot() {
+    let pool = create_test_pool().await;
+    let address = spawn(test_config(), pool).await;
+    let chat = Uuid::new_v4();
+    let mut socket = connect(&address, chat).await;
+    socket.close(None).await.unwrap();
+
+    for _ in 0..5 {
+        let mut replacement = connect(&address, chat).await;
+        replacement.close(None).await.unwrap();
+    }
 }
 
 #[tokio::test]
