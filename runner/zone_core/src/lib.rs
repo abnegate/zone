@@ -9,12 +9,14 @@
 //! - MCP client (stdio servers such as magents)
 //! - File source adapters (local, GitHub)
 //! - Session management
+//! - Credential handling (redaction, zeroizing, encryption at rest)
 
 pub mod agent;
 pub mod context;
 pub mod error;
 pub mod llm;
 pub mod mcp;
+pub mod secret;
 pub mod session;
 pub mod tools;
 pub mod types;
@@ -26,6 +28,7 @@ pub use agent::{
 pub use error::CoreError;
 pub use llm::{LlmClient, LlmConfig, LlmError};
 pub use mcp::{McpConfig, McpHub, McpServerSpec};
+pub use secret::{MasterKey, OptionalSecretExt, SecretError, SecretValue};
 pub use session::{FileSessionStore, Session, SessionStore, SessionSummary};
 pub use tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 pub use types::*;

@@ -56,7 +56,7 @@ impl LlmError {
 }
 
 /// Configuration for the LLM client
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LlmConfig {
     /// Base URL for the API (e.g., "https://api.openai.com/v1")
     pub base_url: String,
@@ -68,6 +68,21 @@ pub struct LlmConfig {
     pub temperature: f32,
     /// Default max tokens
     pub max_tokens: u32,
+}
+
+/// The key is the one field here that must never be printed, and this config
+/// is embedded in the client that every worker logs.
+impl std::fmt::Debug for LlmConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LlmConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &crate::secret::REDACTED)
+            .field("default_model", &self.default_model)
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .finish()
+    }
 }
 
 impl Default for LlmConfig {

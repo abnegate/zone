@@ -35,6 +35,7 @@ pub async fn run_once(
         timeout_ms: timeout_secs.map(|s| s * 1000),
         max_output_bytes: None,
         working_dir: None,
+        confinement: None,
     };
 
     // Spawn the command

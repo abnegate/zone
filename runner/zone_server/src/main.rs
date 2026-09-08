@@ -90,7 +90,7 @@ async fn main() {
         let default_settings = EffectiveAiSettings {
             provider: PROVIDER_SELF_HOSTED.to_string(),
             litellm_host: Some(config.litellm_host.clone()),
-            litellm_key: Some(config.litellm_key.clone()),
+            litellm_key: Some(zone_core::SecretValue::new(config.litellm_key.clone())),
             openai_api_key: None,
             openai_base_url: None,
             anthropic_api_key: None,
@@ -186,7 +186,15 @@ async fn main() {
     zone_server::workers::knowledge_refresh::start_refresh_worker(state.clone());
     zone_server::workers::source_resync::start_resync_worker(state.clone());
     zone_server::workers::reminders::spawn(state.clone());
-    tracing::info!("Started knowledge refresh and source resync workers");
+    zone_server::workers::promotion::spawn(state.clone());
+    zone_server::workers::learning::worker::spawn(state.clone());
+    zone_server::workers::analytics::spawn(state.clone());
+    zone_server::workers::regression::spawn(state.clone());
+    zone_server::workers::reports::spawn(state.clone());
+    zone_server::workers::reception::spawn(state.clone());
+    tracing::info!(
+        "Started knowledge refresh, source resync, answer promotion, learning, agent analytics, regression watch, scheduled report and reception sync workers"
+    );
 
     // Configure CORS based on environment
     let cors_layer = if config.cors_origins.len() == 1 && config.cors_origins[0] == "*" {

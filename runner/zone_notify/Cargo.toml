@@ -1,0 +1,33 @@
+[package]
+name = "zone_notify"
+description = "Multi-channel notification fan-out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = "=2.5.8"
+
+reqwest = { workspace = true }
+lettre = { version = "=0.11.23", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "hostname",
+    "tokio1-native-tls",
+] }
+
+zone_core = { path = "../zone_core" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+wiremock = "=0.6.5"

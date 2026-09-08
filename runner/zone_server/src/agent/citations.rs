@@ -3,10 +3,22 @@
 //! Tool results already carry source URLs, commit SHAs and freshness. This
 //! module turns those observations into a stable message-metadata shape the
 //! console can render, and it refuses to treat incomplete evidence as a pass.
+//!
+//! Every citation also records how its outcome was produced. A server-side
+//! fetch or execution proves one; a model only claims one. A claimed outcome is
+//! advisory evidence and can never be a passing result, exactly as incomplete
+//! evidence cannot.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use super::verification::{Provenance, Verdict, VerificationOutcome};
+
+const INCOMPLETE_NOTE: &str = "Incomplete evidence is not a passing result.";
+const ADVISORY_NOTE: &str = "A model-asserted outcome is advisory evidence, not a passing result.";
+const UNAVAILABLE_NOTE: &str = "No safe behavioral check was available, so nothing was proven.";
+const VERIFICATION_TITLE: &str = "Behavioral verification";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -16,6 +28,7 @@ pub enum CitationKind {
     GithubIssue,
     GithubFile,
     WorkspaceDocument,
+    BehavioralVerification,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +51,10 @@ pub struct Citation {
     pub revision: Option<String>,
     pub observed_at: String,
     pub complete: bool,
+    /// How the outcome was produced. Stored citations predate this field and
+    /// were all built from server-side fetches, so they default to it.
+    #[serde(default)]
+    pub provenance: Provenance,
     pub outcome: CitationOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -48,7 +65,13 @@ impl Citation {
         if self.outcome == CitationOutcome::Success && !self.complete {
             self.outcome = CitationOutcome::Incomplete;
             if self.note.is_none() {
-                self.note = Some("Incomplete evidence is not a passing result.".into());
+                self.note = Some(INCOMPLETE_NOTE.into());
+            }
+        }
+        if self.outcome == CitationOutcome::Success && self.provenance.advisory() {
+            self.outcome = CitationOutcome::Observed;
+            if self.note.is_none() {
+                self.note = Some(ADVISORY_NOTE.into());
             }
         }
         self
@@ -59,7 +82,7 @@ impl Citation {
     }
 
     pub fn passing(&self) -> bool {
-        self.complete && self.outcome == CitationOutcome::Success
+        self.complete && self.provenance.authoritative() && self.outcome == CitationOutcome::Success
     }
 }
 
@@ -72,7 +95,10 @@ pub fn from_tool_at(name: &str, output: &str, observed_at: &str) -> Vec<Citation
     let Ok(value) = serde_json::from_str::<Value>(output) else {
         return Vec::new();
     };
-    if let Some(existing) = value.get("citations").and_then(parse_citations) {
+    if let Some(existing) = value
+        .get("citations")
+        .and_then(|citations| parse_citations(citations, provenance_of(name)))
+    {
         return existing;
     }
     let citations = match name {
@@ -101,9 +127,42 @@ pub fn merge(existing: &mut Vec<Citation>, incoming: impl IntoIterator<Item = Ci
     }
 }
 
-fn parse_citations(value: &Value) -> Option<Vec<Citation>> {
+/// Built-in tools whose citations record an observation the server itself made
+/// against an immutable ref. Anything absent — an MCP server, which is a
+/// third-party process, or a tool added later — is advisory until it is
+/// deliberately added here.
+const SERVER_OBSERVED_TOOLS: &[&str] = &[
+    "assess_pull_requests",
+    "assess_release_pipelines",
+    "get_build_status",
+    "list_deployments",
+    "list_documents",
+    "list_issues",
+    "read_check_logs",
+    "read_document",
+    "read_repository_file",
+];
+
+fn provenance_of(name: &str) -> Provenance {
+    if SERVER_OBSERVED_TOOLS.contains(&name) {
+        Provenance::ServerExecution
+    } else {
+        Provenance::ModelAsserted
+    }
+}
+
+/// Citations a tool emitted in its own output.
+///
+/// A tool cannot certify itself, so provenance comes from which tool ran, never
+/// from the payload: an unrecognised tool is advisory whatever it claims or
+/// omits.
+fn parse_citations(value: &Value, provenance: Provenance) -> Option<Vec<Citation>> {
     let parsed: Vec<Citation> = serde_json::from_value(value.clone()).ok()?;
-    let finished = finish(parsed);
+    let attributed = parsed.into_iter().map(|mut citation| {
+        citation.provenance = provenance;
+        citation
+    });
+    let finished = finish(attributed.collect());
     (!finished.is_empty()).then_some(finished)
 }
 
@@ -135,6 +194,7 @@ fn build_citation(value: &Value, observed_at: &str) -> Citation {
         revision: nonempty(sha),
         observed_at: observed(value, observed_at),
         complete,
+        provenance: Provenance::ServerExecution,
         outcome,
         note: nonempty(note),
     }
@@ -175,6 +235,7 @@ fn deployment_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
                 revision,
                 observed_at: observed_at.clone(),
                 complete: !matches!(outcome, CitationOutcome::Incomplete),
+                provenance: Provenance::ServerExecution,
                 outcome,
                 note: note.clone(),
             }
@@ -206,6 +267,7 @@ fn issue_citations(value: &Value, observed_at: &str) -> Vec<Citation> {
                 revision: nonempty(text(row, "updated_at")),
                 observed_at: observed_at.clone(),
                 complete: row.get("body").is_some_and(|body| !body.is_null()),
+                provenance: Provenance::ServerExecution,
                 outcome: CitationOutcome::Observed,
                 note: None,
             }
@@ -236,9 +298,51 @@ fn file_citation(value: &Value, observed_at: &str) -> Citation {
                     .and_then(Value::as_str)
                     .is_some_and(|content| !content.is_empty())
             }),
+        provenance: Provenance::ServerExecution,
         outcome: CitationOutcome::Observed,
         note: None,
     }
+}
+
+/// Citation for a behavioral verification.
+///
+/// The outcome carries its own provenance, so a model-asserted verdict lands
+/// here as advisory evidence and `normalize` refuses to let it read as a pass.
+/// Only a [`VerificationOutcome::proven`] result can.
+pub fn from_verification(
+    outcome: &VerificationOutcome,
+    title: &str,
+    url: &str,
+    revision: Option<&str>,
+    observed_at: &str,
+) -> Citation {
+    Citation {
+        kind: CitationKind::BehavioralVerification,
+        title: nonempty(title.to_string()).unwrap_or_else(|| VERIFICATION_TITLE.to_string()),
+        url: url.to_string(),
+        revision: revision.and_then(|revision| nonempty(revision.to_string())),
+        observed_at: observed_at.to_string(),
+        complete: outcome.complete(),
+        provenance: outcome.provenance(),
+        outcome: verification_outcome(outcome.verdict()),
+        note: verification_note(outcome),
+    }
+    .normalize()
+}
+
+fn verification_outcome(verdict: Verdict) -> CitationOutcome {
+    match verdict {
+        Verdict::Verified => CitationOutcome::Success,
+        Verdict::NotVerified => CitationOutcome::Failure,
+        Verdict::Unavailable => CitationOutcome::Incomplete,
+    }
+}
+
+fn verification_note(outcome: &VerificationOutcome) -> Option<String> {
+    if outcome.advisory() {
+        return Some(ADVISORY_NOTE.to_string());
+    }
+    (!outcome.complete()).then(|| UNAVAILABLE_NOTE.to_string())
 }
 
 /// Citation for a retrieved knowledge entry or indexed source chunk.
@@ -255,6 +359,7 @@ pub fn from_retrieved(title: &str, uri: &str, complete: bool, observed_at: &str)
         revision,
         observed_at: observed_at.to_string(),
         complete,
+        provenance: Provenance::ServerExecution,
         outcome: if complete {
             CitationOutcome::Observed
         } else {
@@ -324,6 +429,7 @@ fn document_citation(document: &Value, parent: &Value, observed_at: &str) -> Cit
             .or_else(|| nonempty(text(document, "fetched_at"))),
         observed_at: observed(parent, observed_at),
         complete,
+        provenance: Provenance::ServerExecution,
         outcome: if complete {
             CitationOutcome::Observed
         } else {
@@ -417,6 +523,7 @@ fn short_revision(revision: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::super::verification;
     use super::*;
     use serde_json::json;
 
@@ -486,6 +593,7 @@ mod tests {
             revision: Some(SHA.into()),
             observed_at: OBSERVED.into(),
             complete: false,
+            provenance: Provenance::ServerExecution,
             outcome: CitationOutcome::Success,
             note: None,
         }
@@ -723,5 +831,181 @@ mod tests {
         );
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, CitationKind::GithubFile);
+    }
+
+    fn marker(verdict: &str) -> verification::Marker {
+        let payload = format!(
+            r#"{{"version":1,"outcome":"{verdict}","recipes":[{{"kind":"script","manifestPath":"package.json","name":"test:e2e"}}]}}"#
+        );
+        verification::parse(&format!(
+            "{}{payload}{}",
+            verification::OPEN_TAG,
+            verification::CLOSE_TAG
+        ))
+        .expect("the fixture marker parses")
+    }
+
+    fn verification_citation(outcome: &VerificationOutcome, title: &str) -> Citation {
+        from_verification(
+            outcome,
+            title,
+            "https://github.com/owner/repository/blob/main/console/package.json",
+            Some(SHA),
+            OBSERVED,
+        )
+    }
+
+    #[test]
+    fn a_model_asserted_verification_is_never_a_passing_result() {
+        let citation = verification_citation(
+            &VerificationOutcome::asserted(marker("verified")),
+            "Checkout probe",
+        );
+
+        assert_eq!(citation.kind, CitationKind::BehavioralVerification);
+        assert_eq!(citation.provenance, Provenance::ModelAsserted);
+        assert_eq!(citation.revision.as_deref(), Some(SHA));
+        assert!(citation.complete);
+        assert_eq!(citation.outcome, CitationOutcome::Observed);
+        assert!(!citation.passing());
+        assert_eq!(citation.note.as_deref(), Some(ADVISORY_NOTE));
+        assert!(citation.usable());
+    }
+
+    #[test]
+    fn the_same_verification_passes_once_the_server_proves_it() {
+        let asserted = VerificationOutcome::asserted(marker("verified"));
+        let closure = verification::scaffold::proven();
+        let proven = VerificationOutcome::proven(
+            closure.witness().expect("the scaffolded closure held"),
+            asserted.verdict(),
+            asserted.recipes().to_vec(),
+        );
+        assert_eq!(asserted.verdict(), proven.verdict());
+        assert_eq!(asserted.recipes(), proven.recipes());
+        assert_eq!(proven.closure(), Some(closure.entrypoint()));
+
+        let citation = verification_citation(&proven, "Checkout probe");
+
+        assert_eq!(citation.provenance, Provenance::ServerExecution);
+        assert_eq!(citation.outcome, CitationOutcome::Success);
+        assert!(citation.passing());
+        assert!(citation.note.is_none());
+        assert!(!verification_citation(&asserted, "Checkout probe").passing());
+    }
+
+    #[test]
+    fn refuted_and_unavailable_verifications_are_never_passing() {
+        let refuted = verification_citation(
+            &VerificationOutcome::asserted(marker("not_verified")),
+            "Checkout probe",
+        );
+        assert_eq!(refuted.outcome, CitationOutcome::Failure);
+        assert_eq!(refuted.provenance, Provenance::ModelAsserted);
+        assert!(!refuted.passing());
+        assert_eq!(refuted.note.as_deref(), Some(ADVISORY_NOTE));
+
+        let closure = verification::scaffold::proven();
+        let unavailable = verification_citation(
+            &VerificationOutcome::proven(
+                closure.witness().expect("the scaffolded closure held"),
+                Verdict::Unavailable,
+                Vec::new(),
+            ),
+            "",
+        );
+        assert_eq!(unavailable.title, VERIFICATION_TITLE);
+        assert!(!unavailable.complete);
+        assert_eq!(unavailable.outcome, CitationOutcome::Incomplete);
+        assert!(!unavailable.passing());
+        assert_eq!(unavailable.note.as_deref(), Some(UNAVAILABLE_NOTE));
+    }
+
+    #[test]
+    fn a_tool_cannot_declare_a_passing_model_asserted_citation() {
+        let smuggled = citations(
+            "search_knowledge",
+            json!({
+                "citations": [{
+                    "kind": "behavioral_verification",
+                    "title": "Checkout probe",
+                    "url": "https://github.com/owner/repository/commit/aaa",
+                    "observed_at": OBSERVED,
+                    "complete": true,
+                    "provenance": "model_asserted",
+                    "outcome": "success"
+                }]
+            }),
+        )
+        .remove(0);
+
+        assert_eq!(smuggled.provenance, Provenance::ModelAsserted);
+        assert_eq!(smuggled.outcome, CitationOutcome::Observed);
+        assert!(!smuggled.passing());
+        assert_eq!(smuggled.note.as_deref(), Some(ADVISORY_NOTE));
+    }
+
+    #[test]
+    fn an_unrecognised_tool_cannot_certify_itself() {
+        let supplied = citations(
+            "magents_spawn_session",
+            json!({
+                "citations": [{
+                    "kind": "github_build",
+                    "title": "repository main@aaaaaaa",
+                    "url": "https://github.com/owner/repository/commit/aaa",
+                    "observed_at": OBSERVED,
+                    "complete": true,
+                    "outcome": "success"
+                }]
+            }),
+        )
+        .remove(0);
+
+        assert_eq!(supplied.provenance, Provenance::ModelAsserted);
+        assert_eq!(supplied.outcome, CitationOutcome::Observed);
+        assert!(!supplied.passing());
+
+        let wire = serde_json::to_value(&supplied).expect("a citation serializes");
+        assert_eq!(wire["kind"], "github_build");
+        assert_eq!(wire["provenance"], "model_asserted");
+        assert_eq!(wire["outcome"], "observed");
+    }
+
+    #[test]
+    fn a_built_in_tool_keeps_its_server_observation() {
+        let observed = citations(
+            "assess_pull_requests",
+            json!({
+                "citations": [{
+                    "kind": "github_build",
+                    "title": "repository main@aaaaaaa",
+                    "url": "https://github.com/owner/repository/commit/aaa",
+                    "observed_at": OBSERVED,
+                    "complete": true,
+                    "outcome": "success"
+                }]
+            }),
+        )
+        .remove(0);
+
+        assert_eq!(observed.provenance, Provenance::ServerExecution);
+        assert!(observed.passing());
+    }
+
+    #[test]
+    fn a_stored_citation_without_provenance_stays_server_proven() {
+        let stored: Citation = serde_json::from_value(json!({
+            "kind": "github_build",
+            "title": "repository main@aaaaaaa",
+            "url": "https://github.com/owner/repository/commit/aaa",
+            "observed_at": OBSERVED,
+            "complete": true,
+            "outcome": "success"
+        }))
+        .expect("a stored citation deserializes");
+
+        assert_eq!(stored.provenance, Provenance::ServerExecution);
+        assert!(stored.passing());
     }
 }

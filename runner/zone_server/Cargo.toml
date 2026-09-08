@@ -55,12 +55,12 @@ hex = "=0.4.3"
 rand = "=0.10.2"
 getrandom = { workspace = true }
 hmac = "=0.13.0"
-subtle = "=2.6.1"
+subtle = { workspace = true }
 regex = "=1.13.1"
 
 # Encryption
-aes-gcm = "=0.11.1"
-base64 = "=0.23.1"
+aes-gcm = { workspace = true }
+base64 = { workspace = true }
 
 # Email
 lettre = { version = "=0.11.23", features = ["tokio1-native-tls", "builder", "smtp-transport"] }
@@ -82,12 +82,14 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
 # Internal
+tool_runner = { path = "../tool_runner" }
 zone_chat = { path = "../zone_chat" }
 zone_comfy = { path = "../zone_comfy" }
 zone_email = { path = "../zone_email" }
+zone_notify = { path = "../zone_notify" }
 zone_search = { path = "../zone_search" }
 zone_vcs = { path = "../zone_vcs" }
-zone_core = { path = "../zone_core" }
+zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
 
 [dev-dependencies]
@@ -100,3 +102,4 @@ tokio-tungstenite = "=0.30.0"
 futures-util = "=0.3.34"
 zone_context = { path = "../zone_context", features = ["test-utils"] }
 wiremock = "=0.6.5"
+tempfile = "=3.27.0"
