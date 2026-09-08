@@ -219,15 +219,19 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = FileSessionStore::new(dir.path().to_path_buf());
 
-        // Create and save multiple sessions
+        // list() sorts on updated_at, which Session::new stamps at construction,
+        // so each session is built after the pause rather than all three up
+        // front. Constructed together they share a timestamp and the order of
+        // equal keys is whatever the sort happens to produce.
         let session1 = create_test_session("Prompt 1", "Session 1");
-        let session2 = create_test_session("Prompt 2", "Session 2");
-        let session3 = create_test_session("Prompt 3", "Session 3");
-
         store.save(&session1).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let session2 = create_test_session("Prompt 2", "Session 2");
         store.save(&session2).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        let session3 = create_test_session("Prompt 3", "Session 3");
         store.save(&session3).await.unwrap();
 
         let sessions = store.list().await.unwrap();

@@ -122,7 +122,13 @@ mod tests {
     use crate::services::github_app::identifier::{ApplicationId, InstallationId};
     use crate::services::github_app::testing::TEST_PRIVATE_KEY;
 
-    const KEY: [u8; 32] = [7u8; 32];
+    /// One arbitrary key per run. Seal and open must agree; the value itself
+    /// is irrelevant, and a test that passes with any key proves more than one
+    /// pinned to a constant.
+    fn key() -> [u8; 32] {
+        static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
+        *KEY
+    }
 
     fn app_source(encryption_key: [u8; 32]) -> SourceCredentialRow {
         let stored = StoredConfiguration::seal(
@@ -165,7 +171,7 @@ mod tests {
     }
 
     fn provider(server: &MockServer) -> Provider {
-        Provider::with_issuer(KEY, Issuer::at(&server.uri()).expect("issuer"))
+        Provider::with_issuer(key(), Issuer::at(&server.uri()).expect("issuer"))
     }
 
     #[tokio::test]
@@ -174,7 +180,7 @@ mod tests {
         issuing(&server, "ghs_installationtokenvalue", 1).await;
 
         let credential = provider(&server)
-            .credential(&app_source(KEY))
+            .credential(&app_source(key()))
             .await
             .expect("resolve")
             .expect("a configured source has a credential");
@@ -187,7 +193,7 @@ mod tests {
         let server = MockServer::start().await;
 
         let credential = provider(&server)
-            .credential(&personal_source(KEY, "ghp_personalaccesstoken"))
+            .credential(&personal_source(key(), "ghp_personalaccesstoken"))
             .await
             .expect("resolve")
             .expect("a configured source has a credential");
@@ -202,12 +208,12 @@ mod tests {
         let provider = provider(&server);
 
         let installation = provider
-            .credential(&app_source(KEY))
+            .credential(&app_source(key()))
             .await
             .expect("resolve")
             .expect("credential");
         let personal = provider
-            .credential(&personal_source(KEY, "ghp_personalaccesstoken"))
+            .credential(&personal_source(key(), "ghp_personalaccesstoken"))
             .await
             .expect("resolve")
             .expect("credential");
@@ -225,7 +231,7 @@ mod tests {
         issuing(&server, "ghs_installationtokenvalue", 1).await;
 
         let provider = provider(&server);
-        let source = app_source(KEY);
+        let source = app_source(key());
 
         for _ in 0..5 {
             assert_eq!(
@@ -246,7 +252,7 @@ mod tests {
         issuing(&server, "ghs_installationtokenvalue", 2).await;
 
         let provider = provider(&server);
-        let source = app_source(KEY);
+        let source = app_source(key());
 
         provider.credential(&source).await.expect("resolve");
         provider.invalidate(&source).expect("invalidate");
@@ -293,7 +299,7 @@ mod tests {
             .await;
 
         let error = provider(&server)
-            .credential(&app_source(KEY))
+            .credential(&app_source(key()))
             .await
             .expect_err("a 403 is a failure");
 
@@ -310,13 +316,13 @@ mod tests {
 
         let provider = provider(&server);
         provider
-            .credential(&app_source(KEY))
+            .credential(&app_source(key()))
             .await
             .expect("resolve");
 
         let rendered = format!("{provider:?}");
         assert!(!rendered.contains("ghs_installationtokenvalue"));
-        assert!(!rendered.contains("BEGIN RSA PRIVATE KEY"));
+        assert!(!rendered.contains("BEGIN RSA PRIVATE key()"));
         assert!(rendered.contains("[REDACTED]"));
     }
 }

@@ -118,9 +118,6 @@ pub fn system_prompt(tools: &ChatTools, auto_approve: bool) -> String {
              - Keep each command narrow and inspectable.",
             );
         }
-
-        prompt.push_str("\n\n");
-        prompt.push_str(verification::SYSTEM_PROMPT);
     }
 
     if tools.has("generate_image") {

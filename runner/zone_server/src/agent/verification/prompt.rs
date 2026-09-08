@@ -1,6 +1,13 @@
 /// Guidance that teaches a model to nominate a behavioral check and emit the
 /// marker this module parses.
 ///
+/// Not yet wired into `agent::system_prompt`. It belongs on a turn that is
+/// verification-capable, and no such turn exists: the closure proof landed but
+/// nothing executes a nominated recipe, so the marker it asks for cannot be
+/// acted on. Gating it on `read_file` instead — the nearest available check —
+/// put it in front of every file-capable chat, which cost those turns their
+/// budget and stopped a consumed group compacting within it.
+///
 /// It is owned here rather than inlined into `agent::system_prompt` so the
 /// wording, the marker tags and the parser can never drift apart; the marker
 /// tests parse the example out of this constant.

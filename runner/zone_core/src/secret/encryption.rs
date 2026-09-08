@@ -50,9 +50,9 @@ impl MasterKey {
     }
 
     pub fn generate() -> Self {
-        let mut key = [0u8; KEY_BYTES];
-        rand::fill(&mut key);
-        Self { key }
+        Self {
+            key: rand::random(),
+        }
     }
 
     fn as_bytes(&self) -> &[u8; KEY_BYTES] {
