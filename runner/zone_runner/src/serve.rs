@@ -196,6 +196,7 @@ async fn handle_message(
             timeout_ms,
             max_output_bytes,
             working_dir,
+            confinement,
         } => {
             tracing::info!(
                 "RunStart: job_id={}, command={}, workspace={}",
@@ -228,6 +229,7 @@ async fn handle_message(
                 timeout_ms,
                 max_output_bytes,
                 working_dir,
+                confinement,
             };
 
             // Spawn the command
