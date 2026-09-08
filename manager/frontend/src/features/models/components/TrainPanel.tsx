@@ -1,4 +1,4 @@
-import { Button } from '@zone/ui';
+import { Button, Input, Select } from '@zone/ui';
 import { type FormEvent, useEffect, useState } from 'react';
 import { modelsApi } from '../../../api/models';
 
@@ -119,49 +119,42 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       </p>
       {error && <div className="error-placeholder">{error}</div>}
       <form className="ui-form" onSubmit={handleSubmit}>
-        <label>
-          Name
-          <input value={name} onChange={(event) => setName(event.target.value)} required />
-        </label>
-        <label>
-          Base
-          <select value={base} onChange={(event) => setBase(event.target.value)}>
-            {bases.length === 0 && <option value="">No trainable base installed</option>}
-            {bases.map((row) => (
-              <option key={row.id} value={row.id}>
-                {row.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Trigger word
-          <input
-            value={trigger}
-            onChange={(event) => setTrigger(event.target.value)}
-            placeholder="required for a unique identity"
-            required
-          />
-        </label>
-        <label>
-          Images
-          <input
+        <Input
+          label="Name"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          required
+        />
+        <Select
+          label="Base"
+          value={base}
+          onValueChange={setBase}
+          options={bases.map((row) => ({ value: row.id, label: row.label }))}
+          placeholder="No trainable base installed"
+          disabled={bases.length === 0}
+        />
+        <Input
+          label="Trigger word"
+          value={trigger}
+          onChange={(event) => setTrigger(event.target.value)}
+          placeholder="required for a unique identity"
+          required
+        />
+        <Input
+          label="Images"
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          multiple
+          onChange={(event) => void handleFiles(event.target.files)}
+        />
+        {edit && (
+          <Input
+            label="Before images (edit bases)"
             type="file"
             accept="image/png,image/jpeg,image/webp"
             multiple
-            onChange={(event) => void handleFiles(event.target.files)}
+            onChange={(event) => void handleFiles(event.target.files, true)}
           />
-        </label>
-        {edit && (
-          <label>
-            Before images (edit bases)
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/webp"
-              multiple
-              onChange={(event) => void handleFiles(event.target.files, true)}
-            />
-          </label>
         )}
         {images.length > 0 && (
           <div>
@@ -181,17 +174,17 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           </div>
         )}
         {images.map((image, index) => (
-          <label key={`${image.filename}-${index}`}>
-            Caption for {image.filename}
-            <input
-              value={image.caption}
-              onChange={(event) => {
-                const next = [...images];
-                next[index] = { ...image, caption: event.target.value };
-                setImages(next);
-              }}
-            />
-          </label>
+          <Input
+            key={`${image.filename}-${index}`}
+            id={`train-caption-${index}`}
+            label={`Caption for ${image.filename}`}
+            value={image.caption}
+            onChange={(event) => {
+              const next = [...images];
+              next[index] = { ...image, caption: event.target.value };
+              setImages(next);
+            }}
+          />
         ))}
         <Button
           type="submit"

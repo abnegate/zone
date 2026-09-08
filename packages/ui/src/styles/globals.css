@@ -421,6 +421,38 @@
     flex: 1;
   }
 
+  .ui-input[type='file'] {
+    align-items: center;
+    padding: 0.25rem 0.5rem 0.25rem 0.25rem;
+    color: var(--ui-text-secondary);
+    cursor: pointer;
+  }
+
+  .ui-input[type='file']::file-selector-button {
+    height: calc(var(--ui-control-height) - 0.5rem);
+    margin-right: 0.75rem;
+    padding: 0 0.75rem;
+    border: none;
+    border-radius: var(--ui-radius-sm);
+    background-color: var(--ui-bg-surface);
+    box-shadow: var(--ui-shadow-xs);
+    font-family: var(--ui-font-body);
+    font-size: var(--ui-text-sm);
+    font-weight: 500;
+    color: var(--ui-text-primary);
+    cursor: pointer;
+    transition: background-color var(--ui-duration-fast) var(--ui-ease-out);
+  }
+
+  .ui-input[type='file']::file-selector-button:hover {
+    background-color: var(--ui-bg-hover);
+  }
+
+  .ui-input[type='file']:disabled,
+  .ui-input[type='file']:disabled::file-selector-button {
+    cursor: not-allowed;
+  }
+
   .ui-label {
     font-size: var(--ui-text-sm);
     font-weight: 500;
