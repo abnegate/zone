@@ -341,16 +341,30 @@ write by hand are never overwritten. The Models Train tab exposes this as
 **Auto-caption images**, so the captions can be reviewed and edited before
 training starts.
 
+### Why the base weights are cloned before training
+
+ComfyUI loads a checkpoint under `torch.inference_mode`, and autograd refuses to
+save an inference tensor for backward. An adapted module therefore cannot run its
+base matmul with gradients enabled until that weight has been cloned onto normal
+storage, which is what `prepare_frozen_weights` does for every frozen tensor.
+
+Skipping the weights the adapters wrap looks like an optimisation and is not. An
+adapter's gradient is the loss gradient carried back through the base weights of
+every layer below it; with those out of the graph the only remaining path runs
+through the other layers' LoRA branches, which are zero at initialisation by
+construction. Measured on a fixed batch over 40 steps at rank 8, restoring that
+chain moves the gradient norm from 0.0004 to 0.026 and the loss from -0.41% to
+-34.26% for the same drift. Every run made before it peaked at the same -13.5%
+against its own training images, all of it at the noisy end of the schedule,
+which is the most an adapter can do when it can only shift the output.
+
 ### Why the loss is divided by sigma
 
 Flow matching makes the x0 error exactly sigma times the velocity error, so a
 plain MSE on x0 weights each step by sigma squared. Uniform sampling over the
-schedule already puts the median sigma at 0.76 on FLUX; squaring it on top means
-the noisy end, where only colour and layout survive, supplies almost the whole
-gradient and the clean end that carries a subject's shape supplies almost none.
-A run trained that way learns a subject's palette and never its structure: 400
-steps on a single image ended 24% worse than the base model on that same image,
-8% better at high noise and 136% worse at low noise.
+schedule already puts the median sigma at 0.76 on FLUX, and squaring it on top
+leaves the clean end of the schedule — the end that carries a subject's shape —
+contributing almost nothing.
 
 `sigma_floor` in `train_config.json` divides the error by sigma so every noise
 level counts alike, with the floor bounding the amplification as sigma
@@ -400,9 +414,9 @@ python3 comfyui/probe_lora.py my_lora-step150.safetensors my_lora.safetensors
 ```
 
 `ZoneProbeGradient` descends on one unchanging batch, where a correct gradient
-has to lower the loss. It is how the learning rate gets chosen — 1e-4 descends,
-5e-4 drifts up, 2e-3 leaves the basin inside 40 steps — and how a run that
-diverges gets caught in minutes rather than at the end of an hour.
+has to lower the loss. It is how the rank gets chosen and how a broken backward
+pass gets caught in minutes rather than at the end of an hour: a severed chain
+shows up as a loss that will not move however long the descent runs.
 
 ```bash
 ZONE_PROBE_MODE=gradient \
