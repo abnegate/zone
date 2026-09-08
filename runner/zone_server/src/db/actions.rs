@@ -285,34 +285,32 @@ pub async fn start_task(
     {
         return Err(invalid("priority must be between 1 and 5"));
     }
-    let mut transaction = pool.begin().await?;
-    authorize(&mut transaction, workspace_id, user_id, true).await?;
-    if let Some(source_id) = input.source_id {
-        let active: Option<Option<bool>> =
-            sqlx::query_scalar("SELECT is_active FROM sources WHERE id = $1 AND workspace_id = $2")
-                .bind(source_id)
-                .bind(workspace_id)
-                .fetch_optional(&mut *transaction)
-                .await?;
-        if !matches!(active, Some(None) | Some(Some(true))) {
+    let (task, run) = match super::tasks::start_task_authorized(
+        pool,
+        user_id,
+        super::tasks::Create {
+            workspace_id,
+            project_ids: &input.project_ids,
+            title: input.title.trim(),
+            description: input.description.trim(),
+            acceptance_criteria: input.acceptance_criteria.as_deref(),
+            priority: input.priority,
+            is_agentic: true,
+            source_id: input.source_id,
+        },
+    )
+    .await
+    {
+        Ok(super::tasks::Mutation::Applied(result)) => result,
+        Ok(super::tasks::Mutation::NotFound) => return Err(invalid("Workspace access denied")),
+        Err(super::tasks::MutationError::Project) => {
+            return Err(invalid("Project is not available in this workspace"));
+        }
+        Err(super::tasks::MutationError::Source) => {
             return Err(invalid("Source not found in this workspace or inactive"));
         }
-    }
-    transaction.commit().await?;
-
-    let task = super::tasks::create_task(
-        pool,
-        workspace_id,
-        &input.project_ids,
-        input.title.trim(),
-        input.description.trim(),
-        input.acceptance_criteria.as_deref(),
-        input.priority,
-        true,
-        input.source_id,
-    )
-    .await?;
-    let run = super::tasks::create_task_run(pool, task.id).await?;
+        Err(super::tasks::MutationError::Database(error)) => return Err(error),
+    };
     Ok(json!({
         "task_id": task.id,
         "run_id": run.id,

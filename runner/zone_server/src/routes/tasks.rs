@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{sources, tasks, workspace_members};
+use crate::db::{tasks, workspace_members};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
@@ -224,13 +224,6 @@ pub struct UpdateTaskRequest {
     project_ids: Option<Vec<Uuid>>,
 }
 
-/// Whether the caller only reads the resource or changes it.
-#[derive(Clone, Copy)]
-enum Access {
-    Read,
-    Write,
-}
-
 fn denied(status: StatusCode, message: &str) -> Box<Response> {
     Box::new((status, Json(ErrorResponse::new(message))).into_response())
 }
@@ -238,6 +231,25 @@ fn denied(status: StatusCode, message: &str) -> Box<Response> {
 fn database_error(error: impl std::fmt::Display) -> Box<Response> {
     tracing::error!("Database error: {error}");
     denied(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+}
+
+fn user_id(auth: &AuthUser) -> Result<Uuid, Box<Response>> {
+    Uuid::parse_str(&auth.0.sub)
+        .map_err(|_| denied(StatusCode::UNAUTHORIZED, "Invalid user ID in token"))
+}
+
+fn mutation_error(error: tasks::MutationError) -> Box<Response> {
+    match error {
+        tasks::MutationError::Project => denied(
+            StatusCode::BAD_REQUEST,
+            "Project is not available in this workspace",
+        ),
+        tasks::MutationError::Source => denied(
+            StatusCode::BAD_REQUEST,
+            "Source is not available in this workspace",
+        ),
+        tasks::MutationError::Database(error) => database_error(error),
+    }
 }
 
 /// Every handler in this module addresses a task, run, or workspace by an id
@@ -252,50 +264,37 @@ async fn authorize_workspace(
     state: &AppState,
     auth: &AuthUser,
     workspace_id: Uuid,
-    access: Access,
     missing: &str,
 ) -> Result<(), Box<Response>> {
-    let user_id = Uuid::parse_str(&auth.0.sub)
-        .map_err(|_| denied(StatusCode::UNAUTHORIZED, "Invalid user ID in token"))?;
-
-    let permitted = match access {
-        Access::Read => workspace_members::is_member(state.db(), user_id, workspace_id).await,
-        Access::Write => workspace_members::can_write(state.db(), workspace_id, user_id).await,
-    }
-    .map_err(database_error)?;
+    let user_id = user_id(auth)?;
+    let permitted = workspace_members::is_member(state.db(), user_id, workspace_id)
+        .await
+        .map_err(database_error)?;
 
     if permitted {
         return Ok(());
     }
 
-    match access {
-        Access::Read => Err(denied(StatusCode::NOT_FOUND, missing)),
-        Access::Write => Err(denied(
-            StatusCode::FORBIDDEN,
-            "You do not have write access to this workspace",
-        )),
-    }
+    Err(denied(StatusCode::NOT_FOUND, missing))
 }
 
 async fn authorize_task(
     state: &AppState,
     auth: &AuthUser,
     task_id: Uuid,
-    access: Access,
 ) -> Result<(), Box<Response>> {
     let task = tasks::get_task(state.db(), task_id)
         .await
         .map_err(database_error)?
         .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task not found"))?;
 
-    authorize_workspace(state, auth, task.workspace_id, access, "Task not found").await
+    authorize_workspace(state, auth, task.workspace_id, "Task not found").await
 }
 
 async fn authorize_run(
     state: &AppState,
     auth: &AuthUser,
     run_id: Uuid,
-    access: Access,
 ) -> Result<(), Box<Response>> {
     let run = tasks::get_task_run(state.db(), run_id)
         .await
@@ -307,7 +306,7 @@ async fn authorize_run(
         .map_err(database_error)?
         .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task run not found"))?;
 
-    authorize_workspace(state, auth, task.workspace_id, access, "Task run not found").await
+    authorize_workspace(state, auth, task.workspace_id, "Task run not found").await
 }
 
 /// GET /api/workspaces/:workspace_id/tasks
@@ -317,14 +316,8 @@ pub async fn list(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_workspace(
-        &state,
-        &auth,
-        workspace_id,
-        Access::Read,
-        "Workspace not found",
-    )
-    .await
+    if let Err(response) =
+        authorize_workspace(&state, &auth, workspace_id, "Workspace not found").await
     {
         return *response;
     }
@@ -358,62 +351,34 @@ pub async fn create(
     Path(workspace_id): Path<Uuid>,
     Json(request): Json<CreateTaskRequest>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_workspace(
-        &state,
-        &auth,
-        workspace_id,
-        Access::Write,
-        "Workspace not found",
-    )
-    .await
-    {
-        return *response;
-    }
-    if let Some(source_id) = request.source_id {
-        match sources::get_source(state.db(), source_id, workspace_id).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse::new(
-                        "Source is not available in this workspace",
-                    )),
-                )
-                    .into_response();
-            }
-            Err(error) => {
-                tracing::error!("Database error: {}", error);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse::new("Internal server error")),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    match tasks::create_task(
+    let user_id = match user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match tasks::create_task_authorized(
         state.db(),
-        workspace_id,
-        &request.project_ids,
-        &request.title,
-        &request.description,
-        request.acceptance_criteria.as_deref(),
-        request.priority,
-        request.is_agentic.unwrap_or(false),
-        request.source_id,
+        user_id,
+        tasks::Create {
+            workspace_id,
+            project_ids: &request.project_ids,
+            title: &request.title,
+            description: &request.description,
+            acceptance_criteria: request.acceptance_criteria.as_deref(),
+            priority: request.priority,
+            is_agentic: request.is_agentic.unwrap_or(false),
+            source_id: request.source_id,
+        },
     )
     .await
     {
-        Ok(task) => (StatusCode::CREATED, Json(TaskResponse::from(task))).into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+        Ok(tasks::Mutation::Applied(task)) => {
+            (StatusCode::CREATED, Json(TaskResponse::from(task))).into_response()
         }
+        Ok(tasks::Mutation::NotFound) => *denied(
+            StatusCode::FORBIDDEN,
+            "You do not have write access to this workspace",
+        ),
+        Err(error) => *mutation_error(error),
     }
 }
 
@@ -423,7 +388,7 @@ pub async fn get(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_task(&state, &auth, id, Access::Read).await {
+    if let Err(response) = authorize_task(&state, &auth, id).await {
         return *response;
     }
     match tasks::get_task(state.db(), id).await {
@@ -451,35 +416,28 @@ pub async fn update(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTaskRequest>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_task(&state, &auth, id, Access::Write).await {
-        return *response;
-    }
-    match tasks::update_task(
+    let user_id = match user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match tasks::update_task_authorized(
         state.db(),
-        id,
-        req.title.as_deref(),
-        req.description.as_deref(),
-        req.acceptance_criteria.as_deref(),
-        req.status.as_deref(),
-        req.priority,
-        req.project_ids.as_deref(),
+        user_id,
+        tasks::Patch {
+            id,
+            title: req.title.as_deref(),
+            description: req.description.as_deref(),
+            acceptance_criteria: req.acceptance_criteria.as_deref(),
+            status: req.status.as_deref(),
+            priority: req.priority,
+            project_ids: req.project_ids.as_deref(),
+        },
     )
     .await
     {
-        Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
+        Err(error) => *mutation_error(error),
     }
 }
 
@@ -489,16 +447,13 @@ pub async fn delete(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_task(&state, &auth, id, Access::Write).await {
-        return *response;
-    }
-    match tasks::delete_task(state.db(), id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
-        )
-            .into_response(),
+    let user_id = match user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match tasks::delete_task_authorized(state.db(), user_id, id).await {
+        Ok(tasks::Mutation::Applied(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -516,16 +471,13 @@ pub async fn queue(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_task(&state, &auth, id, Access::Write).await {
-        return *response;
-    }
-    match tasks::queue_task(state.db(), id).await {
-        Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
-        )
-            .into_response(),
+    let user_id = match user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match tasks::queue_task_authorized(state.db(), user_id, id).await {
+        Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -543,7 +495,7 @@ pub async fn list_runs(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_task(&state, &auth, id, Access::Read).await {
+    if let Err(response) = authorize_task(&state, &auth, id).await {
         return *response;
     }
     match tasks::list_task_runs(state.db(), id).await {
@@ -568,35 +520,12 @@ pub async fn create_run(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_task(&state, &auth, id, Access::Write).await {
-        return *response;
-    }
-    // Check if there's already a running task run for this task
-    // This prevents duplicate concurrent executions
-    match tasks::list_task_runs(state.db(), id).await {
-        Ok(runs) => {
-            let active_run = runs
-                .iter()
-                .find(|r| r.status == "running" || r.status == "pending");
-            if let Some(existing) = active_run {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse::new(format!(
-                        "Task already has an active run (id: {}, status: {})",
-                        existing.id, existing.status
-                    ))),
-                )
-                    .into_response();
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to check existing runs: {}", e);
-            // Continue anyway - better to potentially have duplicates than fail entirely
-        }
-    }
-
-    match tasks::create_task_run(state.db(), id).await {
-        Ok(run) => {
+    let user_id = match user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    match tasks::create_task_run_authorized(state.db(), user_id, id).await {
+        Ok(tasks::Mutation::Applied(tasks::RunMutation::Created(run))) => {
             let run_id = run.id;
             let task_id = id;
             let state_clone = state.clone();
@@ -608,6 +537,15 @@ pub async fn create_run(
 
             (StatusCode::CREATED, Json(TaskRunResponse::from(run))).into_response()
         }
+        Ok(tasks::Mutation::Applied(tasks::RunMutation::Active(run))) => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse::new(format!(
+                "Task already has an active run (id: {}, status: {})",
+                run.id, run.status
+            ))),
+        )
+            .into_response(),
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
         Err(e) => {
             tracing::error!("Database error: {}", e);
             (
@@ -625,7 +563,7 @@ pub async fn get_run(
     auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_run(&state, &auth, run_id, Access::Read).await {
+    if let Err(response) = authorize_run(&state, &auth, run_id).await {
         return *response;
     }
     match tasks::get_task_run(state.db(), run_id).await {
@@ -652,7 +590,7 @@ pub async fn get_run_logs(
     auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_run(&state, &auth, run_id, Access::Read).await {
+    if let Err(response) = authorize_run(&state, &auth, run_id).await {
         return *response;
     }
     match tasks::get_task_run_logs(state.db(), run_id).await {
