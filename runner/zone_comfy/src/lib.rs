@@ -43,6 +43,7 @@
 pub mod caption;
 pub mod client;
 pub mod config;
+pub mod dataset;
 pub mod inventory;
 pub mod lora;
 pub mod media;
@@ -53,6 +54,7 @@ pub mod train;
 pub use caption::{CaptionImage, CaptionRequest, Captioner, data_url};
 pub use client::{Client, Error, GeneratedImage, SourceImage};
 pub use config::Config;
+pub use dataset::{Concern, Finding, inspect};
 pub use inventory::{InventoryItem, WeightSidecar, scan};
 pub use lora::{TrainBase, TrainError, TrainImage, TrainRequest, available_bases, train};
 pub use media::MediaType;

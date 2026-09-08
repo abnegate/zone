@@ -105,9 +105,13 @@ impl Captioner {
     }
 
     /// Caption every image whose caption is blank. User-written captions are kept.
-    pub async fn fill(&self, images: &mut [(String, String)], trigger: &str) {
+    ///
+    /// Returns the descriptions the vision model produced, before identity words
+    /// are stripped from them, so a caller can measure how much of that
+    /// vocabulary the set has in common.
+    pub async fn fill(&self, images: &mut [(String, String)], trigger: &str) -> Vec<String> {
         if !self.available() || images.iter().all(|(_, caption)| !caption.trim().is_empty()) {
-            return;
+            return Vec::new();
         }
         let subject = self.subject(&images[0].0).await;
         let mut drafts: Vec<Option<String>> = Vec::with_capacity(images.len());
@@ -119,6 +123,7 @@ impl Captioner {
             }
         }
         let banned = identity_words(&drafts, subject.as_deref(), trigger);
+        let described: Vec<String> = drafts.iter().flatten().cloned().collect();
         let mut seen: HashSet<String> = HashSet::new();
         for ((_, caption), draft) in images.iter_mut().zip(drafts) {
             if !caption.trim().is_empty() {
@@ -134,6 +139,7 @@ impl Captioner {
                 None => trigger.to_string(),
             };
         }
+        described
     }
 
     /// One noun phrase naming the subject, used to seed the exclusion list.
@@ -229,7 +235,7 @@ fn identity_words(
     banned
 }
 
-fn content_words(value: &str) -> impl Iterator<Item = String> + '_ {
+pub(crate) fn content_words(value: &str) -> impl Iterator<Item = String> + '_ {
     value
         .split(|character: char| !character.is_alphanumeric())
         .map(str::to_ascii_lowercase)
@@ -443,6 +449,52 @@ mod tests {
                 "image {index}: one answer repeated for every image describes nothing that varies"
             );
         }
+    }
+
+    /// Stripping identity words is what destroys the overlap between captions,
+    /// so the set can only be judged on the answers as the model gave them.
+    #[tokio::test]
+    async fn fill_returns_descriptions_with_the_shared_words_intact() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_string_contains("main object in this photo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer("a teapot robot")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_string_contains("Write a short caption"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer(
+                "a teapot robot on a plinth, three-quarter view, standing on concrete",
+            )))
+            .mount(&server)
+            .await;
+        let captioner = Captioner::new(&config("vision"), server.uri(), "key".into());
+        let mut images = vec![
+            ("data:image/png;base64,aaa".to_string(), String::new()),
+            ("data:image/png;base64,bbb".to_string(), String::new()),
+            (
+                "data:image/png;base64,ccc".to_string(),
+                "hand written".to_string(),
+            ),
+        ];
+        let described = captioner.fill(&mut images, "zrkxyz").await;
+
+        assert_eq!(
+            described.len(),
+            2,
+            "one description per image the model saw"
+        );
+        assert!(
+            described.iter().all(|value| value.contains("robot")),
+            "the shared word must survive for the set to be measurable: {described:?}"
+        );
+        assert!(
+            !images[0].1.contains("robot"),
+            "the caption itself still drops identity: {}",
+            images[0].1
+        );
     }
 
     #[tokio::test]
