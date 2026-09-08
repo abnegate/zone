@@ -37,13 +37,25 @@ class TrainConfigTests(unittest.TestCase):
         self.assertTrue(train_config.is_output_module('diffusion_model.final_layer.linear'))
 
     def test_checkpoints_land_often_enough_to_judge_a_run_early(self):
+        """The interval is derived now, so asserting the configured gap proves nothing."""
         config = train_config.load_config()
-        every = int(config['checkpoint_every'])
-        self.assertGreater(every, 0, 'a long run must be testable before it ends')
+        shortest = int(config['min_steps'])
+        interval = train_config.checkpoint_interval(shortest, config)
+        self.assertGreater(interval, 0, 'a long run must be testable before it ends')
         self.assertLessEqual(
-            every,
-            int(config['min_steps']) // 2,
+            interval,
+            shortest // 2,
             'at least two checkpoints before the shortest run finishes',
+        )
+
+    def test_a_long_run_writes_a_bounded_number_of_intermediates(self):
+        config = train_config.load_config()
+        longest = int(config['max_steps'])
+        interval = train_config.checkpoint_interval(longest, config)
+        self.assertLessEqual(
+            longest // interval,
+            12,
+            'an intermediate is hundreds of megabytes, so the count has to stay bounded',
         )
 
     def test_modulation_layers_are_left_alone_by_default(self):
@@ -91,3 +103,23 @@ class TrainConfigTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CheckpointCadenceTests(unittest.TestCase):
+    def interval(self, steps: int, **settings) -> int:
+        values = {'checkpoint_every': 50, 'checkpoints_per_run': 8}
+        values.update(settings)
+        return train_config.checkpoint_interval(steps, values)
+
+    def test_a_long_run_writes_no_more_intermediates_than_a_short_one(self):
+        """An intermediate is 220 MB, so a fixed gap bills the disk per step."""
+        for steps in (400, 1900, 5700, 6000):
+            self.assertLessEqual(
+                steps // self.interval(steps), 8, f'{steps} steps writes too many intermediates'
+            )
+
+    def test_a_short_run_keeps_the_configured_gap(self):
+        self.assertEqual(self.interval(300), 50)
+
+    def test_checkpointing_can_be_turned_off(self):
+        self.assertEqual(self.interval(6000, checkpoint_every=0), 0)
