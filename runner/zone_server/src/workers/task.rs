@@ -224,32 +224,60 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     ) {
         return;
     }
+    let execution = tasks::Execution {
+        task: task_id,
+        run: run_id,
+        owner,
+        actor: run.triggered_by,
+    };
     let heartbeat = async {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            let refresh = async {
+                if !execution.authorized(state.db(), false).await? {
+                    return Ok(false);
+                }
+                tasks::heartbeat_task_run(state.db(), run_id, owner).await
+            };
             if !matches!(
-                tokio::time::timeout(
-                    HEARTBEAT_TIMEOUT,
-                    tasks::heartbeat_task_run(state.db(), run_id, owner)
-                )
-                .await,
+                tokio::time::timeout(HEARTBEAT_TIMEOUT, refresh).await,
                 Ok(Ok(true))
             ) {
-                tracing::warn!(%run_id, "Task execution lost its lease; cancelling pipeline");
+                tracing::warn!(%run_id, "Task execution lost its lease or writer access; cancelling pipeline");
                 return;
             }
         }
     };
-    tokio::select! {
+    let cancelled = tokio::select! {
         biased;
-        () = heartbeat => {},
-        () = execute_owned_task_run(state, run_id, task_id, owner) => {},
+        () = heartbeat => true,
+        () = execute_owned_task_run(state, execution) => false,
+    };
+    if cancelled {
+        let _ = tokio::time::timeout(
+            HEARTBEAT_TIMEOUT,
+            tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some("Task execution lost its lease or writer access"),
+                None,
+            ),
+        )
+        .await;
     }
 }
 
-async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, owner: Uuid) {
+async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
+    let tasks::Execution {
+        task: task_id,
+        run: run_id,
+        owner,
+        ..
+    } = execution;
     let mut obs = crate::metrics::TaskObs::new();
 
     // Acquire semaphore permit to limit concurrent executions
@@ -273,6 +301,19 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
             return;
         }
     };
+
+    if !matches!(execution.authorized(state.db(), false).await, Ok(true)) {
+        let _ = tasks::complete_owned_task_run(
+            state.db(),
+            run_id,
+            Some(owner),
+            "failed",
+            Some("Workspace write access required"),
+            None,
+        )
+        .await;
+        return;
+    }
 
     if !matches!(
         tasks::start_owned_task_run(state.db(), run_id, Some(owner)).await,
@@ -325,6 +366,19 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
             return;
         }
     };
+
+    if !matches!(execution.authorized(state.db(), false).await, Ok(true)) {
+        let _ = tasks::complete_owned_task_run(
+            state.db(),
+            run_id,
+            Some(owner),
+            "failed",
+            Some("Workspace write access required"),
+            None,
+        )
+        .await;
+        return;
+    }
 
     let checkout =
         match crate::services::checkout::Checkout::prepare(state.db(), &task, run_id).await {
@@ -497,7 +551,7 @@ async fn execute_owned_task_run(state: &AppState, run_id: Uuid, task_id: Uuid, o
             ) {
                 return;
             }
-            let pr_info = match create_pr_for_task(state, task_id, &workspace_path).await {
+            let pr_info = match create_pr_for_task(state, execution, &workspace_path).await {
                 PrCreationResult::Created {
                     pr_url,
                     branch_name,
@@ -1076,5 +1130,162 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn writer_revocation_cancels_waiting_and_running_tasks() {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+        for waiting in [true, false] {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .unwrap();
+            let organization = organizations::create_organization(
+                &pool,
+                "Revocation",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let workspace = workspaces::create_workspace(
+                &pool,
+                organization.id,
+                "Revocation",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let user = users::create_user(
+                &pool,
+                &format!("{}@example.test", Uuid::new_v4()),
+                "unused",
+                Some("Actor"),
+                false,
+            )
+            .await
+            .unwrap();
+            workspace_members::add_member(
+                &pool,
+                workspace.id,
+                user.id,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .unwrap();
+            let task = tasks::create_task_as(
+                &pool,
+                workspace.id,
+                &[],
+                "Revocation",
+                "Stay blocked",
+                None,
+                None,
+                true,
+                None,
+                Some(user.id),
+            )
+            .await
+            .unwrap();
+            let run = tasks::create_task_run_as(&pool, task.id, Some(user.id))
+                .await
+                .unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let reached = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let app = Router::new().route("/v2/model/info",get(||async {Json(serde_json::json!({"data":[{"model_name":"gpt-4","litellm_params":{"model":"openai/gpt-4"},"model_info":{"max_input_tokens":128000}}]}))})).route("/chat/completions",post({
+                let requests=requests.clone(); let reached=reached.clone(); let release=release.clone();
+                move || { let requests=requests.clone(); let reached=reached.clone(); let release=release.clone(); async move {
+                    requests.fetch_add(1,Ordering::SeqCst); reached.notify_one(); release.notified().await;
+                    "data: [DONE]\n\n"
+                }}
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let mut config = crate::state::test_config();
+            config.litellm_host = endpoint.clone();
+            config.ollama_host = endpoint;
+            let state = AppState::new(config, pool.clone(), None);
+            let permit = if waiting {
+                Some(
+                    get_semaphore()
+                        .clone()
+                        .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let mut pipeline = tokio::spawn(async move {
+                execute_task_run(&state, run.id, task.id).await;
+            });
+            if waiting {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if sqlx::query_scalar::<_, bool>(
+                            "SELECT owner IS NOT NULL FROM task_runs WHERE id=$1",
+                        )
+                        .bind(run.id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap()
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                    .await
+                    .unwrap();
+            }
+            sqlx::query(
+                "UPDATE workspace_members SET role='viewer' WHERE workspace_id=$1 AND user_id=$2",
+            )
+            .bind(workspace.id)
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            drop(permit);
+            let finished =
+                tokio::time::timeout(std::time::Duration::from_secs(17), &mut pipeline).await;
+            pipeline.abort();
+            release.notify_waiters();
+            server.abort();
+            assert!(
+                finished.is_ok(),
+                "revoked writer kept executing (waiting={waiting})"
+            );
+            let completed = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
+            assert_eq!(completed.status, "failed");
+            assert!(completed.error_message.unwrap().contains("access"));
+            assert_eq!(requests.load(Ordering::SeqCst), usize::from(!waiting));
+            sqlx::query("DELETE FROM organizations WHERE id=$1")
+                .bind(organization.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM users WHERE id=$1")
+                .bind(user.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
     }
 }

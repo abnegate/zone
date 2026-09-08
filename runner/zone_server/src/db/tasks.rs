@@ -37,6 +37,23 @@ pub struct TaskRow {
     pub pr_created_at: Option<NaiveDateTime>,
 }
 
+/// Identity carried by every side effect of a claimed task run.
+#[derive(Debug, Clone, Copy)]
+pub struct Execution {
+    pub task: Uuid,
+    pub run: Uuid,
+    pub owner: Uuid,
+    pub actor: Option<Uuid>,
+}
+
+impl Execution {
+    /// Legacy tasks may execute without an actor, but can never publish.
+    pub async fn authorized(&self, pool: &PgPool, publication: bool) -> DbResult<bool> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.owner=$3 AND r.triggered_by IS NOT DISTINCT FROM $4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND (NOT $5 OR (t.created_by IS NOT NULL AND $4::uuid IS NOT NULL)) AND (($4::uuid IS NULL AND t.created_by IS NULL) OR EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner'))))")
+            .bind(self.task).bind(self.run).bind(self.owner).bind(self.actor).bind(publication).fetch_one(pool).await
+    }
+}
+
 /// Task run row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TaskRunRow {
@@ -774,76 +791,23 @@ pub async fn get_task_run_logs(pool: &PgPool, task_run_id: Uuid) -> DbResult<Vec
         .collect())
 }
 
-/// Update task PR information
+/// Store publication metadata only while the same writer still owns the run.
 pub async fn update_task_pr(
     pool: &PgPool,
-    task_id: Uuid,
-    pr_url: &str,
-    branch_name: &str,
-    pr_status: &str,
-) -> DbResult<Option<TaskRow>> {
-    let row = sqlx::query!(
-        r#"
-        UPDATE tasks
-        SET pr_url = $2,
-            branch_name = $3,
-            pr_status = $4,
-            pr_created_at = NOW(),
-            updated_at = NOW()
-        WHERE id = $1
-        RETURNING id, title, description, acceptance_criteria, status, priority,
-                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at, created_by
-        "#,
-        task_id,
-        pr_url,
-        branch_name,
-        pr_status
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    match row {
-        Some(r) => {
-            let mut task = map_task_row!(r);
-            task.project_ids = get_task_project_ids(pool, task.id).await?;
-            Ok(Some(task))
-        }
-        None => Ok(None),
-    }
+    execution: &Execution,
+    url: &str,
+    branch: &str,
+    status: &str,
+) -> DbResult<bool> {
+    Ok(sqlx::query("UPDATE tasks t SET pr_url=$5, branch_name=$6, pr_status=$7, pr_created_at=NOW(), updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
+        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(url).bind(branch).bind(status).execute(pool).await?.rows_affected() == 1)
 }
 
-/// Update task branch name (for when branch is created before PR)
 pub async fn update_task_branch(
     pool: &PgPool,
-    task_id: Uuid,
-    branch_name: &str,
-) -> DbResult<Option<TaskRow>> {
-    let row = sqlx::query!(
-        r#"
-        UPDATE tasks
-        SET branch_name = $2,
-            pr_status = 'pending',
-            updated_at = NOW()
-        WHERE id = $1
-        RETURNING id, title, description, acceptance_criteria, status, priority,
-                  model_name, dependencies, is_agentic, github_repo_url, source_id, source_ids,
-                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at, created_by
-        "#,
-        task_id,
-        branch_name
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    match row {
-        Some(r) => {
-            let mut task = map_task_row!(r);
-            task.project_ids = get_task_project_ids(pool, task.id).await?;
-            Ok(Some(task))
-        }
-        None => Ok(None),
-    }
+    execution: &Execution,
+    branch: &str,
+) -> DbResult<bool> {
+    Ok(sqlx::query("UPDATE tasks t SET branch_name=$5, pr_status='pending', updated_at=NOW() FROM task_runs r, workspace_members m WHERE t.id=$1 AND t.active_run_id=$2 AND r.id=$2 AND r.task_id=t.id AND r.owner=$3 AND r.triggered_by=$4 AND r.status='running' AND r.heartbeat_at > NOW() - INTERVAL '60 seconds' AND t.created_by IS NOT NULL AND m.workspace_id=t.workspace_id AND m.user_id=$4 AND m.is_active AND m.role IN ('member','admin','owner')")
+        .bind(execution.task).bind(execution.run).bind(execution.owner).bind(execution.actor).bind(branch).execute(pool).await?.rows_affected() == 1)
 }
