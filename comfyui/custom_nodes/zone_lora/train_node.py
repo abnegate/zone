@@ -40,23 +40,28 @@ from .train_config import (
 )
 
 
+def error_scale(sigmas, sample, sigma_floor: float):
+    """Flow matching makes the x0 error exactly sigma times the velocity error.
+
+    Measuring the x0 error therefore weights a sample by sigma squared, so the
+    noisy end of the schedule — where only colour and layout are recoverable —
+    dominates and the clean end that carries a subject's shape counts for almost
+    nothing. Training and every probe have to divide it out the same way, or a
+    probe ranks adapters by an objective the trainer never optimised.
+    """
+    if not sigma_floor:
+        return 1.0
+    shape = (-1,) + (1,) * (sample.ndim - 1)
+    return sigmas.detach().float().reshape(shape).clamp(min=sigma_floor)
+
+
 class ZoneTrainSampler(TrainSampler):
     def __init__(self, *args, sigma_floor=0.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.sigma_floor = sigma_floor
 
     def error_scale(self, sigmas, sample):
-        """Flow matching makes the x0 error exactly sigma times the velocity error.
-
-        Training on the x0 error therefore weights every step by sigma squared,
-        so the noisy end of the schedule — where only colour and layout are
-        recoverable — supplies almost the whole gradient and the clean end that
-        carries a subject's shape supplies close to none.
-        """
-        if not self.sigma_floor:
-            return 1.0
-        shape = (-1,) + (1,) * (sample.ndim - 1)
-        return sigmas.detach().float().reshape(shape).clamp(min=self.sigma_floor)
+        return error_scale(sigmas, sample, self.sigma_floor)
 
     def fwd_bwd(
         self,
@@ -376,7 +381,7 @@ class ZoneTrainLoRA(io.ComfyNode):
                 optimizer,
                 loss_callback=loss_callback,
                 batch_size=1,
-                grad_acc=max(1, int(settings.get('gradient_accumulation', 1))),
+                grad_acc=1,
                 total_steps=steps,
                 seed=seed,
                 training_dtype=dtype,
