@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+sqlx = ["dep:sqlx"]
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -22,6 +25,16 @@ futures = { workspace = true }
 
 # Session storage
 dirs = "=6.0.0"
+
+# Credential handling
+aes-gcm = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+
+# Read and write a SecretValue as the text column it is stored in
+sqlx = { workspace = true, optional = true }
 
 # Streaming
 async-stream = "=0.3.6"

@@ -8,8 +8,14 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::tools::{
+    MAX_TOOL_MESSAGE_CHARS, Tool, ToolContext, ToolError, ToolRegistry, ToolResult,
+};
 
+use super::readiness::{
+    self, CheckEvidence, CommentEvidence, CommitSha, Greptile, PullEvidence, ReviewComment,
+    ReviewThread, ThreadEvidence,
+};
 use super::tools::{WorkspaceScope, truncate};
 use crate::db::{sources, workspace_members};
 
@@ -18,6 +24,43 @@ const PAGE_SIZE: usize = 100;
 const FILE_PAGE_CHARS: u64 = 8_000;
 const ISSUE_BODY_CHARS: usize = 1_500;
 const BUILD_RECORD_CAP: usize = 20;
+const PULL_PAGE_SIZE: usize = 10;
+const PULL_TITLE_CHARS: usize = 160;
+const REVIEW_PAGE_SIZE: usize = 100;
+const PULL_REVIEW_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!,$first:Int!){\
+repository(owner:$owner,name:$name){pullRequest(number:$number){number isDraft headRefOid \
+reviewThreads(first:$first){pageInfo{hasNextPage}nodes{isResolved}}\
+comments(last:$first){pageInfo{hasPreviousPage}nodes{databaseId body url createdAt author{login}}}\
+}}}";
+const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
+const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
+const LOG_EXCERPT_CHARS: u64 = 5_500;
+const LOG_EXCERPT_FLOOR_CHARS: u64 = 500;
+const LOG_CONTEXT_LINES: usize = 40;
+const LOG_TAIL_LINES: usize = 120;
+const LOG_LINE_CHARS: usize = 500;
+const ELISION_RESERVE_CHARS: usize = 120;
+const RESULT_ENVELOPE_CHARS: usize = 256;
+const ANNOTATED_ERROR: &str = "##[error]";
+const ERROR_MARKERS: [&str; 10] = [
+    ANNOTATED_ERROR,
+    "traceback (most recent call last)",
+    "segmentation fault",
+    "assertion failed",
+    "exception:",
+    "failure:",
+    "error:",
+    "fatal:",
+    "panic:",
+    " failed",
+];
+const LOG_REDIRECT_HOSTS: [&str; 4] = [
+    "blob.core.windows.net",
+    "pipelines.actions.githubusercontent.com",
+    "objects.githubusercontent.com",
+    "github.com",
+];
+const LOG_NOTE: &str = "Excerpt of what the job printed, not proof of why it failed. Per-line timestamps, progress redraws and over-long lines are trimmed, and unshown regions are marked as omitted.";
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -25,6 +68,8 @@ enum Operation {
     Deployments,
     Issues,
     File,
+    PullRequests,
+    CheckLogs,
     CreatePull,
     Comment,
 }
@@ -35,6 +80,8 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::Deployments,
         Operation::Issues,
         Operation::File,
+        Operation::PullRequests,
+        Operation::CheckLogs,
         Operation::CreatePull,
         Operation::Comment,
     ] {
@@ -68,6 +115,7 @@ struct Arguments {
     base: Option<String>,
     body: Option<String>,
     number: Option<u64>,
+    job_id: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +135,8 @@ impl Tool for Integration {
             Operation::Deployments => "list_deployments",
             Operation::Issues => "list_issues",
             Operation::File => "read_repository_file",
+            Operation::CheckLogs => "read_check_logs",
+            Operation::PullRequests => "assess_pull_requests",
             Operation::CreatePull => "create_pull_request",
             Operation::Comment => "comment_on_issue",
         }
@@ -106,6 +156,12 @@ impl Tool for Integration {
             Operation::File => {
                 "Read UTF-8 content of a specific repository file from a connected GitHub source at an immutable commit, with a source URL. Returns a character page that fits the context budget; follow next to continue. Does not read host files. GitHub files over 100 MB are unsupported."
             }
+            Operation::PullRequests => {
+                "Assess whether pull requests on a connected GitHub source are ready to merge, returning a verdict plus every blocker behind it. Ready is the conjunction of every positive condition: no unresolved review threads, a review-bot summary at full confidence naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and a head commit the observations disagree on are all reported as not ready. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
+            }
+            Operation::CheckLogs => {
+                "Read a bounded excerpt of one GitHub Actions job log for a connected source, after confirming the job runs against the pull request or commit being asked about. Returns the lines around the first error and the end of the log within a character budget, never the whole file; omitted regions and capped downloads are marked. An excerpt is evidence of what the job printed, never proof of why it failed, that the log names the real cause, or that a rerun would pass."
+            }
             Operation::CreatePull => {
                 "Open a pull request on a connected GitHub source. Requires write access. Only do this when the user asked to open a PR."
             }
@@ -117,14 +173,18 @@ impl Tool for Integration {
 
     fn parameters_schema(&self) -> Value {
         let mut properties = json!({"source_id": {"type": "string", "format": "uuid"}});
-        if !matches!(self.operation, Operation::Issues) {
+        if !matches!(self.operation, Operation::Issues | Operation::PullRequests) {
             properties["ref"] = json!({"type": "string", "description": "Branch, tag or commit; defaults to the source branch or repository default branch."});
         }
         if matches!(self.operation, Operation::Deployments | Operation::Issues) {
             properties["page"] = json!({"type": "integer", "minimum": 1, "description": "Provider page (100 records), default 1. Follow next_page until null."});
         }
-        if matches!(self.operation, Operation::Issues) {
+        if matches!(self.operation, Operation::Issues | Operation::PullRequests) {
             properties["state"] = json!({"type": "string", "enum": ["open", "closed", "all"]});
+        }
+        if matches!(self.operation, Operation::PullRequests) {
+            properties["page"] = json!({"type": "integer", "minimum": 1, "description": "Page of 10 pull requests, most recently updated first, default 1. Follow next_page until null."});
+            properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Assess only this pull request instead of a page of them."});
         }
         let mut required = vec!["source_id"];
         if matches!(self.operation, Operation::File) {
@@ -132,6 +192,12 @@ impl Tool for Integration {
             properties["offset"] = json!({"type": "integer", "minimum": 0, "description": "Unicode character offset into the file, default 0."});
             properties["limit"] = json!({"type": "integer", "minimum": 1, "description": "Number of characters to return, default 8000, capped at 8000 so the page fits the remaining context budget. Follow next to continue."});
             required.push("path");
+        }
+        if matches!(self.operation, Operation::CheckLogs) {
+            properties["job_id"] = json!({"type": "integer", "minimum": 1, "description": "GitHub Actions job id, taken from the id of a check returned by get_build_status."});
+            properties["number"] = json!({"type": "integer", "minimum": 1, "description": "Pull request number the job must belong to. Omit to bind the job to the commit that ref resolves to instead."});
+            properties["limit"] = json!({"type": "integer", "minimum": 1, "description": "Excerpt size in characters, default 5500 and capped at 5500 so the excerpt fits the remaining context budget."});
+            required.push("job_id");
         }
         if matches!(self.operation, Operation::CreatePull) {
             properties["title"] = json!({"type": "string", "description": "Pull request title."});
@@ -236,6 +302,7 @@ impl Integration {
 struct Github {
     client: Client,
     origin: Url,
+    log_bytes: u64,
     configuration: Configuration,
 }
 
@@ -253,6 +320,7 @@ impl Github {
         Ok(Self {
             client,
             origin: Url::parse(ORIGIN).expect("constant GitHub origin"),
+            log_bytes: MAX_LOG_BYTES,
             configuration,
         })
     }
@@ -283,6 +351,16 @@ impl Github {
         let mut url = self.url(parts);
         url.query_pairs_mut()
             .extend_pairs(query.iter().map(|(key, value)| (*key, value.as_str())));
+        self.dispatch(method, url, raw, body).await
+    }
+
+    async fn dispatch(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+        raw: bool,
+        body: Option<&Value>,
+    ) -> Result<reqwest::Response, String> {
         let mut request = self
             .client
             .request(method, url)
@@ -329,6 +407,34 @@ impl Github {
             .json()
             .await
             .map_err(|_| "GitHub returned an invalid response.".to_string())
+    }
+
+    async fn graphql(&self, query: &str, variables: Value) -> Result<Value, String> {
+        let url = self
+            .origin
+            .join("graphql")
+            .map_err(|_| "Could not build the GitHub GraphQL URL.".to_string())?;
+        let response: Value = self
+            .dispatch(
+                reqwest::Method::POST,
+                url,
+                false,
+                Some(&json!({"query": query, "variables": variables})),
+            )
+            .await?
+            .json()
+            .await
+            .map_err(|_| "GitHub returned an invalid response.".to_string())?;
+        if response
+            .get("errors")
+            .is_some_and(|errors| errors.as_array().is_none_or(|rows| !rows.is_empty()))
+        {
+            return Err(
+                "GitHub rejected the review query. Check source access, permissions and rate limits."
+                    .into(),
+            );
+        }
+        Ok(response["data"].clone())
     }
 
     async fn write(&self, operation: Operation, arguments: &Arguments) -> Result<Value, String> {
@@ -424,6 +530,11 @@ impl Github {
             "https://github.com/{}/{}",
             self.configuration.owner, self.configuration.repo
         );
+        if matches!(operation, Operation::PullRequests) {
+            let mut result = self.readiness(arguments).await?;
+            result["repository"] = json!(repository);
+            return Ok(result);
+        }
         if matches!(operation, Operation::Issues) {
             let state = arguments.state.as_deref().unwrap_or("open");
             if !matches!(state, "open" | "closed" | "all") {
@@ -449,6 +560,11 @@ impl Github {
                 .collect();
             return Ok(json!({"repository": repository, "issues": issues, "next_page": next}));
         }
+        if matches!(operation, Operation::CheckLogs) {
+            let mut result = self.check_logs(arguments).await?;
+            result["repository"] = json!(repository);
+            return Ok(result);
+        }
         let (reference, sha) = self.resolve(arguments.reference.as_deref()).await?;
         let mut result = match operation {
             Operation::Build => self.build(&sha).await?,
@@ -462,7 +578,11 @@ impl Github {
                 )
                 .await?
             }
-            Operation::Issues | Operation::CreatePull | Operation::Comment => unreachable!(),
+            Operation::Issues
+            | Operation::PullRequests
+            | Operation::CheckLogs
+            | Operation::CreatePull
+            | Operation::Comment => unreachable!(),
         };
         result["repository"] = json!(repository);
         result["ref"] = json!(reference);
@@ -500,7 +620,7 @@ impl Github {
         }
     }
 
-    async fn build(&self, sha: &str) -> Result<Value, String> {
+    async fn ci_rows(&self, sha: &str) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>), String> {
         let workflows = self
             .pages(
                 &["actions", "runs"],
@@ -544,21 +664,16 @@ impl Github {
         {
             return Err("GitHub returned checks for a different or missing commit SHA.".into());
         }
+        Ok((workflows, checks, statuses))
+    }
+
+    async fn build(&self, sha: &str) -> Result<Value, String> {
+        let (workflows, checks, statuses) = self.ci_rows(sha).await?;
         let conclusions: Vec<&str> = workflows
             .iter()
             .chain(checks.iter())
-            .map(|row| {
-                if row["status"] == "completed" {
-                    row["conclusion"].as_str().unwrap_or("unknown")
-                } else {
-                    "pending"
-                }
-            })
-            .chain(
-                statuses
-                    .iter()
-                    .map(|row| row["state"].as_str().unwrap_or("unknown")),
-            )
+            .chain(statuses.iter())
+            .map(ci_token)
             .collect();
         let state = assessment(&conclusions);
         Ok(bound_build(json!({"state": state, "complete": true,
@@ -566,6 +681,143 @@ impl Github {
             "workflows": workflows.iter().map(|row| project(row, &["id", "name", "head_sha", "status", "conclusion", "html_url", "updated_at"])).collect::<Vec<_>>(),
             "checks": checks.iter().map(|row| project(row, &["id", "name", "head_sha", "status", "conclusion", "html_url", "details_url", "completed_at"])).collect::<Vec<_>>(),
             "statuses": statuses.iter().map(|row| project(row, &["context", "state", "description", "target_url", "created_at"])).collect::<Vec<_>>() })))
+    }
+
+    async fn check_evidence(&self, sha: &str) -> Result<CheckEvidence, String> {
+        let (workflows, checks, statuses) = self.ci_rows(sha).await?;
+        Ok(tally(
+            workflows
+                .iter()
+                .chain(checks.iter())
+                .chain(statuses.iter())
+                .map(ci_token),
+        ))
+    }
+
+    async fn readiness(&self, arguments: &Arguments) -> Result<Value, String> {
+        let (rows, next) = match arguments.number {
+            Some(number) => {
+                if number == 0 {
+                    return Err("number must be positive.".to_string());
+                }
+                (
+                    vec![self.get(&["pulls", &number.to_string()], &[]).await?],
+                    None,
+                )
+            }
+            None => {
+                let state = arguments.state.as_deref().unwrap_or("open");
+                if !matches!(state, "open" | "closed" | "all") {
+                    return Err("Pull request state must be open, closed or all.".to_string());
+                }
+                let page = arguments.page.unwrap_or(1);
+                let response = self
+                    .get(
+                        &["pulls"],
+                        &[
+                            ("state", state.into()),
+                            ("sort", "updated".into()),
+                            ("direction", "desc".into()),
+                            ("per_page", PULL_PAGE_SIZE.to_string()),
+                            ("page", page.to_string()),
+                        ],
+                    )
+                    .await?;
+                let records = array(&response)?.clone();
+                let next = next_page_of(records.len(), page, PULL_PAGE_SIZE)?;
+                (records, next)
+            }
+        };
+        let mut assessed = Vec::with_capacity(rows.len());
+        for row in &rows {
+            assessed.push(assessment_record(&self.assess(row).await?));
+        }
+        Ok(bound_readiness(
+            json!({
+                "assessed": assessed.len(),
+                "ready": assessed.iter().filter(|row| row["ready"] == true).count(),
+                "next_page": next,
+                "complete": next.is_none(),
+                "assessment": READINESS_ASSESSMENT,
+            }),
+            &assessed,
+            &Utc::now().to_rfc3339(),
+        ))
+    }
+
+    async fn assess(&self, row: &Value) -> Result<readiness::Assessment, String> {
+        let number = row["number"]
+            .as_u64()
+            .filter(|number| *number > 0)
+            .ok_or("GitHub returned a pull request without a number.")?;
+        let draft = row["draft"]
+            .as_bool()
+            .ok_or("GitHub returned a pull request without its draft state.")?;
+        let review = self.review(number).await?;
+        let head = row["head"]["sha"]
+            .as_str()
+            .and_then(CommitSha::parse)
+            .filter(|listed| review.head.as_ref() == Some(listed));
+        let checks = match &head {
+            Some(head) => self.check_evidence(head.as_str()).await?,
+            None => CheckEvidence::default(),
+        };
+        Ok(readiness::assess(
+            PullEvidence {
+                number,
+                title: truncate(row["title"].as_str().unwrap_or_default(), PULL_TITLE_CHARS),
+                url: text(row, "html_url"),
+                updated_at: text(row, "updated_at"),
+                draft: draft || review.draft,
+                head,
+                threads: review.threads,
+                comments: review.comments,
+                checks,
+            },
+            &Greptile,
+        ))
+    }
+
+    async fn review(&self, number: u64) -> Result<Review, String> {
+        let data = self
+            .graphql(
+                PULL_REVIEW_QUERY,
+                json!({
+                    "owner": self.configuration.owner,
+                    "name": self.configuration.repo,
+                    "number": number,
+                    "first": REVIEW_PAGE_SIZE,
+                }),
+            )
+            .await?;
+        let pull = &data["repository"]["pullRequest"];
+        if pull["number"].as_u64() != Some(number) {
+            return Err(
+                "GitHub returned review threads for a different or missing pull request.".into(),
+            );
+        }
+        let threads = &pull["reviewThreads"];
+        let comments = &pull["comments"];
+        Ok(Review {
+            draft: pull["isDraft"].as_bool().unwrap_or(true),
+            head: pull["headRefOid"].as_str().and_then(CommitSha::parse),
+            threads: ThreadEvidence {
+                complete: threads["pageInfo"]["hasNextPage"].as_bool() == Some(false),
+                threads: array(&threads["nodes"])?
+                    .iter()
+                    .map(|node| ReviewThread {
+                        resolved: node["isResolved"].as_bool().unwrap_or(false),
+                    })
+                    .collect(),
+            },
+            comments: CommentEvidence {
+                complete: comments["pageInfo"]["hasPreviousPage"].as_bool() == Some(false),
+                comments: array(&comments["nodes"])?
+                    .iter()
+                    .map(review_comment)
+                    .collect(),
+            },
+        })
     }
 
     async fn deployments(&self, sha: &str, page: u32) -> Result<Value, String> {
@@ -679,6 +931,400 @@ impl Github {
             "url": format!("https://github.com/{}/{}/blob/{}/{}", self.configuration.owner, self.configuration.repo, sha, path.split('/').map(|part| urlencoding::encode(part).into_owned()).collect::<Vec<_>>().join("/"))}),
         )
     }
+    async fn check_logs(&self, arguments: &Arguments) -> Result<Value, String> {
+        let job_id = arguments.job_id.ok_or("job_id is required.")?;
+        if job_id == 0 {
+            return Err("job_id must be positive.".to_string());
+        }
+        let (reference, sha, pull) = self.log_target(arguments).await?;
+        let job = self
+            .get(&["actions", "jobs", &job_id.to_string()], &[])
+            .await?;
+        let run_id = self.verify_job(&job, job_id, &sha)?;
+        let (bytes, capped) = self.collect_log(self.log_response(job_id).await?).await?;
+        let lines = log_lines(&String::from_utf8_lossy(&bytes));
+        let log = JobLog {
+            job,
+            run_id,
+            sha,
+            reference,
+            pull,
+            downloaded: bytes.len(),
+            capped,
+            observed_at: Utc::now().to_rfc3339(),
+        };
+        let mut budget = arguments
+            .limit
+            .unwrap_or(LOG_EXCERPT_CHARS)
+            .clamp(LOG_EXCERPT_FLOOR_CHARS, LOG_EXCERPT_CHARS);
+        let envelope = MAX_TOOL_MESSAGE_CHARS.saturating_sub(RESULT_ENVELOPE_CHARS);
+        loop {
+            let result = log.result(&lines, budget);
+            if json_chars(&result) <= envelope || budget <= LOG_EXCERPT_FLOOR_CHARS {
+                return Ok(result);
+            }
+            budget = (budget / 2).max(LOG_EXCERPT_FLOOR_CHARS);
+        }
+    }
+
+    async fn log_target(
+        &self,
+        arguments: &Arguments,
+    ) -> Result<(String, String, Option<Value>), String> {
+        let Some(number) = arguments.number else {
+            let (reference, sha) = self.resolve(arguments.reference.as_deref()).await?;
+            return Ok((reference, sha, None));
+        };
+        if number == 0 {
+            return Err("number must be positive.".to_string());
+        }
+        let pull = self.get(&["pulls", &number.to_string()], &[]).await?;
+        if pull["number"].as_u64() != Some(number) {
+            return Err("GitHub returned a different pull request.".to_string());
+        }
+        let sha = pull["head"]["sha"]
+            .as_str()
+            .filter(|value| valid_sha(value))
+            .ok_or("GitHub did not return an immutable pull request head SHA.")?
+            .to_ascii_lowercase();
+        let reference = pull["head"]["ref"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("refs/pull/{number}/head"));
+        Ok((
+            reference,
+            sha,
+            Some(project(
+                &pull,
+                &["number", "title", "state", "draft", "html_url"],
+            )),
+        ))
+    }
+
+    fn verify_job(&self, job: &Value, job_id: u64, sha: &str) -> Result<u64, String> {
+        let run_id = job["run_id"]
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or("GitHub returned a job without its workflow run identity.")?;
+        let head_sha = job["head_sha"]
+            .as_str()
+            .filter(|value| valid_sha(value))
+            .ok_or("GitHub returned a job without a commit SHA.")?;
+        if job["id"].as_u64() != Some(job_id)
+            || !head_sha.eq_ignore_ascii_case(sha)
+            || !is_job_url(
+                job["html_url"].as_str().unwrap_or_default(),
+                &self.configuration.owner,
+                &self.configuration.repo,
+                run_id,
+                job_id,
+            )
+        {
+            return Err(
+                "That job does not belong to the pull request or commit being asked about."
+                    .to_string(),
+            );
+        }
+        Ok(run_id)
+    }
+
+    async fn log_response(&self, job_id: u64) -> Result<reqwest::Response, String> {
+        let mut request = self
+            .client
+            .get(self.url(&["actions", "jobs", &job_id.to_string(), "logs"]))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2026-03-10");
+        if let Some(token) = &self.configuration.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "GitHub request failed or timed out.".to_string())?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        if !response.status().is_redirection() {
+            return Err(format!(
+                "GitHub returned HTTP {}. Check source access, permissions, rate limits and the requested resource.",
+                response.status().as_u16()
+            ));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or("GitHub redirected the job log without a destination.")?;
+        let target = self.log_redirect(location)?;
+        // The signed destination carries its own authorization; forwarding the
+        // source token off the API origin would hand it to storage.
+        let redirected = self
+            .client
+            .get(target)
+            .send()
+            .await
+            .map_err(|_| "The job log download failed or timed out.".to_string())?;
+        if !redirected.status().is_success() {
+            return Err(format!(
+                "The job log download returned HTTP {}.",
+                redirected.status().as_u16()
+            ));
+        }
+        Ok(redirected)
+    }
+
+    fn log_redirect(&self, location: &str) -> Result<Url, String> {
+        let unexpected = "GitHub redirected the job log to an unexpected host.";
+        let target = self
+            .origin
+            .join(location)
+            .map_err(|_| unexpected.to_string())?;
+        let Some(host) = target.host_str() else {
+            return Err(unexpected.to_string());
+        };
+        if !target.username().is_empty() || target.password().is_some() {
+            return Err(unexpected.to_string());
+        }
+        let same_origin = target.scheme() == self.origin.scheme()
+            && Some(host) == self.origin.host_str()
+            && target.port_or_known_default() == self.origin.port_or_known_default();
+        let published = target.scheme() == "https"
+            && LOG_REDIRECT_HOSTS
+                .iter()
+                .any(|allowed| host == *allowed || host.ends_with(&format!(".{allowed}")));
+        if same_origin || published {
+            Ok(target)
+        } else {
+            Err(unexpected.to_string())
+        }
+    }
+
+    async fn collect_log(
+        &self,
+        mut response: reqwest::Response,
+    ) -> Result<(Vec<u8>, bool), String> {
+        let mut collected: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| "The job log download failed part way through.".to_string())?
+        {
+            let room = (self.log_bytes as usize).saturating_sub(collected.len());
+            if chunk.len() > room {
+                collected.extend_from_slice(&chunk[..room]);
+                return Ok((collected, true));
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        Ok((collected, false))
+    }
+}
+
+struct JobLog {
+    job: Value,
+    run_id: u64,
+    sha: String,
+    reference: String,
+    pull: Option<Value>,
+    downloaded: usize,
+    capped: bool,
+    observed_at: String,
+}
+
+impl JobLog {
+    fn result(&self, lines: &[String], budget: u64) -> Value {
+        let error_line = find_error(lines);
+        let selected = select(lines, budget as usize, error_line);
+        let complete = !self.capped && selected.len() == lines.len();
+        let mut result = json!({
+            "job": project(&self.job, &["id", "run_id", "name", "status", "conclusion", "html_url", "started_at", "completed_at"]),
+            "run_id": self.run_id,
+            "ref": self.reference,
+            "sha": self.sha,
+            "log": {
+                "excerpt": render_excerpt(lines, &selected),
+                "total_lines": lines.len(),
+                "shown_lines": selected.len(),
+                "first_error_line": error_line.map(|index| index + 1),
+                "downloaded_bytes": self.downloaded,
+                "download_capped": self.capped,
+                "complete": complete,
+            },
+            "note": LOG_NOTE,
+            "citations": [self.citation(complete)],
+        });
+        if let Some(pull) = &self.pull {
+            result["pull_request"] = pull.clone();
+        }
+        result
+    }
+
+    fn citation(&self, complete: bool) -> Value {
+        let conclusion = if self.job["status"].as_str() == Some("completed") {
+            self.job["conclusion"].as_str().unwrap_or("unknown")
+        } else {
+            "pending"
+        };
+        json!({
+            "kind": "github_build",
+            "title": format!("{} job log excerpt", self.job["name"].as_str().unwrap_or("Check")),
+            "url": self.job["html_url"].as_str().unwrap_or_default(),
+            "revision": self.sha,
+            "observed_at": self.observed_at,
+            "complete": complete,
+            "outcome": match assessment(&[conclusion]) {
+                "failure" => "failure",
+                "pending" => "pending",
+                "success" => "success",
+                _ => "observed",
+            },
+            "note": LOG_NOTE,
+        })
+    }
+}
+
+fn is_job_url(value: &str, owner: &str, repo: &str, run_id: u64, job_id: u64) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path().eq_ignore_ascii_case(&format!(
+            "/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}"
+        ))
+}
+
+/// Strip the RFC 3339 stamp GitHub prefixes to every line of a job log.
+fn strip_timestamp(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    if bytes.len() < 21
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+    {
+        return line;
+    }
+    match line.find("Z ") {
+        Some(offset) if offset <= 32 => &line[offset + 2..],
+        _ => line,
+    }
+}
+
+/// Split a job log into lines a budget can be spent on: one entry per printed
+/// line, carriage-return redraws collapsed to the state that survived them, and
+/// no single line wide enough to crowd out the rest.
+fn log_lines(log: &str) -> Vec<String> {
+    let mut lines: Vec<String> = log
+        .split('\n')
+        .map(|line| {
+            let settled = line.trim_end_matches('\r');
+            let settled = settled.rsplit('\r').next().unwrap_or(settled);
+            truncate(strip_timestamp(settled).trim_end(), LOG_LINE_CHARS)
+        })
+        .collect();
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+fn find_error(lines: &[String]) -> Option<usize> {
+    let mut fallback = None;
+    for (index, line) in lines.iter().enumerate() {
+        let lowered = line.to_lowercase();
+        if lowered.contains(ANNOTATED_ERROR) {
+            return Some(index);
+        }
+        if fallback.is_none() && ERROR_MARKERS.iter().any(|marker| lowered.contains(marker)) {
+            fallback = Some(index);
+        }
+    }
+    fallback
+}
+
+/// Lines worth spending the budget on, most valuable first: the first error and
+/// the context that explains it, then the end of the log. Each step widens a
+/// region by one line, so whatever the budget affords stays contiguous.
+fn candidates(lines: &[String], error_line: Option<usize>) -> Vec<usize> {
+    let last = lines.len() - 1;
+    let mut order = Vec::new();
+    if let Some(index) = error_line {
+        order.push(index);
+        for offset in 1..=LOG_CONTEXT_LINES {
+            if index + offset <= last {
+                order.push(index + offset);
+            }
+            if let Some(before) = index.checked_sub(offset) {
+                order.push(before);
+            }
+        }
+    }
+    order.extend((0..LOG_TAIL_LINES.min(lines.len())).map(|offset| last - offset));
+    order
+}
+
+fn select(
+    lines: &[String],
+    budget: usize,
+    error_line: Option<usize>,
+) -> std::collections::BTreeSet<usize> {
+    let mut selected = std::collections::BTreeSet::new();
+    if lines.is_empty() {
+        return selected;
+    }
+    let mut spent = ELISION_RESERVE_CHARS;
+    for index in candidates(lines, error_line) {
+        if selected.contains(&index) {
+            continue;
+        }
+        let cost = lines[index].chars().count() + 1;
+        // Stopping rather than skipping keeps each region contiguous, so the
+        // excerpt reads as the log did instead of as scattered lines.
+        if !selected.is_empty() && spent + cost > budget {
+            break;
+        }
+        spent += cost;
+        selected.insert(index);
+    }
+    selected
+}
+
+fn ranges(selected: &std::collections::BTreeSet<usize>) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for index in selected {
+        match ranges.last_mut() {
+            Some(last) if last.1 + 1 == *index => last.1 = *index,
+            _ => ranges.push((*index, *index)),
+        }
+    }
+    ranges
+}
+
+fn render_excerpt(lines: &[String], selected: &std::collections::BTreeSet<usize>) -> String {
+    let mut rendered: Vec<String> = Vec::new();
+    let mut cursor = 0;
+    for (start, end) in ranges(selected) {
+        if start > cursor {
+            rendered.push(elision(start - cursor));
+        }
+        rendered.extend_from_slice(&lines[start..=end]);
+        cursor = end + 1;
+    }
+    if cursor < lines.len() {
+        rendered.push(elision(lines.len() - cursor));
+    }
+    rendered.join("\n")
+}
+
+fn elision(count: usize) -> String {
+    format!("… {count} lines omitted …")
 }
 
 fn text_page(content: &str, offset: u64, limit: u64) -> Result<(String, u64, Option<u64>), String> {
@@ -744,13 +1390,25 @@ fn array(value: &Value) -> Result<&Vec<Value>, String> {
 }
 
 fn next_page(length: usize, page: u32) -> Result<Option<u32>, String> {
-    if length < PAGE_SIZE {
+    next_page_of(length, page, PAGE_SIZE)
+}
+
+fn next_page_of(length: usize, page: u32, size: usize) -> Result<Option<u32>, String> {
+    if length < size {
         Ok(None)
     } else {
         page.checked_add(1)
             .map(Some)
             .ok_or_else(|| "GitHub pagination overflowed.".into())
     }
+}
+
+fn text(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn project(value: &Value, keys: &[&str]) -> Value {
@@ -839,13 +1497,34 @@ fn bound_build(mut result: Value) -> Value {
     let statuses = take_array(&result, "statuses");
     let mut cap = BUILD_RECORD_CAP.max(1);
     loop {
-        apply_record_cap(&mut result, "workflows", &workflows, cap);
-        apply_record_cap(&mut result, "checks", &checks, cap);
-        apply_record_cap(&mut result, "statuses", &statuses, cap);
+        apply_record_cap(&mut result, "workflows", &workflows, cap, ci_priority);
+        apply_record_cap(&mut result, "checks", &checks, cap, ci_priority);
+        apply_record_cap(&mut result, "statuses", &statuses, cap, ci_priority);
         if json_chars(&result) <= budget || cap == 1 {
             return result;
         }
         cap = (cap / 2).max(1);
+    }
+}
+
+/// Trim the assessed page, and the citations derived from it, together so the
+/// whole payload fits the context budget.
+fn bound_readiness(mut result: Value, pulls: &[Value], observed_at: &str) -> Value {
+    let budget = FILE_PAGE_CHARS as usize;
+    let mut cap = pulls.len().max(1);
+    loop {
+        apply_record_cap(&mut result, "pull_requests", pulls, cap, pull_priority);
+        let listed = take_array(&result, "pull_requests");
+        result["citations"] = json!(
+            listed
+                .iter()
+                .map(|row| readiness_citation(row, observed_at))
+                .collect::<Vec<_>>()
+        );
+        if json_chars(&result) <= budget || cap == 1 {
+            return result;
+        }
+        cap /= 2;
     }
 }
 
@@ -861,8 +1540,14 @@ fn take_array(value: &Value, key: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn apply_record_cap(result: &mut Value, key: &str, rows: &[Value], cap: usize) {
-    let (capped, omitted) = cap_ci_records(rows, cap);
+fn apply_record_cap(
+    result: &mut Value,
+    key: &str,
+    rows: &[Value],
+    cap: usize,
+    priority: fn(&Value) -> u8,
+) {
+    let (capped, omitted) = cap_records(rows, cap, priority);
     result[key] = Value::Array(capped);
     let omitted_key = format!("{key}_omitted");
     if omitted > 0 {
@@ -872,32 +1557,150 @@ fn apply_record_cap(result: &mut Value, key: &str, rows: &[Value], cap: usize) {
     }
 }
 
-fn cap_ci_records(rows: &[Value], cap: usize) -> (Vec<Value>, usize) {
+fn cap_records(rows: &[Value], cap: usize, priority: fn(&Value) -> u8) -> (Vec<Value>, usize) {
     let total = rows.len();
     if total <= cap {
         return (rows.to_vec(), 0);
     }
     let mut ranked: Vec<&Value> = rows.iter().collect();
-    ranked.sort_by_key(|row| ci_priority(row));
+    ranked.sort_by_key(|row| priority(row));
     (ranked.into_iter().take(cap).cloned().collect(), total - cap)
 }
 
-fn ci_priority(row: &Value) -> u8 {
-    let token = if row.get("status").is_some() {
+fn ci_token(row: &Value) -> &str {
+    if row.get("status").is_some() {
         if row["status"].as_str() == Some("completed") {
             row["conclusion"].as_str().unwrap_or("unknown")
         } else {
-            "pending"
+            row["status"].as_str().unwrap_or("pending")
         }
     } else {
         row["state"].as_str().unwrap_or("unknown")
-    };
-    match assessment(&[token]) {
+    }
+}
+
+fn ci_priority(row: &Value) -> u8 {
+    match assessment(&[ci_token(row)]) {
         "failure" => 0,
         "pending" => 1,
         "unknown" => 2,
         _ => 3,
     }
+}
+
+fn pull_priority(row: &Value) -> u8 {
+    u8::from(row["ready"] == true)
+}
+
+struct Review {
+    draft: bool,
+    head: Option<CommitSha>,
+    threads: ThreadEvidence,
+    comments: CommentEvidence,
+}
+
+fn review_comment(node: &Value) -> ReviewComment {
+    ReviewComment {
+        id: node["databaseId"].as_u64().unwrap_or_default(),
+        author: text(&node["author"], "login"),
+        body: text(node, "body"),
+        url: text(node, "url"),
+        created_at: text(node, "createdAt"),
+    }
+}
+
+/// Count observed checks into buckets that add up by construction, so a state
+/// that disagrees with them can only come from the provider.
+fn tally<'a>(tokens: impl Iterator<Item = &'a str>) -> CheckEvidence {
+    let mut evidence = CheckEvidence {
+        complete: true,
+        ..CheckEvidence::default()
+    };
+    for token in tokens {
+        evidence.total += 1;
+        match assessment(&[token]) {
+            "failure" => evidence.failed += 1,
+            "success" => evidence.passed += 1,
+            "pending" => {
+                evidence.running += 1;
+                if matches!(token, "queued" | "requested" | "waiting") {
+                    evidence.queued += 1;
+                } else {
+                    evidence.in_progress += 1;
+                }
+            }
+            _ => evidence.unknown += 1,
+        }
+    }
+    evidence.state = if evidence.total == 0 {
+        "none"
+    } else if evidence.failed > 0 {
+        "failure"
+    } else if evidence.running > 0 {
+        "pending"
+    } else if evidence.unknown > 0 {
+        "unknown"
+    } else {
+        "success"
+    }
+    .to_string();
+    evidence
+}
+
+fn assessment_record(assessment: &readiness::Assessment) -> Value {
+    json!({
+        "number": assessment.number,
+        "title": assessment.title,
+        "url": assessment.url,
+        "updated_at": assessment.updated_at,
+        "draft": assessment.draft,
+        "head": assessment.head.as_ref().map(CommitSha::as_str),
+        "ready": assessment.ready,
+        "blockers": assessment.reports(),
+        "checks": assessment.checks,
+        "review": assessment.review,
+        "review_current": assessment.review_current,
+        "unresolved_threads": assessment.unresolved,
+        "threads_complete": assessment.threads_complete,
+        "comments_complete": assessment.comments_complete,
+    })
+}
+
+fn readiness_citation(record: &Value, observed_at: &str) -> Value {
+    let ready = record["ready"] == true;
+    let complete = record["checks"]["complete"] == true
+        && record["threads_complete"] == true
+        && record["comments_complete"] == true;
+    let state = text(&record["checks"], "state");
+    let outcome = if ready {
+        "success"
+    } else if state == "failure" {
+        "failure"
+    } else if state == "pending" {
+        "pending"
+    } else if !complete {
+        "incomplete"
+    } else {
+        "observed"
+    };
+    let blockers: Vec<String> = take_array(record, "blockers")
+        .iter()
+        .map(|blocker| text(blocker, "detail"))
+        .collect();
+    json!({
+        "kind": "github_issue",
+        "title": format!("#{} {}", record["number"], text(record, "title")).trim().to_string(),
+        "url": text(record, "url"),
+        "revision": record["head"],
+        "observed_at": observed_at,
+        "complete": complete,
+        "outcome": outcome,
+        "note": if blockers.is_empty() {
+            READINESS_ASSESSMENT.to_string()
+        } else {
+            truncate(&blockers.join("; "), ISSUE_BODY_CHARS)
+        },
+    })
 }
 
 #[cfg(test)]
@@ -991,6 +1794,7 @@ mod tests {
                     base: None,
                     body: None,
                     number: None,
+                    job_id: None,
                 },
             )
             .await
@@ -1294,6 +2098,7 @@ mod tests {
                     base: None,
                     body: None,
                     number: None,
+                    job_id: None,
                 },
             )
             .await
@@ -1421,6 +2226,7 @@ mod tests {
                     base: None,
                     body: Some("details".into()),
                     number: None,
+                    job_id: None,
                 },
             )
             .await
@@ -1462,6 +2268,7 @@ mod tests {
                     base: None,
                     body: Some("ship it".into()),
                     number: Some(7),
+                    job_id: None,
                 },
             )
             .await
@@ -1489,6 +2296,7 @@ mod tests {
             base: None,
             body: body.map(str::to_string),
             number,
+            job_id: None,
         }
     }
 
@@ -1561,6 +2369,419 @@ mod tests {
                 .contains("read-only")
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    }
+
+    async fn mock_graphql(server: &MockServer, response: Value) {
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("Authorization", "Bearer test-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(server)
+            .await;
+    }
+
+    fn summary(score: u8, sha: &str) -> String {
+        format!("**Confidence Score:** {score}/5\n_Last reviewed commit: {sha}_")
+    }
+
+    fn review_payload(head: &str, resolved: bool, body: &str, more_threads: bool) -> Value {
+        json!({"data": {"repository": {"pullRequest": {
+            "number": 7,
+            "isDraft": false,
+            "headRefOid": head,
+            "reviewThreads": {
+                "pageInfo": {"hasNextPage": more_threads},
+                "nodes": [{"isResolved": resolved}]
+            },
+            "comments": {
+                "pageInfo": {"hasPreviousPage": false},
+                "nodes": [{
+                    "databaseId": 11,
+                    "body": body,
+                    "url": "https://github.com/owner/repository/pull/7#issuecomment-11",
+                    "createdAt": "2026-09-05T00:00:00Z",
+                    "author": {"login": "greptile-apps"}
+                }]
+            }
+        }}}})
+    }
+
+    fn readiness_args(number: Option<u64>) -> Arguments {
+        Arguments {
+            source_id: Uuid::new_v4(),
+            reference: None,
+            path: None,
+            page: None,
+            offset: None,
+            limit: None,
+            state: None,
+            title: None,
+            head: None,
+            base: None,
+            body: None,
+            number,
+            job_id: None,
+        }
+    }
+
+    async fn mock_pull(server: &MockServer, head: &str) {
+        mock(
+            server,
+            "pulls/7",
+            json!({"number": 7, "draft": false, "title": "Ship the billing export",
+                   "html_url": "https://github.com/owner/repository/pull/7",
+                   "updated_at": "2026-09-05T00:00:00Z", "head": {"sha": head}}),
+        )
+        .await;
+    }
+
+    async fn mock_green_ci(server: &MockServer) {
+        mock(
+            server,
+            "actions/runs",
+            json!({"workflow_runs": [{"workflow_id": 1, "head_sha": COMMIT, "status": "completed", "conclusion": "success"}], "total_count": 1}),
+        )
+        .await;
+        mock(
+            server,
+            &format!("commits/{COMMIT}/check-runs"),
+            json!({"check_runs": [{"head_sha": COMMIT, "status": "completed", "conclusion": "success"}]}),
+        )
+        .await;
+        mock(server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
+    }
+
+    #[tokio::test]
+    async fn coherent_green_evidence_is_ready_and_cites_the_head_commit() {
+        let server = MockServer::start().await;
+        mock_pull(&server, COMMIT).await;
+        mock_graphql(
+            &server,
+            review_payload(COMMIT, true, &summary(5, COMMIT), false),
+        )
+        .await;
+        mock_green_ci(&server).await;
+        let result = github(&server)
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap();
+        let pull = &result["pull_requests"][0];
+        assert_eq!(pull["ready"], true);
+        assert_eq!(pull["blockers"].as_array().unwrap().len(), 0);
+        assert_eq!(pull["head"], COMMIT);
+        assert_eq!(pull["checks"]["state"], "success");
+        assert_eq!(pull["checks"]["counts"]["total"], 2);
+        assert_eq!(pull["review"]["confidence"]["score"], 5);
+        assert_eq!(pull["review_current"], true);
+        assert_eq!(result["ready"], 1);
+        assert_eq!(result["assessed"], 1);
+        assert_eq!(result["next_page"], Value::Null);
+        assert!(json_chars(&result) <= FILE_PAGE_CHARS as usize);
+        let citation = crate::agent::citations::from_tool_at(
+            "assess_pull_requests",
+            &result.to_string(),
+            "2026-09-05T00:00:00+00:00",
+        )
+        .remove(0);
+        assert!(citation.passing());
+        assert_eq!(citation.revision.as_deref(), Some(COMMIT));
+        assert_eq!(citation.url, "https://github.com/owner/repository/pull/7");
+    }
+
+    #[tokio::test]
+    async fn a_head_commit_the_observations_disagree_on_is_never_ready() {
+        let server = MockServer::start().await;
+        mock_pull(&server, COMMIT).await;
+        mock_graphql(
+            &server,
+            review_payload(BLOB, true, &summary(5, BLOB), false),
+        )
+        .await;
+        mock_green_ci(&server).await;
+        let result = github(&server)
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap();
+        let pull = &result["pull_requests"][0];
+        assert_eq!(pull["ready"], false);
+        assert_eq!(pull["head"], Value::Null);
+        assert_eq!(pull["blockers"][0]["code"], "head_commit_unverified");
+        assert_eq!(result["ready"], 0);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| !request.url.path().contains("check-runs")),
+            "an unverified head commit must not be used to fetch checks"
+        );
+        let citation = crate::agent::citations::from_tool_at(
+            "assess_pull_requests",
+            &result.to_string(),
+            "2026-09-05T00:00:00+00:00",
+        )
+        .remove(0);
+        assert!(!citation.passing());
+        assert_eq!(citation.outcome, crate::agent::CitationOutcome::Incomplete);
+    }
+
+    #[tokio::test]
+    async fn threads_that_could_not_be_paginated_block_otherwise_green_evidence() {
+        let server = MockServer::start().await;
+        mock_pull(&server, COMMIT).await;
+        mock_graphql(
+            &server,
+            review_payload(COMMIT, true, &summary(5, COMMIT), true),
+        )
+        .await;
+        mock_green_ci(&server).await;
+        let result = github(&server)
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap();
+        let pull = &result["pull_requests"][0];
+        assert_eq!(pull["ready"], false);
+        assert_eq!(pull["threads_complete"], false);
+        assert_eq!(pull["checks"]["state"], "success");
+        assert_eq!(pull["blockers"][0]["code"], "threads_incomplete");
+        assert_eq!(
+            pull["blockers"][0]["detail"],
+            "Review threads could not be fully checked"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_query_failures_and_mismatched_pull_requests_fail_closed() {
+        let server = MockServer::start().await;
+        mock_pull(&server, COMMIT).await;
+        mock_graphql(
+            &server,
+            json!({"data": Value::Null, "errors": [{"message": "test-secret"}]}),
+        )
+        .await;
+        let error = github(&server)
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap_err();
+        assert!(error.contains("rejected the review query"));
+        assert!(!error.contains("test-secret"));
+        server.reset().await;
+        mock_pull(&server, COMMIT).await;
+        let mut payload = review_payload(COMMIT, true, &summary(5, COMMIT), false);
+        payload["data"]["repository"]["pullRequest"]["number"] = json!(8);
+        mock_graphql(&server, payload).await;
+        assert!(
+            github(&server)
+                .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                .await
+                .unwrap_err()
+                .contains("different or missing pull request")
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_requests_without_a_number_or_draft_state_fail_closed() {
+        let server = MockServer::start().await;
+        mock(
+            &server,
+            "pulls/7",
+            json!({"number": 7, "head": {"sha": COMMIT}}),
+        )
+        .await;
+        assert!(
+            github(&server)
+                .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                .await
+                .unwrap_err()
+                .contains("draft state")
+        );
+        server.reset().await;
+        mock(&server, "pulls/7", json!({"draft": false})).await;
+        assert!(
+            github(&server)
+                .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                .await
+                .unwrap_err()
+                .contains("without a number")
+        );
+        assert!(
+            github(&server)
+                .observe(Operation::PullRequests, &readiness_args(Some(0)))
+                .await
+                .unwrap_err()
+                .contains("positive")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listed_page_requests_the_most_recently_updated_pull_requests() {
+        let server = MockServer::start().await;
+        Mock::given(path("/repos/owner/repository/pulls"))
+            .and(query_param("state", "open"))
+            .and(query_param("sort", "updated"))
+            .and(query_param("direction", "desc"))
+            .and(query_param("per_page", "10"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "number": 7, "draft": true, "title": "Ship the billing export",
+                "html_url": "https://github.com/owner/repository/pull/7",
+                "updated_at": "2026-09-05T00:00:00Z", "head": {"sha": COMMIT}
+            }])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mock_graphql(
+            &server,
+            review_payload(COMMIT, true, &summary(5, COMMIT), false),
+        )
+        .await;
+        mock_green_ci(&server).await;
+        let result = github(&server)
+            .observe(Operation::PullRequests, &readiness_args(None))
+            .await
+            .unwrap();
+        assert_eq!(result["assessed"], 1);
+        assert_eq!(result["next_page"], Value::Null);
+        assert_eq!(result["complete"], true);
+        assert_eq!(result["pull_requests"][0]["ready"], false);
+        assert_eq!(result["pull_requests"][0]["blockers"][0]["code"], "draft");
+        assert_eq!(
+            result["repository"], "https://github.com/owner/repository",
+            "the citation-bearing shape keeps the repository the other operations return"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listed_page_rejects_an_unknown_state() {
+        let server = MockServer::start().await;
+        let mut arguments = readiness_args(None);
+        arguments.state = Some("merged".into());
+        assert!(
+            github(&server)
+                .observe(Operation::PullRequests, &arguments)
+                .await
+                .unwrap_err()
+                .contains("open, closed or all")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn tallied_counts_always_add_up_and_split_running_checks() {
+        let evidence = tally(
+            [
+                "success",
+                "failure",
+                "queued",
+                "in_progress",
+                "neutral",
+                "success",
+            ]
+            .into_iter(),
+        );
+        assert_eq!(evidence.total, 6);
+        assert_eq!(evidence.passed, 2);
+        assert_eq!(evidence.failed, 1);
+        assert_eq!(evidence.running, 2);
+        assert_eq!(evidence.queued, 1);
+        assert_eq!(evidence.in_progress, 1);
+        assert_eq!(evidence.unknown, 1);
+        let summary = evidence.normalize();
+        assert!(summary.complete, "a tally must survive its own normalizer");
+        assert_eq!(summary.state, readiness::CheckState::Failure);
+        let absent = tally(std::iter::empty()).normalize();
+        assert_eq!(absent.state, readiness::CheckState::None);
+        assert_eq!(absent.counts.total, 0);
+        let green = tally(["success"].into_iter()).normalize();
+        assert_eq!(green.state, readiness::CheckState::Success);
+        let skipped = tally(["success", "skipped"].into_iter()).normalize();
+        assert_eq!(
+            skipped.state,
+            readiness::CheckState::Unknown,
+            "results outside the known set are not green"
+        );
+    }
+
+    #[test]
+    fn ci_tokens_come_from_the_record_that_carries_them() {
+        assert_eq!(
+            ci_token(&json!({"status": "completed", "conclusion": "failure"})),
+            "failure"
+        );
+        assert_eq!(ci_token(&json!({"status": "queued"})), "queued");
+        assert_eq!(ci_token(&json!({"status": "in_progress"})), "in_progress");
+        assert_eq!(
+            ci_token(&json!({"context": "lint", "state": "pending"})),
+            "pending"
+        );
+        assert_eq!(ci_token(&json!({"context": "lint"})), "unknown");
+        assert_eq!(ci_priority(&json!({"status": "queued"})), 1);
+        assert_eq!(
+            ci_priority(&json!({"status": "completed", "conclusion": "failure"})),
+            0
+        );
+    }
+
+    #[test]
+    fn short_pages_end_pagination_and_full_pages_continue() {
+        assert_eq!(next_page_of(9, 1, PULL_PAGE_SIZE).unwrap(), None);
+        assert_eq!(
+            next_page_of(PULL_PAGE_SIZE, 1, PULL_PAGE_SIZE).unwrap(),
+            Some(2)
+        );
+        assert!(next_page_of(PULL_PAGE_SIZE, u32::MAX, PULL_PAGE_SIZE).is_err());
+        assert_eq!(next_page(PAGE_SIZE - 1, 1).unwrap(), None);
+        assert_eq!(next_page(PAGE_SIZE, 1).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn a_long_page_is_trimmed_with_its_citations_and_keeps_blocked_pull_requests() {
+        let mut pulls: Vec<Value> = (0..40)
+            .map(|number| {
+                json!({
+                    "number": number,
+                    "ready": true,
+                    "title": "Ready pull request with a title long enough to cost context ".repeat(4),
+                    "url": format!("https://github.com/owner/repository/pull/{number}"),
+                    "head": COMMIT,
+                    "checks": {"state": "success", "complete": true},
+                    "threads_complete": true,
+                    "comments_complete": true,
+                    "blockers": []
+                })
+            })
+            .collect();
+        pulls.push(json!({
+            "number": 99,
+            "ready": false,
+            "title": "Blocked",
+            "url": "https://github.com/owner/repository/pull/99",
+            "head": BLOB,
+            "checks": {"state": "failure", "complete": true},
+            "threads_complete": true,
+            "comments_complete": true,
+            "blockers": [{"code": "checks_failed", "detail": "1 of 2 checks failed"}]
+        }));
+        let result = bound_readiness(
+            json!({"assessed": pulls.len(), "ready": 40, "assessment": READINESS_ASSESSMENT}),
+            &pulls,
+            "2026-09-05T00:00:00+00:00",
+        );
+        let listed = result["pull_requests"].as_array().unwrap();
+        assert!(
+            listed.iter().any(|pull| pull["number"] == 99),
+            "a trimmed page must still carry the pull request that is not ready"
+        );
+        assert!(listed.len() < 41);
+        assert_eq!(result["pull_requests_omitted"], 41 - listed.len());
+        assert_eq!(result["citations"].as_array().unwrap().len(), listed.len());
+        assert_eq!(
+            result["ready"], 40,
+            "trimming the page must not change how many were assessed as ready"
+        );
+        assert_eq!(result["assessed"], 41);
+        assert!(json_chars(&result) <= FILE_PAGE_CHARS as usize);
     }
 
     #[tokio::test]
@@ -1669,5 +2890,309 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+    const JOB_ID: u64 = 4242;
+
+    const RUN_ID: u64 = 99;
+
+    fn check_args(job_id: Option<u64>, number: Option<u64>, limit: Option<u64>) -> Arguments {
+        Arguments {
+            source_id: Uuid::new_v4(),
+            reference: None,
+            path: None,
+            page: None,
+            offset: None,
+            limit,
+            state: None,
+            title: None,
+            head: None,
+            base: None,
+            body: None,
+            number,
+            job_id,
+        }
+    }
+
+    fn job(head_sha: &str) -> Value {
+        json!({
+            "id": JOB_ID,
+            "run_id": RUN_ID,
+            "name": "build",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": head_sha,
+            "started_at": "2026-09-05T00:00:00Z",
+            "completed_at": "2026-09-05T00:01:00Z",
+            "html_url": format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}")
+        })
+    }
+
+    async fn mock_pull_for_job(server: &MockServer, number: u64, head_sha: &str) {
+        mock(
+            server,
+            &format!("pulls/{number}"),
+            json!({"number": number, "title": "Fix", "state": "open", "draft": false,
+                   "html_url": format!("https://github.com/owner/repository/pull/{number}"),
+                   "head": {"sha": head_sha, "ref": "feature"}}),
+        )
+        .await;
+    }
+
+    async fn mock_log(server: &MockServer, body: String) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/repos/owner/repository/actions/jobs/{JOB_ID}/logs"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    fn noisy_log(lines: usize, failure_at: usize) -> String {
+        (0..lines)
+            .map(|index| {
+                let body = if index == failure_at {
+                    "##[error]Process completed with exit code 1.".to_string()
+                } else {
+                    format!("Compiling crate number {index}")
+                };
+                format!("2026-09-05T00:00:0{}.1234567Z {body}", index % 10)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_job_from_another_pull_request_is_refused_before_its_log_is_fetched() {
+        let server = MockServer::start().await;
+        mock_pull_for_job(&server, 7, COMMIT).await;
+        mock(&server, &format!("actions/jobs/{JOB_ID}"), job(BLOB)).await;
+        mock_log(&server, "secret log".into()).await;
+        let error = github(&server)
+            .observe(
+                Operation::CheckLogs,
+                &check_args(Some(JOB_ID), Some(7), None),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("does not belong"),
+            "a job on a different commit must be refused: {error}"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| !request.url.path().ends_with("/logs")),
+            "the log must not be fetched before the job is bound to the pull request"
+        );
+    }
+
+    #[tokio::test]
+    async fn job_identity_must_match_the_repository_and_the_requested_job() {
+        let server = MockServer::start().await;
+        let foreign_repository = json!({
+            "id": JOB_ID, "run_id": RUN_ID, "head_sha": COMMIT, "status": "completed",
+            "conclusion": "failure", "name": "build",
+            "html_url": format!("https://github.com/attacker/private/actions/runs/{RUN_ID}/job/{JOB_ID}")
+        });
+        let renumbered = json!({
+            "id": JOB_ID + 1, "run_id": RUN_ID, "head_sha": COMMIT, "status": "completed",
+            "conclusion": "failure", "name": "build",
+            "html_url": format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}")
+        });
+        for metadata in [foreign_repository, renumbered, job(BLOB)] {
+            assert!(
+                github(&server)
+                    .verify_job(&metadata, JOB_ID, COMMIT)
+                    .unwrap_err()
+                    .contains("does not belong")
+            );
+        }
+        assert_eq!(
+            github(&server).verify_job(&job(COMMIT), JOB_ID, COMMIT),
+            Ok(RUN_ID)
+        );
+        assert!(
+            github(&server)
+                .verify_job(&json!({"id": JOB_ID, "head_sha": COMMIT}), JOB_ID, COMMIT)
+                .unwrap_err()
+                .contains("workflow run identity")
+        );
+        assert!(!is_job_url(
+            &format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}?x=1"),
+            "owner",
+            "repository",
+            RUN_ID,
+            JOB_ID
+        ));
+        assert!(!is_job_url(
+            &format!(
+                "https://github.com.evil.test/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}"
+            ),
+            "owner",
+            "repository",
+            RUN_ID,
+            JOB_ID
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_log_is_capped_and_reported_rather_than_silently_cut() {
+        let server = MockServer::start().await;
+        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+        mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
+        mock_log(&server, noisy_log(400, 10)).await;
+        let mut github = github(&server);
+        github.log_bytes = 1_000;
+        let result = github
+            .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
+            .await
+            .unwrap();
+        let log = &result["log"];
+        assert_eq!(log["download_capped"], true);
+        assert_eq!(log["downloaded_bytes"], 1_000);
+        assert_eq!(log["complete"], false);
+        assert!(
+            log["excerpt"].as_str().is_some_and(|text| !text.is_empty()),
+            "a capped download must still return usable evidence"
+        );
+        let citation = crate::agent::citations::from_tool_at(
+            "read_check_logs",
+            &result.to_string(),
+            "2026-09-05T00:00:00+00:00",
+        )
+        .remove(0);
+        assert!(
+            !citation.complete && !citation.passing(),
+            "a capped log is incomplete evidence and must never read as a pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_excerpt_keeps_the_failure_region_and_the_end_of_a_long_log() {
+        let server = MockServer::start().await;
+        mock_pull_for_job(&server, 7, COMMIT).await;
+        mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
+        mock_log(&server, noisy_log(4_000, 900)).await;
+        let result = github(&server)
+            .observe(
+                Operation::CheckLogs,
+                &check_args(Some(JOB_ID), Some(7), None),
+            )
+            .await
+            .unwrap();
+        let log = &result["log"];
+        let excerpt = log["excerpt"].as_str().unwrap();
+        assert_eq!(log["total_lines"], 4_000);
+        assert_eq!(log["first_error_line"], 901);
+        assert_eq!(log["complete"], false);
+        assert!(
+            excerpt.contains("##[error]Process completed with exit code 1."),
+            "the failure line must survive trimming"
+        );
+        assert!(
+            excerpt.contains("Compiling crate number 899")
+                && excerpt.contains("Compiling crate number 901"),
+            "the lines around the failure must survive trimming"
+        );
+        assert!(
+            excerpt.contains("Compiling crate number 3999"),
+            "the end of the log must survive trimming"
+        );
+        assert!(
+            excerpt.contains("lines omitted"),
+            "dropped regions must be marked, not silently removed"
+        );
+        assert!(
+            excerpt.chars().count() <= LOG_EXCERPT_CHARS as usize,
+            "the excerpt must respect its character budget"
+        );
+        assert!(
+            !excerpt.contains("2026-09-05T00:00:0"),
+            "per-line timestamps are noise the budget should not pay for"
+        );
+        assert_eq!(result["sha"], COMMIT);
+        assert_eq!(result["ref"], "feature");
+        assert_eq!(result["pull_request"]["number"], 7);
+        assert_eq!(result["job"]["conclusion"], "failure");
+        assert!(json_chars(&result) <= MAX_TOOL_MESSAGE_CHARS);
+    }
+
+    #[tokio::test]
+    async fn a_noisy_log_is_trimmed_to_what_it_printed_and_survives_the_tool_result() {
+        let server = MockServer::start().await;
+        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+        mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
+        let mut lines: Vec<String> = (0..300)
+            .map(|index| {
+                format!(
+                    "2026-09-05T00:00:00.1234567Z \u{1b}[32mok\u{1b}[0m step {index}\rretry {index}\rdone {index}"
+                )
+            })
+            .collect();
+        lines.push(format!(
+            "2026-09-05T00:00:00.1234567Z \u{1b}[31m##[error]assertion failed\u{1b}[0m {}",
+            "detail ".repeat(400)
+        ));
+        mock_log(&server, lines.join("\r\n")).await;
+        let result = github(&server)
+            .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
+            .await
+            .unwrap();
+        let excerpt = result["log"]["excerpt"].as_str().unwrap();
+        assert!(
+            !excerpt.contains('\r'),
+            "carriage-return redraws must collapse to the state that survived them"
+        );
+        assert!(
+            excerpt.contains("done 299") && !excerpt.contains("retry 299"),
+            "only the settled state of a redrawn line is worth the budget"
+        );
+        assert!(
+            excerpt.contains("##[error]assertion failed"),
+            "terminal escapes must not hide the failure region"
+        );
+        assert!(
+            excerpt
+                .lines()
+                .all(|line| line.chars().count() <= LOG_LINE_CHARS + 1),
+            "no single line may crowd out the rest of the excerpt"
+        );
+        assert!(excerpt.chars().count() <= LOG_EXCERPT_CHARS as usize);
+        let message = ToolResult::success(result.to_string()).to_message();
+        assert_eq!(
+            message,
+            result.to_string(),
+            "the excerpt must fit the tool message budget instead of being cut at the boundary"
+        );
+    }
+
+    #[test]
+    fn log_lines_collapse_redraws_strip_stamps_and_bound_width() {
+        assert_eq!(
+            log_lines("2026-09-05T00:00:00.1234567Z hello\r\n\r\n"),
+            vec!["hello".to_string()]
+        );
+        assert_eq!(
+            log_lines("1%\r50%\r100% done"),
+            vec!["100% done".to_string()]
+        );
+        assert_eq!(log_lines("plain\r"), vec!["plain".to_string()]);
+        assert_eq!(
+            strip_timestamp("not a stamp at all here"),
+            "not a stamp at all here"
+        );
+        let wide = log_lines(&"x".repeat(LOG_LINE_CHARS * 3));
+        assert_eq!(wide[0].chars().count(), LOG_LINE_CHARS + 1);
+        assert!(log_lines("").is_empty());
+        assert_eq!(find_error(&log_lines("a\nb")), None);
+        assert_eq!(
+            find_error(&log_lines("Command failed\nlater\n##[error]real")),
+            Some(2),
+            "an annotated error outranks an earlier generic marker"
+        );
     }
 }

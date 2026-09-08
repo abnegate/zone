@@ -1,5 +1,6 @@
 //! Error types for the tool runner.
 
+use crate::executor::ConfinementError;
 use crate::protocol::ErrorCode;
 use std::io;
 use thiserror::Error;
@@ -54,6 +55,10 @@ pub enum ExecutorError {
     #[error("Failed to set up process group: {0}")]
     ProcessGroupFailed(String),
 
+    /// Confinement was requested but could not be established
+    #[error("Confinement unavailable: {0}")]
+    ConfinementUnavailable(#[from] ConfinementError),
+
     /// I/O error during execution
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
@@ -73,6 +78,7 @@ impl ExecutorError {
             ExecutorError::OutputLimitExceeded { .. } => ErrorCode::OutputLimitExceeded,
             ExecutorError::InvalidWorkspace(_) => ErrorCode::InvalidWorkspace,
             ExecutorError::ProcessGroupFailed(_) => ErrorCode::InternalError,
+            ExecutorError::ConfinementUnavailable(_) => ErrorCode::ConfinementUnavailable,
             ExecutorError::Io(_) => ErrorCode::InternalError,
             ExecutorError::ChannelClosed => ErrorCode::InternalError,
         }
