@@ -655,11 +655,15 @@ test.describe('Sources Page', () => {
 
   test.describe('Loading State', () => {
     test('shows skeleton cards while loading', async ({ page }) => {
+      let finishLoading: () => void = () => {};
+      const sourcesCanLoad = new Promise<void>((resolve) => {
+        finishLoading = resolve;
+      });
       await page.unroute(sourcesRoutePattern);
       await routeApi(page, sourcesRoutePattern, async (route) => {
         if (isSourcesListRequest(route.request().url())) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          route.fulfill({
+          await sourcesCanLoad;
+          await route.fulfill({
             status: 200,
             contentType: 'application/json',
             body: JSON.stringify({ sources: mockSources }),
@@ -673,6 +677,8 @@ test.describe('Sources Page', () => {
       await page.click('a[href="/sources"]');
 
       await expect(page.locator('.skeleton-card').first()).toBeVisible();
+      finishLoading();
+      await expect(page.locator('.source-card')).toHaveCount(3);
     });
   });
 });

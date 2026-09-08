@@ -23,13 +23,13 @@ export default function PermissionGate({
 
   // Check single permission
   if (permission) {
-    return hasPermission(permission) ? <>{children}</> : <>{fallback}</>;
+    return hasPermission(permission) ? children : fallback;
   }
 
   // Check multiple permissions
   if (permissions && permissions.length > 0) {
     const hasAccess = requireAll ? hasAllPermissions(permissions) : hasAnyPermission(permissions);
-    return hasAccess ? <>{children}</> : <>{fallback}</>;
+    return hasAccess ? children : fallback;
   }
 
   // No permissions specified, render children
