@@ -51,6 +51,8 @@ pub enum LlmError {
     Json(#[from] serde_json::Error),
     #[error("Stream error: {0}")]
     Stream(String),
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl LlmError {
@@ -218,9 +220,7 @@ impl LlmClient {
                 IpAddr::V4(v4) => {
                     v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
                 }
-                IpAddr::V6(v6) => {
-                    v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local()
-                }
+                IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local(),
             };
             if blocked {
                 return Err(LlmError::InvalidConfig(
@@ -718,5 +718,67 @@ mod tests {
             })
             .unwrap();
         assert!(compact.get("reasoning_effort").is_none());
+    }
+
+    fn client_for(base_url: &str) -> LlmClient {
+        LlmClient::new(LlmConfig {
+            base_url: base_url.to_string(),
+            ..LlmConfig::default()
+        })
+    }
+
+    #[test]
+    fn a_public_https_host_is_accepted() {
+        assert!(
+            client_for("https://api.openai.com/v1")
+                .validate_outbound_url("https://api.openai.com/v1/chat/completions")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_non_http_scheme_is_refused() {
+        let error = client_for("file:///etc/passwd")
+            .validate_outbound_url("file:///etc/passwd")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("http or https")),
+            "the refusal has to name the scheme rule: {error}"
+        );
+    }
+
+    #[test]
+    fn credentials_in_the_url_are_refused() {
+        let error = client_for("https://user:pass@api.openai.com/v1")
+            .validate_outbound_url("https://user:pass@api.openai.com/v1")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("userinfo")),
+            "the refusal has to name the userinfo rule: {error}"
+        );
+    }
+
+    #[test]
+    fn a_loopback_host_is_refused() {
+        for base_url in ["http://localhost:4000", "http://127.0.0.1:4000"] {
+            let error = client_for(base_url)
+                .validate_outbound_url(base_url)
+                .unwrap_err();
+            assert!(
+                matches!(&error, LlmError::InvalidConfig(_)),
+                "{base_url} has to be refused while the loopback rule stands: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_private_address_is_refused() {
+        let error = client_for("http://192.168.1.50:4000")
+            .validate_outbound_url("http://192.168.1.50:4000")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("IP is not allowed")),
+            "the refusal has to name the address rule: {error}"
+        );
     }
 }
