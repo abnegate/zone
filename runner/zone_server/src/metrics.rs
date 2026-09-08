@@ -58,6 +58,15 @@ const AUTH_LOGIN: &str = "zone_auth_login_total";
 const RESYNC_TRIGGERED: &str = "zone_source_resync_triggered_total";
 const PROCESS_RSS: &str = "zone_process_resident_memory_bytes";
 
+const AGENT_RUNS: &str = "zone_agent_runs";
+const AGENT_SUCCESS_RATE: &str = "zone_agent_success_rate";
+const AGENT_RECENT_SUCCESS_RATE: &str = "zone_agent_recent_success_rate";
+const AGENT_SUCCESS_RATE_CHANGE: &str = "zone_agent_success_rate_change";
+const AGENT_FAILURES: &str = "zone_agent_failures";
+const AGENT_COMPLETION_SECONDS: &str = "zone_agent_completion_seconds";
+const AGENT_REGRESSIONS: &str = "zone_agent_regression_checks_total";
+const REPORT_DELIVERIES: &str = "zone_report_deliveries_total";
+
 const HTTP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
 ];
@@ -115,6 +124,32 @@ fn handle() -> PrometheusHandle {
             describe_counter!(AUTH_FAILURES, "HTTP authentication failures");
             describe_counter!(AUTH_LOGIN, "Password login attempts");
             describe_counter!(RESYNC_TRIGGERED, "Source resync jobs queued");
+            describe_gauge!(AGENT_RUNS, "Agent runs that finished inside the window");
+            describe_gauge!(
+                AGENT_SUCCESS_RATE,
+                "Share of window runs that succeeded, 0 to 1"
+            );
+            describe_gauge!(
+                AGENT_RECENT_SUCCESS_RATE,
+                "Success rate with recent runs weighted above old ones, 0 to 1"
+            );
+            describe_gauge!(
+                AGENT_SUCCESS_RATE_CHANGE,
+                "Success rate of the window's later half minus its earlier half"
+            );
+            describe_gauge!(AGENT_FAILURES, "Window failures by error category");
+            describe_gauge!(
+                AGENT_COMPLETION_SECONDS,
+                "Seconds a successful run takes to finish, by quantile"
+            );
+            describe_counter!(
+                AGENT_REGRESSIONS,
+                "Regression checks by checker and verdict"
+            );
+            describe_counter!(
+                REPORT_DELIVERIES,
+                "Scheduled report deliveries by channel and outcome"
+            );
             describe_gauge!(
                 PROCESS_RSS,
                 "Manager process resident memory in bytes (from /proc/self/statm)"
@@ -197,6 +232,87 @@ fn record_process_rss() {
     if let Some(bytes) = process_rss_bytes() {
         gauge!(PROCESS_RSS).set(bytes as f64);
     }
+}
+
+/// How often one failure kind came up in the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailureCount<'a> {
+    pub category: &'a str,
+    pub count: usize,
+}
+
+/// One workspace's agent numbers over one window.
+///
+/// Every field is already reduced to a scalar. Prometheus stores the history
+/// itself, so publishing a series into it would only duplicate what a scrape
+/// already builds.
+#[derive(Debug, Clone, Copy)]
+pub struct AgentSnapshot<'a> {
+    pub workspace: &'a str,
+    pub period: &'a str,
+    pub runs: usize,
+    pub success_rate: f64,
+    pub recent_success_rate: f64,
+    pub success_rate_change: f64,
+    pub median_completion_seconds: f64,
+    pub ninetieth_completion_seconds: f64,
+    pub failures: &'a [FailureCount<'a>],
+}
+
+/// Publish one workspace's agent gauges.
+///
+/// Every category the caller wants tracked has to appear in
+/// [`AgentSnapshot::failures`], including the ones at zero. A gauge that is not
+/// set holds its last value, so a failure mode that has stopped happening would
+/// otherwise read as still happening forever.
+pub fn record_agent(snapshot: AgentSnapshot<'_>) {
+    init();
+    let workspace = snapshot.workspace.to_string();
+    let period = snapshot.period.to_string();
+
+    gauge!(AGENT_RUNS, "workspace" => workspace.clone(), "period" => period.clone())
+        .set(snapshot.runs as f64);
+    gauge!(AGENT_SUCCESS_RATE, "workspace" => workspace.clone(), "period" => period.clone())
+        .set(snapshot.success_rate);
+    gauge!(AGENT_RECENT_SUCCESS_RATE, "workspace" => workspace.clone(), "period" => period.clone())
+        .set(snapshot.recent_success_rate);
+    gauge!(AGENT_SUCCESS_RATE_CHANGE, "workspace" => workspace.clone(), "period" => period.clone())
+        .set(snapshot.success_rate_change);
+
+    for (quantile, seconds) in [
+        ("0.5", snapshot.median_completion_seconds),
+        ("0.9", snapshot.ninetieth_completion_seconds),
+    ] {
+        gauge!(
+            AGENT_COMPLETION_SECONDS,
+            "workspace" => workspace.clone(),
+            "period" => period.clone(),
+            "quantile" => quantile
+        )
+        .set(seconds);
+    }
+
+    for failure in snapshot.failures {
+        gauge!(
+            AGENT_FAILURES,
+            "workspace" => workspace.clone(),
+            "period" => period.clone(),
+            "category" => failure.category.to_string()
+        )
+        .set(failure.count as f64);
+    }
+}
+
+/// Count one regression check, whatever it concluded.
+pub fn record_regression(checker: &'static str, verdict: &'static str) {
+    init();
+    counter!(AGENT_REGRESSIONS, "checker" => checker, "verdict" => verdict).increment(1);
+}
+
+/// Count one channel's attempt at one scheduled report.
+pub fn record_report_delivery(channel: &str, status: &'static str) {
+    init();
+    counter!(REPORT_DELIVERIES, "channel" => channel.to_string(), "status" => status).increment(1);
 }
 
 fn process_rss_bytes() -> Option<u64> {

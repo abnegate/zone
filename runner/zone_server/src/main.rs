@@ -187,7 +187,13 @@ async fn main() {
     zone_server::workers::source_resync::start_resync_worker(state.clone());
     zone_server::workers::reminders::spawn(state.clone());
     zone_server::workers::promotion::spawn(state.clone());
-    tracing::info!("Started knowledge refresh, source resync and answer promotion workers");
+    zone_server::workers::learning::worker::spawn(state.clone());
+    zone_server::workers::analytics::spawn(state.clone());
+    zone_server::workers::regression::spawn(state.clone());
+    zone_server::workers::reports::spawn(state.clone());
+    tracing::info!(
+        "Started knowledge refresh, source resync, answer promotion, learning, agent analytics, regression watch and scheduled report workers"
+    );
 
     // Configure CORS based on environment
     let cors_layer = if config.cors_origins.len() == 1 && config.cors_origins[0] == "*" {

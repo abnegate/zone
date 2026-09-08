@@ -9941,6 +9941,7 @@ dependencies = [
  "zone_context",
  "zone_core",
  "zone_email",
+ "zone_notify",
  "zone_search",
  "zone_vcs",
 ]
