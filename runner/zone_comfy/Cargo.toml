@@ -24,7 +24,17 @@ urlencoding = "=2.1.3"
 # Vision captioning talks to an OpenAI-compatible endpoint
 zone_core = { path = "../zone_core" }
 
+# Screening decodes the training set. Default features only: the ONNX Runtime
+# lives behind zone_vision's `saliency` feature and none of this needs it.
+zone_vision = { path = "../zone_vision" }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "=3.27.0"
 wiremock = "=0.6.5"
+
+# Screening fixtures are drawn and encoded in-test rather than checked in.
+image = { version = "=0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+] }

@@ -51,6 +51,7 @@ pub mod media;
 pub mod observe;
 pub mod quality;
 pub mod recipe;
+pub mod screening;
 pub mod train;
 
 pub use caption::{CaptionImage, CaptionRequest, Captioner, data_url};
@@ -65,3 +66,4 @@ pub use media::MediaType;
 pub use observe::{RequestObserver, observe_requests};
 pub use quality::Quality;
 pub use recipe::{PromptMode, Recipe, RecipeCatalog, sanitize_weight_filename};
+pub use screening::{Rejection, Verdict, screen};
