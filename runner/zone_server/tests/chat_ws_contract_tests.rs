@@ -130,6 +130,28 @@ async fn assert_error(socket: &mut Socket, expected: &str) {
     assert_eq!(frame, json!({"type": "error", "message": expected}));
 }
 
+async fn periodic_error(socket: &mut Socket, count: usize) -> Option<String> {
+    for _ in 0..count {
+        tokio::time::advance(Duration::from_secs(30)).await;
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        let frame = socket.next().await?.ok()?;
+        match frame {
+            WsMessage::Ping(data) => socket.send(WsMessage::Pong(data)).await.ok()?,
+            WsMessage::Text(text) => {
+                let frame: Value = serde_json::from_str(&text).ok()?;
+                if frame["type"] == "error" {
+                    return frame["message"].as_str().map(str::to_string);
+                }
+            }
+            WsMessage::Close(_) => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 #[tokio::test]
 async fn unauthenticated_connections_reject_bad_tokens_and_excess_fanout() {
     let pool = create_test_pool().await;
@@ -440,6 +462,95 @@ async fn closing_before_authentication_releases_the_connection_slot() {
         let mut replacement = connect(&address, chat).await;
         replacement.close(None).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn idle_authenticated_connections_are_closed() {
+    let pool = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, _, chat) = seed(&client).await;
+    let address = spawn(config, pool).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(301)).await;
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    assert!(next_json(&mut socket).await.is_none());
+}
+
+#[tokio::test]
+async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
+    let pool = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, workspace, chat) = seed(&client).await;
+    let user = validate_token(&token, &config.jwt_secret)
+        .unwrap()
+        .user_id()
+        .unwrap();
+    let address = spawn(config, pool.clone()).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+    sqlx::query(
+        "UPDATE workspace_members SET is_active = FALSE WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace)
+    .bind(user)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    tokio::time::pause();
+    for _ in 0..190 {
+        tokio::time::advance(Duration::from_secs(30)).await;
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        let frame = socket.next().await.expect("authorization ping").unwrap();
+        if let WsMessage::Ping(data) = frame {
+            socket.send(WsMessage::Pong(data)).await.unwrap();
+        }
+        tokio::task::yield_now().await;
+    }
+    // Reach just before the authorization query while time is paused. SQLx
+    // also uses Tokio deadlines, so the query itself must run in real time.
+    tokio::time::advance(Duration::from_millis(269_999)).await;
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_error(&mut socket, "Access revoked").await;
+    assert!(next_json(&mut socket).await.is_none());
+}
+
+#[tokio::test]
+async fn repeated_authorization_database_errors_close_an_unstable_connection() {
+    let pool = create_test_pool().await;
+    let config = test_config();
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, _, chat) = seed(&client).await;
+    let address = spawn(config, pool.clone()).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+    pool.close().await;
+
+    tokio::time::pause();
+    let reported = periodic_error(&mut socket, 1_005).await;
+    tokio::time::resume();
+    assert_eq!(
+        reported.as_deref(),
+        Some("Connection unstable, please reconnect")
+    );
+    assert!(next_json(&mut socket).await.is_none());
 }
 
 #[tokio::test]
