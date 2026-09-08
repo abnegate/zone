@@ -152,7 +152,6 @@ pub fn derive_key(config_key: &str) -> CryptoResult<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn random_key() -> [u8; 32] {
         let mut key = [0u8; 32];
@@ -356,23 +355,26 @@ mod tests {
 
     #[test]
     fn repeated_derivation_reuses_the_first_result() {
+        use sha2::{Digest, Sha256};
+
         let config_key = "a-different-high-entropy-key-for-the-memoisation-test";
         let first = derive_key(config_key).unwrap();
 
-        let started = std::time::Instant::now();
-        for _ in 0..20 {
-            assert_eq!(
-                derive_key(config_key).unwrap(),
-                first,
-                "a memoised derivation still returns the derived key"
-            );
-        }
+        let mut hasher = Sha256::new();
+        hasher.update(SALT);
+        hasher.update(config_key.as_bytes());
+        let salt: [u8; 32] = hasher.finalize().into();
 
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "20 repeat derivations took {:?}; Argon2id is memory-hard, so re-running it \
-             per call costs seconds each in an unoptimised build",
-            started.elapsed()
+        assert_eq!(
+            DERIVED.get(&salt).map(|derived| *derived),
+            Some(first),
+            "the derivation is kept so that Argon2id, which is memory-hard on \
+             purpose, runs once per key rather than once per caller"
+        );
+        assert_eq!(
+            derive_key(config_key).unwrap(),
+            first,
+            "a memoised derivation still returns the derived key"
         );
     }
 
