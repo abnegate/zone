@@ -7,7 +7,11 @@ use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
 
-use super::DbResult;
+use super::{
+    DbResult,
+    organization_members::{self, OrgRole},
+    workspace_members::{self, WorkspaceRole},
+};
 
 const PROVIDER_ANTHROPIC: &str = "anthropic";
 
@@ -68,19 +72,11 @@ async fn authorize_organization(
     user_id: Uuid,
     write: bool,
 ) -> AccessResult<()> {
-    // The shared lock makes membership revocation and the protected query
-    // observe a definite order inside the caller's transaction.
-    let role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM organization_members WHERE organization_id = $1 AND user_id = $2 AND is_active FOR SHARE",
-    )
-    .bind(organization_id)
-    .bind(user_id)
-    .fetch_optional(connection)
-    .await?;
+    let role = organization_members::lock_role(connection, organization_id, user_id).await?;
 
-    match role.as_deref() {
-        Some("owner" | "admin") => Ok(()),
-        Some("member") if !write => Ok(()),
+    match role {
+        Some(OrgRole::Owner | OrgRole::Admin) => Ok(()),
+        Some(OrgRole::Member) if !write => Ok(()),
         _ if write => Err(AccessError::Forbidden(
             "Only organization admins can change AI settings",
         )),
@@ -110,17 +106,11 @@ async fn authorize_workspace(
 
     authorize_organization(&mut *connection, organization_id, user_id, write).await?;
 
-    let role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND is_active FOR SHARE",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(connection)
-    .await?;
+    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
 
-    match role.as_deref() {
-        Some("owner" | "admin" | "member") => Ok(()),
-        Some("viewer") if !write => Ok(()),
+    match role {
+        Some(WorkspaceRole::Owner | WorkspaceRole::Admin | WorkspaceRole::Member) => Ok(()),
+        Some(WorkspaceRole::Viewer) if !write => Ok(()),
         Some(_) if write => Err(AccessError::Forbidden(
             "You do not have write access to this workspace",
         )),

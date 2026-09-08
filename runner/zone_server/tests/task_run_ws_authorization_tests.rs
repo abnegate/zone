@@ -240,11 +240,22 @@ async fn session_revocation_stops_an_established_task_run_stream() {
 
 #[tokio::test]
 async fn token_expiry_stops_an_established_task_run_stream() {
-    let fixture = fixture(1).await;
-    let mut socket = connect(fixture.address, fixture.run, &fixture.credentials.access).await;
+    let fixture = fixture(900).await;
+    let access = zone_server::auth::create_session_access_token(
+        fixture.credentials.user,
+        "expiry@example.com",
+        vec![],
+        vec![],
+        false,
+        fixture.credentials.session,
+        common::test_config().jwt_secret(),
+        chrono::Duration::seconds(2),
+    )
+    .unwrap();
+    let mut socket = connect(fixture.address, fixture.run, &access).await;
     expect_init(&mut socket).await;
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     add_log(&fixture.pool, fixture.run).await;
 
     assert_denied(&mut socket).await;

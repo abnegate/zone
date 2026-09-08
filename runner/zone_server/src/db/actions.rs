@@ -14,7 +14,10 @@ pub fn publish(chat_id: Uuid, message: Value) {
     let _ = UPDATES.send((chat_id, message));
 }
 
-use super::DbResult;
+use super::{
+    DbResult,
+    workspace_members::{self, WorkspaceRole},
+};
 
 fn patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -77,11 +80,10 @@ pub async fn authorize(
     user_id: Uuid,
     write: bool,
 ) -> DbResult<()> {
-    let role: Option<String> = sqlx::query_scalar("SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND is_active FOR SHARE")
-        .bind(workspace_id).bind(user_id).fetch_optional(connection).await?;
-    if !matches!(role.as_deref(), Some("owner" | "admin" | "member"))
-        && (write || role.as_deref() != Some("viewer"))
-    {
+    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
+    if !role.is_some_and(|role| {
+        role >= WorkspaceRole::Member || (!write && role == WorkspaceRole::Viewer)
+    }) {
         return Err(invalid("Workspace access denied"));
     }
     Ok(())

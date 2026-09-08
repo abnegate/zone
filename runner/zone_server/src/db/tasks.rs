@@ -5,7 +5,10 @@ use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::DbResult;
+use super::{
+    DbResult,
+    workspace_members::{self, WorkspaceRole},
+};
 
 /// Result of a tenant-scoped mutation without exposing resource existence.
 #[derive(Debug)]
@@ -158,23 +161,11 @@ async fn lock_writer(
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<bool> {
-    let membership: Option<Uuid> = sqlx::query_scalar(
-        r#"
-        SELECT id
-        FROM workspace_members
-        WHERE workspace_id = $1
-          AND user_id = $2
-          AND is_active = TRUE
-          AND role IN ('owner', 'admin', 'member')
-        FOR SHARE
-        "#,
+    Ok(
+        workspace_members::lock_role(connection, workspace_id, user_id)
+            .await?
+            .is_some_and(|role| role >= WorkspaceRole::Member),
     )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(&mut *connection)
-    .await?;
-
-    Ok(membership.is_some())
 }
 
 async fn lock_task_writer(
@@ -182,24 +173,18 @@ async fn lock_task_writer(
     task_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<Option<Uuid>> {
-    sqlx::query_scalar(
-        r#"
-        SELECT task.workspace_id
-        FROM tasks task
-        INNER JOIN workspace_members member
-          ON member.workspace_id = task.workspace_id
-        WHERE task.id = $1
-          AND member.user_id = $2
-          AND member.is_active = TRUE
-          AND member.role IN ('owner', 'admin', 'member')
-        FOR UPDATE OF task
-        FOR SHARE OF member
-        "#,
-    )
-    .bind(task_id)
-    .bind(user_id)
-    .fetch_optional(&mut *connection)
-    .await
+    let workspace_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT workspace_id FROM tasks WHERE id = $1 FOR UPDATE")
+            .bind(task_id)
+            .fetch_optional(&mut *connection)
+            .await?;
+    let Some(workspace_id) = workspace_id else {
+        return Ok(None);
+    };
+
+    Ok(lock_writer(connection, workspace_id, user_id)
+        .await?
+        .then_some(workspace_id))
 }
 
 async fn lock_projects(

@@ -3490,8 +3490,11 @@ async fn test_task_create_for_nonexistent_project() {
         )
         .await;
 
-    // Should fail with FK constraint
-    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": "Project is not available in this workspace" })
+    );
 }
 
 #[tokio::test]

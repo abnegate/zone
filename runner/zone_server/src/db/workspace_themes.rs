@@ -4,7 +4,10 @@ use chrono::NaiveDateTime;
 use sqlx::{Executor, PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
-use super::DbResult;
+use super::{
+    DbResult,
+    workspace_members::{self, WorkspaceRole},
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
@@ -34,19 +37,11 @@ async fn authorize(
     user_id: Uuid,
     write: bool,
 ) -> AccessResult<()> {
-    // Hold the membership row through the protected query so revocation and
-    // the theme mutation have a definite transaction order.
-    let role: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND is_active FOR SHARE",
-    )
-    .bind(workspace_id)
-    .bind(user_id)
-    .fetch_optional(connection)
-    .await?;
+    let role = workspace_members::lock_role(connection, workspace_id, user_id).await?;
 
-    match role.as_deref() {
-        Some("owner" | "admin" | "member") => Ok(()),
-        Some("viewer") if !write => Ok(()),
+    match role {
+        Some(WorkspaceRole::Owner | WorkspaceRole::Admin | WorkspaceRole::Member) => Ok(()),
+        Some(WorkspaceRole::Viewer) if !write => Ok(()),
         _ if write => Err(AccessError::Forbidden(
             "You do not have write access to this workspace",
         )),
