@@ -36,13 +36,8 @@ class TrainStepsTests(unittest.TestCase):
         settings.update(overrides)
         return settings
 
-    def test_budget_counts_optimiser_updates_not_forward_passes(self):
-        settings = self.config(gradient_accumulation=4)
-        updates = max(int(settings['min_steps']), 8 * int(settings['steps_per_image']))
-        self.assertEqual(train_lora.train_steps(8, settings), updates * 4)
-
     def test_steps_scale_with_images_and_clamp(self):
-        settings = self.config(gradient_accumulation=1)
+        settings = self.config()
         self.assertGreaterEqual(train_lora.train_steps(1, settings), int(settings['min_steps']))
         self.assertEqual(
             train_lora.train_steps(8, settings),

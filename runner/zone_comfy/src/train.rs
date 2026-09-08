@@ -663,8 +663,8 @@ mod tests {
     fn identity_config_trains_long_enough_for_eight_images() {
         let config: TrainConfig = packaged_config().unwrap();
         assert!(
-            config.steps(8) >= config.min_steps,
-            "eight images clear the step floor"
+            config.min_steps >= 400,
+            "identity training needs at least 400 steps, and clamping to a lower floor would pass every other assertion here"
         );
         assert_eq!(config.steps(1), config.min_steps, "a tiny set still trains");
         assert_eq!(

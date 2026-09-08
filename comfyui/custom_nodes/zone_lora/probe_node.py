@@ -6,6 +6,8 @@ import comfy.samplers
 import comfy_extras.nodes_custom_sampler
 import torch
 from comfy_api.latest import io
+from .train_config import load_config
+from .train_node import error_scale
 from comfy_extras.nodes_train import (
     TrainGuider,
     _prepare_latents_and_count,
@@ -20,9 +22,10 @@ from comfy_extras.nodes_train import (
 class LossProbe(comfy.samplers.Sampler):
     """The training loss at a fixed noise level, so two sets of weights are comparable."""
 
-    def __init__(self, percents: list[float], seed: int):
+    def __init__(self, percents: list[float], seed: int, sigma_floor: float):
         self.percents = percents
         self.seed = seed
+        self.sigma_floor = sigma_floor
         self.losses: dict[float, float] = {}
 
     def noise_for(self, percent: float, index: int, latent: torch.Tensor) -> torch.Tensor:
@@ -62,7 +65,10 @@ class LossProbe(comfy.samplers.Sampler):
                     extra_args, [index], full_size=dataset_size
                 )
                 x0_pred = model_wrap(xt, batch_sigmas, **batch_extra)
-                total += torch.nn.functional.mse_loss(x0_pred.float(), x0.float()).item()
+                scale = error_scale(batch_sigmas, x0_pred, self.sigma_floor)
+                total += torch.nn.functional.mse_loss(
+                    x0_pred.float() / scale, x0.float() / scale
+                ).item()
             self.losses[percent] = total / dataset_size
         return torch.zeros_like(latent_image)
 
@@ -97,7 +103,7 @@ class ZoneProbeLoss(io.ComfyNode):
         dtype = torch.float16 if model.model.get_dtype() == torch.float16 else torch.bfloat16
         latents, count, _ = _prepare_latents_and_count(latents, dtype, False)
         positive = _validate_and_expand_conditioning(positive, count, False)
-        probe = LossProbe(wanted, seed)
+        probe = LossProbe(wanted, seed, float(load_config().get('sigma_floor', 0.0)))
         guider = TrainGuider(model, offloading=False)
         guider.set_conds(positive)
         noise = comfy_extras.nodes_custom_sampler.Noise_RandomNoise(seed)
