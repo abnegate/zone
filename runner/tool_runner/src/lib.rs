@@ -40,12 +40,12 @@ pub mod proxy;
 // Re-export commonly used types
 pub use error::{DaemonError, ExecutorError, JobError, ProtocolError};
 pub use executor::{
-    Backend, CommandExecutor, Confinement, ConfinementError, ExecutorConfig, HOST_BACKEND,
-    Invocation, JobHandle,
+    Backend, CommandExecutor, Confinement, ConfinementError, ConfinementMode, ExecutorConfig,
+    HOST_BACKEND, Invocation, JobHandle,
 };
 pub use job::{JobRegistry, JobState};
 pub use protocol::{
     Capability, ConfinementRequest, ErrorCode, InboundMessage, LogLevel, NdjsonCodec,
-    OutboundMessage, PROTOCOL_VERSION,
+    OutboundMessage, PROTOCOL_VERSION, ProcessTreeRequest,
 };
 pub use proxy::Proxy;

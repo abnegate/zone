@@ -2,7 +2,7 @@
 //!
 //! All messages are serialized as newline-delimited JSON (NDJSON).
 
-use crate::executor::Confinement;
+use crate::executor::{Confinement, ConfinementMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,7 +11,9 @@ use std::path::PathBuf;
 ///
 /// Confinement was added without a bump: `RunStart.confinement` defaults to
 /// absent and the capability list is the negotiated extension point, so a
-/// client that predates it keeps working unchanged.
+/// client that predates it keeps working unchanged. `ConfinementRequest`
+/// grows the same way — `process_tree` defaults to absent, which is the
+/// single-command confinement that shipped first.
 pub const PROTOCOL_VERSION: &str = "1.0";
 
 /// Filesystem a confined job is allowed to see.
@@ -24,6 +26,34 @@ pub struct ConfinementRequest {
     pub read_roots: Vec<PathBuf>,
     #[serde(default)]
     pub write_roots: Vec<PathBuf>,
+    /// Absent asks for the single-command confinement: the job runs one
+    /// executable and may neither fork nor exec anything else. Present asks
+    /// for a bounded process tree, which a build tool needs and a verification
+    /// recipe does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_tree: Option<ProcessTreeRequest>,
+}
+
+impl ConfinementRequest {
+    /// How much of a process tree this request asks for.
+    pub fn mode(&self) -> ConfinementMode {
+        match self.process_tree {
+            Some(_) => ConfinementMode::ProcessTree,
+            None => ConfinementMode::SingleCommand,
+        }
+    }
+}
+
+/// The bound on a confined process tree.
+///
+/// A tree may only start executables that live under one of `execute_roots`,
+/// plus the entry command itself. Read and write roots never confer the right
+/// to execute, so a tree cannot write a binary into its workspace and then run
+/// it unless the caller named that directory here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessTreeRequest {
+    #[serde(default)]
+    pub execute_roots: Vec<PathBuf>,
 }
 
 /// Messages sent from the backend to the Runner
@@ -53,9 +83,10 @@ pub enum InboundMessage {
         #[serde(default)]
         working_dir: Option<PathBuf>,
         /// When present the job runs under OS confinement, and fails to start
-        /// if this runner cannot prove confinement works.
+        /// if this runner cannot prove confinement works. Boxed because most
+        /// jobs carry none and the request is the largest thing in the enum.
         #[serde(default)]
-        confinement: Option<ConfinementRequest>,
+        confinement: Option<Box<ConfinementRequest>>,
     },
 
     /// Send data to a running command's stdin
@@ -185,15 +216,18 @@ pub enum Capability {
     ProcessGroup,
     /// Can run jobs under OS-level confinement
     Confinement,
+    /// Can confine a whole process tree, not just a single executable
+    ConfinementProcessTree,
 }
 
 impl Capability {
-    const ALL: [Capability; 5] = [
+    const ALL: [Capability; 6] = [
         Capability::Cancel,
         Capability::Stdin,
         Capability::Logs,
         Capability::ProcessGroup,
         Capability::Confinement,
+        Capability::ConfinementProcessTree,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -203,6 +237,7 @@ impl Capability {
             Capability::Logs => "logs",
             Capability::ProcessGroup => "process_group",
             Capability::Confinement => "confinement",
+            Capability::ConfinementProcessTree => "confinement_process_tree",
         }
     }
 
@@ -225,7 +260,9 @@ impl Capability {
 
     fn is_supported(&self) -> bool {
         match self {
-            Capability::Confinement => Confinement::is_available(),
+            Capability::Confinement | Capability::ConfinementProcessTree => {
+                Confinement::is_available()
+            }
             _ => true,
         }
     }
@@ -892,17 +929,22 @@ mod tests {
         assert_eq!(Capability::Logs.as_str(), "logs");
         assert_eq!(Capability::ProcessGroup.as_str(), "process_group");
         assert_eq!(Capability::Confinement.as_str(), "confinement");
+        assert_eq!(
+            Capability::ConfinementProcessTree.as_str(),
+            "confinement_process_tree"
+        );
     }
 
     #[test]
     fn test_capability_all() {
         let all = Capability::all();
-        assert_eq!(all.len(), 5);
+        assert_eq!(all.len(), 6);
         assert!(all.contains(&"cancel".to_string()));
         assert!(all.contains(&"stdin".to_string()));
         assert!(all.contains(&"logs".to_string()));
         assert!(all.contains(&"process_group".to_string()));
         assert!(all.contains(&"confinement".to_string()));
+        assert!(all.contains(&"confinement_process_tree".to_string()));
     }
 
     #[test]
