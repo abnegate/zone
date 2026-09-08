@@ -58,7 +58,11 @@ async fn exercise_approved(
     messages: Vec<Message>,
     approval: ApprovalPolicy,
 ) -> (Vec<AgentEvent>, Vec<Value>) {
-    let provider = MockServer::start().await;
+    // LlmClient shares its HTTP pool across tests, but each Tokio test owns a
+    // separate runtime. A pooled mock can reuse a connection whose I/O driver
+    // belongs to a paused or shutting-down test runtime. Give each provider its
+    // own listener instead, while retaining keep-alives within this agent run.
+    let provider = MockServer::builder().start().await;
     let responses = Arc::new(Mutex::new(VecDeque::from(rounds)));
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -674,7 +678,7 @@ async fn prose_emitted_after_native_tool_deltas_is_still_streamed() {
 async fn reasoning_is_emitted_before_and_after_a_tool_round() {
     let mut first = vec![json!({"reasoning_content": "Need the file."})];
     first.extend(native(Some("call_0")));
-    let (events, _) = exercise(vec![
+    let (events, requests) = exercise(vec![
         first,
         vec![
             json!({"reasoning_content": "Ask for a path."}),
@@ -698,7 +702,8 @@ async fn reasoning_is_emitted_before_and_after_a_tool_round() {
             "tool",
             "Ask for a path.",
             "Please provide a path."
-        ]
+        ],
+        "events={events:?}, requests={requests:?}"
     );
 }
 
@@ -761,4 +766,23 @@ async fn failed_mutations_do_not_create_a_progress_epoch() {
             .any(|event| matches!(event, AgentEvent::ToolCallCompleted { success: false, .. }))
     );
     assert!(requests.last().unwrap()["tools"].is_null());
+}
+
+#[test]
+fn provider_connections_do_not_depend_on_another_test_runtime() {
+    let first = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (events, _) = first.block_on(exercise(vec![text("First response.")]));
+    assert_eq!(answer(&events), "First response.");
+
+    // Keep the first runtime alive but idle, as an independently scheduled test
+    // can be. Its pooled HTTP connection must not drive this test's provider.
+    let second = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (events, _) = second.block_on(exercise(vec![text("Second response.")]));
+    assert_eq!(answer(&events), "Second response.", "{events:?}");
 }
