@@ -136,12 +136,16 @@ impl GitService {
     }
 
     fn network_command(token: Option<&str>) -> Command {
+        // Task-local replacement refs and legacy grafts must not reinterpret
+        // the stored objects used by history checks, diffs, commits or pushes.
         let mut command = Command::new("git");
         command
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_GRAFT_FILE", "/dev/null")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "/usr/bin/false")
             .env("GIT_ALLOW_PROTOCOL", "https")
@@ -1010,6 +1014,93 @@ mod publication_tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    async fn forged_ancestry(legacy: bool) {
+        let fixture = tempfile::tempdir().unwrap();
+        git(fixture.path(), &["init", "--initial-branch=main"]);
+        let service = GitService::new();
+        std::fs::write(fixture.path().join("file"), "baseline").unwrap();
+        service.stage_all(fixture.path()).await.unwrap();
+        let baseline = service.commit(fixture.path(), "baseline").await.unwrap();
+        git(fixture.path(), &["checkout", "--orphan", "task"]);
+        std::fs::write(fixture.path().join("file"), "unrelated").unwrap();
+        service.stage_all(fixture.path()).await.unwrap();
+        let orphan = service.commit(fixture.path(), "orphan").await.unwrap();
+        if legacy {
+            std::fs::write(
+                fixture.path().join(".git/info/grafts"),
+                format!("{orphan} {baseline}\n"),
+            )
+            .unwrap();
+        } else {
+            git(fixture.path(), &["replace", "--graft", "HEAD", &baseline]);
+        }
+        assert!(
+            !service
+                .is_ancestor(fixture.path(), &baseline, "HEAD")
+                .await
+                .unwrap(),
+            "task metadata forged baseline ancestry"
+        );
+        assert_eq!(
+            service.revision(fixture.path(), "HEAD").await.unwrap(),
+            orphan
+        );
+        assert_eq!(
+            service
+                .changed_files(fixture.path(), &baseline)
+                .await
+                .unwrap(),
+            vec!["file"]
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_refs_do_not_supply_trusted_ancestry() {
+        forged_ancestry(false).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_grafts_do_not_supply_trusted_ancestry() {
+        forged_ancestry(true).await;
+    }
+
+    #[tokio::test]
+    async fn replacement_objects_cannot_hide_staged_changes() {
+        let fixture = tempfile::tempdir().unwrap();
+        git(fixture.path(), &["init", "--initial-branch=main"]);
+        let service = GitService::new();
+        std::fs::write(fixture.path().join("file"), "baseline").unwrap();
+        service.stage_all(fixture.path()).await.unwrap();
+        let baseline = service.commit(fixture.path(), "baseline").await.unwrap();
+        git(fixture.path(), &["checkout", "-b", "replacement"]);
+        std::fs::write(fixture.path().join("file"), "changed").unwrap();
+        service.stage_all(fixture.path()).await.unwrap();
+        let replacement = service
+            .commit(fixture.path(), "replacement tree")
+            .await
+            .unwrap();
+        git(fixture.path(), &["checkout", "main"]);
+        git(fixture.path(), &["replace", &baseline, &replacement]);
+        std::fs::write(fixture.path().join("file"), "changed").unwrap();
+        git(fixture.path(), &["--no-replace-objects", "add", "-A"]);
+        assert!(
+            service.has_changes(fixture.path()).await.unwrap(),
+            "replacement tree hid staged task changes"
+        );
+        let committed = service
+            .commit(fixture.path(), "real task changes")
+            .await
+            .unwrap();
+        assert_ne!(committed, baseline);
+        assert_eq!(
+            service
+                .changed_files(fixture.path(), &baseline)
+                .await
+                .unwrap(),
+            vec!["file"]
+        );
     }
 
     #[tokio::test]

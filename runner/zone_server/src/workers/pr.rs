@@ -1137,6 +1137,89 @@ mod publication_tests {
         );
     }
 
+    async fn forged_history(legacy: bool) {
+        let fixture = Fixture::new().await;
+        let remote = LocalRemote::new(&fixture);
+        let server = api(false).await;
+        git(
+            &remote.0,
+            &[
+                "update-ref",
+                "-d",
+                &format!("refs/heads/{}", fixture.baseline.branch),
+            ],
+        );
+        git(&fixture.path, &["checkout", "--orphan", "forged-history"]);
+        git(&fixture.path, &["add", "."]);
+        git(&fixture.path, &["commit", "-m", "unrelated history"]);
+        git(&fixture.path, &["branch", "-M", &fixture.baseline.branch]);
+        let head = git(&fixture.path, &["rev-parse", "HEAD"]);
+        if legacy {
+            std::fs::write(
+                fixture.path.join(".git/info/grafts"),
+                format!("{} {}\n", head, fixture.baseline.commit),
+            )
+            .unwrap();
+        } else {
+            git(
+                &fixture.path,
+                &["replace", "--graft", "HEAD", &fixture.baseline.commit],
+            );
+        }
+        let actual = std::process::Command::new("git")
+            .args([
+                "--no-replace-objects",
+                "merge-base",
+                "--is-ancestor",
+                &fixture.baseline.commit,
+                "HEAD",
+            ])
+            .env("GIT_GRAFT_FILE", "/dev/null")
+            .current_dir(&fixture.path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            actual.status.code(),
+            Some(1),
+            "fixture has real baseline ancestry"
+        );
+        let result = publish(&fixture, &remote, &server).await;
+        let pushed = std::process::Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{}", fixture.baseline.branch),
+            ])
+            .current_dir(&remote.0)
+            .output()
+            .unwrap();
+        fixture.cleanup().await;
+        assert!(
+            matches!(&result, PrCreationResult::Error(error) if error.contains("rewrote the checkout baseline")),
+            "{result:?}"
+        );
+        assert_eq!(
+            pushed.status.code(),
+            Some(1),
+            "forged history was published"
+        );
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "forged history reached GitHub"
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_rejects_replacement_forged_baseline() {
+        forged_history(false).await;
+    }
+
+    #[tokio::test]
+    async fn publication_rejects_legacy_grafted_baseline() {
+        forged_history(true).await;
+    }
+
     #[tokio::test]
     async fn publication_rejects_changed_identity_or_rewritten_history() {
         for change in ["task branch", "task repository", "origin", "history"] {
