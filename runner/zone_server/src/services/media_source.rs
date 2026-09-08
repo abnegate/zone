@@ -375,6 +375,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_clip_loads_from_its_own_chat_and_nowhere_else() {
+        let root = std::env::temp_dir().join(format!("zone-media-clip-{}", Uuid::new_v4()));
+        let store = ArtifactStore::new(root.clone());
+        let workspace = Uuid::new_v4();
+        let chat = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        let url = store
+            .persist(workspace, chat, owner, "webm", WEBM)
+            .await
+            .unwrap();
+        let attached = attachment("clip.webm", "video/webm", &url);
+
+        let source = resolve_source_media_from(
+            [Some(&attached)],
+            workspace,
+            chat,
+            &store,
+            Some(Kind::Video),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let Source::Video(video) = source else {
+            panic!("a webm artifact must resolve as a clip");
+        };
+        assert_eq!(video.bytes.as_ref(), WEBM);
+        assert_eq!(video.mime, "video/webm");
+
+        // Another chat's clip is off limits, exactly as another chat's photo is.
+        assert!(matches!(
+            resolve_source_media_from(
+                [Some(&attached)],
+                workspace,
+                Uuid::new_v4(),
+                &store,
+                Some(Kind::Video),
+            )
+            .await,
+            Err(Error::Unreadable)
+        ));
+        // So is anything fetched over the network.
+        let remote = attachment("clip.webm", "video/webm", "https://example.test/clip.webm");
+        assert!(matches!(
+            resolve_source_media_from([Some(&remote)], workspace, chat, &store, None).await,
+            Err(Error::Unreadable)
+        ));
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
     async fn image_resolution_skips_a_newer_video() {
         let root = std::env::temp_dir().join(format!("zone-media-skip-{}", Uuid::new_v4()));
         let store = ArtifactStore::new(root.clone());

@@ -1948,6 +1948,30 @@ mod tests {
     }
 
     #[test]
+    fn the_packaged_upscale_graphs_load_when_no_file_is_configured() {
+        // An operator who never sets COMFYUI_UPSCALE_WORKFLOW_PATH still gets a
+        // working pair, and the clip graph is found beside the image one.
+        let missing = std::path::Path::new("/nonexistent/upscale-image-api.json");
+        let image = load_upscale_workflow(missing).unwrap();
+        assert_eq!(image["1"]["class_type"], json!("LoadImage"));
+        assert_eq!(
+            image[UPSCALE_IMAGE_OUTPUT_NODE]["class_type"],
+            json!("PreviewImage")
+        );
+        let video = load_upscale_video_workflow(missing).unwrap();
+        assert_eq!(video["1"]["class_type"], json!("LoadVideo"));
+        assert_eq!(
+            video[UPSCALE_VIDEO_OUTPUT_NODE]["class_type"],
+            json!("SaveWEBM")
+        );
+        assert!(validate_upscale_image_workflow(&image).is_ok());
+        assert!(validate_upscale_video_workflow(&video).is_ok());
+        // The graphs are not interchangeable.
+        assert!(validate_upscale_video_workflow(&image).is_err());
+        assert!(validate_upscale_image_workflow(&video).is_err());
+    }
+
+    #[test]
     fn upscale_workflows_reject_pathful_filenames() {
         assert!(build_upscale_image_workflow("4x-model.safetensors", "../shot.png").is_err());
         assert!(build_upscale_video_workflow("4x-model.safetensors", "sub/clip.webm").is_err());

@@ -3255,6 +3255,63 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_file_and_its_attachment_always_agree() {
+        // Whatever ComfyUI names the format, the extension the artifact is
+        // stored under and the media type announced for it come from one entry,
+        // so a URL can never contradict the attachment beside it.
+        for (returned, fallback, extension, mime) in [
+            ("image/png", MediaType::PNG, "png", "image/png"),
+            ("image/jpeg", MediaType::PNG, "jpg", "image/jpeg"),
+            ("image/webp", MediaType::PNG, "webp", "image/webp"),
+            ("video/webm", MediaType::WEBM, "webm", "video/webm"),
+            ("video/mp4", MediaType::WEBM, "mp4", "video/mp4"),
+            ("audio/flac", MediaType::FLAC, "flac", "audio/flac"),
+        ] {
+            let media = stored_media(returned, fallback);
+            assert_eq!(media.extension, extension, "{returned}");
+            assert_eq!(media.mime, mime, "{returned}");
+            let url = format!("/api/artifacts/w/c/m/file.{}", media.extension);
+            let attachment = generated_media_attachment(&url, media.mime, 0)
+                .expect("a stored artifact is always attachable");
+            assert_eq!(attachment.mime, media.mime, "{returned}");
+            assert!(attachment.name.ends_with(media.extension), "{returned}");
+        }
+    }
+
+    #[test]
+    fn a_format_outside_the_job_lane_falls_back_rather_than_mislabelling() {
+        // A video job that somehow reports a picture must not store a .png the
+        // player will then be handed as a clip.
+        assert_eq!(stored_media("image/png", MediaType::WEBM), MediaType::WEBM);
+        assert_eq!(stored_media("video/webm", MediaType::FLAC), MediaType::FLAC);
+        assert_eq!(stored_media("audio/flac", MediaType::PNG), MediaType::PNG);
+        // An unknown format falls back within its own lane.
+        assert_eq!(
+            stored_media("video/x-matroska", MediaType::WEBM),
+            MediaType::WEBM
+        );
+        assert_eq!(stored_media("", MediaType::PNG), MediaType::PNG);
+    }
+
+    #[test]
+    fn every_job_reports_an_unreachable_comfyui_the_same_way() {
+        let error = zone_comfy::Error::Configuration("prompt is empty or too long");
+        for subject in [
+            "Image generation",
+            "Video generation",
+            "Audio generation",
+            "Upscaling",
+        ] {
+            let message = comfy_failure(subject, &error);
+            assert!(message.starts_with(subject), "{message}");
+            assert!(message.contains("prompt is empty or too long"), "{message}");
+        }
+        assert_eq!(
+            comfy_failure("Upscaling", &zone_comfy::Error::Disabled),
+            "Upscaling failed: ComfyUI is disabled"
+        );
+    }
+
     fn test_generated_image_attachment_builds_persistable_metadata() {
         let attachment =
             generated_image_attachment("data:image/webp;base64,abc", 0).expect("valid image");

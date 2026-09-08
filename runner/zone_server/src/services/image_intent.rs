@@ -1458,7 +1458,8 @@ mod tests {
                     "upscale this",
                     Some(&serde_json::json!({
                         "image_generation": false,
-                        "video_generation": false
+                        "video_generation": false,
+                        "audio_generation": false
                     }))
                 )
                 .await,

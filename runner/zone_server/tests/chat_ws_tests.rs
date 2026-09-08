@@ -1887,6 +1887,152 @@ async fn test_naming_the_video_upscales_it_past_an_attached_screenshot() {
     let _ = tokio::fs::remove_dir_all(artifact_root).await;
 }
 
+/// Mount a ComfyUI that upscales an attached image, returning bytes of the
+/// caller's choosing so a test can drive the size the artifact store sees.
+async fn upscale_comfy(output: Vec<u8>) -> MockServer {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "uploaded-source.png", "subfolder": "", "type": "input"
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "u1"})))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/u1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "u1": {"status": {"status_str": "success"}, "outputs": {"4": {"images": [{
+                "filename": "big.png", "subfolder": "", "type": "temp"
+            }]}}}
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(output),
+        )
+        .mount(&comfy)
+        .await;
+    comfy
+}
+
+fn upscale_send() -> WsMessage {
+    WsMessage::Text(
+        json!({
+            "type": "send",
+            "content": "upscale this to 4k",
+            "metadata": {"attachments": [{
+                "name": "rooster.png", "mime": "image/png", "url": red_png_data_url()
+            }]}
+        })
+        .to_string()
+        .into(),
+    )
+}
+
+#[tokio::test]
+async fn test_upscale_output_too_large_says_so_rather_than_claiming_nothing_came_back() {
+    // 4x on a large source overruns the artifact cap, and after minutes of GPU
+    // "nothing came back" is the wrong thing to tell the user.
+    let comfy = upscale_comfy(vec![0u8; 64 * 1024 * 1024 + 1]).await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-big-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
+    socket.send(upscale_send()).await.unwrap();
+
+    assert_eq!(
+        image_error(&mut socket).await,
+        "Upscaling finished, but the image is too large to store"
+    );
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
+async fn test_upscale_reports_an_unreachable_comfyui_without_an_empty_message() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let refused = listener.local_addr().unwrap();
+    drop(listener);
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-refused-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = format!("http://{refused}");
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
+    socket.send(upscale_send()).await.unwrap();
+
+    assert_eq!(
+        image_error(&mut socket).await,
+        "Upscaling failed: cannot reach ComfyUI. Start the image service and try again."
+    );
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
+async fn test_upscale_cancel_before_the_prompt_lands_never_submits() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "uploaded-source.png", "subfolder": "", "type": "input"
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_json(json!({"prompt_id": "never"})),
+        )
+        .mount(&comfy)
+        .await;
+
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-cancel-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
+    socket.send(upscale_send()).await.unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "cancel"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut cancelled = false;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("cancelled") => {
+                cancelled = true;
+                break;
+            }
+            Some("message_end") => panic!("a cancelled upscale must not leave a bubble: {frame}"),
+            _ => {}
+        }
+    }
+    assert!(cancelled, "cancelling an upscale must be acknowledged");
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
 #[tokio::test]
 async fn test_upscale_without_media_reports_what_is_missing() {
     let comfy = MockServer::start().await;
