@@ -237,6 +237,14 @@ class GraphContractTests(unittest.TestCase):
         ).strip()
         if revision != PIN:
             raise AssertionError(f'ComfyUI checkout is {revision}, expected exact pin {PIN}')
+
+        # ComfyUI picks its device while `comfy.model_management` is being
+        # imported, and defaults to CUDA. CI has CPU-only torch, where that
+        # import raises before a single contract can be read, so the choice
+        # has to be made before `nodes` pulls it in.
+        from comfy.cli_args import args
+
+        args.cpu = True
         import nodes
 
         async def load_registry() -> bool:
