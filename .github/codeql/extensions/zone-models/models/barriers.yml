@@ -17,3 +17,8 @@ extensions:
       - ["zone_comfy::quality::child_directory", "ReturnValue", "path-injection", "manual"]
       - ["zone_comfy::quality::destination", "ReturnValue", "path-injection", "manual"]
       - ["zone_comfy::inventory::publication_marker", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::require_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::require_confined_directory", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::require_regular_file", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::validate_output", "ReturnValue", "path-injection", "manual"]
+      - ["zone_comfy::lora::require_regular_output", "ReturnValue", "path-injection", "manual"]

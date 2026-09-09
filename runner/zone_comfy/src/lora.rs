@@ -132,10 +132,10 @@ static PUBLICATIONS: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
 
 impl Attempt {
     fn create(models: &Path) -> Result<Self, TrainError> {
-        require_directory(models, "models directory")?;
+        let models = require_directory(models, "models directory")?;
         let id = Uuid::new_v4().to_string();
-        let training = ensure_child_directory(models, "training")?;
-        sync_directory(models)?;
+        let training = ensure_child_directory(&models, "training")?;
+        sync_directory(&models)?;
         let root = training.join(&id);
         fs::create_dir(&root).map_err(failed)?;
         sync_directory(&training)?;
@@ -373,10 +373,8 @@ async fn train_with_pipeline(
     let findings = crate::dataset::inspect(&described, survivors.len());
     let mut attempt = Attempt::create(&config.models_dir)?;
     let loras = ensure_child_directory(&config.models_dir, "loras")?;
-    let output = loras.join(&filename);
-    let output_sidecar = sidecar_path(&output);
-    validate_output(&loras, &output)?;
-    validate_output(&loras, &output_sidecar)?;
+    let output = validate_output(&loras, &loras.join(&filename))?;
+    let output_sidecar = validate_output(&loras, &sidecar_path(&output))?;
     let targets = ensure_child_directory(&attempt.root, "targets")?;
     let controls = edit
         .then(|| ensure_child_directory(&attempt.root, "control_1"))
@@ -740,12 +738,12 @@ fn failed(error: std::io::Error) -> TrainError {
     TrainError::Failed(error.to_string())
 }
 
-fn require_directory(path: &Path, label: &'static str) -> Result<(), TrainError> {
+fn require_directory(path: &Path, label: &'static str) -> Result<PathBuf, TrainError> {
     let metadata = fs::symlink_metadata(path).map_err(failed)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(TrainError::Invalid(label));
     }
-    Ok(())
+    Ok(path.to_path_buf())
 }
 
 fn ensure_child_directory(parent: &Path, name: &str) -> Result<PathBuf, TrainError> {
@@ -765,28 +763,28 @@ fn ensure_child_directory(parent: &Path, name: &str) -> Result<PathBuf, TrainErr
     Ok(path)
 }
 
-fn require_confined_directory(parent: &Path, child: &Path) -> Result<(), TrainError> {
-    let parent = fs::canonicalize(parent).map_err(failed)?;
-    let child = fs::canonicalize(child).map_err(failed)?;
-    if !child.starts_with(&parent) || child == parent {
+fn require_confined_directory(parent: &Path, child: &Path) -> Result<PathBuf, TrainError> {
+    let root = fs::canonicalize(parent).map_err(failed)?;
+    let real = fs::canonicalize(child).map_err(failed)?;
+    if !real.starts_with(&root) || real == root {
         return Err(TrainError::Invalid(
             "training path escapes its configured root",
         ));
     }
-    Ok(())
+    Ok(child.to_path_buf())
 }
 
-fn require_regular_file(root: &Path, path: &Path) -> Result<(), TrainError> {
+fn require_regular_file(root: &Path, path: &Path) -> Result<PathBuf, TrainError> {
     let metadata = fs::symlink_metadata(path).map_err(failed)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(TrainError::Invalid("training output is not a regular file"));
     }
-    let root = fs::canonicalize(root).map_err(failed)?;
-    let path = fs::canonicalize(path).map_err(failed)?;
-    if !path.starts_with(root) {
+    let real_root = fs::canonicalize(root).map_err(failed)?;
+    let real = fs::canonicalize(path).map_err(failed)?;
+    if !real.starts_with(real_root) {
         return Err(TrainError::Invalid("training output escapes its attempt"));
     }
-    Ok(())
+    Ok(path.to_path_buf())
 }
 
 fn write_new(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), TrainError> {
@@ -807,7 +805,7 @@ fn write_new(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), TrainError> {
     file.write_all(bytes).map_err(&named)
 }
 
-fn validate_output(parent: &Path, output: &Path) -> Result<(), TrainError> {
+fn validate_output(parent: &Path, output: &Path) -> Result<PathBuf, TrainError> {
     require_confined_directory(
         parent
             .parent()
@@ -821,8 +819,8 @@ fn validate_output(parent: &Path, output: &Path) -> Result<(), TrainError> {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(TrainError::Invalid("LoRA output is not a regular file"))
         }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Ok(output.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(output.to_path_buf()),
         Err(error) => Err(failed(error)),
     }
 }
@@ -1064,10 +1062,8 @@ fn recover_publication(
     let models = parent
         .parent()
         .ok_or(TrainError::Invalid("LoRA directory has no parent"))?;
-    let training = models.join("training");
-    require_directory(&training, "training directory")?;
-    let attempt = training.join(&publication.generation);
-    require_confined_directory(&training, &attempt)?;
+    let training = require_directory(&models.join("training"), "training directory")?;
+    let attempt = require_confined_directory(&training, &training.join(&publication.generation))?;
     restore_snapshot(
         &attempt,
         &attempt.join("previous.safetensors"),
@@ -1168,13 +1164,13 @@ fn restore_snapshot(
     }
 }
 
-fn require_regular_output(parent: &Path, path: &Path) -> Result<(), TrainError> {
+fn require_regular_output(parent: &Path, path: &Path) -> Result<PathBuf, TrainError> {
     validate_output(parent, path)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
             TrainError::Invalid("LoRA publication target is not a regular file"),
         ),
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(path.to_path_buf()),
         Err(error) => Err(failed(error)),
     }
 }
