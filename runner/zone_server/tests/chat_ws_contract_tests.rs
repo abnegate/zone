@@ -134,6 +134,7 @@ async fn assert_error(socket: &mut Socket, expected: &str) {
 }
 
 async fn periodic_error(socket: &mut Socket, count: usize) -> Option<String> {
+    let mut pong = true;
     for _ in 0..count {
         tokio::time::advance(Duration::from_secs(30)).await;
         for _ in 0..3 {
@@ -141,7 +142,14 @@ async fn periodic_error(socket: &mut Socket, count: usize) -> Option<String> {
         }
         let frame = socket.next().await?.ok()?;
         match frame {
-            WsMessage::Ping(data) => socket.send(WsMessage::Pong(data)).await.ok()?,
+            WsMessage::Ping(data) if pong => {
+                // The server closes the moment it reports, so this pong can
+                // find a broken pipe. Keep reading rather than giving up: the
+                // error frame it sent before closing is still on its way.
+                if socket.send(WsMessage::Pong(data)).await.is_err() {
+                    pong = false;
+                }
+            }
             WsMessage::Text(text) => {
                 let frame: Value = serde_json::from_str(&text).ok()?;
                 if frame["type"] == "error" {
@@ -196,6 +204,10 @@ async fn silent_connection_receives_an_authentication_timeout() {
     let mut socket = connect(&address, Uuid::new_v4()).await;
 
     tokio::time::advance(Duration::from_secs(31)).await;
+    // The frame still has to cross a real socket. While the clock is paused
+    // the runtime answers next_json's timeout by jumping to its deadline, so
+    // hand the read real time to arrive in.
+    tokio::time::resume();
     assert_error(&mut socket, "Authentication timeout or error").await;
     assert!(next_json(&mut socket).await.is_none());
 }
@@ -582,7 +594,11 @@ async fn periodic_authorization_recheck_disconnects_a_revoked_member() {
     .unwrap();
 
     tokio::time::pause();
-    for _ in 0..199 {
+    // A Tokio interval yields its first tick immediately, so n advances make
+    // n + 1 ticks due and the 200th lands exactly on the 199th advance. Stop a
+    // tick short: the recheck then waits for the resumed clock below instead of
+    // firing here, which only worked while the server lagged a tick behind.
+    for _ in 0..198 {
         tokio::time::advance(Duration::from_secs(30)).await;
         for _ in 0..3 {
             tokio::task::yield_now().await;
@@ -615,7 +631,11 @@ async fn periodic_authorization_recheck_keeps_an_active_member_connected() {
     let mut socket = authenticate(&address, chat, &token).await;
 
     tokio::time::pause();
-    for _ in 0..199 {
+    // A Tokio interval yields its first tick immediately, so n advances make
+    // n + 1 ticks due and the 200th lands exactly on the 199th advance. Stop a
+    // tick short: the recheck then waits for the resumed clock below instead of
+    // firing here, which only worked while the server lagged a tick behind.
+    for _ in 0..198 {
         tokio::time::advance(Duration::from_secs(30)).await;
         for _ in 0..3 {
             tokio::task::yield_now().await;
@@ -652,7 +672,10 @@ async fn repeated_authorization_database_errors_close_an_unstable_connection() {
     pool.close().await;
 
     tokio::time::pause();
-    let reported = periodic_error(&mut socket, 1_005).await;
+    // AUTH_RECHECK_INTERVAL pings per recheck and MAX_CONSECUTIVE_ERRORS of
+    // them puts the report near a thousand ticks. The bound is patience, not
+    // arithmetic -- the loop returns as soon as the error lands.
+    let reported = periodic_error(&mut socket, 2_000).await;
     tokio::time::resume();
     assert_eq!(
         reported.as_deref(),
