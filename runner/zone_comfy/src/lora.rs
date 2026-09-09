@@ -1,10 +1,11 @@
 //! Packaged LoRA training jobs. Default path posts ZoneTrainLoRA to ComfyUI.
 
-use crate::caption::{Captioner, data_url};
+use crate::caption::{Captioner, Draft};
 use crate::config::Config;
 use crate::inventory::{PUBLICATION_DIRECTORY, WeightDocument, WeightSidecar, publication_marker};
 use crate::quality::Quality;
 use crate::recipe::{RecipeCatalog, TrainingModel, sanitize_weight_filename};
+use crate::subject::{CENTRE, Subject};
 use crate::train::Run;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,6 +17,8 @@ use std::process::Stdio;
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 use tokio::process::Command;
 use uuid::Uuid;
+use zone_vision::gravity::Point;
+use zone_vision::{Raster, Rendered, decode};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TrainError {
@@ -43,6 +46,10 @@ pub struct TrainImage {
     pub bytes_base64: String,
     #[serde(default)]
     pub before_base64: Option<String>,
+    /// Images sharing a group are the same shot and are captioned together.
+    /// Frames pulled from a clip arrive grouped; separate photos do not.
+    #[serde(default)]
+    pub group: Option<usize>,
 }
 
 /// A finished run: the adapter on disk and, when ComfyUI could be asked, how
@@ -68,6 +75,7 @@ pub struct Dropped {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct TrainBase {
     pub id: String,
     pub label: String,
@@ -79,7 +87,9 @@ struct ScreenedImage {
     target: Vec<u8>,
     reference: Option<Vec<u8>>,
     text: String,
-    url: Option<String>,
+    /// Base64 of the crop, kept only for identity runs, which caption it.
+    encoded: Option<String>,
+    group: usize,
 }
 
 struct Attempt {
@@ -237,18 +247,8 @@ async fn train_with_screening(
         .iter()
         .map(|image| decode_base64(&image.bytes_base64))
         .collect::<Result<Vec<Vec<u8>>, TrainError>>()?;
-    let references = request
-        .images
-        .iter()
-        .map(|image| {
-            image
-                .before_base64
-                .as_deref()
-                .map(decode_base64)
-                .transpose()
-        })
-        .collect::<Result<Vec<Option<Vec<u8>>>, TrainError>>()?;
-    let verdict = screening(&decoded, crate::train::packaged_config()?.resolution());
+    let side = crate::train::packaged_config()?.resolution();
+    let verdict = screening(&decoded, side);
     validate_verdict(&verdict, request.images.len())?;
     let dropped = verdict
         .drop
@@ -258,21 +258,29 @@ async fn train_with_screening(
             reason: *rejection,
         })
         .collect::<Vec<Dropped>>();
+    // Cropping comes before captioning so the vision model describes the image
+    // that will be trained on. Captioning the upload instead would have it
+    // describe a background the crop is about to remove.
+    let subject = Subject::shared(config);
+    let groups = shots(&request.images);
     let mut survivors = request
         .images
-        .into_iter()
-        .zip(decoded)
-        .zip(references)
+        .iter()
+        .zip(&groups)
         .enumerate()
         .filter(|(index, _)| verdict.keep.binary_search(index).is_ok())
-        .map(|(original, ((image, target), reference))| ScreenedImage {
-            original,
-            url: (!edit).then(|| data_url(&image.filename, &image.bytes_base64)),
-            target,
-            reference,
-            text: image.caption,
+        .map(|(original, (image, group))| {
+            let framed = frame(&subject, image, side)?;
+            Ok(ScreenedImage {
+                original,
+                encoded: (!edit).then(|| framed.encoded()),
+                target: framed.target,
+                reference: framed.control,
+                text: image.caption.clone(),
+                group: *group,
+            })
         })
-        .collect::<Vec<ScreenedImage>>();
+        .collect::<Result<Vec<ScreenedImage>, TrainError>>()?;
     if survivors.len() != verdict.keep.len() {
         return Err(TrainError::Failed(
             "screening returned an invalid survivor index".to_string(),
@@ -287,21 +295,17 @@ async fn train_with_screening(
         let mut drafts = survivors
             .iter()
             .map(|image| {
-                Ok::<(String, String), TrainError>((
-                    image.url.clone().ok_or_else(|| {
-                        TrainError::Failed(
-                            "identity survivor is missing its caption input".to_string(),
-                        )
-                    })?,
-                    image.text.clone(),
-                ))
+                let encoded = image.encoded.as_deref().ok_or_else(|| {
+                    TrainError::Failed("identity survivor is missing its caption input".to_string())
+                })?;
+                Ok::<Draft, TrainError>(Draft::new(CROP, encoded, &image.text, image.group))
             })
-            .collect::<Result<Vec<(String, String)>, TrainError>>()?;
+            .collect::<Result<Vec<Draft>, TrainError>>()?;
         let described = Captioner::new(config, litellm_host, litellm_key)
             .fill(&mut drafts, trigger)
             .await;
-        for (image, (_, caption)) in survivors.iter_mut().zip(drafts) {
-            image.text = caption;
+        for (image, draft) in survivors.iter_mut().zip(drafts) {
+            image.text = draft.caption;
         }
         described
     };
@@ -622,11 +626,12 @@ fn require_regular_file(root: &Path, path: &Path) -> Result<(), TrainError> {
 }
 
 fn write_new(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), TrainError> {
-    let root = fs::canonicalize(root).map_err(failed)?;
+    let named = |error: std::io::Error| TrainError::Failed(format!("{}: {error}", path.display()));
+    let root = fs::canonicalize(root).map_err(&named)?;
     let parent = path
         .parent()
         .ok_or(TrainError::Invalid("training path has no parent"))?;
-    let parent = fs::canonicalize(parent).map_err(failed)?;
+    let parent = fs::canonicalize(parent).map_err(&named)?;
     if !parent.starts_with(&root) {
         return Err(TrainError::Invalid("training path escapes its attempt"));
     }
@@ -634,8 +639,8 @@ fn write_new(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), TrainError> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(failed)?;
-    file.write_all(bytes).map_err(failed)
+        .map_err(&named)?;
+    file.write_all(bytes).map_err(&named)
 }
 
 fn validate_output(parent: &Path, output: &Path) -> Result<(), TrainError> {
@@ -1059,6 +1064,121 @@ fn safe_directory(path: &Path) -> bool {
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
 }
 
+/// The shot each image belongs to. Frames from a clip say which shot they came
+/// from; a separate photo is its own, numbered past every clip's groups so the
+/// two cannot be taken for each other.
+fn shots(images: &[TrainImage]) -> Vec<usize> {
+    // Renumbered into a dense range rather than used as sent. The group is
+    // deserialized straight from the request, so counting up from the largest
+    // one overflows on usize::MAX and, saturating, would hand a photo the same
+    // shot as the clip. Renumbering cannot collide whatever arrives, and cannot
+    // run past the number of images.
+    let mut clips: Vec<usize> = Vec::new();
+    let seen: Vec<Option<usize>> = images
+        .iter()
+        .map(|image| {
+            image.group.map(|group| {
+                clips
+                    .iter()
+                    .position(|&known| known == group)
+                    .unwrap_or_else(|| {
+                        clips.push(group);
+                        clips.len() - 1
+                    })
+            })
+        })
+        .collect();
+    let mut next = clips.len();
+    seen.into_iter()
+        .map(|shot| {
+            shot.unwrap_or_else(|| {
+                next += 1;
+                next - 1
+            })
+        })
+        .collect()
+}
+
+/// The filename a crop is captioned under. Only its extension is read, to pick
+/// the MIME type of the data URL a vision model is handed.
+const CROP: &str = "crop.png";
+
+/// One upload as the dataset will hold it: a square PNG framed on its subject,
+/// and the control image that has to keep answering it.
+#[derive(Debug)]
+struct Framed {
+    target: Vec<u8>,
+    control: Option<Vec<u8>>,
+}
+
+impl Framed {
+    fn encoded(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&self.target)
+    }
+}
+
+/// Crops one upload square onto its subject.
+///
+/// Cropping here rather than leaving it to the loader is what keeps the subject
+/// in the dataset: the loader fits whatever it is given onto a white square, so
+/// an uncropped photo trains on its own letterboxing and on however much
+/// background the photographer happened to include.
+fn frame(subject: &Subject, image: &TrainImage, side: u32) -> Result<Framed, TrainError> {
+    let raster = decode(&image.bytes_base64)?;
+    let focus = subject.focus(&raster, CENTRE);
+    let control = match &image.before_base64 {
+        // The control has to keep answering the target pixel for pixel, so it
+        // is cropped to the target's subject rather than to its own.
+        Some(before) => Some(square(subject, &decode(before)?, side, focus)?),
+        None => None,
+    };
+    Ok(Framed {
+        target: square(subject, &raster, side, focus)?,
+        control,
+    })
+}
+
+fn square(
+    subject: &Subject,
+    raster: &Raster,
+    side: u32,
+    focus: Point,
+) -> Result<Vec<u8>, TrainError> {
+    png(&subject
+        .render(raster, side, focus)
+        .map_err(|error| TrainError::Failed(error.to_string()))?)
+}
+
+/// Decoding is also what applies a photo's EXIF rotation: a sideways image
+/// otherwise trains a sideways subject.
+fn decode(base64: &str) -> Result<Raster, TrainError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.trim())
+        .map_err(|_| TrainError::Invalid("image is not valid base64"))?;
+    if bytes.is_empty() {
+        return Err(TrainError::Invalid("image is empty"));
+    }
+    decode::decode(&bytes)
+        .map_err(|_| TrainError::Invalid("training images must be PNG, JPEG, or WebP"))
+}
+
+/// Encodes a rendered RGB image as PNG.
+pub(crate) fn png(rendered: &Rendered) -> Result<Vec<u8>, TrainError> {
+    use image::ImageEncoder;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            &rendered.pixels,
+            rendered.width,
+            rendered.height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|error| TrainError::Failed(error.to_string()))?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,17 +1205,74 @@ mod tests {
         (root, config)
     }
 
-    fn encoded(bytes: &[u8]) -> String {
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
-
+    /// A real image whose colour follows its name, so a crop can still be
+    /// traced back to the upload it was made from.
     fn image(target: &str, caption: &str, reference: Option<&str>) -> TrainImage {
         TrainImage {
             filename: format!("{target}.png"),
             caption: caption.to_string(),
-            bytes_base64: encoded(target.as_bytes()),
-            before_base64: reference.map(|value| encoded(value.as_bytes())),
+            bytes_base64: encoded(colour(target)),
+            before_base64: reference.map(|value| encoded(colour(value))),
+            group: None,
         }
+    }
+
+    /// ComfyUI echoes back where it put the file, and the uploader checks that
+    /// what came back is what it sent.
+    struct Stage;
+
+    impl wiremock::Respond for Stage {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let body = String::from_utf8_lossy(&request.body);
+            let field = |name: &str| {
+                body.split(&format!("name=\"{name}\""))
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n\r\n").nth(1))
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let filename = body
+                .split("filename=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_default()
+                .to_string();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": filename,
+                "subfolder": field("subfolder"),
+                "type": field("type"),
+            }))
+        }
+    }
+
+    /// ComfyUI names the artifact it is serving, and the download checks that
+    /// the file it gets back is the one it asked for.
+    struct ServeArtifact(Vec<u8>);
+
+    impl wiremock::Respond for ServeArtifact {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let filename = request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "filename")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_default();
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "content-disposition",
+                    format!("filename=\"{filename}\"").as_str(),
+                )
+                .insert_header("content-type", "application/octet-stream")
+                .set_body_bytes(self.0.clone())
+        }
+    }
+
+    fn colour(name: &str) -> [u8; 3] {
+        let hash = name.bytes().fold(17u32, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(u32::from(byte))
+        });
+        [hash as u8, (hash >> 8) as u8, (hash >> 16) as u8]
     }
 
     fn identity(name: &str) -> TrainRequest {
@@ -1163,6 +1340,42 @@ mod tests {
         (attempt, staged, sidecar)
     }
 
+    /// A real one-pixel image, so the dataset writer has something to decode.
+    fn encoded(colour: [u8; 3]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(
+            png(&Rendered {
+                width: 1,
+                height: 1,
+                pixels: colour.to_vec(),
+            })
+            .unwrap(),
+        )
+    }
+
+    /// A flat image of the given size, encoded the way an upload arrives.
+    fn encoded_at(width: u32, height: u32) -> String {
+        base64::engine::general_purpose::STANDARD.encode(
+            png(&Rendered {
+                width,
+                height,
+                pixels: (0..width * height)
+                    .flat_map(|index| [(index % 251) as u8, 40, 90])
+                    .collect(),
+            })
+            .unwrap(),
+        )
+    }
+
+    fn upload(caption: &str, group: Option<usize>) -> TrainImage {
+        TrainImage {
+            filename: "a.png".into(),
+            caption: caption.into(),
+            bytes_base64: encoded([12, 34, 56]),
+            before_base64: None,
+            group,
+        }
+    }
+
     #[tokio::test]
     async fn train_writes_adapter_with_configured_command() {
         let (_root, config) = harness("printf lora > \"$ZONE_TRAIN_OUTPUT\"");
@@ -1202,6 +1415,339 @@ mod tests {
 
         assert_eq!(fs::read(outcome.path).unwrap(), b"legacy");
         assert!(training_entries(&config).is_empty());
+    }
+
+    /// A models root with the output directory the writer needs.
+    fn root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("zone-train-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("loras")).unwrap();
+        root
+    }
+
+    fn request(name: &str, base: &str, trigger: Option<&str>) -> TrainRequest {
+        TrainRequest {
+            name: name.into(),
+            base: base.into(),
+            trigger: trigger.map(str::to_string),
+            images: vec![upload("a portrait", None)],
+        }
+    }
+
+    async fn rejected(config: &Config, request: TrainRequest) -> TrainError {
+        train(config, String::new(), String::new(), request)
+            .await
+            .expect_err("this request should not have trained")
+    }
+
+    #[tokio::test]
+    async fn training_needs_either_a_command_or_a_reachable_comfyui() {
+        let error = rejected(
+            &Config::default(),
+            request("my-style", "flux-schnell", Some("ohwx")),
+        )
+        .await;
+        assert!(matches!(error, TrainError::Disabled), "{error}");
+    }
+
+    /// The LoRA name reaches `create_dir_all` and `fs::write`, so it is the one
+    /// field of a training request that could write outside the models
+    /// directory. Nothing here may be accepted, and nothing may be created.
+    #[tokio::test]
+    async fn a_name_that_is_not_a_filename_is_refused() {
+        let root = root();
+        let outside = root
+            .join("..")
+            .join(format!("escaped-{}", uuid::Uuid::new_v4()));
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        for name in [
+            "",
+            "   ",
+            ".",
+            "..",
+            "../escape",
+            "../../escape",
+            "a/../../escape",
+            "/etc/passwd",
+            "/absolute",
+            "back\\slash",
+            "nested/name",
+            &outside.display().to_string(),
+            &"a".repeat(300),
+        ] {
+            let error = rejected(&config, request(name, "flux-schnell", Some("ohwx"))).await;
+            assert!(
+                matches!(error, TrainError::Invalid(_)),
+                "{name:?} was not refused: {error}"
+            );
+        }
+
+        let training = root.join("training");
+        assert!(
+            !training.exists() || fs::read_dir(&training).unwrap().count() == 0,
+            "a refused name must not create a dataset directory"
+        );
+        assert!(
+            !outside.exists(),
+            "a refused name reached outside the models directory"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn training_needs_images() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        let mut empty = request("my-style", "flux-schnell", Some("ohwx"));
+        empty.images.clear();
+        let error = rejected(&config, empty).await;
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_blank_trigger_counts_as_no_trigger() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        let error = rejected(&config, request("my-style", "flux-schnell", Some("   "))).await;
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_base_is_refused_before_anything_is_written() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        let error = rejected(&config, request("my-style", "no-such-base", Some("ohwx"))).await;
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+        let training = root.join("training");
+        assert!(
+            !training.exists() || fs::read_dir(&training).unwrap().count() == 0,
+            "a refused request should leave no dataset behind"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_trainer_that_exits_badly_is_reported() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("exit 3".into()),
+            ..Default::default()
+        };
+        let error = rejected(&config, request("my-style", "flux-schnell", Some("ohwx"))).await;
+        let TrainError::Failed(message) = &error else {
+            panic!("expected a failure, got {error}");
+        };
+        assert!(
+            message.contains('3'),
+            "the exit code is the diagnosis: {message}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_trainer_that_writes_nothing_is_not_a_success() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("true".into()),
+            ..Default::default()
+        };
+        let error = rejected(&config, request("my-style", "flux-schnell", Some("ohwx"))).await;
+        assert!(
+            matches!(&error, TrainError::Failed(message) if message.contains("did not write")),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn an_edit_base_gets_a_control_directory_beside_its_targets() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("printf lora > \"$ZONE_TRAIN_OUTPUT\"".into()),
+            ..Default::default()
+        };
+        let catalog = RecipeCatalog::packaged().unwrap();
+        let edit_base = catalog
+            .image_recipes()
+            .find(|recipe| {
+                !recipe.adapter && recipe.prompt_mode == crate::recipe::PromptMode::EditInstruction
+            })
+            .expect("the packaged catalog no longer ships an edit base")
+            .id
+            .clone();
+        let mut pair = request("my-edit", &edit_base, Some("ohwx"));
+        pair.images[0].before_base64 = Some(encoded_at(8, 8));
+        train(&config, String::new(), String::new(), pair)
+            .await
+            .expect("an edit base trains on before and after together");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_blank_caption_is_filled_in_before_the_dataset_is_written() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("printf lora > \"$ZONE_TRAIN_OUTPUT\"".into()),
+            ..Default::default()
+        };
+        let mut blank = request("my-style", "flux-schnell", Some("ohwx"));
+        blank.images[0].caption = String::new();
+        train(&config, String::new(), String::new(), blank)
+            .await
+            .expect("with no caption model, the trigger alone still has to reach the dataset");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_name_too_long_to_write_is_refused_rather_than_failing_in_the_trainer() {
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            train_command: Some("printf lora > \"$ZONE_TRAIN_OUTPUT\"".into()),
+            ..Default::default()
+        };
+        // Under the limit itself, over it once ".safetensors" is on the end.
+        let long = "a".repeat(250);
+        let error = rejected(&config, request(&long, "flux-schnell", Some("ohwx"))).await;
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+
+        let named = train(
+            &config,
+            String::new(),
+            String::new(),
+            request("already.safetensors", "flux-schnell", Some("ohwx")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            named.path.file_name().unwrap(),
+            "already.safetensors",
+            "a name that already carries the extension keeps exactly one"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_empty_upload_is_not_an_image() {
+        let Err(error) = decode("") else {
+            panic!("an empty upload is not an image");
+        };
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+    }
+
+    #[test]
+    fn only_installed_bases_are_offered_for_training() {
+        let root = std::env::temp_dir().join(format!("zone-bases-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("checkpoints")).unwrap();
+        let catalog = RecipeCatalog::packaged().unwrap();
+
+        assert!(
+            available_bases(&catalog, &root).is_empty(),
+            "nothing is trainable until its weights are on disk"
+        );
+
+        let recipe = catalog
+            .get("flux-schnell")
+            .expect("the packaged catalog ships flux-schnell");
+        let checkpoint = recipe
+            .defaults
+            .get("checkpoint")
+            .expect("flux-schnell declares a checkpoint");
+        fs::write(root.join("checkpoints").join(checkpoint), vec![0u8; 1024]).unwrap();
+
+        let bases = available_bases(&catalog, &root);
+        assert!(
+            bases
+                .iter()
+                .any(|base| base.id == "flux-schnell" && !base.edit),
+            "the installed base should be offered: {bases:?}"
+        );
+        assert!(
+            !bases.iter().any(|base| base.id.ends_with("-adapter")),
+            "a LoRA slot is not something to train onto: {bases:?}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn without_a_train_command_the_job_runs_as_a_comfyui_graph() {
+        let server = MockServer::start().await;
+        let prompt = uuid::Uuid::new_v4();
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(Stage)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"prompt_id": prompt, "number": 1})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                prompt.to_string(): {"status": {"completed": true, "status_str": "success"}}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(ServeArtifact(vec![9u8; 20_000]))
+            .mount(&server)
+            .await;
+
+        let root = root();
+        let config = Config {
+            models_dir: root.clone(),
+            enabled: true,
+            base_url: server.uri(),
+            train_command: None,
+            poll_interval_ms: 50,
+            ..Default::default()
+        };
+        let outcome = train(
+            &config,
+            String::new(),
+            String::new(),
+            request("graph-style", "flux-schnell", Some("ohwx")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&outcome.path).unwrap(), vec![9u8; 20_000]);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path() == "/upload/image"),
+            "the dataset has to reach the graph before it is queued"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1303,17 +1849,21 @@ mod tests {
             test "$folder_id" != "$ZONE_TRAIN_FOLDER" || exit 28
             test "$artifact_id" != "$ZONE_TRAIN_ARTIFACT" || exit 29
             test "$folder_id" != "$artifact_id" || exit 30
-            test "$(cat "$ZONE_TRAIN_DIR/targets/0000.png")" = "target-zero" || exit 15
-            test "$(cat "$ZONE_TRAIN_DIR/control_1/0000.png")" = "reference-zero" || exit 16
             test "$(cat "$ZONE_TRAIN_DIR/targets/0000.txt")" = "change zero" || exit 17
-            test "$(cat "$ZONE_TRAIN_DIR/targets/0001.png")" = "target-two" || exit 18
-            test "$(cat "$ZONE_TRAIN_DIR/control_1/0001.png")" = "reference-two" || exit 19
             test "$(cat "$ZONE_TRAIN_DIR/targets/0001.txt")" = "change two" || exit 20
             test ! -e "$ZONE_TRAIN_DIR/targets/0002.png" || exit 21
             test ! -e "$ZONE_TRAIN_DIR/control_1/0002.png" || exit 22
+            cp "$ZONE_TRAIN_DIR/targets/0000.png" "KEPT/target-0.png" || exit 15
+            cp "$ZONE_TRAIN_DIR/control_1/0000.png" "KEPT/control-0.png" || exit 16
+            cp "$ZONE_TRAIN_DIR/targets/0001.png" "KEPT/target-1.png" || exit 18
+            cp "$ZONE_TRAIN_DIR/control_1/0001.png" "KEPT/control-1.png" || exit 19
             printf trained > "$ZONE_TRAIN_OUTPUT"
         "#;
-        let (_root, mut config) = harness(command);
+        // The attempt is cleaned up when the run ends, so the images have to be
+        // copied out before they can be compared against the crops they should be.
+        let kept = tempfile::tempdir().expect("kept dataset");
+        let command = command.replace("KEPT", &kept.path().display().to_string());
+        let (_root, mut config) = harness(&command);
         config.caption_model = "vision".to_string();
         let captioner = wiremock::MockServer::start().await;
         let outcome = train_with_screening(
@@ -1347,6 +1897,27 @@ mod tests {
             "edit instructions must never be sent through the identity captioner"
         );
         assert!(training_entries(&config).is_empty());
+
+        let side = crate::train::packaged_config().unwrap().resolution();
+        let subject = Subject::shared(&config);
+        for (index, name) in [(0, "zero"), (1, "two")] {
+            let source = image(
+                &format!("target-{name}"),
+                "",
+                Some(&format!("reference-{name}")),
+            );
+            let framed = frame(&subject, &source, side).expect("the fixture frames");
+            assert_eq!(
+                fs::read(kept.path().join(format!("target-{index}.png"))).unwrap(),
+                framed.target,
+                "targets/{index:04} must hold the {name} pair's target"
+            );
+            assert_eq!(
+                fs::read(kept.path().join(format!("control-{index}.png"))).unwrap(),
+                framed.control.expect("the fixture carries a reference"),
+                "control_1/{index:04} must hold the {name} pair's reference"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1578,7 +2149,7 @@ mod tests {
         assert_eq!(fs::read(outcome.path).unwrap(), b"trained");
 
         let mut paired = identity("paired-identity");
-        paired.images[0].before_base64 = Some(encoded(b"reference"));
+        paired.images[0].before_base64 = Some(encoded(colour("reference")));
         let error = train_with_screening(&config, String::new(), String::new(), paired, keep_all)
             .await
             .unwrap_err();
@@ -2079,5 +2650,153 @@ mod tests {
 
         assert!(write_new(&attempt.root, &staged, b"replacement").is_err());
         assert_eq!(fs::read(outside).unwrap(), b"outside");
+    }
+
+    #[test]
+    fn a_group_at_the_top_of_its_range_does_not_wrap_a_photo_onto_a_clip() {
+        // The group is deserialized straight from the request, so this is a
+        // value a caller can actually send.
+        let images = vec![
+            upload("", Some(usize::MAX)),
+            upload("", Some(usize::MAX)),
+            upload("", None),
+        ];
+        let assigned = shots(&images);
+        assert_eq!(assigned[0], assigned[1], "two frames of one shot share it");
+        assert_ne!(
+            assigned[2], assigned[0],
+            "a photo must not be captioned as part of the clip's shot"
+        );
+    }
+
+    #[test]
+    fn a_trigger_is_matched_as_a_word_rather_than_a_substring() {
+        // A short trigger occurs inside longer words, and a substring test
+        // would read that as the trigger already being present, leaving the
+        // image to train with no trigger at all.
+        assert_eq!(
+            identity_caption("zrk pattern knitwear", "zrkx"),
+            "zrkx, zrk pattern knitwear"
+        );
+        assert_eq!(
+            identity_caption("zrkxyz, a portrait", "zrkxyz"),
+            "zrkxyz, a portrait",
+            "a caption that already names the trigger keeps exactly one"
+        );
+        assert_eq!(
+            identity_caption("zrkxyzed hair", "zrkxyz"),
+            "zrkxyz, zrkxyzed hair",
+            "a longer word that merely starts with the trigger is not the trigger"
+        );
+        // A trigger is not always one word. Splitting the caption into words
+        // could never match this one, and would prefix it a second time.
+        assert_eq!(
+            identity_caption("my-style, a portrait", "my-style"),
+            "my-style, a portrait",
+            "a hyphenated trigger the caption already names is not repeated"
+        );
+        assert_eq!(
+            identity_caption("a portrait", "my-style"),
+            "my-style, a portrait"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_names_the_artifact_it_was_for() {
+        let attempt = tempfile::tempdir().unwrap();
+        let missing = attempt.path().join("targets").join("0000.png");
+        let Err(TrainError::Failed(message)) = write_new(attempt.path(), &missing, b"x") else {
+            panic!("writing into a directory that does not exist should fail");
+        };
+        assert!(
+            message.contains("0000.png"),
+            "an operator has to be told which artifact failed: {message}"
+        );
+    }
+
+    #[test]
+    fn a_photo_never_lands_in_a_clips_shot() {
+        let images = vec![
+            upload("", Some(0)),
+            upload("", Some(1)),
+            upload("", Some(0)),
+            upload("", None),
+            upload("", None),
+        ];
+        let assigned = shots(&images);
+        assert_eq!(
+            assigned,
+            vec![0, 1, 0, 2, 3],
+            "frames keep their shot, photos get one each, and the two never meet"
+        );
+    }
+
+    #[test]
+    fn a_photo_is_framed_as_the_upright_square_the_dataset_reads_back() {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(&[10; 8 * 4 * 3], 8, 4, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let framed = frame(
+            &Subject::none(),
+            &TrainImage {
+                filename: "a.jpg".into(),
+                caption: String::new(),
+                bytes_base64: base64::engine::general_purpose::STANDARD.encode(&jpeg),
+                before_base64: None,
+                group: None,
+            },
+            4,
+        )
+        .unwrap();
+        assert!(
+            framed.target.starts_with(b"\x89PNG\r\n\x1a\n"),
+            "a .png in the dataset has to be a PNG"
+        );
+        assert_eq!(
+            decode::decode(&framed.target).unwrap().oriented_size(),
+            (4, 4),
+            "the loader letterboxes anything that is not already square"
+        );
+        assert!(framed.control.is_none(), "there was no before image");
+    }
+
+    #[test]
+    fn an_undecodable_upload_is_rejected_rather_than_framed() {
+        let error = frame(
+            &Subject::none(),
+            &TrainImage {
+                filename: "a.png".into(),
+                caption: String::new(),
+                bytes_base64: base64::engine::general_purpose::STANDARD.encode(b"not an image"),
+                before_base64: None,
+                group: None,
+            },
+            512,
+        )
+        .unwrap_err();
+        assert!(matches!(error, TrainError::Invalid(_)), "{error}");
+    }
+
+    #[test]
+    fn an_edit_pair_is_cropped_the_same_way_on_both_sides() {
+        let wide = encoded_at(16, 8);
+        let framed = frame(
+            &Subject::none(),
+            &TrainImage {
+                filename: "a.png".into(),
+                caption: String::new(),
+                bytes_base64: wide.clone(),
+                before_base64: Some(wide),
+                group: None,
+            },
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            framed.control.as_deref(),
+            Some(framed.target.as_slice()),
+            "a control cropped to its own subject stops answering its target"
+        );
     }
 }

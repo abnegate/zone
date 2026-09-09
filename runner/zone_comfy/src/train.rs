@@ -132,10 +132,12 @@ pub fn packaged_config() -> Result<TrainConfig, TrainError> {
 }
 
 impl TrainConfig {
+    /// Side of the square every training image is read back at.
     pub fn resolution(&self) -> u32 {
         self.resolution
     }
 
+    /// Steps for a dataset of this size, clamped to the configured bounds.
     pub fn steps(&self, image_count: usize) -> u32 {
         u32::try_from(image_count.max(1))
             .unwrap_or(u32::MAX)
@@ -1059,7 +1061,8 @@ fn authorize(config: &Config, request: reqwest::RequestBuilder) -> reqwest::Requ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use crate::recipe::{Recipe, RecipeCatalog};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const DATASETS: [usize; 4] = [8, 24, 100, 300];
@@ -1081,6 +1084,400 @@ mod tests {
             clip: "qwen-clip.safetensors".into(),
             vae: "qwen-vae.safetensors".into(),
         }
+    }
+
+    /// A dataset on disk, as `lora::train` leaves it for the graph runner.
+    fn dataset() -> tempfile::TempDir {
+        let work = tempfile::tempdir().unwrap();
+        let targets = work.path().join("targets");
+        fs::create_dir_all(&targets).unwrap();
+        let mut png = Vec::new();
+        {
+            use image::ImageEncoder;
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(&[10, 20, 30], 1, 1, image::ExtendedColorType::Rgb8)
+                .unwrap();
+        }
+        fs::write(targets.join("0000.png"), &png).unwrap();
+        fs::write(targets.join("0000.txt"), "ohwx, a portrait").unwrap();
+        fs::write(targets.join("0001.png"), &png).unwrap();
+        fs::write(targets.join("0001.txt"), "ohwx, from behind").unwrap();
+        work
+    }
+
+    fn config(server: &MockServer) -> Config {
+        Config {
+            enabled: true,
+            base_url: server.uri(),
+            api_token: Some("secret".into()),
+            train_timeout_secs: 60,
+            poll_interval_ms: 50,
+            // No sibling input/ directory, so staging falls through to upload.
+            models_dir: std::env::temp_dir().join(format!("zone-models-{}", Uuid::new_v4())),
+            ..Default::default()
+        }
+    }
+
+    fn recipe() -> Recipe {
+        RecipeCatalog::packaged()
+            .unwrap()
+            .get("flux-schnell")
+            .expect("the packaged catalog ships flux-schnell")
+            .clone()
+    }
+
+    fn base() -> TrainingModel {
+        recipe()
+            .training_model()
+            .expect("flux-schnell is a trainable base")
+    }
+
+    async fn queues(server: &MockServer, body: serde_json::Value) {
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    /// ComfyUI echoes back where it put the file, and the uploader checks that
+    /// what came back is what it sent.
+    struct Stage;
+
+    impl wiremock::Respond for Stage {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let body = String::from_utf8_lossy(&request.body);
+            let field = |name: &str| {
+                body.split(&format!("name=\"{name}\""))
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n\r\n").nth(1))
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let filename = body
+                .split("filename=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_default()
+                .to_string();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": filename,
+                "subfolder": field("subfolder"),
+                "type": field("type"),
+            }))
+        }
+    }
+
+    async fn uploads(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(Stage)
+            .mount(server)
+            .await;
+    }
+
+    async fn finishes(server: &MockServer, prompt: Uuid) {
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({prompt.to_string(): {"status": {"completed": true, "status_str": "success"}}}),
+            ))
+            .mount(server)
+            .await;
+    }
+
+    /// ComfyUI names the artifact it is serving, and the download checks that
+    /// the file it gets back is the one it asked for.
+    struct Serve(Vec<u8>);
+
+    impl wiremock::Respond for Serve {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let filename = request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "filename")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_default();
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "content-disposition",
+                    format!("filename=\"{filename}\"").as_str(),
+                )
+                .insert_header("content-type", "application/octet-stream")
+                .set_body_bytes(self.0.clone())
+        }
+    }
+
+    async fn serves(server: &MockServer, weights: Vec<u8>) {
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .and(query_param("subfolder", "loras"))
+            .respond_with(Serve(weights))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_finished_graph_writes_the_weights_comfyui_produced() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        uploads(&server).await;
+        queues(&server, json!({"prompt_id": prompt, "number": 1})).await;
+        finishes(&server, prompt).await;
+        serves(&server, vec![7u8; 20_000]).await;
+
+        let work = dataset();
+        let output = work.path().join("my-style.safetensors");
+        let started = run(&config(&server), &base(), work.path(), &output, 2)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&output).unwrap(), vec![7u8; 20_000]);
+
+        let posted = server.received_requests().await.unwrap();
+        let graph = posted
+            .iter()
+            .find(|request| request.url.path() == "/prompt")
+            .expect("the graph was never submitted");
+        assert_eq!(
+            graph.headers.get("X-Zone-ComfyUI-Token").unwrap(),
+            "secret",
+            "a token-protected ComfyUI has to be told who is asking"
+        );
+        let body: Value = serde_json::from_slice(&graph.body).unwrap();
+        let inputs = &body["prompt"]["5"]["inputs"];
+        assert_eq!(
+            inputs["steps"],
+            packaged_config().unwrap().min_steps,
+            "two images clamp up to min_steps"
+        );
+        assert_eq!(inputs["save_name"], started.artifact);
+        assert_eq!(
+            body["prompt"]["1"]["inputs"]["ckpt_name"],
+            recipe().defaults["checkpoint"]
+        );
+        assert_eq!(
+            body["prompt"]["2"]["inputs"]["resolution"],
+            packaged_config().unwrap().resolution()
+        );
+        let manifest: Value = serde_json::from_str(
+            body["prompt"]["2"]["inputs"]["manifest_json"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["architecture"], "flux");
+        assert_eq!(manifest["pairs"][0]["target"], "targets/0000.png");
+        assert_eq!(manifest["pairs"][0]["instruction"], "ohwx, a portrait");
+        assert_eq!(manifest["pairs"][1]["target"], "targets/0001.png");
+        assert_eq!(manifest["pairs"][1]["instruction"], "ohwx, from behind");
+        assert!(
+            manifest["pairs"][0]["reference"].is_null(),
+            "an identity run trains on the target alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_target_with_no_caption_beside_it_is_refused() {
+        let work = dataset();
+        fs::remove_file(work.path().join("targets/0001.txt")).unwrap();
+        let error = run(
+            &Config {
+                enabled: true,
+                base_url: "http://127.0.0.1:9".into(),
+                ..Default::default()
+            },
+            &base(),
+            work.path(),
+            &work.path().join("out.safetensors"),
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, TrainError::Invalid(message) if message.contains("instruction")),
+            "a dataset the writer could not have produced must not reach the trainer: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_graph_comfyui_will_not_accept_fails_the_job() {
+        let server = MockServer::start().await;
+        uploads(&server).await;
+        queues(
+            &server,
+            json!({
+                "prompt_id": Uuid::new_v4(),
+                "number": 1,
+                "error": {"type": "prompt_outputs_failed_validation"}
+            }),
+        )
+        .await;
+
+        let work = dataset();
+        let error = run(
+            &config(&server),
+            &base(),
+            work.path(),
+            &work.path().join("out.safetensors"),
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&error, TrainError::Failed(message) if message.contains("rejected")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn weights_too_small_to_be_trained_are_not_accepted() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        uploads(&server).await;
+        queues(&server, json!({"prompt_id": prompt, "number": 1})).await;
+        finishes(&server, prompt).await;
+        // ComfyUI serves its error pages with a 200, so size is the only tell.
+        serves(&server, b"<html>not found</html>".to_vec()).await;
+
+        let work = dataset();
+        let output = work.path().join("out.safetensors");
+        let error = run(&config(&server), &base(), work.path(), &output, 2)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, TrainError::Failed(message) if message.contains("too small")),
+            "{error}"
+        );
+        assert!(
+            !output.exists(),
+            "a rejected download leaves nothing behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_graph_that_never_finishes_times_out() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        uploads(&server).await;
+        queues(&server, json!({"prompt_id": prompt, "number": 1})).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({prompt.to_string(): {"status": {"status_str": "running"}}}),
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let work = dataset();
+        let client = reqwest::Client::new();
+        let failure = wait_prompt(
+            &client,
+            &config(&server),
+            prompt,
+            Duration::from_millis(120),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&failure.error, TrainError::Failed(message) if message.contains("timed out")),
+            "{}",
+            failure.error
+        );
+        drop(work);
+    }
+
+    #[tokio::test]
+    async fn a_graph_that_errors_is_reported_rather_than_polled_forever() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        Mock::given(method("GET"))
+            .and(path(format!("/history/{prompt}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({prompt.to_string(): {"status": {"status_str": "error"}}}),
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let failure = wait_prompt(
+            &reqwest::Client::new(),
+            &config(&server),
+            prompt,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&failure.error, TrainError::Failed(message) if message.contains("train failed")),
+            "{}",
+            failure.error
+        );
+    }
+
+    #[tokio::test]
+    async fn training_against_a_disabled_comfyui_does_not_reach_the_network() {
+        let work = dataset();
+        let error = run(
+            &Config::default(),
+            &base(),
+            work.path(),
+            &work.path().join("out.safetensors"),
+            2,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, TrainError::Disabled), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_dataset_beside_comfyui_is_staged_rather_than_uploaded() {
+        let server = MockServer::start().await;
+        let prompt = Uuid::new_v4();
+        queues(&server, json!({"prompt_id": prompt, "number": 1})).await;
+        finishes(&server, prompt).await;
+        serves(&server, vec![7u8; 20_000]).await;
+
+        // models_dir with a sibling input/ is the shared-volume deployment,
+        // where the dataset can simply be copied into place.
+        let comfy = tempfile::tempdir().unwrap();
+        let input = comfy.path().join("input");
+        fs::create_dir_all(&input).unwrap();
+        let mut settings = config(&server);
+        settings.models_dir = comfy.path().join("models");
+        fs::create_dir_all(&settings.models_dir).unwrap();
+
+        let work = dataset();
+        run(
+            &settings,
+            &base(),
+            work.path(),
+            &work.path().join("out.safetensors"),
+            2,
+        )
+        .await
+        .unwrap();
+
+        let staged: Vec<PathBuf> = fs::read_dir(&input)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|item| item.path()))
+            .collect();
+        assert_eq!(staged.len(), 1, "one folder per training run");
+        // Captions ride in the graph's captions_json, so only the images stage.
+        assert!(staged[0].join("targets/0000.png").is_file());
+        assert!(staged[0].join("targets/0001.png").is_file());
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path() == "/upload/image"),
+            "a staged dataset must not also be uploaded"
+        );
     }
 
     #[test]

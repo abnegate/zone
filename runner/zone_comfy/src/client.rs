@@ -17,12 +17,19 @@ use crate::recipe::{
 };
 
 pub const MAX_SOURCE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+/// Clips come back from the artifact store rather than a chat upload, so the
+/// cap matches what the store is willing to keep rather than a request body.
+pub const MAX_SOURCE_VIDEO_BYTES: usize = 64 * 1024 * 1024;
 const PACKAGED_VIDEO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-api.json");
 const PACKAGED_I2V_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/wan2.2-ti2v-5b-i2v-api.json");
 const PACKAGED_AUDIO_WORKFLOW: &str =
     include_str!("../../../comfyui/workflows/ace-step-v1-3.5b-api.json");
+const PACKAGED_UPSCALE_WORKFLOW: &str =
+    include_str!("../../../comfyui/workflows/upscale-image-api.json");
+const PACKAGED_UPSCALE_VIDEO_WORKFLOW: &str =
+    include_str!("../../../comfyui/workflows/upscale-video-api.json");
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -73,6 +80,32 @@ impl SourceImage {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SourceVideo {
+    pub bytes: bytes::Bytes,
+    pub mime: String,
+    pub filename: String,
+}
+
+impl SourceVideo {
+    pub fn new(bytes: impl Into<bytes::Bytes>, mime: &str) -> Result<Self, Error> {
+        let mime = normalize_source_video_mime(mime)?;
+        let bytes = bytes.into();
+        if bytes.is_empty() || bytes.len() > MAX_SOURCE_VIDEO_BYTES {
+            return Err(Error::Configuration("source video is empty or too large"));
+        }
+        Ok(Self {
+            filename: format!(
+                "zone-upscale-{}.{}",
+                Uuid::new_v4(),
+                extension_for_video_mime(&mime)
+            ),
+            bytes,
+            mime,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     config: Config,
@@ -110,6 +143,18 @@ enum OutputMode {
     Image,
     Video,
     Audio,
+}
+
+/// What to poll a submitted graph for, and what to tell the caller while it runs.
+#[derive(Clone, Copy)]
+struct Collection<'a> {
+    mode: OutputMode,
+    /// Graph node the media is collected from. `None` sweeps every node, which
+    /// a graph whose loader previews its own input cannot afford.
+    node: Option<&'a str>,
+    queued: &'a str,
+    generating: &'a str,
+    saving: &'a str,
 }
 
 fn collect_output_files(node: &Value, mode: OutputMode) -> Result<Vec<OutputImage>, Error> {
@@ -167,14 +212,24 @@ fn outputs_from_history_entry(
     status: &str,
     nodes: Option<&serde_json::Map<String, Value>>,
     mode: OutputMode,
+    output_node: Option<&str>,
 ) -> Result<Option<Vec<OutputImage>>, Error> {
     if status == "error" {
         return Err(Error::InvalidResponse("workflow execution failed"));
     }
     let mut files = Vec::new();
     if let Some(nodes) = nodes {
-        for node in nodes.values() {
-            files.extend(collect_output_files(node, mode)?);
+        match output_node {
+            Some(id) => {
+                if let Some(node) = nodes.get(id) {
+                    files.extend(collect_output_files(node, mode)?);
+                }
+            }
+            None => {
+                for node in nodes.values() {
+                    files.extend(collect_output_files(node, mode)?);
+                }
+            }
         }
     }
     if files.is_empty() {
@@ -326,10 +381,13 @@ impl Client {
             cancel,
             deadline,
             progress,
-            "Image queued...",
-            "Generating image...",
-            "Saving generated image...",
-            OutputMode::Image,
+            Collection {
+                mode: OutputMode::Image,
+                node: None,
+                queued: "Image queued...",
+                generating: "Generating image...",
+                saving: "Saving generated image...",
+            },
         )
         .await
     }
@@ -387,10 +445,99 @@ impl Client {
             cancel,
             deadline,
             progress,
-            "Video queued...",
-            "Generating video...",
-            "Saving generated video...",
-            OutputMode::Video,
+            Collection {
+                mode: OutputMode::Video,
+                node: None,
+                queued: "Video queued...",
+                generating: "Generating video...",
+                saving: "Saving generated video...",
+            },
+        )
+        .await
+    }
+
+    pub async fn upscale_image(
+        &self,
+        source: &SourceImage,
+        cancel: &mut broadcast::Receiver<()>,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<Vec<GeneratedImage>, Error> {
+        if !self.config.enabled {
+            return Err(Error::Disabled);
+        }
+        if cancel.try_recv().is_ok() {
+            return Err(Error::Cancelled);
+        }
+        let workflow = load_upscale_workflow(&self.config.upscale_workflow_path)?;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(self.config.upscale_generation_timeout_secs);
+        let _ = progress.send("Uploading source image...".to_string());
+        let uploaded = self
+            .upload_media(
+                &source.bytes,
+                &source.filename,
+                &source.mime,
+                cancel,
+                deadline,
+            )
+            .await?;
+        let workflow =
+            configure_upscale_image_workflow(workflow, &self.config.upscale_model, &uploaded)?;
+        self.submit_and_collect(
+            workflow,
+            cancel,
+            deadline,
+            progress,
+            Collection {
+                mode: OutputMode::Image,
+                node: Some(UPSCALE_IMAGE_OUTPUT_NODE),
+                queued: "Upscale queued...",
+                generating: "Upscaling image...",
+                saving: "Saving upscaled image...",
+            },
+        )
+        .await
+    }
+
+    pub async fn upscale_video(
+        &self,
+        source: &SourceVideo,
+        cancel: &mut broadcast::Receiver<()>,
+        progress: mpsc::UnboundedSender<String>,
+    ) -> Result<Vec<GeneratedImage>, Error> {
+        if !self.config.enabled {
+            return Err(Error::Disabled);
+        }
+        if cancel.try_recv().is_ok() {
+            return Err(Error::Cancelled);
+        }
+        let workflow = load_upscale_video_workflow(&self.config.upscale_workflow_path)?;
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(self.config.upscale_generation_timeout_secs);
+        let _ = progress.send("Uploading source video...".to_string());
+        let uploaded = self
+            .upload_media(
+                &source.bytes,
+                &source.filename,
+                &source.mime,
+                cancel,
+                deadline,
+            )
+            .await?;
+        let workflow =
+            configure_upscale_video_workflow(workflow, &self.config.upscale_model, &uploaded)?;
+        self.submit_and_collect(
+            workflow,
+            cancel,
+            deadline,
+            progress,
+            Collection {
+                mode: OutputMode::Video,
+                node: Some(UPSCALE_VIDEO_OUTPUT_NODE),
+                queued: "Upscale queued...",
+                generating: "Upscaling video...",
+                saving: "Saving upscaled video...",
+            },
         )
         .await
     }
@@ -422,10 +569,13 @@ impl Client {
             cancel,
             deadline,
             progress,
-            "Audio queued...",
-            "Generating audio...",
-            "Saving generated audio...",
-            OutputMode::Audio,
+            Collection {
+                mode: OutputMode::Audio,
+                node: None,
+                queued: "Audio queued...",
+                generating: "Generating audio...",
+                saving: "Saving generated audio...",
+            },
         )
         .await
     }
@@ -436,21 +586,16 @@ impl Client {
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
         progress: mpsc::UnboundedSender<String>,
-        queued: &str,
-        generating: &str,
-        saving: &str,
-        mode: OutputMode,
+        collection: Collection<'_>,
     ) -> Result<Vec<GeneratedImage>, Error> {
         let started = std::time::Instant::now();
-        let kind = match mode {
+        let kind = match collection.mode {
             OutputMode::Image => "image",
             OutputMode::Video => "video",
             OutputMode::Audio => "audio",
         };
         let result = self
-            .submit_and_collect_inner(
-                workflow, cancel, deadline, progress, queued, generating, saving, mode,
-            )
+            .submit_and_collect_inner(workflow, cancel, deadline, progress, collection)
             .await;
         let status = match &result {
             Ok(_) => "ok",
@@ -471,10 +616,7 @@ impl Client {
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
         progress: mpsc::UnboundedSender<String>,
-        queued: &str,
-        generating: &str,
-        saving: &str,
-        mode: OutputMode,
+        collection: Collection<'_>,
     ) -> Result<Vec<GeneratedImage>, Error> {
         let request = self
             .authorize(self.client.post(format!("{}/prompt", self.config.base_url)))
@@ -493,7 +635,7 @@ impl Client {
             })
             .await?;
         let prompt_id = response.prompt_id;
-        let _ = progress.send(queued.to_string());
+        let _ = progress.send(collection.queued.to_string());
 
         let mut announced_generation = false;
         loop {
@@ -509,12 +651,12 @@ impl Client {
                 }
                 _ = tokio::time::sleep(Duration::from_millis(self.config.poll_interval_ms)) => {
                     if !announced_generation {
-                        let _ = progress.send(generating.to_string());
+                        let _ = progress.send(collection.generating.to_string());
                         announced_generation = true;
                     }
-                    match self.history_outputs(&prompt_id, cancel, deadline, mode).await {
+                    match self.history_outputs(&prompt_id, cancel, deadline, collection).await {
                         Ok(Some(outputs)) => {
-                            let _ = progress.send(saving.to_string());
+                            let _ = progress.send(collection.saving.to_string());
                             let result = self.fetch_outputs(outputs, cancel, deadline).await;
                             self.clear_history(&prompt_id).await;
                             if matches!(result, Err(Error::Cancelled | Error::Timeout)) {
@@ -541,11 +683,29 @@ impl Client {
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
     ) -> Result<String, Error> {
-        let filename = sanitize_upload_name(&source.filename)?;
-        let part = reqwest::multipart::Part::bytes(source.bytes.to_vec())
+        self.upload_media(
+            &source.bytes,
+            &source.filename,
+            &source.mime,
+            cancel,
+            deadline,
+        )
+        .await
+    }
+
+    async fn upload_media(
+        &self,
+        bytes: &bytes::Bytes,
+        name: &str,
+        mime: &str,
+        cancel: &mut broadcast::Receiver<()>,
+        deadline: tokio::time::Instant,
+    ) -> Result<String, Error> {
+        let filename = sanitize_upload_name(name)?;
+        let part = reqwest::multipart::Part::bytes(bytes.to_vec())
             .file_name(filename.clone())
-            .mime_str(&source.mime)
-            .map_err(|_| Error::Configuration("source image type is not supported"))?;
+            .mime_str(mime)
+            .map_err(|_| Error::Configuration("source media type is not supported"))?;
         let form = reqwest::multipart::Form::new()
             .part("image", part)
             .text("overwrite", "true")
@@ -597,7 +757,7 @@ impl Client {
         prompt_id: &str,
         cancel: &mut broadcast::Receiver<()>,
         deadline: tokio::time::Instant,
-        mode: OutputMode,
+        collection: Collection<'_>,
     ) -> Result<Option<Vec<OutputImage>>, Error> {
         let request = self.authorize(
             self.client
@@ -623,7 +783,8 @@ impl Client {
         outputs_from_history_entry(
             status,
             entry.get("outputs").and_then(Value::as_object),
-            mode,
+            collection.mode,
+            collection.node,
         )
     }
 
@@ -804,6 +965,123 @@ pub fn build_ace_step_workflow(prompt: &str, checkpoint: &str, seed: u64) -> Res
     let workflow = serde_json::from_str(PACKAGED_AUDIO_WORKFLOW)
         .map_err(|_| Error::Configuration("packaged audio workflow is not valid JSON"))?;
     configure_ace_step_workflow(workflow, prompt, checkpoint, seed)
+}
+
+const UPSCALE_IMAGE_OUTPUT_NODE: &str = "4";
+const UPSCALE_VIDEO_OUTPUT_NODE: &str = "5";
+
+fn load_upscale_workflow(path: &std::path::Path) -> Result<Value, Error> {
+    if path.is_file() {
+        return load_workflow_file(path)
+            .map_err(|_| Error::Configuration("upscale workflow path is not readable"));
+    }
+    serde_json::from_str(PACKAGED_UPSCALE_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged upscale workflow is not valid JSON"))
+}
+
+fn load_upscale_video_workflow(image_path: &std::path::Path) -> Result<Value, Error> {
+    let sibling = image_path
+        .parent()
+        .map(|directory| directory.join("upscale-video-api.json"));
+    if let Some(path) = sibling.filter(|path| path.is_file()) {
+        return load_workflow_file(&path)
+            .map_err(|_| Error::Configuration("video upscale workflow path is not readable"));
+    }
+    serde_json::from_str(PACKAGED_UPSCALE_VIDEO_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged video upscale workflow is not valid JSON"))
+}
+
+/// Build the packaged image upscale workflow and mutate only approved inputs.
+pub fn build_upscale_image_workflow(model: &str, image_name: &str) -> Result<Value, Error> {
+    let workflow = serde_json::from_str(PACKAGED_UPSCALE_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged upscale workflow is not valid JSON"))?;
+    configure_upscale_image_workflow(workflow, model, image_name)
+}
+
+/// Build the packaged video upscale workflow and mutate only approved inputs.
+pub fn build_upscale_video_workflow(model: &str, video_name: &str) -> Result<Value, Error> {
+    let workflow = serde_json::from_str(PACKAGED_UPSCALE_VIDEO_WORKFLOW)
+        .map_err(|_| Error::Configuration("packaged video upscale workflow is not valid JSON"))?;
+    configure_upscale_video_workflow(workflow, model, video_name)
+}
+
+fn validate_upscale_image_workflow(workflow: &Value) -> Result<(), Error> {
+    for (pointer, class) in [
+        ("/1/class_type", "LoadImage"),
+        ("/2/class_type", "UpscaleModelLoader"),
+        ("/3/class_type", "ImageUpscaleWithModel"),
+        ("/4/class_type", "PreviewImage"),
+    ] {
+        if workflow.pointer(pointer).and_then(Value::as_str) != Some(class) {
+            return Err(Error::Configuration(
+                "workflow does not match the image upscale contract",
+            ));
+        }
+    }
+    for pointer in ["/1/inputs/image", "/2/inputs/model_name"] {
+        if workflow.pointer(pointer).is_none() {
+            return Err(Error::Configuration(
+                "workflow does not match the image upscale contract",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_upscale_video_workflow(workflow: &Value) -> Result<(), Error> {
+    for (pointer, class) in [
+        ("/1/class_type", "LoadVideo"),
+        ("/2/class_type", "GetVideoComponents"),
+        ("/3/class_type", "UpscaleModelLoader"),
+        ("/4/class_type", "ImageUpscaleWithModel"),
+        ("/5/class_type", "SaveWEBM"),
+    ] {
+        if workflow.pointer(pointer).and_then(Value::as_str) != Some(class) {
+            return Err(Error::Configuration(
+                "workflow does not match the video upscale contract",
+            ));
+        }
+    }
+    for pointer in ["/1/inputs/file", "/3/inputs/model_name", "/5/inputs/fps"] {
+        if workflow.pointer(pointer).is_none() {
+            return Err(Error::Configuration(
+                "workflow does not match the video upscale contract",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn configure_upscale_image_workflow(
+    mut workflow: Value,
+    model: &str,
+    image_name: &str,
+) -> Result<Value, Error> {
+    validate_upscale_image_workflow(&workflow)?;
+    if !is_model_filename(model) {
+        return Err(Error::Configuration(
+            "COMFYUI_UPSCALE_MODEL must be an upscale model filename",
+        ));
+    }
+    workflow["1"]["inputs"]["image"] = json!(sanitize_upload_name(image_name)?);
+    workflow["2"]["inputs"]["model_name"] = json!(model);
+    Ok(workflow)
+}
+
+fn configure_upscale_video_workflow(
+    mut workflow: Value,
+    model: &str,
+    video_name: &str,
+) -> Result<Value, Error> {
+    validate_upscale_video_workflow(&workflow)?;
+    if !is_model_filename(model) {
+        return Err(Error::Configuration(
+            "COMFYUI_UPSCALE_MODEL must be an upscale model filename",
+        ));
+    }
+    workflow["1"]["inputs"]["file"] = json!(sanitize_upload_name(video_name)?);
+    workflow["3"]["inputs"]["model_name"] = json!(model);
+    Ok(workflow)
 }
 
 fn validate_video_workflow(workflow: &Value) -> Result<(), Error> {
@@ -987,6 +1265,21 @@ fn extension_for_mime(mime: &str) -> &'static str {
         .filter(MediaType::is_image)
         .unwrap_or(MediaType::PNG)
         .extension
+}
+
+fn normalize_source_video_mime(mime: &str) -> Result<String, Error> {
+    match mime.trim().to_ascii_lowercase().as_str() {
+        "video/webm" => Ok("video/webm".to_string()),
+        "video/mp4" => Ok("video/mp4".to_string()),
+        _ => Err(Error::Configuration("source video type is not supported")),
+    }
+}
+
+fn extension_for_video_mime(mime: &str) -> &'static str {
+    match mime {
+        "video/mp4" => "mp4",
+        _ => "webm",
+    }
 }
 
 fn is_model_filename(name: &str) -> bool {
@@ -1320,7 +1613,7 @@ mod tests {
             "10": {"images": [{"filename": "cover.png", "subfolder": "", "type": "temp"}]}
         });
         assert!(matches!(
-            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Audio),
+            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Audio, None),
             Err(Error::InvalidResponse(
                 "workflow completed without a usable output"
             ))
@@ -1333,7 +1626,7 @@ mod tests {
             "10": {"audio": [{"filename": "zone.flac", "subfolder": "", "type": "output"}]}
         });
         assert!(matches!(
-            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Audio),
+            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Audio, None),
             Err(Error::InvalidResponse(
                 "workflow returned a non-temporary audio file"
             ))
@@ -1346,7 +1639,7 @@ mod tests {
             "10": {"images": [{"filename": "still.png", "subfolder": "", "type": "output"}]}
         });
         assert!(matches!(
-            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Video),
+            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Video, None),
             Err(Error::InvalidResponse(
                 "workflow completed without a usable output"
             ))
@@ -1356,7 +1649,7 @@ mod tests {
     #[test]
     fn incomplete_history_without_files_keeps_polling() {
         assert!(
-            outputs_from_history_entry("executing", None, OutputMode::Video)
+            outputs_from_history_entry("executing", None, OutputMode::Video, None)
                 .unwrap()
                 .is_none()
         );
@@ -1672,6 +1965,214 @@ mod tests {
             progress_rx.recv().await.as_deref(),
             Some("Uploading source image...")
         );
+    }
+
+    #[test]
+    fn video_upscale_ignores_the_source_clip_the_loader_previews() {
+        // LoadVideo reports the uploaded input as a PreviewVideo, which is a
+        // video output living under "input". Sweeping every node would take
+        // that for the result and fail the whole job.
+        let nodes = json!({
+            "1": {"images": [{"filename": "zone-upscale-in.webm", "subfolder": "", "type": "input"}], "animated": [true]},
+            "5": {"images": [{"filename": "zone-upscale_00001_.webm", "subfolder": "", "type": "output"}], "animated": [true]}
+        });
+        let collected = outputs_from_history_entry(
+            "success",
+            nodes.as_object(),
+            OutputMode::Video,
+            Some(UPSCALE_VIDEO_OUTPUT_NODE),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].filename, "zone-upscale_00001_.webm");
+
+        assert!(matches!(
+            outputs_from_history_entry("success", nodes.as_object(), OutputMode::Video, None),
+            Err(Error::InvalidResponse(
+                "workflow returned an unsupported video location"
+            ))
+        ));
+    }
+
+    #[test]
+    fn upscale_workflows_mutate_only_approved_inputs() {
+        let image = build_upscale_image_workflow("4x-model.safetensors", "shot.png").unwrap();
+        assert_eq!(image["1"]["inputs"]["image"], json!("shot.png"));
+        assert_eq!(
+            image["2"]["inputs"]["model_name"],
+            json!("4x-model.safetensors")
+        );
+        assert_eq!(image["3"]["class_type"], json!("ImageUpscaleWithModel"));
+        assert_eq!(image["4"]["class_type"], json!("PreviewImage"));
+
+        let video = build_upscale_video_workflow("4x-model.safetensors", "clip.webm").unwrap();
+        assert_eq!(video["1"]["inputs"]["file"], json!("clip.webm"));
+        assert_eq!(
+            video["3"]["inputs"]["model_name"],
+            json!("4x-model.safetensors")
+        );
+        // The encoder takes its rate from the source so the clip keeps its timing.
+        assert_eq!(video["5"]["inputs"]["fps"], json!(["2", 2]));
+        assert_eq!(video["5"]["class_type"], json!("SaveWEBM"));
+    }
+
+    #[test]
+    fn the_packaged_upscale_graphs_load_when_no_file_is_configured() {
+        // An operator who never sets COMFYUI_UPSCALE_WORKFLOW_PATH still gets a
+        // working pair, and the clip graph is found beside the image one.
+        let missing = std::path::Path::new("/nonexistent/upscale-image-api.json");
+        let image = load_upscale_workflow(missing).unwrap();
+        assert_eq!(image["1"]["class_type"], json!("LoadImage"));
+        assert_eq!(
+            image[UPSCALE_IMAGE_OUTPUT_NODE]["class_type"],
+            json!("PreviewImage")
+        );
+        let video = load_upscale_video_workflow(missing).unwrap();
+        assert_eq!(video["1"]["class_type"], json!("LoadVideo"));
+        assert_eq!(
+            video[UPSCALE_VIDEO_OUTPUT_NODE]["class_type"],
+            json!("SaveWEBM")
+        );
+        assert!(validate_upscale_image_workflow(&image).is_ok());
+        assert!(validate_upscale_video_workflow(&video).is_ok());
+        // The graphs are not interchangeable.
+        assert!(validate_upscale_video_workflow(&image).is_err());
+        assert!(validate_upscale_image_workflow(&video).is_err());
+    }
+
+    #[test]
+    fn upscale_workflows_reject_pathful_filenames() {
+        assert!(build_upscale_image_workflow("4x-model.safetensors", "../shot.png").is_err());
+        assert!(build_upscale_video_workflow("4x-model.safetensors", "sub/clip.webm").is_err());
+        assert!(build_upscale_image_workflow("../model.safetensors", "shot.png").is_err());
+        assert!(build_upscale_video_workflow(String::new().as_str(), "clip.webm").is_err());
+    }
+
+    #[tokio::test]
+    async fn upscale_image_uploads_source_then_collects_the_preview() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "uploaded-source.png",
+                "subfolder": "",
+                "type": "input"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains(
+                "ImageUpscaleWithModel",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "uploaded-source.png",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "u1"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/u1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "u1": {"status": {"status_str": "success"}, "outputs": {
+                    "4": {"images": [{"filename": "big.png", "subfolder": "", "type": "temp"}]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![9, 9, 9]),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let source = SourceImage::new(vec![1, 2, 3], "image/png").unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let images = client
+            .upscale_image(&source, &mut cancel_rx, progress_tx)
+            .await
+            .unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].bytes.as_ref(), &[9, 9, 9]);
+        assert_eq!(
+            progress_rx.recv().await.as_deref(),
+            Some("Uploading source image...")
+        );
+    }
+
+    #[tokio::test]
+    async fn upscale_video_uploads_the_clip_and_returns_only_the_encoded_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/upload/image"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "uploaded-clip.webm",
+                "subfolder": "",
+                "type": "input"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/prompt"))
+            .and(wiremock::matchers::body_string_contains(
+                "GetVideoComponents",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "uploaded-clip.webm",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "u2"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/history/u2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "u2": {"status": {"status_str": "success"}, "outputs": {
+                    "1": {"images": [{"filename": "uploaded-clip.webm", "subfolder": "", "type": "input"}], "animated": [true]},
+                    "5": {"images": [{"filename": "zone-upscale_00001_.webm", "subfolder": "", "type": "output"}], "animated": [true]}
+                }}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/view"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/webm")
+                    .set_body_bytes(vec![4, 5, 6]),
+            )
+            .mount(&server)
+            .await;
+        let client = Client::new(Config {
+            enabled: true,
+            base_url: server.uri(),
+            poll_interval_ms: 50,
+            ..Default::default()
+        })
+        .unwrap();
+        let source = SourceVideo::new(vec![1, 2, 3], "video/webm").unwrap();
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+        let videos = client
+            .upscale_video(&source, &mut cancel_rx, progress_tx)
+            .await
+            .unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].mime, "video/webm");
+        assert_eq!(videos[0].filename, "zone-upscale_00001_.webm");
     }
 
     #[tokio::test]

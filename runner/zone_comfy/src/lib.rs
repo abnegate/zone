@@ -1,5 +1,5 @@
-//! ComfyUI integration: image, video, and audio generation, model inventory,
-//! and LoRA training.
+//! ComfyUI integration: image, video, and audio generation, upscaling, model
+//! inventory, and LoRA training.
 //!
 //! The crate talks to a ComfyUI server over HTTP and owns nothing else. It has
 //! no web framework, database, or application state, so it can be dropped into
@@ -38,6 +38,27 @@
 //! # fn litellm_key() -> String { String::new() }
 //! ```
 //!
+//! A clip can stand in for that image set. [`extract`] samples it above the
+//! rate the caller asked for, keeps the sharpest frame of each moment, drops
+//! the ones that repeat a shot already taken, and crops what is left around
+//! whatever moved:
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use zone_comfy::{Config, video};
+//!
+//! let clip = video::extract(
+//!     &Config::from_env(),
+//!     &std::fs::read("subject.mp4")?,
+//!     "subject.mp4",
+//!     video::Options { fps: 4, resolution: 512, mirror: true, limit: 48 },
+//! )
+//! .await?;
+//! # let _ = clip;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! A host that collects metrics installs [`observe_requests`] once at startup;
 //! without it the crate records nothing and pulls in no metrics stack.
 
@@ -52,10 +73,12 @@ pub mod observe;
 pub mod quality;
 pub mod recipe;
 pub mod screening;
+pub mod subject;
 pub mod train;
+pub mod video;
 
-pub use caption::{CaptionImage, CaptionRequest, Captioner, data_url};
-pub use client::{Client, Error, GeneratedImage, SourceImage};
+pub use caption::{CaptionImage, CaptionRequest, Captioner, Draft, data_url};
+pub use client::{Client, Error, GeneratedImage, SourceImage, SourceVideo};
 pub use config::Config;
 pub use dataset::{Concern, Finding, inspect};
 pub use inventory::{InventoryItem, WeightSidecar, scan};
@@ -67,3 +90,5 @@ pub use observe::{RequestObserver, observe_requests};
 pub use quality::Quality;
 pub use recipe::{PromptMode, Recipe, RecipeCatalog, sanitize_weight_filename};
 pub use screening::{Rejection, Verdict, screen};
+pub use subject::Subject;
+pub use video::{Clip, Frame, FrameRequest, extract};

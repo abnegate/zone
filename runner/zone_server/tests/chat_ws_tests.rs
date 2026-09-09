@@ -1610,6 +1610,487 @@ async fn test_attached_image_routes_to_image_to_image() {
 }
 
 #[tokio::test]
+async fn test_attached_image_upscale_routes_and_serves_protected_artifact() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "uploaded-source.png",
+            "subfolder": "",
+            "type": "input"
+        })))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .and(wiremock::matchers::body_string_contains(
+            "uploaded-source.png",
+        ))
+        .and(wiremock::matchers::body_string_contains(
+            "ImageUpscaleWithModel",
+        ))
+        .and(wiremock::matchers::body_string_contains(
+            "custom-upscale.safetensors",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "up-1"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/up-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "up-1": {
+                "status": {"status_str": "success"},
+                "outputs": {"4": {"images": [{
+                    "filename": "bigger.png", "subfolder": "", "type": "temp"
+                }]}}
+            }
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(b"upscaled-bytes"),
+        )
+        .expect(1)
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    config.comfyui.upscale_model = "custom-upscale.safetensors".to_string();
+    let addr = spawn_server_with_config(config).await;
+
+    let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "upscale this to 4k",
+                "metadata": {
+                    "attachments": [{
+                        "name": "rooster.png",
+                        "mime": "image/png",
+                        "url": red_png_data_url()
+                    }]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut image_url = None;
+    let mut assistant_message_id = None;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("image") => {
+                image_url = frame["attachment"]["url"].as_str().map(str::to_string);
+            }
+            Some("message_end") => {
+                assistant_message_id = frame["message_id"].as_str().map(str::to_string);
+                break;
+            }
+            Some("error") => panic!("unexpected upscale error: {frame}"),
+            _ => {}
+        }
+    }
+    let image_url = image_url.expect("upscaling must announce an artifact URL");
+    let assistant_message_id =
+        assistant_message_id.expect("message_end must contain the persisted message ID");
+    assert!(image_url.starts_with("/api/artifacts/"));
+
+    let artifact = reqwest::Client::new()
+        .get(format!("http://{addr}{image_url}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(artifact.status(), reqwest::StatusCode::OK);
+    assert_eq!(artifact.bytes().await.unwrap().as_ref(), b"upscaled-bytes");
+
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let persisted = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == assistant_message_id.as_str())
+        .expect("upscaled image message must survive reload");
+    assert_eq!(persisted["content"], "Upscaled image.");
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
+async fn test_naming_the_video_upscales_it_past_an_attached_screenshot() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .and(wiremock::matchers::body_string_contains(
+            "Wan22ImageToVideoLatent",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "gen-1"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/gen-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "gen-1": {"status": {"status_str": "success"}, "outputs": {"10": {"gifs": [{
+                "filename": "zone.webm", "subfolder": "", "type": "output"
+            }]}}}
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "uploaded-clip.webm", "subfolder": "", "type": "input"
+        })))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    // Only reached when the source resolved to the thread's clip rather than
+    // the screenshot attached to this turn.
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .and(wiremock::matchers::body_string_contains(
+            "GetVideoComponents",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "up-1"})))
+        .expect(1)
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/up-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "up-1": {"status": {"status_str": "success"}, "outputs": {"5": {"images": [{
+                "filename": "zone-upscale_00001_.webm", "subfolder": "", "type": "output"
+            }], "animated": [true]}}}
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/webm")
+                .set_body_bytes(b"webm-bytes"),
+        )
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-thread-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let addr = spawn_server_with_config(config).await;
+
+    let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "Please generate a video of a blue fox running",
+                "metadata": {"video_generation": true}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("message_end") => break,
+            Some("error") => panic!("unexpected video generation error: {frame}"),
+            _ => {}
+        }
+    }
+
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "content": "upscale the video",
+                "metadata": {
+                    "attachments": [{
+                        "name": "rooster.png",
+                        "mime": "image/png",
+                        "url": red_png_data_url()
+                    }]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut assistant_message_id = None;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("message_end") => {
+                assistant_message_id = frame["message_id"].as_str().map(str::to_string);
+                break;
+            }
+            Some("error") => panic!("unexpected upscale error: {frame}"),
+            _ => {}
+        }
+    }
+    let assistant_message_id = assistant_message_id.expect("upscale must finish with a message");
+    let reloaded = client
+        .get_auth(&format!("/api/chats/{chat_id}"), &token)
+        .await
+        .json_value();
+    let persisted = reloaded["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == assistant_message_id.as_str())
+        .expect("upscaled clip message must survive reload");
+    assert_eq!(persisted["content"], "Upscaled video.");
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+/// Mount a ComfyUI that upscales an attached image, returning bytes of the
+/// caller's choosing so a test can drive the size the artifact store sees.
+async fn upscale_comfy(output: Vec<u8>) -> MockServer {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "uploaded-source.png", "subfolder": "", "type": "input"
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "u1"})))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/history/u1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "u1": {"status": {"status_str": "success"}, "outputs": {"4": {"images": [{
+                "filename": "big.png", "subfolder": "", "type": "temp"
+            }]}}}
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/view"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(output),
+        )
+        .mount(&comfy)
+        .await;
+    comfy
+}
+
+fn upscale_send() -> WsMessage {
+    WsMessage::Text(
+        json!({
+            "type": "send",
+            "content": "upscale this to 4k",
+            "metadata": {"attachments": [{
+                "name": "rooster.png", "mime": "image/png", "url": red_png_data_url()
+            }]}
+        })
+        .to_string()
+        .into(),
+    )
+}
+
+#[tokio::test]
+async fn test_upscale_output_too_large_says_so_rather_than_claiming_nothing_came_back() {
+    // 4x on a large source overruns the artifact cap, and after minutes of GPU
+    // "nothing came back" is the wrong thing to tell the user.
+    let comfy = upscale_comfy(vec![0u8; 64 * 1024 * 1024 + 1]).await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-big-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
+    socket.send(upscale_send()).await.unwrap();
+
+    assert_eq!(
+        image_error(&mut socket).await,
+        "Upscaling finished, but the image is too large to store"
+    );
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
+async fn test_upscale_reports_an_unreachable_comfyui_without_an_empty_message() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let refused = listener.local_addr().unwrap();
+    drop(listener);
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-refused-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = format!("http://{refused}");
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
+    socket.send(upscale_send()).await.unwrap();
+
+    assert_eq!(
+        image_error(&mut socket).await,
+        "Upscaling failed: cannot reach ComfyUI. Start the image service and try again."
+    );
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
+async fn test_upscale_cancel_before_the_prompt_lands_never_submits() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/upload/image"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "uploaded-source.png", "subfolder": "", "type": "input"
+        })))
+        .mount(&comfy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_json(json!({"prompt_id": "never"})),
+        )
+        .mount(&comfy)
+        .await;
+
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-cancel-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let (_client, _token, _chat_id, mut socket) = image_socket(config).await;
+    socket.send(upscale_send()).await.unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "cancel"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut cancelled = false;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("cancelled") => {
+                cancelled = true;
+                break;
+            }
+            Some("message_end") => panic!("a cancelled upscale must not leave a bubble: {frame}"),
+            _ => {}
+        }
+    }
+    assert!(cancelled, "cancelling an upscale must be acknowledged");
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
+async fn test_upscale_without_media_reports_what_is_missing() {
+    let comfy = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/prompt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"prompt_id": "never"})))
+        .expect(0)
+        .mount(&comfy)
+        .await;
+
+    let client = TestClient::with_db().await;
+    let (token, chat_id) = seed_chat_with_model(&client, "not-a-chat-model").await;
+    let artifact_root =
+        std::env::temp_dir().join(format!("zone-ws-upscale-empty-{}", uuid::Uuid::new_v4()));
+    let mut config = test_config();
+    config.comfyui.enabled = true;
+    config.comfyui.base_url = comfy.uri();
+    config.comfyui.poll_interval_ms = 50;
+    config.comfyui.artifact_root = artifact_root.clone();
+    let addr = spawn_server_with_config(config).await;
+
+    let (mut socket, _) = connect_async(format!("ws://{}/ws/chats/{}", addr, chat_id))
+        .await
+        .expect("websocket connect");
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "auth", "token": token}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "send", "content": "upscale this to 4k"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut error = None;
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(10)).await {
+        match frame["type"].as_str() {
+            Some("error") => {
+                error = frame["message"].as_str().map(str::to_string);
+                break;
+            }
+            Some("message_end") => panic!("upscaling with no media must not produce a message"),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        error.as_deref(),
+        Some("Upscaling needs an image or video: attach one or generate one first")
+    );
+    let _ = tokio::fs::remove_dir_all(artifact_root).await;
+}
+
+#[tokio::test]
 async fn test_image_failure_never_announces_empty_assistant_message() {
     let comfy = MockServer::start().await;
     Mock::given(method("POST"))
@@ -2130,7 +2611,9 @@ async fn test_image_status_precedes_stalled_prompt_and_timeout_is_visible() {
     let (_, _, _, mut socket) = image_socket(config).await;
     socket.send(WsMessage::Text(json!({"type":"send", "content":"Generate an image of the same rooster facing the other way"}).to_string().into())).await.unwrap();
     let mut status = false;
-    while let Some(frame) = next_frame(&mut socket, Duration::from_millis(500)).await {
+    // The assertion is the ordering, not how fast the first frame lands, so
+    // wait as patiently as image_error does rather than racing a loaded box.
+    while let Some(frame) = next_frame(&mut socket, Duration::from_secs(5)).await {
         match frame["type"].as_str() {
             Some("status") => {
                 status = true;

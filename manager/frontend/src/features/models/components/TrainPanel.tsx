@@ -1,4 +1,4 @@
-import { Button, Input, Select } from '@zone/ui';
+import { Button, Checkbox, Input, Select } from '@zone/ui';
 import { type FormEvent, type ReactElement, useEffect, useState } from 'react';
 import {
   type DatasetConcern,
@@ -29,6 +29,9 @@ type Draft = {
   bytes_base64: string;
   reading: boolean;
   reference?: Reference;
+  group?: number;
+  source?: string;
+  mirrored?: boolean;
 };
 
 type Band = 'none' | 'weak' | 'healthy' | 'strong';
@@ -255,17 +258,34 @@ function readiness(images: Draft[]): string {
   return `${pending.length} target ${pending.length === 1 ? 'pair still needs' : 'pairs still need'} ${missing}.`;
 }
 
+// Frames of one clip are all named alike, so the clip they came from is what
+// tells them apart, and a mirrored one is worth saying so its caption can allow
+// for it.
+function captionOf(image: Draft): string {
+  const named = image.source ? `${image.source} ${image.filename}` : image.filename;
+  return image.mirrored ? `${named} (mirrored)` : named;
+}
+
+// Frames arrive grouped per clip, so a second clip has to be shifted past the
+// groups already on the list or the two clips would be captioned as one.
+function nextGroup(images: Draft[]): number {
+  return images.reduce((highest, image) => Math.max(highest, (image.group ?? -1) + 1), 0);
+}
+
 export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
   const [bases, setBases] = useState<TrainBase[]>([]);
   const [name, setName] = useState('');
   const [base, setBase] = useState('');
   const [trigger, setTrigger] = useState('');
   const [images, setImages] = useState<Draft[]>([]);
+  const [mirror, setMirror] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<TrainResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [captioning, setCaptioning] = useState(false);
   const [focusRequested, setFocusRequested] = useState(false);
+  const [sampling, setSampling] = useState<string | null>(null);
+  const [sampled, setSampled] = useState<string | null>(null);
 
   useEffect(() => {
     modelsApi
@@ -371,24 +391,73 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
     if (!edit) setFocusRequested(true);
   };
 
+  const handleVideos = async (files: FileList | null) => {
+    if (busy || !files?.length) return;
+    setError(null);
+    setSampled(null);
+    try {
+      for (const file of Array.from(files)) {
+        setSampling(file.name);
+        const clip = await modelsApi.frames({
+          filename: file.name,
+          bytes_base64: await fileToBase64(file),
+          mirror,
+        });
+        // Appended against whatever the list holds now, not against a copy
+        // taken before the upload: images picked while a clip was extracting
+        // would otherwise be dropped, and a clip that failed would take the
+        // frames of the clips before it with it.
+        setImages((current) => {
+          const offset = nextGroup(current);
+          return [
+            ...current,
+            ...clip.frames.map((frame) => ({
+              key: nextKey(),
+              filename: frame.filename,
+              caption: '',
+              captionRevision: 0,
+              instruction: '',
+              bytes_base64: frame.bytes_base64,
+              reading: false,
+              group: offset + frame.group,
+              source: file.name,
+              mirrored: frame.mirrored,
+            })),
+          ];
+        });
+        setSampled(
+          `${file.name}: ${clip.sampled} frames read at ${clip.sampled_fps.toFixed(1)}/s, ${clip.frames.length} kept`
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not read the video');
+    } finally {
+      setSampling(null);
+    }
+  };
+
   const handleCaption = async () => {
     if (busy || edit || reading || images.length === 0) return;
-    const requested = images.map(({ key, filename, caption, captionRevision, bytes_base64 }) => ({
-      key,
-      filename,
-      caption,
-      captionRevision,
-      bytes_base64,
-    }));
+    const requested = images.map(
+      ({ key, filename, caption, captionRevision, bytes_base64, group }) => ({
+        key,
+        filename,
+        caption,
+        captionRevision,
+        bytes_base64,
+        group,
+      })
+    );
     setCaptioning(true);
     setError(null);
     try {
       const { captions } = await modelsApi.captions({
         trigger: trigger.trim() || undefined,
-        images: requested.map(({ filename, caption, bytes_base64 }) => ({
+        images: requested.map(({ filename, caption, bytes_base64, group }) => ({
           filename,
           caption,
           bytes_base64,
+          group,
         })),
       });
       const generated = new Map(
@@ -429,12 +498,14 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           filename: image.filename,
           caption: edit ? image.instruction.trim() : image.caption,
           bytes_base64: image.bytes_base64,
+          group: image.group,
           ...(edit && image.reference ? { before_base64: image.reference.bytes_base64 } : {}),
         })),
       });
       setResult(trained);
       setImages([]);
       setName('');
+      setSampled(null);
       onTrained();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Training failed');
@@ -461,7 +532,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
       <p className="help-text">
         {edit
           ? 'Add target images, then pair each one with the reference image and instruction that produced it.'
-          : 'Drop images, pick an installed base, and set a unique trigger word. Zone trains every transformer block (rank 32, alpha equals rank, 400+ steps).'}
+          : 'Drop images or a video, pick an installed base, and set a unique trigger word. Every image is cropped square on its subject, then Zone trains every transformer block (rank 32, alpha equals rank, 400+ steps) so the LoRA can keep that identity.'}
       </p>
       {error && <div className="error-placeholder">{error}</div>}
       {result && (
@@ -520,6 +591,32 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             void handleTargets(files);
           }}
         />
+        {!edit && (
+          <>
+            <Input
+              label="Video"
+              type="file"
+              accept="video/*"
+              multiple
+              disabled={busy || Boolean(sampling)}
+              onChange={(event) => void handleVideos(event.target.files)}
+            />
+            <p className="help-text">
+              A clip is sampled above the rate it keeps, so the sharpest frame of each moment wins
+              its slot, repeats of a shot already taken are dropped, and every frame is cropped
+              around whatever moved.
+            </p>
+            <Checkbox
+              label="Mirror half the frames of each second"
+              helpText="More variety from one angle, applied as each clip is read. Turn it off for a subject carrying text, or one a mirror would get wrong."
+              checked={mirror}
+              disabled={busy}
+              onCheckedChange={setMirror}
+            />
+            {sampling && <p className="help-text">Reading {sampling}…</p>}
+            {sampled && <p className="help-text">{sampled}</p>}
+          </>
+        )}
         {images.length > 0 && !edit && (
           <div>
             <Button
@@ -533,7 +630,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
             </Button>
             <p className="help-text">
               Describes pose, setting, and lighting only, so the trigger word carries the identity.
-              Captions you have written are kept.
+              Captions you have written are kept, and frames of one shot are described once.
             </p>
           </div>
         )}
@@ -552,18 +649,19 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
           <div className="train-pairs">
             {images.map((image, index) => {
               const number = index + 1;
-              const referenceLabel = `Reference image for target ${number}: ${image.filename}`;
-              const instructionLabel = `Instruction for target ${number}: ${image.filename}`;
+              const named = captionOf(image);
+              const referenceLabel = `Reference image for target ${number}: ${named}`;
+              const instructionLabel = `Instruction for target ${number}: ${named}`;
               return (
                 <fieldset
                   className="train-pair"
                   key={image.key}
-                  aria-label={`Target pair ${number}: ${image.filename}`}
+                  aria-label={`Target pair ${number}: ${named}`}
                   aria-busy={image.reading || Boolean(image.reference?.reading)}
                 >
                   <legend className="train-pair-title">
                     <span>Target {number}</span>
-                    <span className="train-pair-filename">{image.filename}</span>
+                    <span className="train-pair-filename">{named}</span>
                   </legend>
                   {edit && (
                     <>
@@ -593,7 +691,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                   )}
                   <Input
                     id={edit ? `train-instruction-${image.key}` : `train-caption-${image.key}`}
-                    label={edit ? instructionLabel : `Caption for ${image.filename}`}
+                    label={edit ? instructionLabel : `Caption for ${named}`}
                     value={edit ? image.instruction : image.caption}
                     disabled={busy}
                     required={edit}
@@ -620,17 +718,13 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                       );
                     }}
                   />
-                  <div
-                    className="train-pair-actions"
-                    role="group"
-                    aria-label={`Arrange ${image.filename}`}
-                  >
+                  <div className="train-pair-actions" role="group" aria-label={`Arrange ${named}`}>
                     <Button
                       type="button"
                       size="sm"
                       variant="ghost"
                       disabled={busy || index === 0}
-                      aria-label={`Move target ${number}: ${image.filename} up`}
+                      aria-label={`Move target ${number}: ${named} up`}
                       onClick={() => move(image.key, -1)}
                     >
                       Move up
@@ -640,7 +734,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                       size="sm"
                       variant="ghost"
                       disabled={busy || index === images.length - 1}
-                      aria-label={`Move target ${number}: ${image.filename} down`}
+                      aria-label={`Move target ${number}: ${named} down`}
                       onClick={() => move(image.key, 1)}
                     >
                       Move down
@@ -650,7 +744,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
                       size="sm"
                       variant="ghost"
                       disabled={busy}
-                      aria-label={`Remove target ${number}: ${image.filename}`}
+                      aria-label={`Remove target ${number}: ${named}`}
                       onClick={() => {
                         if (busy) return;
                         setImages((current) =>
@@ -669,7 +763,7 @@ export default function TrainPanel({ onTrained }: { onTrained: () => void }) {
         <Button
           type="submit"
           loading={busy}
-          disabled={busy || !ready}
+          disabled={busy || !ready || Boolean(sampling)}
           aria-describedby={edit ? 'train-pairs-status' : undefined}
         >
           Train

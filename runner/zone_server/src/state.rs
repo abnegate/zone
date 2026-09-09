@@ -17,6 +17,9 @@ use zone_email::EmailService;
 
 /// Maximum concurrent indexing operations
 const MAX_CONCURRENT_INDEX: usize = 3;
+/// One, because a training upload holds its whole body in memory and a second
+/// run would be waiting on the same ComfyUI and the same GPU regardless.
+const MAX_CONCURRENT_TRAIN: usize = 1;
 
 /// Shared application state
 ///
@@ -42,6 +45,11 @@ struct AppStateInner {
     pub encryption_key: [u8; 32],
     /// Semaphore for limiting concurrent indexing operations
     pub index_semaphore: Arc<Semaphore>,
+    /// Training uploads carry their images and clips inline as base64, so a
+    /// handler holds the encoded body and the bytes it decodes out of it at
+    /// once. One at a time bounds the peak to a single request's worth, and
+    /// costs nothing real: a second run would contend for the same ComfyUI.
+    pub train_semaphore: Arc<Semaphore>,
     /// Process-wide MCP hub. Connected once, shared across chat turns.
     pub mcp: OnceCell<McpHub>,
 }
@@ -82,6 +90,7 @@ impl AppState {
                 pull_registry: PullRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
+                train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
             }),
         }
@@ -129,6 +138,7 @@ impl AppState {
                 pull_registry: PullRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
+                train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
             }),
         }
@@ -177,6 +187,7 @@ impl AppState {
                 pull_registry: PullRegistry::new(),
                 encryption_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
+                train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 mcp: OnceCell::new(),
             }),
         }
@@ -230,6 +241,11 @@ impl AppState {
     /// Get the index semaphore for limiting concurrent indexing operations
     pub fn index_semaphore(&self) -> &Arc<Semaphore> {
         &self.inner.index_semaphore
+    }
+
+    /// Permits for training uploads, which are held for the whole request.
+    pub fn train_semaphore(&self) -> &Arc<Semaphore> {
+        &self.inner.train_semaphore
     }
 
     /// Get the sync registry
@@ -296,6 +312,7 @@ pub(crate) fn test_config() -> Config {
         source_index: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
+        train_upload_limit_mb: 512,
     }
 }
 
@@ -328,6 +345,7 @@ mod tests {
             source_index: Default::default(),
             monitoring: Default::default(),
             chat: Default::default(),
+            train_upload_limit_mb: 512,
         }
     }
 

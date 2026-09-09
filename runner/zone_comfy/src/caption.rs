@@ -66,6 +66,30 @@ pub struct CaptionImage {
     pub bytes_base64: String,
     #[serde(default)]
     pub caption: String,
+    /// Images sharing a group show the same shot, so one description covers
+    /// them all. Video frames arrive grouped; separate photos do not.
+    #[serde(default)]
+    pub group: Option<usize>,
+}
+
+/// One image on its way to a caption.
+#[derive(Clone, Debug)]
+pub struct Draft {
+    /// Inline data URL, the only image shape a vision model takes.
+    pub image: String,
+    pub caption: String,
+    /// Drafts sharing a group are described once and captioned alike.
+    pub group: usize,
+}
+
+impl Draft {
+    pub fn new(filename: &str, base64: &str, caption: &str, group: usize) -> Self {
+        Self {
+            image: data_url(filename, base64),
+            caption: caption.to_string(),
+            group,
+        }
+    }
 }
 
 /// Inline data URL, the only image shape an OpenAI-compatible vision model takes.
@@ -104,42 +128,52 @@ impl Captioner {
         !self.host.trim().is_empty() && !self.model.trim().is_empty()
     }
 
-    /// Caption every image whose caption is blank. User-written captions are kept.
+    /// Caption every image whose caption is blank. User-written captions are
+    /// kept, and a group is looked at once however many images it holds.
     ///
-    /// Returns the descriptions the vision model produced, before identity words
-    /// are stripped from them, so a caller can measure how much of that
+    /// Returns the descriptions the vision model produced, before identity
+    /// words are stripped from them, so a caller can measure how much of that
     /// vocabulary the set has in common.
-    pub async fn fill(&self, images: &mut [(String, String)], trigger: &str) -> Vec<String> {
-        if !self.available() || images.iter().all(|(_, caption)| !caption.trim().is_empty()) {
+    pub async fn fill(&self, drafts: &mut [Draft], trigger: &str) -> Vec<String> {
+        if !self.available() || drafts.iter().all(|draft| !draft.caption.trim().is_empty()) {
             return Vec::new();
         }
-        let subject = self.subject(&images[0].0).await;
-        let mut drafts: Vec<Option<String>> = Vec::with_capacity(images.len());
-        for (url, caption) in images.iter() {
-            if caption.trim().is_empty() {
-                drafts.push(self.describe(url, subject.as_deref()).await);
-            } else {
-                drafts.push(None);
-            }
-        }
-        let banned = identity_words(&drafts, subject.as_deref(), trigger);
-        let described: Vec<String> = drafts.iter().flatten().cloned().collect();
-        let mut seen: HashSet<String> = HashSet::new();
-        for ((_, caption), draft) in images.iter_mut().zip(drafts) {
-            if !caption.trim().is_empty() {
+        let subject = self.subject(&drafts[0].image).await;
+        let mut shots: Vec<usize> = Vec::new();
+        let mut described: Vec<Option<String>> = Vec::new();
+        for draft in drafts.iter() {
+            if !draft.caption.trim().is_empty() || shots.contains(&draft.group) {
                 continue;
             }
-            let kept = draft
-                .map(|value| strip_words(&value, &banned))
-                .filter(|value| !value.is_empty())
-                .filter(|value| seen.insert(value.to_ascii_lowercase()));
-            *caption = match kept {
-                Some(value) if trigger.is_empty() => value,
-                Some(value) => format!("{trigger}, {value}"),
-                None => trigger.to_string(),
-            };
+            shots.push(draft.group);
+            described.push(self.describe(&draft.image, subject.as_deref()).await);
         }
-        described
+        let banned = identity_words(&described, subject.as_deref(), trigger);
+        let vocabulary: Vec<String> = described.iter().flatten().cloned().collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let captions: Vec<String> = described
+            .into_iter()
+            .map(|draft| {
+                let kept = draft
+                    .map(|value| strip_words(&value, &banned))
+                    .filter(|value| !value.is_empty())
+                    .filter(|value| seen.insert(value.to_ascii_lowercase()));
+                match kept {
+                    Some(value) if trigger.is_empty() => value,
+                    Some(value) => format!("{trigger}, {value}"),
+                    None => trigger.to_string(),
+                }
+            })
+            .collect();
+        for draft in drafts.iter_mut() {
+            if !draft.caption.trim().is_empty() {
+                continue;
+            }
+            if let Some(shot) = shots.iter().position(|&group| group == draft.group) {
+                draft.caption = captions[shot].clone();
+            }
+        }
+        vocabulary
     }
 
     /// One noun phrase naming the subject, used to seed the exclusion list.
@@ -398,16 +432,16 @@ mod tests {
             .await;
         let captioner = Captioner::new(&config("vision"), server.uri(), "key".into());
         let mut images = vec![
-            ("data:image/png;base64,aaa".to_string(), String::new()),
-            (
-                "data:image/png;base64,bbb".to_string(),
-                "hand written".to_string(),
-            ),
+            Draft::new("a.png", "aaa", "", 0),
+            Draft::new("b.png", "bbb", "hand written", 1),
         ];
         captioner.fill(&mut images, "zrkxyz").await;
 
-        assert_eq!(images[1].1, "hand written", "written captions must survive");
-        let generated = &images[0].1;
+        assert_eq!(
+            images[1].caption, "hand written",
+            "written captions must survive"
+        );
+        let generated = &images[0].caption;
         assert!(generated.starts_with("zrkxyz, "), "got {generated}");
         assert!(
             !generated.contains("teapot") && !generated.contains("robot"),
@@ -438,14 +472,14 @@ mod tests {
             .await;
         let captioner = Captioner::new(&config("vision"), server.uri(), "key".into());
         let mut images = vec![
-            ("data:image/png;base64,aaa".to_string(), String::new()),
-            ("data:image/png;base64,bbb".to_string(), String::new()),
-            ("data:image/png;base64,ccc".to_string(), String::new()),
+            Draft::new("a.png", "aaa", "", 0),
+            Draft::new("b.png", "bbb", "", 1),
+            Draft::new("c.png", "ccc", "", 2),
         ];
         captioner.fill(&mut images, "zrkxyz").await;
-        for (index, (_, caption)) in images.iter().enumerate() {
+        for (index, draft) in images.iter().enumerate() {
             assert_eq!(
-                caption, "zrkxyz",
+                draft.caption, "zrkxyz",
                 "image {index}: one answer repeated for every image describes nothing that varies"
             );
         }
@@ -472,12 +506,9 @@ mod tests {
             .await;
         let captioner = Captioner::new(&config("vision"), server.uri(), "key".into());
         let mut images = vec![
-            ("data:image/png;base64,aaa".to_string(), String::new()),
-            ("data:image/png;base64,bbb".to_string(), String::new()),
-            (
-                "data:image/png;base64,ccc".to_string(),
-                "hand written".to_string(),
-            ),
+            Draft::new("a.png", "aaa", "", 0),
+            Draft::new("b.png", "bbb", "", 1),
+            Draft::new("c.png", "ccc", "hand written", 2),
         ];
         let described = captioner.fill(&mut images, "zrkxyz").await;
 
@@ -491,18 +522,18 @@ mod tests {
             "the shared word must survive for the set to be measurable: {described:?}"
         );
         assert!(
-            !images[0].1.contains("robot"),
+            !images[0].caption.contains("robot"),
             "the caption itself still drops identity: {}",
-            images[0].1
+            images[0].caption
         );
     }
 
     #[tokio::test]
     async fn fill_is_a_no_op_without_a_caption_model() {
         let captioner = Captioner::new(&config(""), "http://unused".into(), "key".into());
-        let mut images = vec![("data:image/png;base64,aaa".to_string(), String::new())];
+        let mut images = vec![Draft::new("a.png", "aaa", "", 0)];
         captioner.fill(&mut images, "zrkxyz").await;
-        assert_eq!(images[0].1, "");
+        assert_eq!(images[0].caption, "");
     }
 
     #[tokio::test]
@@ -514,8 +545,51 @@ mod tests {
             .mount(&server)
             .await;
         let captioner = Captioner::new(&config("vision"), server.uri(), "key".into());
-        let mut images = vec![("data:image/png;base64,aaa".to_string(), String::new())];
+        let mut images = vec![Draft::new("a.png", "aaa", "", 0)];
         captioner.fill(&mut images, "zrkxyz").await;
-        assert_eq!(images[0].1, "zrkxyz");
+        assert_eq!(images[0].caption, "zrkxyz");
+    }
+
+    #[tokio::test]
+    async fn one_shot_is_described_once_however_many_frames_it_holds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_string_contains("main object in this photo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(answer("a teapot robot")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_string_contains("Write a short caption"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(answer("three-quarter view, standing on concrete")),
+            )
+            .mount(&server)
+            .await;
+        let captioner = Captioner::new(&config("vision"), server.uri(), "key".into());
+        let mut frames: Vec<Draft> = (0..6)
+            .map(|index| Draft::new(&format!("{index}.png"), "aaa", "", index / 3))
+            .collect();
+        captioner.fill(&mut frames, "zrkxyz").await;
+
+        let described = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| {
+                String::from_utf8_lossy(&request.body).contains("Write a short caption")
+            })
+            .count();
+        assert_eq!(described, 2, "six frames of two shots cost two round trips");
+        assert_eq!(frames[0].caption, frames[2].caption, "a shot reads alike");
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.caption.starts_with("zrkxyz")),
+            "every frame still carries the trigger"
+        );
     }
 }

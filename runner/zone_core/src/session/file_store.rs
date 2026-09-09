@@ -219,15 +219,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = FileSessionStore::new(dir.path().to_path_buf());
 
-        // Create and save multiple sessions
+        // Saving does not restamp a session, so the order under test comes from
+        // the timestamps themselves rather than from when each one is written.
         let session1 = create_test_session("Prompt 1", "Session 1");
-        let session2 = create_test_session("Prompt 2", "Session 2");
-        let session3 = create_test_session("Prompt 3", "Session 3");
+        let mut session2 = create_test_session("Prompt 2", "Session 2");
+        let mut session3 = create_test_session("Prompt 3", "Session 3");
+        let oldest = session1.updated_at;
+        session2.updated_at = oldest + chrono::Duration::seconds(1);
+        session3.updated_at = oldest + chrono::Duration::seconds(2);
 
         store.save(&session1).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         store.save(&session2).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         store.save(&session3).await.unwrap();
 
         let sessions = store.list().await.unwrap();

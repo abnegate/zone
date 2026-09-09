@@ -67,6 +67,7 @@ RUN mkdir -p \
         /workspace/ComfyUI/models/text_encoders \
         /workspace/ComfyUI/models/vae \
         /workspace/ComfyUI/models/loras \
+        /workspace/ComfyUI/models/upscale_models \
         /workspace/ComfyUI/output \
         /workspace/ComfyUI/temp \
         /workspace/ComfyUI/user \

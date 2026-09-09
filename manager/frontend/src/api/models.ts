@@ -1,7 +1,10 @@
+import type { z } from 'zod';
+import type { TrainFrameSchema } from '../features/models/schemas';
 import {
   BrowseResponseSchema,
   DiskUsageSchema,
   ModelsResponseSchema,
+  TrainClipSchema,
 } from '../features/models/schemas';
 import type {
   BrowseOptions,
@@ -15,6 +18,9 @@ import { parse } from '../validation';
 import { client } from './client';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
+
+export type TrainFrame = z.infer<typeof TrainFrameSchema>;
+export type TrainClip = z.infer<typeof TrainClipSchema>;
 
 export type TrainQuality = {
   improvement: number;
@@ -166,7 +172,7 @@ export const modelsApi = {
 
   async captions(body: {
     trigger?: string;
-    images: Array<{ filename: string; caption: string; bytes_base64: string }>;
+    images: Array<{ filename: string; caption: string; bytes_base64: string; group?: number }>;
   }): Promise<{ captions: string[] }> {
     const response = await fetch(`${API_BASE}/api/models/train/captions`, {
       method: 'POST',
@@ -189,6 +195,7 @@ export const modelsApi = {
       caption: string;
       bytes_base64: string;
       before_base64?: string;
+      group?: number;
     }>;
   }): Promise<TrainResult> {
     const response = await fetch(`${API_BASE}/api/models/train`, {
@@ -201,6 +208,29 @@ export const modelsApi = {
       throw new Error(payload.error || `Failed to train: ${response.status}`);
     }
     return response.json();
+  },
+
+  /**
+   * Pull training frames out of a video. The server samples above the kept rate,
+   * keeps the sharpest frame of each moment, drops repeats of a shot it already
+   * has, and crops what is left around whatever moved.
+   */
+  async frames(body: {
+    filename: string;
+    bytes_base64: string;
+    fps?: number;
+    mirror?: boolean;
+  }): Promise<TrainClip> {
+    const response = await fetch(`${API_BASE}/api/models/train/frames`, {
+      method: 'POST',
+      headers: { ...client.getHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: 'Frame extraction failed' }));
+      throw new Error(payload.error || `Failed to read the video: ${response.status}`);
+    }
+    return parse(TrainClipSchema, await response.json());
   },
 
   async trainBases(): Promise<Array<{ id: string; label: string; edit: boolean }>> {
