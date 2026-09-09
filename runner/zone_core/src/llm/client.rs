@@ -2,7 +2,6 @@
 
 use reqwest::{Client, Url};
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -51,6 +50,8 @@ pub enum LlmError {
     Json(#[from] serde_json::Error),
     #[error("Stream error: {0}")]
     Stream(String),
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl LlmError {
@@ -203,31 +204,18 @@ impl LlmClient {
             ));
         }
 
-        let host = parsed.host_str().ok_or_else(|| {
+        // No network-location rule belongs here. Every client is built from
+        // operator configuration -- `litellm_host` and `ollama_host` off the
+        // process config -- so this URL is trusted input, and a self-hosted
+        // Zone points it at loopback, a LAN address, or a compose service
+        // name. Refusing those ranges rejected the product's own default while
+        // mitigating nothing, since the check read IP literals only and any
+        // hostname resolving inside the network passed untouched. Should
+        // organization settings ever feed these hosts, check the address at
+        // that boundary, against the untrusted value.
+        parsed.host_str().ok_or_else(|| {
             LlmError::InvalidConfig("LLM base_url must include a host".to_string())
         })?;
-
-        if host.eq_ignore_ascii_case("localhost") {
-            return Err(LlmError::InvalidConfig(
-                "LLM base_url host is not allowed".to_string(),
-            ));
-        }
-
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            let blocked = match ip {
-                IpAddr::V4(v4) => {
-                    v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
-                }
-                IpAddr::V6(v6) => {
-                    v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local()
-                }
-            };
-            if blocked {
-                return Err(LlmError::InvalidConfig(
-                    "LLM base_url IP is not allowed".to_string(),
-                ));
-            }
-        }
 
         Ok(())
     }

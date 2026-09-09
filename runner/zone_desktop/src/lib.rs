@@ -161,7 +161,7 @@ mod tests {
             ClientPlatform::current(),
             ClientPlatform::from_os(std::env::consts::OS)
         );
-        assert!(!cfg!(target_os = "android"));
-        assert!(!cfg!(target_os = "ios"));
+        const { assert!(!cfg!(target_os = "android")) };
+        const { assert!(!cfg!(target_os = "ios")) };
     }
 }
