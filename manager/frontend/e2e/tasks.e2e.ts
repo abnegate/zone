@@ -172,14 +172,22 @@ test.describe('Tasks Page', () => {
       });
     });
 
+    let reportProjectsLoaded: () => void = () => {};
+    const projectsLoaded = new Promise<void>((resolve) => {
+      reportProjectsLoaded = resolve;
+    });
+
     // Mock projects endpoint
-    await routeApi(page, '**/api/projects*', (route) => {
+    await routeApi(page, '**/api/projects*', async (route) => {
       if (route.request().method() === 'GET') {
-        route.fulfill({
+        await route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({ success: true, projects: mockProjects }),
         });
+        reportProjectsLoaded();
+      } else {
+        await route.continue();
       }
     });
 
@@ -217,8 +225,10 @@ test.describe('Tasks Page', () => {
 
     // Navigate to tasks page
     await page.click('a[href="/tasks"]');
+    await projectsLoaded;
     await expect(page).toHaveURL('/tasks');
     await expect(page.locator('.tasks-page')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: /New Task/ })).toBeEnabled();
   });
 
   test.describe('Page Header', () => {
@@ -464,10 +474,15 @@ test.describe('Tasks Page', () => {
     });
 
     test('shows loading state during creation', async ({ page }) => {
+      let finishCreation: () => void = () => {};
+      const taskCanCreate = new Promise<void>((resolve) => {
+        finishCreation = resolve;
+      });
+
       await routeApi(page, tasksRoutePattern, async (route) => {
         if (route.request().method() === 'POST') {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          route.fulfill({
+          await taskCanCreate;
+          await route.fulfill({
             status: 201,
             contentType: 'application/json',
             body: JSON.stringify({
@@ -475,7 +490,7 @@ test.describe('Tasks Page', () => {
             }),
           });
         } else {
-          route.continue();
+          await route.continue();
         }
       });
 
@@ -492,6 +507,8 @@ test.describe('Tasks Page', () => {
       await dialog.getByRole('button', { name: 'Create Task' }).click();
 
       await expect(dialog.getByRole('button', { name: 'Creating...' })).toBeVisible();
+      finishCreation();
+      await expect(dialog).toHaveCount(0);
     });
 
     test('shows error when creation fails', async ({ page }) => {

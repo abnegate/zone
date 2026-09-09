@@ -249,8 +249,9 @@ for (const viewport of [
             const toggle = await dialog
               .locator('.toggle-wrapper')
               .boundingBox();
-            expect.soft(toggle?.width).toBe(44);
-            expect.soft(toggle?.height).toBe(24);
+            expect(toggle).not.toBeNull();
+            expect.soft(toggle!.width).toBeCloseTo(44, 3);
+            expect.soft(toggle!.height).toBeCloseTo(24, 3);
             const agentic = dialog.locator('.toggle-wrapper input');
             await dialog
               .getByText('Enable Agentic Mode', { exact: true })

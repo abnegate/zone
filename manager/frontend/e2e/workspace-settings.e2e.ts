@@ -337,13 +337,17 @@ test.describe('Workspace Settings Page', () => {
 
   test.describe('Loading State', () => {
     test('shows loading state while fetching theme', async ({ context, page }) => {
+      let finishLoading: () => void = () => {};
+      const themeCanLoad = new Promise<void>((resolve) => {
+        finishLoading = resolve;
+      });
       await context.unroute(themeRoutePattern);
       await routeApiContext(
         context,
         themeRoutePattern,
         async (route) => {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          route.fulfill({
+          await themeCanLoad;
+          await route.fulfill({
             status: 200,
             contentType: 'application/json',
             body: JSON.stringify({ theme: mockTheme }),
@@ -355,6 +359,8 @@ test.describe('Workspace Settings Page', () => {
       await page.click('a[href="/settings"]');
 
       await expect(page.locator('.loading-state')).toContainText('Loading theme settings');
+      finishLoading();
+      await expect(page.getByRole('heading', { name: 'Theme Configuration' })).toBeVisible();
     });
   });
 
