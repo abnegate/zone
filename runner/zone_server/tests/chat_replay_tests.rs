@@ -3,7 +3,7 @@ mod common;
 
 use axum::http::StatusCode;
 use common::context::{
-    Harness, answer, calls, finish, next, ordinary, pairs, send, successful, tool,
+    Harness, PAGE_CHARS, answer, calls, finish, next, ordinary, pairs, send, successful, tool,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -78,7 +78,7 @@ async fn fresh_seven_large_results_and_errors_survive_restart_and_text_agent_tra
     // read_file pages at FILE_PAGE_CHARS, so a fresh result carries the first
     // page rather than the whole file. What matters is that the page reaches
     // the model intact, not compacted away or replaced by a reference.
-    let paged = |value: &str| value.chars().take(8_000).collect::<String>();
+    let paged = |value: &str| value.chars().take(PAGE_CHARS).collect::<String>();
     for body in &bodies {
         assert!(
             requests[2]["messages"]
@@ -187,7 +187,7 @@ async fn fresh_seven_large_results_and_errors_survive_restart_and_text_agent_tra
 #[tokio::test]
 async fn consumed_active_turn_group_compacts_atomically_while_new_result_and_user_remain_verbatim()
 {
-    let harness = Harness::new(Some(16_000), true, vec![]).await;
+    let harness = Harness::holding(1, true, vec![]).await;
     let first = format!("FIRST_ORIGINAL\n{}\nFIRST_TAIL", "a".repeat(80_000));
     let second = format!("SECOND_ORIGINAL\n{}\nSECOND_TAIL", "b".repeat(80_000));
     let first_path = harness.file("first.txt", &first);
@@ -206,7 +206,7 @@ async fn consumed_active_turn_group_compacts_atomically_while_new_result_and_use
     let requests = harness.requests().await;
     let requests = ordinary(&requests);
     assert_eq!(requests.len(), 3);
-    let paged = |value: &str| value.chars().take(8_000).collect::<String>();
+    let paged = |value: &str| value.chars().take(PAGE_CHARS).collect::<String>();
     assert!(requests[1]["messages"].as_array().unwrap().iter().any(|m| {
         m["content"]
             .as_str()

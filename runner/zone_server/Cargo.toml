@@ -32,6 +32,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
+# IANA zone name for the session block; chrono resolves the offset, not the name.
+iana-time-zone = "=0.1.65"
 uuid = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

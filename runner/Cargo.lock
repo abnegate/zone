@@ -9911,6 +9911,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "http-body-util",
+ "iana-time-zone",
  "jsonwebtoken 11.0.0",
  "lettre",
  "metrics",

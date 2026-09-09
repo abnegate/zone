@@ -3,11 +3,13 @@
 use super::{
     TestClient, create_test_router, create_test_state, test_config, test_email, test_password,
 };
+use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -19,12 +21,82 @@ use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
 };
-use zone_core::context::ContextUsage;
+use zone_core::context::{ContextSource, ContextUsage, Policy};
 use zone_server::config::Config;
 use zone_server::db::{chats, context::Store};
+use zone_server::services::chat::session::{LEASE_LIFETIME, Settings};
 
 pub const MODEL: &str = "context-test";
 pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// `read_file` pages at this many characters, so one large read costs exactly
+/// one page in the durable entry and in every request that carries it.
+pub const PAGE_CHARS: usize = 8_000;
+
+/// `zone_core` estimates one token per four UTF-8 bytes.
+const BYTES_PER_TOKEN: u64 = 4;
+
+/// Wide enough that measuring a chat's fixed prefix is never itself budget-bound.
+const MEASUREMENT_WINDOW: u64 = 200_000;
+
+/// Tool calls one seeded agent round issues, so history arrives as rounds a
+/// real turn could have produced rather than as one transaction no lease can
+/// outlive.
+const ROUND: usize = 64;
+
+/// The advertised context length, shared with the metadata mocks so a fixture
+/// can resize the model between preparations; capacity is resolved per
+/// preparation, never cached across turns.
+#[derive(Clone)]
+struct Window(Arc<AtomicU64>);
+
+impl Window {
+    fn new(limit: Option<u64>) -> Self {
+        Self(Arc::new(AtomicU64::new(limit.unwrap_or_default())))
+    }
+
+    fn get(&self) -> Option<u64> {
+        Some(self.0.load(Ordering::SeqCst)).filter(|limit| *limit > 0)
+    }
+
+    fn set(&self, limit: u64) {
+        self.0.store(limit, Ordering::SeqCst);
+    }
+}
+
+fn page_tokens() -> u64 {
+    u64::try_from(PAGE_CHARS)
+        .unwrap_or(u64::MAX)
+        .div_ceil(BYTES_PER_TOKEN)
+}
+
+/// Invert the production budget: the smallest advertised window whose
+/// compaction threshold reaches `budget` tokens.
+fn window_for(budget: u64) -> u64 {
+    let settings = Settings::from_env().unwrap_or_default();
+    let threshold = |limit: u64| {
+        Policy {
+            limit: Some(limit),
+            reserved: settings.reserved(Some(limit)),
+            source: ContextSource::Configured,
+        }
+        .threshold()
+        .unwrap_or_default()
+    };
+    let ceiling = budget
+        .saturating_mul(2)
+        .saturating_add(u64::from(settings.output));
+    let (mut low, mut high) = (1, ceiling.max(2));
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if threshold(middle) < budget {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
 
 #[derive(Clone)]
 pub struct Script {
@@ -132,12 +204,32 @@ pub struct Harness {
     pub workspace: Uuid,
     pub address: String,
     pub config: Config,
+    window: Window,
     directory: PathBuf,
     server: tokio::task::JoinHandle<()>,
 }
 
 impl Harness {
     pub async fn new(limit: Option<u64>, agent: bool, replies: Vec<ResponseTemplate>) -> Self {
+        Self::advertising(Window::new(limit), agent, replies).await
+    }
+
+    /// A chat whose compaction budget holds its fixed prefix — the rendered
+    /// system prompt, the tool schemas and the framing the server adds, all
+    /// measured through the real preview endpoint — plus `pages` tool result
+    /// pages and half of one more, so the page after those is the one that has
+    /// to compact. Every term scales with the prompt, so growing the prompt
+    /// moves the window with it instead of invalidating a written-down number.
+    pub async fn holding(pages: u64, agent: bool, replies: Vec<ResponseTemplate>) -> Self {
+        let harness =
+            Self::advertising(Window::new(Some(MEASUREMENT_WINDOW)), agent, replies).await;
+        let page = page_tokens();
+        let budget = harness.prefix().await + pages * page + page / 2;
+        harness.window.set(window_for(budget));
+        harness
+    }
+
+    async fn advertising(window: Window, agent: bool, replies: Vec<ResponseTemplate>) -> Self {
         let provider = MockServer::start().await;
         let script = Script::new(replies);
         let responder = script.clone();
@@ -146,10 +238,14 @@ impl Harness {
             .respond_with(move |request: &Request| responder.respond(request))
             .mount(&provider)
             .await;
-        let models = limit.map_or_else(|| json!({"data":[]}), |limit| json!({"data":[{"model_name":MODEL,"litellm_params":{"model":format!("ollama_chat/{MODEL}"),"api_base":provider.uri(),"num_ctx":limit},"model_info":{"id":"verified-local-route"}}]}));
+        let uri = provider.uri();
+        let routes = window.clone();
         Mock::given(method("GET"))
             .and(path("/v2/model/info"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(models))
+            .respond_with(move |_: &Request| {
+                let models = routes.get().map_or_else(|| json!({"data":[]}), |limit| json!({"data":[{"model_name":MODEL,"litellm_params":{"model":format!("ollama_chat/{MODEL}"),"api_base":uri,"num_ctx":limit},"model_info":{"id":"verified-local-route"}}]}));
+                ResponseTemplate::new(200).set_body_json(models)
+            })
             .mount(&provider)
             .await;
         Mock::given(method("GET"))
@@ -157,7 +253,8 @@ impl Harness {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models":[]})))
             .mount(&provider)
             .await;
-        Mock::given(method("POST")).and(path("/api/show")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"capabilities":["completion","tools","vision"],"model_info":{"general.architecture":"test","test.context_length":limit.unwrap_or(32768)}}))).mount(&provider).await;
+        let native = window.clone();
+        Mock::given(method("POST")).and(path("/api/show")).respond_with(move |_: &Request| ResponseTemplate::new(200).set_body_json(json!({"capabilities":["completion","tools","vision"],"model_info":{"general.architecture":"test","test.context_length":native.get().unwrap_or(32768)}}))).mount(&provider).await;
         let database = super::context_database_url();
         let pool = PgPool::connect(&database).await.unwrap();
         let mut config = test_config();
@@ -222,9 +319,18 @@ impl Harness {
             workspace,
             address,
             config,
+            window,
             directory,
             server,
         }
+    }
+
+    /// Every token a request carries before any tool result: the rendered
+    /// instructions, the tool schemas and the framing the server adds itself.
+    async fn prefix(&self) -> u64 {
+        let response = self.preview("", None).await;
+        response.assert_status(StatusCode::OK);
+        usage(&response.json_value()["context"]).used
     }
 
     pub async fn connect(&self) -> Socket {
@@ -443,10 +549,10 @@ pub async fn seed_evidence(harness: &Harness, count: usize) -> Vec<String> {
     use zone_core::llm::{FunctionCall, Message, ToolCall};
 
     let store = harness.store();
-    let lease = store
-        .acquire(Uuid::new_v4(), Duration::from_secs(30))
-        .await
-        .unwrap();
+    let lease = store.acquire(Uuid::new_v4(), LEASE_LIFETIME).await.unwrap();
+    // Renewed on its own schedule as a production turn is: a bare lifetime
+    // lapses mid-seed once the database is shared with the rest of the binary.
+    let mut guard = store.keep_alive(lease.clone(), LEASE_LIFETIME).unwrap();
     let turn = Uuid::new_v4();
     store
         .begin(
@@ -459,36 +565,43 @@ pub async fn seed_evidence(harness: &Harness, count: usize) -> Vec<String> {
         )
         .await
         .unwrap();
-    let calls: Vec<_> = (0..count)
-        .map(|index| ToolCall {
-            id: format!("historical-{index}"),
-            call_type: "function".into(),
-            function: FunctionCall {
-                name: "read_file".into(),
-                arguments: json!({"path":format!("evidence-{index}")}).to_string(),
-            },
-        })
-        .collect();
-    let mut entries = vec![NewEntry {
-        id: Uuid::new_v4().to_string(),
-        message: ReplayMessage::from(&Message::assistant_with_tools(calls)),
-        mutations: Vec::new(),
-    }];
+    // An append holds the lease row locked until it commits, so renewal cannot
+    // run while one is in flight; rounds keep every transaction far shorter
+    // than the lease however loaded the database is.
     let mut references = Vec::new();
-    for index in 0..count {
-        let id = format!("evidence-{}-🙂", Uuid::new_v4());
-        references.push(id.clone());
-        entries.push(NewEntry {
-            id,
-            message: ReplayMessage::from(&Message::tool_result(
-                format!("historical-{index}"),
-                format!("PRIVATE_RAW_BODY_{index} résumé🙂"),
-            )),
+    let mut covered = Vec::new();
+    for round in (0..count).step_by(ROUND) {
+        let last = count.min(round + ROUND);
+        let calls: Vec<_> = (round..last)
+            .map(|index| ToolCall {
+                id: format!("historical-{index}"),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path":format!("evidence-{index}")}).to_string(),
+                },
+            })
+            .collect();
+        let mut entries = vec![NewEntry {
+            id: Uuid::new_v4().to_string(),
+            message: ReplayMessage::from(&Message::assistant_with_tools(calls)),
             mutations: Vec::new(),
-        });
+        }];
+        for index in round..last {
+            let id = format!("evidence-{}-🙂", Uuid::new_v4());
+            references.push(id.clone());
+            entries.push(NewEntry {
+                id,
+                message: ReplayMessage::from(&Message::tool_result(
+                    format!("historical-{index}"),
+                    format!("PRIVATE_RAW_BODY_{index} résumé🙂"),
+                )),
+                mutations: Vec::new(),
+            });
+        }
+        store.append(&lease, turn, &entries).await.unwrap();
+        covered.extend(entries.into_iter().map(|entry| entry.id));
     }
-    store.append(&lease, turn, &entries).await.unwrap();
-    let covered: Vec<_> = entries.into_iter().map(|entry| entry.id).collect();
     store.consumed(&lease, &covered).await.unwrap();
     let history = store.load().await.unwrap();
     let mut state: Value = serde_json::from_str(&state()).unwrap();
@@ -504,6 +617,7 @@ pub async fn seed_evidence(harness: &Harness, count: usize) -> Vec<String> {
         .complete(&lease, turn, "Earlier tools completed", None)
         .await
         .unwrap();
+    guard.stop().await;
     store.release(&lease).await.unwrap();
     references
 }

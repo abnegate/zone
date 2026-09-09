@@ -11,9 +11,10 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::{LlmClient, LlmConfig, Message, Role};
+use zone_server::agent::prompt;
 use zone_server::agent::{
-    AgentEvent, AgentRun, ApprovalGate, ApprovalPolicy, ChatTools, MAX_ITERATIONS, WorkspaceScope,
-    run,
+    AgentEvent, AgentRun, ApprovalGate, ApprovalPolicy, ChatTools, Environment, MAX_ITERATIONS,
+    WorkspaceScope, run,
 };
 
 const MALFORMED: &str =
@@ -785,4 +786,79 @@ fn provider_connections_do_not_depend_on_another_test_runtime() {
         .unwrap();
     let (events, _) = second.block_on(exercise(vec![text("Second response.")]));
     assert_eq!(answer(&events), "Second response.", "{events:?}");
+}
+
+/// The agent loop forwards whatever system message it is handed, so this is the
+/// only place the assembled prompt is checked as the provider receives it:
+/// one system message, first, with the sections in the order `ORDER` fixes.
+/// Relative offsets rather than a snapshot, so rewording a rule cannot fail it.
+#[tokio::test]
+async fn the_assembled_system_prompt_reaches_the_provider_in_section_order() {
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let state = common::create_test_state(common::test_config(), pool);
+    let tools = ChatTools::build(WorkspaceScope {
+        user_id: Uuid::new_v4(),
+        state,
+        workspace_id: Uuid::new_v4(),
+        chat_id: Some(Uuid::new_v4()),
+    })
+    .await;
+    let environment = Environment::at(
+        chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
+        "Pacific/Auckland",
+        std::path::PathBuf::from("/srv/zone"),
+    );
+
+    let (_, requests) = exercise_messages(
+        vec![(200, text("Ready."))],
+        vec![
+            Message::system(prompt::chat(&tools, false, &environment)),
+            Message::user("Help me inspect a file."),
+        ],
+    )
+    .await;
+
+    let first = &requests[0]["messages"][0];
+    assert_eq!(first["role"], "system");
+    let prompt = first["content"].as_str().expect("a system prompt");
+
+    let offset = |section: &str| {
+        prompt
+            .find(section)
+            .unwrap_or_else(|| panic!("{section} is missing from {prompt}"))
+    };
+    let identity =
+        offset("You are Zone's assistant, answering inside one of the user's workspaces.");
+    let boundary = offset("Instructions and data:");
+    let conduct = offset("Reporting outcomes: report what happened, not what you meant to happen.");
+    let reply = offset("Writing the reply:");
+    let refusal = offset("Declining and directness:");
+    let files = offset("act in the server runtime");
+    let session = offset("Session context:");
+
+    assert_eq!(identity, 0, "{prompt}");
+    assert!(identity < boundary, "{prompt}");
+    assert!(boundary < conduct, "{prompt}");
+    assert!(conduct < reply, "{prompt}");
+    assert!(reply < refusal, "{prompt}");
+    assert!(refusal < files, "{prompt}");
+    assert!(files < session, "{prompt}");
+    assert_eq!(
+        prompt.rfind("Session context:"),
+        Some(session),
+        "the live block renders once, last: {prompt}"
+    );
+
+    assert_eq!(
+        requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .count(),
+        1,
+        "{prompt}"
+    );
 }

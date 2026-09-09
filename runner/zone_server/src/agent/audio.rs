@@ -39,7 +39,12 @@ impl Tool for GenerateAudioTool {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "What to generate."
+                    "description": "What to generate. Stay faithful to the request: it must not \
+                                    present incorrect information and must not promote hatred or \
+                                    violence. Before rendering a real person's likeness, ask once \
+                                    for a recording of them and work from what they supply. When \
+                                    the clip arrives, do not describe it back to the user; they \
+                                    can hear it."
                 }
             },
             "required": ["prompt"]
@@ -188,6 +193,28 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["prompt"]["type"], "string");
         assert_eq!(schema["required"], json!(["prompt"]));
+    }
+
+    /// The content rule belongs on the parameter, not only in the system prompt:
+    /// the description is what the model reads as it decides to call.
+    #[tokio::test]
+    async fn the_audio_prompt_carries_the_content_rules() {
+        let schema = GenerateAudioTool(scope(true)).parameters_schema();
+        let description = schema["properties"]["prompt"]["description"]
+            .as_str()
+            .expect("generate_audio describes its prompt");
+
+        for rule in [
+            "must not present incorrect information",
+            "must not promote hatred or violence",
+            "real person's likeness, ask once",
+            "do not describe it back to the user",
+        ] {
+            assert!(
+                description.contains(rule),
+                "the audio prompt description dropped {rule:?}: {description}"
+            );
+        }
     }
 
     #[tokio::test]

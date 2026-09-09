@@ -2341,8 +2341,13 @@ async fn prepare_chat(
     let search = load_web_search(state, content, web_search_requested).await;
     let agentic = preparation.agentic;
     let character = chat.character.as_ref();
-    let mut prompt =
-        session::system_prompt(&chat, &preparation.tools, agentic, &search.capability());
+    let mut prompt = session::system_prompt(
+        &chat,
+        &preparation.tools,
+        agentic,
+        &search.capability(),
+        &preparation.environment,
+    );
     if !agentic && character.is_none() {
         let query_embedding = match state.embedding_service() {
             Some(embedding_service) => {
@@ -2458,29 +2463,6 @@ async fn prepare_chat(
     Ok(preparation)
 }
 
-#[cfg(test)]
-fn chat_system_prompt(
-    character: Option<&ChatCharacter>,
-    agentic: bool,
-    tools: &agent::ChatTools,
-    auto_approve: bool,
-) -> String {
-    match (character, agentic) {
-        (Some(card), true) => {
-            format!(
-                "{}\n\n{}",
-                card.system_prompt(),
-                agent::system_prompt(tools, auto_approve)
-            )
-        }
-        (Some(card), false) => card.system_prompt(),
-        (None, true) => agent::system_prompt(tools, auto_approve),
-        (None, false) => {
-            "You are Zone's assistant, answering inside one of the user's workspaces.".to_string()
-        }
-    }
-}
-
 async fn handle_chat_generation(
     state: &AppState,
     stream: &ChatStream,
@@ -2499,6 +2481,7 @@ async fn handle_chat_generation(
         stop,
         budget,
         timeout,
+        environment: _,
     } = preparation;
     let model_name = model.as_str();
     let mut replay = context.clone();
@@ -3010,28 +2993,63 @@ mod tests {
             system_prompt: Some("Stay {{char}}.".into()),
             ..Default::default()
         };
+        let environment = agent::prompt::Environment::at(
+            chrono::DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
+            "Pacific/Auckland",
+            std::path::PathBuf::from("/srv/zone"),
+        );
+        const CAPABILITY: &str = "Web search is unavailable this turn.";
+        const IDENTITY: &str =
+            "You are Zone's assistant, answering inside one of the user's workspaces.";
 
-        let persona = chat_system_prompt(Some(&character), false, &tools, false);
-        assert_eq!(persona, "Stay Ari.");
+        let persona = session::system_prompt(
+            &session::chat_row(Some(character.clone()), false, false),
+            &tools,
+            false,
+            CAPABILITY,
+            &environment,
+        );
+        assert!(persona.starts_with("Stay Ari."), "{persona}");
+        assert!(persona.ends_with(CAPABILITY), "{persona}");
+        assert!(!persona.contains("You can call these tools"), "{persona}");
 
-        let agent = chat_system_prompt(None, true, &tools, true);
+        let agent = session::system_prompt(
+            &session::chat_row(None, true, true),
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+        );
         assert!(agent.contains("You can call these tools"), "{agent}");
         assert!(
             agent.contains("without waiting for confirmation"),
             "{agent}"
         );
+        assert!(agent.ends_with(CAPABILITY), "{agent}");
 
-        let combined = chat_system_prompt(Some(&character), true, &tools, false);
+        let combined = session::system_prompt(
+            &session::chat_row(Some(character), true, false),
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+        );
         assert!(combined.starts_with("Stay Ari.\n\n"), "{combined}");
         assert!(
             combined.contains("wait for the user to approve"),
             "{combined}"
         );
 
-        assert_eq!(
-            chat_system_prompt(None, false, &tools, false),
-            "You are Zone's assistant, answering inside one of the user's workspaces."
+        let plain = session::system_prompt(
+            &session::chat_row(None, false, false),
+            &tools,
+            false,
+            CAPABILITY,
+            &environment,
         );
+        assert!(plain.contains(IDENTITY), "{plain}");
+        assert!(!plain.contains("You can call these tools"), "{plain}");
+        assert!(plain.ends_with(CAPABILITY), "{plain}");
     }
 
     #[tokio::test]

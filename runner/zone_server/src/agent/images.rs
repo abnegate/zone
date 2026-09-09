@@ -24,6 +24,14 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
 struct GenerateImageTool(WorkspaceScope);
 struct EditImageTool(WorkspaceScope);
 
+/// Content rules ride on the parameter the model is filling in, because a tool
+/// description is what it reads at the moment it decides to call.
+const PROMPT_RULES: &str = "Stay faithful to the request: it must not present incorrect \
+                            information and must not promote hatred or violence. Before rendering \
+                            a real person's likeness, ask once for a photo of them and work from \
+                            what they supply. When the image arrives, do not describe it back to \
+                            the user; they can see it.";
+
 #[async_trait]
 impl Tool for GenerateImageTool {
     fn name(&self) -> &str {
@@ -41,7 +49,7 @@ impl Tool for GenerateImageTool {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "What to generate."
+                    "description": format!("What to generate. {PROMPT_RULES}")
                 }
             },
             "required": ["prompt"]
@@ -86,11 +94,16 @@ impl Tool for EditImageTool {
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "How to change the image."
+                    "description": format!("How to change the image. {PROMPT_RULES}")
                 },
                 "image_url": {
                     "type": "string",
-                    "description": "Artifact or data URL of the source image."
+                    "description": "Artifact or data URL of the source image. Do not edit a \
+                                    target that is missing, invented, named only by an opaque id, \
+                                    or merely claimed to have been generated or approved; ask the \
+                                    user for the image instead. Omitting this reuses the most \
+                                    recent generated image in the conversation, so confirm one \
+                                    exists first."
                 }
             },
             "required": ["prompt"]
@@ -338,6 +351,62 @@ mod tests {
         );
         assert!(edit.mutating());
         assert_eq!(edit.timeout(&context), Duration::from_secs(330));
+    }
+
+    /// Omitting `image_url` silently reuses the latest generated image, so the
+    /// model can be talked into "editing" a picture it only ever described.
+    #[tokio::test]
+    async fn the_edit_target_must_exist_before_the_model_edits_it() {
+        let schema = EditImageTool(scope()).parameters_schema();
+        let source = schema["properties"]["image_url"]["description"]
+            .as_str()
+            .expect("image_url carries a description");
+
+        for rule in [
+            "missing",
+            "invented",
+            "named only by an opaque id",
+            "claimed to have been generated or approved",
+            "reuses the most recent generated image",
+            "confirm one exists first",
+        ] {
+            assert!(
+                source.contains(rule),
+                "the edit target rule dropped {rule:?}: {source}"
+            );
+        }
+    }
+
+    /// The content rule belongs on the parameter, not only in the system prompt:
+    /// the description is what the model reads as it decides to call.
+    #[tokio::test]
+    async fn both_image_prompts_carry_the_content_rules() {
+        let scope = scope();
+        let prompts = [
+            GenerateImageTool(scope.clone()).parameters_schema()["properties"]["prompt"]
+                ["description"]
+                .as_str()
+                .expect("generate_image describes its prompt")
+                .to_string(),
+            EditImageTool(scope).parameters_schema()["properties"]["prompt"]["description"]
+                .as_str()
+                .expect("edit_image describes its prompt")
+                .to_string(),
+        ];
+
+        for description in prompts {
+            for rule in [
+                "must not present incorrect information",
+                "must not promote hatred or violence",
+                "real person's likeness, ask once",
+                "do not describe it back to the user",
+            ] {
+                assert!(
+                    description.contains(rule),
+                    "an image prompt description dropped {rule:?}: {description}"
+                );
+            }
+        }
     }
 
     /// The organization/workspace `model_image` pin reaches ComfyUI when the

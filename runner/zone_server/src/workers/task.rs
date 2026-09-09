@@ -15,6 +15,7 @@ use zone_core::agent::{AgentCallback, AgentPhase};
 use zone_core::llm::{LlmClient, LlmConfig, Message as LlmMessage};
 use zone_core::tools::ToolResult;
 
+use crate::agent::prompt::{self, Environment, Vcs};
 use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget};
 use crate::db::{ai_settings, tasks, workspaces};
 use crate::services::chat::session::{self, RunContext};
@@ -23,6 +24,7 @@ use crate::state::AppState;
 use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
 use zone_chat::capacity::Resolver;
+use zone_context::context::SearchResultWithAnalysis;
 
 // Max concurrent task executions
 const MAX_CONCURRENT_TASKS: usize = 5;
@@ -818,13 +820,25 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
     };
 
     let guidance = guidance(state, &task).await;
-    let prompt = format!("# Task: {}\n\n{}", task.title, task.description);
+    let task_prompt = format!("# Task: {}\n\n{}", task.title, task.description);
+    let environment = Environment {
+        directory: workspace_path.clone(),
+        ..Environment::here()
+    };
+    let environment = match checkout.baseline() {
+        Some(baseline) => environment.with_vcs(Vcs {
+            branch: baseline.branch.clone(),
+            head: baseline.commit.clone(),
+        }),
+        None => environment,
+    };
     let policy = RetryPolicy::default();
     let pool = state.db();
     let workspace = workspace_path.as_path();
     let model = model.as_str();
-    let prompt = prompt.as_str();
+    let task_prompt = task_prompt.as_str();
     let guidance = guidance.as_str();
+    let environment = &environment;
 
     let result = run_with_policy(
         policy,
@@ -836,9 +850,10 @@ async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
                 workspace_id,
                 actor,
                 model,
-                prompt,
+                task_prompt,
                 guidance,
                 workspace,
+                environment,
             )
         },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
@@ -972,89 +987,338 @@ async fn resolve_model(state: &AppState, task: &tasks::TaskRow) -> String {
     )
 }
 
-async fn guidance(state: &AppState, task: &tasks::TaskRow) -> String {
-    let mut guidance = String::from(
-        "\n\nYou are completing a background coding task. Stay inside the sandboxed working directory.\n",
-    );
+/// What a run appends after `prompt::task`, once each source has been read.
+///
+/// Every block carries its own leading blank line, so a run with nothing to add
+/// appends nothing at all and the built prompt is left exactly as it rendered.
+/// The two knowledge renderers already open with their own `"\n\n# "` heading,
+/// which is why they arrive here whole rather than as bodies to be titled.
+struct Guidance<'a> {
+    retrieved: &'a [SearchResultWithAnalysis],
+    criteria: Option<&'a str>,
+    instructions: &'a str,
+    facts: &'a str,
+}
 
-    if let Some(source_ids) = &task.source_ids
-        && !source_ids.is_empty()
-        && let Some(context_service) = state.context_service()
-    {
-        tracing::info!(
-            "Gathering context from {} sources for task {}",
-            source_ids.len(),
-            task.id
+impl Guidance<'_> {
+    fn render(&self) -> String {
+        let mut guidance = String::new();
+        push_block(&mut guidance, &self.retrieved());
+        if let Some(criteria) = self.criteria {
+            push_block(
+                &mut guidance,
+                &format!("\n\n# Acceptance Criteria\n{}", criteria.trim()),
+            );
+        }
+        push_block(&mut guidance, self.instructions);
+        push_block(&mut guidance, self.facts);
+        guidance
+    }
+
+    fn retrieved(&self) -> String {
+        if self.retrieved.is_empty() {
+            return String::new();
+        }
+
+        let mut block = String::from(
+            "\n\n# Relevant Context\n\nThe following context has been retrieved from the knowledge base to help with this task:",
         );
+        for (index, result) in self.retrieved.iter().enumerate() {
+            block.push_str(&format!(
+                "\n\n## Context {} (Relevance: {:.2})\n{}",
+                index + 1,
+                result.similarity,
+                result.chunk_text.trim()
+            ));
+        }
+        block
+    }
+}
 
-        let search_query = format!("{}\n\n{}", task.title, task.description);
+/// Appends one guidance block, which owns the blank line that opens it.
+///
+/// Trimming what is already there rather than adding a separator is what keeps
+/// adjacent blocks exactly one blank line apart: the knowledge renderers close
+/// with a newline and the next block opens with two, which would otherwise run
+/// the appended guidance past the blank line the prompt is assembled with.
+fn push_block(guidance: &mut String, block: &str) {
+    let block = block.trim_end();
+    if block.is_empty() {
+        return;
+    }
+    guidance.truncate(guidance.trim_end().len());
+    guidance.push_str(block);
+}
 
-        match context_service
-            .search(
-                &search_query,
-                20,
-                Some(zone_context::embeddings::SearchFilters {
-                    source_ids: Some(source_ids.clone()),
-                    ..Default::default()
-                }),
-            )
+async fn guidance(state: &AppState, task: &tasks::TaskRow) -> String {
+    let retrieved = retrieved_context(state, task).await;
+
+    let instructions =
+        match crate::db::knowledge::standing_instructions_prompt(state.db(), task.workspace_id)
             .await
         {
-            Ok(results) if !results.is_empty() => {
-                guidance.push_str("\n# Relevant Context\n\n");
-                guidance.push_str("The following context has been retrieved from the knowledge base to help with this task:\n\n");
-
-                for (idx, result) in results.iter().enumerate() {
-                    guidance.push_str(&format!(
-                        "## Context {} (Relevance: {:.2})\n{}\n\n",
-                        idx + 1,
-                        result.similarity,
-                        result.chunk_text
-                    ));
-                }
-
-                tracing::info!(
-                    "Added {} context chunks to task {} system prompt",
-                    results.len(),
-                    task.id
-                );
-            }
-            Ok(_) => {
-                tracing::info!("No relevant context found for task {}", task.id);
-            }
+            Ok(instructions) => instructions,
             Err(error) => {
                 tracing::warn!(
-                    "Failed to gather context for task {}: {}. Proceeding without context.",
-                    task.id,
-                    error
+                    task_id = %task.id,
+                    %error,
+                    "Failed to load standing instructions; continuing without them"
                 );
+                String::new()
             }
+        };
+
+    let facts =
+        match crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await {
+            Ok(facts) => facts,
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    %error,
+                    "Failed to load learned facts; continuing without them"
+                );
+                String::new()
+            }
+        };
+
+    Guidance {
+        retrieved: &retrieved,
+        criteria: task.acceptance_criteria.as_deref(),
+        instructions: &instructions,
+        facts: &facts,
+    }
+    .render()
+}
+
+async fn retrieved_context(
+    state: &AppState,
+    task: &tasks::TaskRow,
+) -> Vec<SearchResultWithAnalysis> {
+    let Some(source_ids) = &task.source_ids else {
+        return Vec::new();
+    };
+    if source_ids.is_empty() {
+        return Vec::new();
+    }
+    let Some(context_service) = state.context_service() else {
+        return Vec::new();
+    };
+
+    tracing::info!(
+        "Gathering context from {} sources for task {}",
+        source_ids.len(),
+        task.id
+    );
+
+    let search_query = format!("{}\n\n{}", task.title, task.description);
+
+    match context_service
+        .search(
+            &search_query,
+            20,
+            Some(zone_context::embeddings::SearchFilters {
+                source_ids: Some(source_ids.clone()),
+                ..Default::default()
+            }),
+        )
+        .await
+    {
+        Ok(results) if !results.is_empty() => {
+            tracing::info!(
+                "Added {} context chunks to task {} system prompt",
+                results.len(),
+                task.id
+            );
+            results
+        }
+        Ok(_) => {
+            tracing::info!("No relevant context found for task {}", task.id);
+            Vec::new()
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Failed to gather context for task {}: {}. Proceeding without context.",
+                task.id,
+                error
+            );
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod guidance_tests {
+    use super::*;
+    use crate::agent::ToolProfile;
+    use crate::db::knowledge::{
+        LearnedCategory, LearnedEntryRow, render_learned_facts, render_standing_instructions,
+    };
+    use chrono::DateTime;
+    use std::path::PathBuf;
+
+    const SANDBOX: &str = "You are completing a background coding task.";
+
+    fn entry(title: &str, content: &str) -> LearnedEntryRow {
+        LearnedEntryRow {
+            id: Uuid::nil(),
+            workspace_id: Uuid::nil(),
+            title: title.to_string(),
+            content: content.to_string(),
+            tags: Vec::new(),
+            updated_at: None,
         }
     }
 
-    if let Some(criteria) = &task.acceptance_criteria {
-        guidance.push_str(&format!("\n# Acceptance Criteria\n{}\n", criteria));
+    fn result(similarity: f32, chunk_text: &str) -> SearchResultWithAnalysis {
+        SearchResultWithAnalysis {
+            chunk_id: Uuid::nil(),
+            content_item_id: Uuid::nil(),
+            source_id: Uuid::nil(),
+            similarity,
+            rrf_score: None,
+            semantic_score: None,
+            keyword_score: None,
+            chunk_text: chunk_text.to_string(),
+            item_uri: "zone://runbook".to_string(),
+            item_title: "Runbook".to_string(),
+            analysis: None,
+        }
     }
 
-    match crate::db::knowledge::standing_instructions_prompt(state.db(), task.workspace_id).await {
-        Ok(instructions) => guidance.push_str(&instructions),
-        Err(error) => tracing::warn!(
-            task_id = %task.id,
-            %error,
-            "Failed to load standing instructions; continuing without them"
-        ),
+    fn environment() -> Environment {
+        Environment::at(
+            DateTime::parse_from_rfc3339("2026-09-09T09:30:00+12:00").unwrap(),
+            "Pacific/Auckland",
+            PathBuf::from("/srv/zone"),
+        )
     }
 
-    match crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await {
-        Ok(facts) => guidance.push_str(&facts),
-        Err(error) => tracing::warn!(
-            task_id = %task.id,
-            %error,
-            "Failed to load learned facts; continuing without them"
-        ),
+    fn tools() -> ChatTools {
+        ChatTools::with_names(
+            ToolProfile::Task,
+            &["apply_patch", "read_file", "run_command"],
+            None,
+        )
     }
 
-    guidance
+    /// Every block populated, and each source shaped the way its own renderer
+    /// leaves it, so the composition is exercised against real inputs.
+    fn populated() -> String {
+        let retrieved = [result(
+            0.91,
+            "The runner reads its config from zone.toml.\n",
+        )];
+        let instructions = render_standing_instructions(&[entry(
+            "Migrations",
+            "Never edit a migration that has shipped.",
+        )]);
+        let facts = render_learned_facts(
+            LearnedCategory::RepositoryConvention,
+            &[entry("Naming", "Sections are one file each.")],
+        );
+
+        Guidance {
+            retrieved: &retrieved,
+            criteria: Some("The suite passes and clippy is clean.\n"),
+            instructions: &instructions,
+            facts: &facts,
+        }
+        .render()
+    }
+
+    #[test]
+    fn a_run_with_nothing_to_add_appends_nothing() {
+        let rendered = Guidance {
+            retrieved: &[],
+            criteria: None,
+            instructions: "",
+            facts: "",
+        }
+        .render();
+
+        assert_eq!(rendered, "");
+    }
+
+    /// The sentence framing the run now belongs to the task section, which is
+    /// where a test can pin it; leaving a copy behind would state it twice.
+    #[test]
+    fn the_sandbox_sentence_has_left_the_guidance_for_the_prompt_that_owns_it() {
+        let guidance = populated();
+        assert!(!guidance.contains(SANDBOX), "{guidance}");
+        assert!(
+            !guidance.contains("sandboxed working directory"),
+            "{guidance}"
+        );
+
+        let composed = prompt::task(&tools(), &environment()) + &guidance;
+        assert_eq!(
+            composed.matches(SANDBOX).count(),
+            1,
+            "the sandbox sentence should appear once, not {}",
+            composed.matches(SANDBOX).count()
+        );
+    }
+
+    #[test]
+    fn the_four_blocks_keep_their_headings_and_their_order() {
+        let guidance = populated();
+
+        let offset = |heading: &str| {
+            guidance
+                .find(heading)
+                .unwrap_or_else(|| panic!("{heading} is missing from {guidance}"))
+        };
+        let retrieved = offset("# Relevant Context");
+        let criteria = offset("# Acceptance Criteria");
+        let instructions = offset("# Standing instructions");
+        let facts = offset("# Repository conventions");
+
+        assert!(retrieved < criteria, "{guidance}");
+        assert!(criteria < instructions, "{guidance}");
+        assert!(instructions < facts, "{guidance}");
+        assert!(
+            guidance.contains("## Context 1 (Relevance: 0.91)"),
+            "{guidance}"
+        );
+        assert!(
+            guidance.contains("The suite passes and clippy is clean."),
+            "{guidance}"
+        );
+    }
+
+    /// The guidance is appended to a prompt whose sections are already one blank
+    /// line apart, so a block that keeps its own trailing newline would open a
+    /// wider gap than any separator the builder produces.
+    #[test]
+    fn the_guidance_joins_the_built_prompt_without_a_three_newline_gap() {
+        let composed = prompt::task(&tools(), &environment()) + &populated();
+
+        assert!(!composed.contains("\n\n\n"), "{composed}");
+        assert!(populated().starts_with("\n\n# Relevant Context"));
+        assert!(!populated().ends_with('\n'));
+    }
+
+    #[test]
+    fn a_block_that_is_absent_leaves_no_gap_behind_it() {
+        let facts = render_learned_facts(
+            LearnedCategory::StrategyLesson,
+            &[entry("Approach", "Small changes land faster.")],
+        );
+        let rendered = Guidance {
+            retrieved: &[],
+            criteria: None,
+            instructions: "",
+            facts: &facts,
+        }
+        .render();
+
+        assert!(
+            rendered.starts_with("\n\n# What has worked here"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("\n\n\n"), "{rendered}");
+        assert!(!rendered.contains("# Relevant Context"), "{rendered}");
+    }
 }
 
 async fn record_attempt(pool: &PgPool, run_id: Uuid, policy: RetryPolicy, attempt: Attempt) {
@@ -1180,15 +1444,14 @@ async fn attempt_run(
     workspace_id: Uuid,
     actor: Option<Uuid>,
     model: &str,
-    prompt: &str,
+    task_prompt: &str,
     guidance: &str,
     workspace: &Path,
+    environment: &Environment,
 ) -> Result<TaskOutcome, Fault> {
     let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
         .await
         .with_task_lease(state.db().clone(), run_id, owner);
-    let mut system_prompt = agent::system_prompt(&tools, true);
-    system_prompt.push_str(guidance);
 
     let capacity = Resolver::with_context(
         &state.config().litellm_host,
@@ -1209,11 +1472,17 @@ async fn attempt_run(
     if let Some(limit) = capacity.ollama {
         llm = llm.with_ollama_context(model, limit);
     }
-    if capacity.reasoning
-        && let Some(effort) = zone_core::llm::ReasoningEffort::Auto.resolve(prompt)
-    {
+    let effort = capacity
+        .reasoning
+        .then(|| zone_core::llm::ReasoningEffort::Auto.resolve(task_prompt))
+        .flatten();
+    let mut environment = environment.clone();
+    if let Some(effort) = effort {
         llm = llm.with_reasoning(model, effort);
+        environment = environment.with_effort(effort);
     }
+    let mut system_prompt = prompt::task(&tools, &environment);
+    system_prompt.push_str(guidance);
 
     let callback = DatabaseTaskCallback {
         pool: state.db().clone(),
@@ -1222,7 +1491,7 @@ async fn attempt_run(
     };
     let messages = vec![
         LlmMessage::system(system_prompt),
-        LlmMessage::user(prompt.to_string()),
+        LlmMessage::user(task_prompt.to_string()),
     ];
     let mut context = RunContext::from_messages(messages);
     context.policy = policy;
