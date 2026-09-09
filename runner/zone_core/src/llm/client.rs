@@ -2,7 +2,6 @@
 
 use reqwest::{Client, Url};
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -51,6 +50,8 @@ pub enum LlmError {
     Json(#[from] serde_json::Error),
     #[error("Stream error: {0}")]
     Stream(String),
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl LlmError {
@@ -201,32 +202,6 @@ impl LlmClient {
             return Err(LlmError::InvalidConfig(
                 "LLM base_url must not include userinfo".to_string(),
             ));
-        }
-
-        let host = parsed.host_str().ok_or_else(|| {
-            LlmError::InvalidConfig("LLM base_url must include a host".to_string())
-        })?;
-
-        if host.eq_ignore_ascii_case("localhost") {
-            return Err(LlmError::InvalidConfig(
-                "LLM base_url host is not allowed".to_string(),
-            ));
-        }
-
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            let blocked = match ip {
-                IpAddr::V4(v4) => {
-                    v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
-                }
-                IpAddr::V6(v6) => {
-                    v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local()
-                }
-            };
-            if blocked {
-                return Err(LlmError::InvalidConfig(
-                    "LLM base_url IP is not allowed".to_string(),
-                ));
-            }
         }
 
         Ok(())
@@ -560,6 +535,45 @@ mod tests {
         assert_eq!(client.config().default_model, "gpt-4-turbo");
         assert!((client.config().temperature - 0.3).abs() < f32::EPSILON);
         assert_eq!(client.config().max_tokens, 8192);
+    }
+
+    #[test]
+    fn reaches_the_operators_own_inference_host() {
+        let client = LlmClient::new(LlmConfig::default());
+        for base_url in [
+            "http://127.0.0.1:4000",
+            "http://localhost:11434",
+            "http://litellm:4000",
+            "http://host.docker.internal:11434",
+            "http://192.168.1.10:4000",
+            "https://api.openai.com/v1",
+        ] {
+            assert!(
+                client
+                    .validate_outbound_url(&format!("{base_url}/chat/completions"))
+                    .is_ok(),
+                "{base_url} is a supported inference target"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_base_urls_no_request_could_use() {
+        let client = LlmClient::new(LlmConfig::default());
+        for base_url in [
+            "litellm:4000/chat/completions",
+            "ftp://litellm:4000/chat/completions",
+            "file:///etc/passwd",
+            "http://user:secret@litellm:4000/chat/completions",
+        ] {
+            assert!(
+                matches!(
+                    client.validate_outbound_url(base_url),
+                    Err(LlmError::InvalidConfig(_))
+                ),
+                "{base_url} is not a usable LLM endpoint"
+            );
+        }
     }
 
     #[test]
