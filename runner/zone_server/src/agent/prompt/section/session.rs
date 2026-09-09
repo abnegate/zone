@@ -10,6 +10,9 @@ use crate::agent::prompt::{Context, Verbosity};
 
 const HEADING: &str = "Session context:";
 
+/// The one line that moves between two builds of the same turn's prompt.
+const NOW: &str = "- Now: ";
+
 /// Zero-padded throughout, with a numeric offset, so the width never moves.
 const TIMESTAMP: &str = "%A %Y-%m-%d %H:%M:%S %:z";
 
@@ -44,7 +47,7 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     let mut lines = vec![
         HEADING.to_string(),
         format!(
-            "- Now: {} ({}). {CLOCK}",
+            "{NOW}{} ({}). {CLOCK}",
             environment.now.format(TIMESTAMP),
             environment.timezone
         ),
@@ -275,6 +278,52 @@ mod tests {
                 .with_effort(Effort::Medium)
         };
         assert_eq!(chat(&filled(early)).len(), chat(&filled(late)).len());
+    }
+
+    /// A preview and the generation that follows it each call `Environment::here`,
+    /// so this block renders twice a moment apart and the two can never be
+    /// byte-identical. The instant is the only thing allowed to move: anything
+    /// else that drifts stops the preview projecting the send it predicts, and a
+    /// width change stops it costing that send. The two moments share no
+    /// sub-second either, as two real clock reads do not, so a field derived
+    /// from a finer part of the clock than the rendered second still moves here.
+    #[test]
+    fn a_second_of_drift_moves_the_clock_line_and_nothing_else() {
+        let filled = |moment: &str| {
+            at(moment)
+                .with_vcs(Vcs {
+                    branch: "main".into(),
+                    head: "83ff18b".into(),
+                })
+                .with_user("Ari")
+                .with_workspace("Zone")
+                .with_effort(Effort::Medium)
+        };
+
+        for render in [chat as fn(&Environment) -> String, task] {
+            let before = render(&filled("2026-09-09T09:30:00.123456789+12:00"));
+            let after = render(&filled("2026-09-09T09:30:01.987654321+12:00"));
+
+            assert_ne!(before, after, "a second has to reach the rendered clock");
+            assert_eq!(before.len(), after.len(), "{before}\n{after}");
+            assert_eq!(
+                before.lines().count(),
+                after.lines().count(),
+                "{before}\n{after}"
+            );
+
+            let drifted = before
+                .lines()
+                .zip(after.lines())
+                .filter(|(before, after)| before != after)
+                .map(|(before, _)| before)
+                .collect::<Vec<_>>();
+            assert_eq!(drifted.len(), 1, "{drifted:?}");
+            assert!(
+                drifted[0].starts_with(NOW),
+                "only the clock may move: {drifted:?}"
+            );
+        }
     }
 
     #[test]

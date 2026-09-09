@@ -5,10 +5,41 @@ use common::context::{Harness, answer, successful, usage};
 use serde_json::json;
 use uuid::Uuid;
 use zone_core::context;
-use zone_core::llm::Role;
+use zone_core::llm::{Message, Role};
 use zone_search::client::{SearchContext, SearchHit};
 use zone_server::db::chats;
 use zone_server::services::chat::session::{self, Mode};
+
+/// The prefix of the one line a preview and the send after it cannot share:
+/// `session::build` reads the clock once per build, and the two are separate
+/// requests seconds or minutes apart. The line renders at a fixed width, so the
+/// cost the preview quotes still holds.
+const NOW: &str = "- Now: ";
+
+const INSTANT: &str = "<instant>";
+
+/// Blank the rendered instant alone, leaving the zone, the rest of the clock
+/// line and every other byte to be compared as they are.
+fn steady(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            message.content = message.content.map(|content| blank(&content));
+            message
+        })
+        .collect()
+}
+
+fn blank(content: &str) -> String {
+    let Some(instant) = content.find(NOW).map(|start| start + NOW.len()) else {
+        return content.to_string();
+    };
+    let Some(zone) = content[instant..].find(" (").map(|offset| instant + offset) else {
+        return content.to_string();
+    };
+    format!("{}{INSTANT}{}", &content[..instant], &content[zone..])
+}
 
 #[tokio::test]
 async fn static_search_supplement_has_identical_preview_and_send_costs() {
@@ -56,10 +87,23 @@ async fn static_search_supplement_has_identical_preview_and_send_costs() {
                 .preserve,
             "The actual user remains protected despite the supplemental user message"
         );
+        let previewed = context::project(&preview.context.entries, None).unwrap();
+        let drifted = previewed
+            .iter()
+            .zip(&messages)
+            .filter_map(|(preview, send)| preview.content.as_deref().zip(send.content.as_deref()))
+            .flat_map(|(preview, send)| preview.lines().zip(send.lines()))
+            .filter(|(preview, send)| preview != send)
+            .map(|(preview, _)| preview)
+            .collect::<Vec<_>>();
+        assert!(
+            drifted.iter().all(|line| line.starts_with(NOW)),
+            "Only the session clock may move between a preview and the send it predicts: {drifted:?}"
+        );
         assert_eq!(
-            serde_json::to_value(context::project(&preview.context.entries, None).unwrap())
-                .unwrap(),
-            serde_json::to_value(&messages).unwrap()
+            serde_json::to_value(steady(&previewed)).unwrap(),
+            serde_json::to_value(steady(&messages)).unwrap(),
+            "A preview projects the send it predicts, apart from the instant each read the clock"
         );
         assert_eq!(
             preview.context.usage(&preview.model, None).used,

@@ -12,8 +12,11 @@ const UNKNOWN_TIMEZONE: &str = "UTC";
 
 /// Everything about the machine, the clock and the caller a section may state.
 ///
-/// Built once per turn so a preview and the generation that follows it agree,
-/// and passed by reference into every section.
+/// Built once per turn and passed by reference into every section, so one turn
+/// states one instant. A preview and the generation that follows it are separate
+/// turns that read the clock separately, so the two agree on width rather than
+/// on bytes: every field renders at a fixed width, which is what keeps the
+/// preview's cost estimate true of the send it predicts.
 #[derive(Debug, Clone)]
 pub struct Environment {
     pub now: DateTime<FixedOffset>,
