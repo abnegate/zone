@@ -69,3 +69,21 @@ exposure of RSA private-key operations and has no patched release. This existing
 exception must be revisited if an RSA private-key operation or an Octocrab caller
 is introduced. All other vulnerability advisories remain fatal; no new advisory
 ID is suppressed by this change.
+
+## Lighthouse archive advisory exception
+
+`GHSA-7pqw-9j4j-h8q3` is excepted in `manager/frontend`'s audit script. The
+advisory describes arbitrary file writes through symlink entries in an archive
+handed to extract-zip, and covers every published release: 2.0.1 is the latest,
+so there is nothing to upgrade to.
+
+The single path is `@lhci/cli > lighthouse > puppeteer-core > @puppeteer/browsers
+> extract-zip`. `@lhci/cli` is a devDependency, so extract-zip is never bundled
+into the manager frontend or any shipped artifact; it runs only in CI, and the
+only archive it opens is the Chrome build `@puppeteer/browsers` downloads from
+Google's endpoint. Reaching the vulnerable path means that download is already
+attacker-controlled.
+
+This exception must be revisited if extract-zip publishes a patched release, if
+`@lhci/cli` moves out of devDependencies, or if a caller extracts an archive from
+a source outside the Chrome download. All other frontend advisories remain fatal.
