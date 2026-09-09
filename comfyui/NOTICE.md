@@ -61,3 +61,15 @@ command.
 These weights are not included in Zone images or source distributions. They
 are downloaded only when the operator runs the explicit audio model setup
 command.
+
+## Real-ESRGAN x4plus
+
+- Packaged model: <https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged>
+- Original project: <https://github.com/xinntao/Real-ESRGAN>
+- File: `RealESRGAN_x4plus.safetensors`
+- License: BSD 3-Clause "New" License, Copyright (c) 2021, Xintao Wang
+- License text: <https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE>
+
+These weights are not included in Zone images or source distributions. They
+are downloaded only when the operator runs the explicit upscale model setup
+command.

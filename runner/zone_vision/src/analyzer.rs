@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::crop::{self, Rendered, Target};
-use crate::gravity::Point;
+use crate::gravity::{Point, Rect};
 use crate::preprocess::Preprocessor;
 use crate::saliency::{INPUT_HEIGHT, INPUT_WIDTH, Model};
 use crate::{decode, gravity, preprocess, saliency};
@@ -83,6 +83,33 @@ impl Analyzer {
     pub fn focus_raster(&self, raster: &decode::Raster) -> Result<Focus, Error> {
         let mut preprocessor = self.take();
         let result = self.locate(&mut preprocessor, raster);
+        self.give(preprocessor);
+        result
+    }
+
+    /// Hands the raw saliency map to `read`, along with the rectangle the
+    /// image occupies inside it.
+    ///
+    /// [`Self::focus`] is the answer for an image on its own. This is for a
+    /// caller that knows something the model does not — which of several
+    /// subjects is the one being trained, say — and wants to weight the map
+    /// before taking its centre of mass. The map is
+    /// [`INPUT_WIDTH`] x [`INPUT_HEIGHT`], row-major, and is borrowed from ONNX
+    /// Runtime's own output buffer, so it is never copied.
+    pub fn saliency<R>(
+        &self,
+        raster: &decode::Raster,
+        read: impl FnOnce(&[f32], Rect) -> R,
+    ) -> Result<R, Error> {
+        let mut preprocessor = self.take();
+        let result = preprocessor
+            .prepare(raster)
+            .map_err(Error::from)
+            .and_then(|content| {
+                self.model
+                    .infer(preprocessor.tensor(), |map| read(map, content))
+                    .map_err(Error::from)
+            });
         self.give(preprocessor);
         result
     }

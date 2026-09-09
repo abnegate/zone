@@ -10,7 +10,7 @@ pub mod checkout;
 pub mod completion_tokens;
 pub mod embedding;
 pub mod image_intent;
-pub mod image_source;
+pub mod media_source;
 pub mod model;
 pub mod runner;
 pub mod stages;

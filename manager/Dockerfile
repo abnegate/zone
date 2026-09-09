@@ -15,6 +15,8 @@ WORKDIR /build/runner
 ARG TARGETARCH
 ARG TARGETVARIANT
 
+# Every workspace member, because Cargo reads the whole workspace manifest
+# before it builds any one package.
 COPY runner/Cargo.toml runner/Cargo.lock ./
 COPY runner/tool_runner ./tool_runner/
 COPY runner/zone_runner ./zone_runner/
@@ -53,8 +55,10 @@ RUN --mount=type=cache,id=zone-manager-registry,target=/usr/local/cargo/registry
 # linked against is present. libstdc++6 backs the statically linked ONNX Runtime.
 FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime-base
 
+# ffmpeg (with ffprobe) decodes the clips submitted for LoRA training. Without
+# it images still train; videos are refused with a message saying why.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates git libssl3t64 libstdc++6 \
+        curl ca-certificates git libssl3t64 libstdc++6 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 FROM runtime-base AS runtime

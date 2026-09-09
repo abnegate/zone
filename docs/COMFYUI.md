@@ -1,14 +1,15 @@
 # ComfyUI, FLUX.1 Schnell, Wan 2.2 TI2V, and ACE-Step v1
 
 Zone supports a pinned ComfyUI runtime with FLUX.1 Schnell FP8 for images,
-Wan 2.2 TI2V 5B for text-to-video and image-to-video, and ACE-Step v1 3.5B for
-text-to-audio. The runtime is native on Apple Silicon and an optional NVIDIA
-Compose profile on Linux.
+Wan 2.2 TI2V 5B for text-to-video and image-to-video, ACE-Step v1 3.5B for
+text-to-audio, and Real-ESRGAN x4plus for upscaling a picture or a clip. The
+runtime is native on Apple Silicon and an optional NVIDIA Compose profile on
+Linux.
 
 Weights are **not** downloaded during a build or normal startup. Model setup is
 an explicit operation and verifies both the exact byte count and SHA-256 before
-a file is accepted. Image, image-edit, video, and audio weights are separate
-bundles so operators can install only what they need.
+a file is accepted. Image, image-edit, video, audio, and upscale weights are
+separate bundles so operators can install only what they need.
 
 LoRA training lives in `comfyui/custom_nodes/zone_lora/` (identity defaults in
 `train_config.json`). The macOS installer copies that folder after the pinned
@@ -61,6 +62,18 @@ Comfy checkout so core files stay unmodified:
   into `models/checkpoints/`
 - Size: approximately 7.17 GiB / 7.70 GB
 - Model license: Apache-2.0
+
+### Real-ESRGAN x4plus (upscale)
+
+- Model repository: `Comfy-Org/Real-ESRGAN_repackaged`
+- Model revision: `ea19b4cd14f85a5b914eee8aa7ff77bc371039a0`
+- File: `RealESRGAN_x4plus.safetensors` (`66,857,836` bytes, approximately
+  63.8 MiB)
+- SHA-256: `37f9a931c215f040aa6d50f711f2cb115f713c46df1d0d6469a8bd7bfe9a60bb`
+- Model license: BSD-3-Clause
+- Architecture: RRDBNet, 4x, loaded by the base `spandrel` registry that
+  ComfyUI's `UpscaleModelLoader` uses
+- Installs to `models/upscale_models/`
 
 The machine-readable source of truth is `comfyui/model-manifest.json`.
 Third-party attribution is in `comfyui/NOTICE.md`.
@@ -314,6 +327,38 @@ one file rather than fetching both bases:
 ./scripts/setup-comfyui-macos.sh --download-model --bundle image-dev
 ```
 
+### Crops are framed on the subject
+
+Every training image, photo or video frame, is written as a square at the
+training resolution rather than handed to the loader whole. The loader fits what
+it is given onto a white square, so an uncropped photo trains on its own
+letterboxing and on however much background the shot happened to include.
+
+Which square is chosen is `zone_vision`'s port of
+[autogravity](https://github.com/appwrite/autogravity): U2-Net segments what
+looks like a subject, and the crop is centred on the centre of mass of that,
+then slid back inside the frame so a subject near an edge stays whole. Weights
+are 168 MiB and are not vendored:
+
+```bash
+make setup-vision-model    # into the shared models volume, as vision/u2net.onnx
+```
+
+`ZONE_VISION_MODEL` overrides where the manager looks. Without the weights
+nothing fails: a photo is cropped on its centre and a video frame on whatever
+moved, which is what both did before subject detection was wired in.
+
+For a clip the two signals are combined rather than ranked. Saliency leads, and
+a frame's motion doubles the weight of the region that moved, which is enough to
+pick the subject being filmed out of a group and never enough to invent one
+where the model saw none. It matters most where motion says nothing at all: on a
+tripod shot of a subject off to one side, motion falls back to the centre and
+crops half the subject away, while detection frames it.
+
+Inference is about 250 ms an image on an 8-core machine, and runs on a blocking
+thread. It is loaded once per process, so the first training request after a
+restart pays for the model load.
+
 ### Captions decide whether identity is learned
 
 Caption the *variable* parts of each image and let the trigger token carry the
@@ -370,6 +415,59 @@ contributing almost nothing.
 level counts alike, with the floor bounding the amplification as sigma
 approaches zero — 1.7% of draws fall below the default 0.05. Set it to 0 to
 train on the x0 error instead.
+### Training from a video
+
+A clip can stand in for the photo set. The Models Train tab takes one under
+**Video**, and `POST /api/models/train/frames` returns the frames it becomes, so
+they can be captioned and edited like any other training image before training
+starts.
+
+A video is a worse photo set than its frame count suggests, so the frames are
+earned rather than taken:
+
+- **Sampled above the rate they are kept at.** `COMFYUI_TRAIN_FRAME_FPS` (4) is
+  the rate that survives, but ffmpeg is asked for twice that, and each second
+  keeps only its sharpest frames. Whichever frame the clock lands on is as
+  likely to be smeared by motion as it is to be sharp; the sharpest of the ones
+  that competed for a slot is not.
+- **Deduplicated by shot.** Frames are ranked by how far their difference hash
+  sits from everything already kept, so the budget is spent on the widest spread
+  of shots the clip holds. Once the only frames left repeat one already taken,
+  selection stops early — a clip of someone standing still contributes a handful
+  of frames, not eighty copies of one pose.
+- **Cropped on the subject**, the same way a photo is, except that a clip knows
+  something a photo does not: the frames are diffed against their neighbours,
+  and the region that moved is weighted up, so the crop lands on the subject
+  being filmed rather than on whichever of several the model liked most. Without
+  the weights, motion decides on its own. Frames therefore arrive already square
+  and already framed, and the loader's own centre crop is a no-op on them rather
+  than a second opinion.
+- **Mirrored in alternation.** Half the frames of each second are flipped left
+  to right, so a subject filmed from one side does not teach the adapter that it
+  only ever faces that way. Turn it off for a subject carrying text, or anything
+  else a mirror would render backwards.
+- **Captioned by shot, not by frame.** Frames of one shot share a caption, so a
+  fifty-frame clip costs a handful of vision-model round trips rather than
+  fifty. Separate photos are still captioned one at a time.
+
+A long clip lowers its own sampling rate rather than being cut short, so the
+whole video is represented. `COMFYUI_TRAIN_FRAME_LIMIT` (48) caps what one clip
+contributes: the trainer's step ceiling means each frame past that is seen fewer
+times without adding variety the selection has not already found.
+
+Decoding needs `ffmpeg` and `ffprobe`, which ship in the manager image. Without
+them images still train and a submitted video is refused with a message saying
+why. `TRAIN_UPLOAD_LIMIT_MB` (512) bounds one upload; clips are posted inline as
+base64 and held in memory while the request is read.
+
+To see what a clip becomes without going through the UI:
+
+```bash
+cd runner && cargo run --example frames -p zone_comfy -- clip.mp4 /tmp/frames
+```
+
+It writes every frame the trainer would see, and prints the timestamp, shot, and
+mirroring of each.
 
 ### Why the residual hook exists
 
@@ -546,10 +644,53 @@ directory. Zone copies successful output into the protected artifact store and
 clears the ComfyUI history entry. Chat can force this path with
 `metadata.audio_generation: true`.
 
+## Upscale workflow contract
+
+`comfyui/workflows/upscale-image-api.json` upscales one image, and
+`comfyui/workflows/upscale-video-api.json` upscales every frame of a clip and
+re-encodes it. Both use only built-in ComfyUI nodes, and integration code may
+replace only these inputs:
+
+- image graph, node `1`: uploaded source filename on `LoadImage`
+- image graph, node `2`: upscale model filename (`COMFYUI_UPSCALE_MODEL`)
+- video graph, node `1`: uploaded source filename on `LoadVideo`
+- video graph, node `3`: upscale model filename
+
+The video graph takes its frame rate from `GetVideoComponents` rather than a
+fixed number, so an upscaled clip keeps the timing of its source. `SaveWEBM`
+carries no audio track, so a source clip's audio is dropped; Wan output has
+none to begin with.
+
+`LoadVideo` reports the clip it loaded as a preview output living under
+`input`. Collecting media from every node in the history would take that
+uploaded source for the result, so the upscale graphs collect only from their
+declared output node.
+
+Chat routes here when the request names an upscale and points at media that
+already exists — an attachment on the turn, or the newest matching media on the
+thread. Naming a kind ("upscale the video") searches the thread for that kind
+before falling back, so a screenshot attached to the same turn does not hide the
+clip.
+
+A resolution word alone never routes here. Either the request names the act
+("upscale this", "hi-res version of this"), or it pairs an enlarging verb with a
+resolution and introduces nothing new. So "make a 4k video" generates a clip,
+"make it a 4k wallpaper" generates a picture, "make this a watercolor at 4k"
+edits, "is this 4k" answers — and only "make this 4k" and "make this video 4k"
+upscale. Chat can force the path with `metadata.upscale: true` and suppress it
+with `false`; turning every generator off still wins over either.
+
+Upscaling is GPU-bound per frame. A short 832×480 Wan clip is roughly 49 frames
+at 4x, so raise `COMFYUI_UPSCALE_GENERATION_TIMEOUT_SECS` past its 600 second
+default before upscaling anything longer.
+
 ## Troubleshooting
 
 - **Model verification fails immediately:** the named volume or macOS model
   directory is empty. Run the explicit model setup command.
+- **Upscaling reports that ComfyUI could not load the model:** the upscale
+  bundle is not installed. Run `make setup-comfyui-upscale-model`, or point
+  `COMFYUI_UPSCALE_MODEL` at a model already in `models/upscale_models/`.
 - **CUDA device unavailable:** confirm `nvidia-smi` works on the host and
   `docker run --rm --gpus all nvidia/cuda:13.0.2-base-ubuntu24.04 nvidia-smi`
   works before starting the profile.

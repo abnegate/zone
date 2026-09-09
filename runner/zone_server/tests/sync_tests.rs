@@ -55,6 +55,7 @@ async fn setup_test_state() -> AppState {
         source_index: Default::default(),
         monitoring: Default::default(),
         chat: Default::default(),
+        train_upload_limit_mb: 512,
     };
 
     AppState::new(config, pool.inner().clone(), None)

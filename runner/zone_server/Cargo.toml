@@ -8,10 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["local-embeddings"]
+default = ["local-embeddings", "saliency"]
 # In-process embeddings (EMBEDDING_ENGINE=local). Links ONNX Runtime, which
 # publishes no musl prebuilts, so any image building this must be glibc-based.
 local-embeddings = ["zone_context/local-embeddings"]
+# Subject detection for LoRA training crops. Links the same ONNX Runtime, and
+# is inert until ZONE_VISION_MODEL points at a U2-Net model.
+saliency = ["zone_comfy/saliency"]
 
 [lib]
 name = "zone_server"

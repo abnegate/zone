@@ -82,3 +82,17 @@ export const PullProgressSchema = z.object({
   message: z.string().optional(),
   success: z.boolean().optional(),
 });
+
+export const TrainFrameSchema = z.object({
+  filename: z.string(),
+  bytes_base64: z.string(),
+  timestamp_ms: z.number(),
+  mirrored: z.boolean(),
+  group: z.number(),
+});
+
+export const TrainClipSchema = z.object({
+  frames: z.array(TrainFrameSchema),
+  sampled: z.number(),
+  sampled_fps: z.number(),
+});
