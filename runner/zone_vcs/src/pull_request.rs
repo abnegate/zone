@@ -314,6 +314,16 @@ impl Default for PrService {
     }
 }
 
+/// A single path segment that is safe to interpolate into a request URL.
+fn named(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
 impl PrService {
     /// Create a new PR service
     pub fn new() -> Self {
@@ -331,32 +341,45 @@ impl PrService {
         }
     }
 
-    /// Parse owner and repo from a GitHub URL
+    /// Parse owner and repo from a repository URL.
     ///
-    /// Supports formats:
-    /// - https://github.com/owner/repo
-    /// - https://github.com/owner/repo.git
+    /// The host is not matched, so a GitHub Enterprise repository parses the
+    /// same as a github.com one -- matching `https://github.com/` was what made
+    /// `GITHUB_API_URL` insufficient on its own to reach Enterprise.
+    ///
+    /// Supports:
+    /// - https://github.com/owner/repo, with or without `.git`
+    /// - https://github.example.com/owner/repo
     /// - git@github.com:owner/repo.git
+    /// - ssh://git@github.example.com/owner/repo.git
     pub fn parse_github_url(&self, url: &str) -> PrResult<(String, String)> {
-        // Handle HTTPS URLs
-        if let Some(path) = url.strip_prefix("https://github.com/") {
-            let path = path.trim_end_matches(".git");
-            let parts: Vec<&str> = path.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                return Ok((parts[0].to_string(), parts[1].to_string()));
-            }
+        let invalid = || PrError::InvalidRepoUrl(url.to_string());
+        let url = url.trim();
+
+        // `git@host:owner/repo` is not a URL, so it is split on the colon
+        // rather than parsed. The scp-like form has no scheme to strip.
+        let path = if let Some((_, path)) = url.split_once("://") {
+            path.split_once('/')
+                .map(|(_, path)| path)
+                .ok_or_else(invalid)?
+        } else if let Some((_, path)) = url.split_once(':') {
+            path
+        } else {
+            return Err(invalid());
+        };
+
+        let path = path.trim_matches('/').trim_end_matches(".git");
+        let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+        let owner = segments.next().ok_or_else(invalid)?;
+        let repository = segments.next().ok_or_else(invalid)?;
+        // The pair is interpolated into `{base}/repos/{owner}/{repo}/...`, so a
+        // third segment or a traversal component would reach a different
+        // endpoint than the caller asked for.
+        if segments.next().is_some() || !named(owner) || !named(repository) {
+            return Err(invalid());
         }
 
-        // Handle SSH URLs
-        if let Some(path) = url.strip_prefix("git@github.com:") {
-            let path = path.trim_end_matches(".git");
-            let parts: Vec<&str> = path.splitn(2, '/').collect();
-            if parts.len() == 2 {
-                return Ok((parts[0].to_string(), parts[1].to_string()));
-            }
-        }
-
-        Err(PrError::InvalidRepoUrl(url.to_string()))
+        Ok((owner.to_string(), repository.to_string()))
     }
 
     /// Create a pull request on GitHub
@@ -697,6 +720,50 @@ mod tests {
             .unwrap();
         assert_eq!(owner, "acme");
         assert_eq!(repo, "project");
+    }
+
+    /// Matching `https://github.com/` meant an Enterprise repository was
+    /// refused as invalid, so `GITHUB_API_URL` alone could not reach one.
+    #[test]
+    fn an_enterprise_repository_parses_like_a_github_one() {
+        let service = PrService::new();
+        for url in [
+            "https://github.example.com/acme/project",
+            "https://github.example.com/acme/project.git",
+            "http://127.0.0.1:9099/acme/project.git",
+            "ssh://git@github.example.com/acme/project.git",
+            "git@github.example.com:acme/project.git",
+            "  https://github.com/acme/project/  ",
+        ] {
+            assert_eq!(
+                service.parse_github_url(url).expect(url),
+                ("acme".to_string(), "project".to_string()),
+                "{url}"
+            );
+        }
+    }
+
+    /// The pair is interpolated into `{base}/repos/{owner}/{repo}/pulls`, so
+    /// anything that could reach a different endpoint has to be refused. The
+    /// old parser split into two and kept every remaining slash in `repo`.
+    #[test]
+    fn a_path_that_could_reach_another_endpoint_is_refused() {
+        let service = PrService::new();
+        for url in [
+            "https://github.com/acme/project/extra",
+            "https://github.com/acme/../admin",
+            "https://github.com/../acme",
+            "https://github.com/acme",
+            "https://github.com/",
+            "https://github.com/acme/pro ject",
+            "not-a-url",
+            "",
+        ] {
+            assert!(
+                service.parse_github_url(url).is_err(),
+                "{url:?} must be refused"
+            );
+        }
     }
 
     #[test]
