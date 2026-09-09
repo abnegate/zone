@@ -1,7 +1,8 @@
+use futures::StreamExt;
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::{LlmClient, LlmConfig, Message};
+use zone_core::llm::{LlmClient, LlmConfig, LlmError, Message};
 
 const RACERS: usize = 8;
 const TURNS: usize = 12;
@@ -71,4 +72,84 @@ fn a_pooled_connection_outliving_its_runtime_does_not_fail_the_next_turn() {
             .join()
             .expect("no turn is handed a dead pooled connection");
     }
+}
+
+#[tokio::test]
+async fn default_streaming_route_uses_the_configured_model_and_yields_chunks() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer test-secret"))
+        .and(body_partial_json(json!({
+            "model": "configured-model",
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = LlmClient::new(LlmConfig {
+        base_url: server.uri(),
+        api_key: "test-secret".to_string(),
+        default_model: "configured-model".to_string(),
+        ..LlmConfig::default()
+    });
+    let chunks = client
+        .chat_stream(&[Message::user("hi")], None)
+        .await
+        .expect("the streaming request is accepted")
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        chunks[0].as_ref().unwrap().choices[0]
+            .delta
+            .content
+            .as_deref(),
+        Some("hello")
+    );
+}
+
+#[tokio::test]
+async fn model_specific_streaming_route_preserves_provider_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "model": "requested-model",
+            "stream": true
+        })))
+        .respond_with(ResponseTemplate::new(429).set_body_string("capacity exhausted"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = LlmClient::new(LlmConfig {
+        base_url: server.uri(),
+        ..LlmConfig::default()
+    });
+    let error = match client
+        .chat_stream_with_model("requested-model", &[Message::user("hi")], None)
+        .await
+    {
+        Ok(_) => panic!("the provider rejection must reach the caller"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        LlmError::Api {
+            status: 429,
+            ref message
+        } if message == "capacity exhausted"
+    ));
 }
