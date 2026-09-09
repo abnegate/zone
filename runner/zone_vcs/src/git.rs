@@ -6,6 +6,10 @@
 //! - Pushing to remote
 
 use base64::Engine;
+
+/// Longest diff kept before truncation, in bytes.
+const MAXIMUM_DIFF_BYTES: usize = 50_000;
+
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -162,15 +166,7 @@ impl GitService {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         if let Some(token) = token {
-            let authorization =
-                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
-            command
-                .env("GIT_CONFIG_COUNT", "1")
-                .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
-                .env(
-                    "GIT_CONFIG_VALUE_0",
-                    format!("Authorization: Basic {authorization}"),
-                );
+            authenticate(&mut command, token);
         }
         command
     }
@@ -478,9 +474,15 @@ impl GitService {
         .await?;
 
         let diff_text = String::from_utf8_lossy(&diff_output.stdout);
-        // Limit diff text size
-        let diff_text = if diff_text.len() > 50_000 {
-            format!("{}...[truncated]", &diff_text[..50_000])
+        // len() counts bytes, so cutting at a fixed offset panics whenever the
+        // boundary lands inside a multi-byte character -- an emoji or any
+        // accented character in a diff over the cap is enough.
+        let diff_text = if diff_text.len() > MAXIMUM_DIFF_BYTES {
+            let mut end = MAXIMUM_DIFF_BYTES;
+            while end > 0 && !diff_text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...[truncated]", &diff_text[..end])
         } else {
             diff_text.to_string()
         };
@@ -713,6 +715,22 @@ impl GitService {
     }
 }
 
+/// Authenticate a git network command without putting the token in the URL.
+///
+/// A credential in the remote URL reaches `.git/config`, the process table and
+/// any error text that echoes the remote. The header is scoped to github.com so
+/// a redirect elsewhere cannot carry it.
+pub(crate) fn authenticate(command: &mut Command, token: &str) {
+    let authorization =
+        base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+    command
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: Basic {authorization}"),
+        );
+}
 #[cfg(test)]
 mod tests {
     use super::*;

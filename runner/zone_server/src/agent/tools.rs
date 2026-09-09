@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
@@ -74,29 +74,79 @@ fn host_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/"))
 }
 
-const TASK_SAFE_ENV: &[&str] = &[
-    "PATH",
+/// The only process environment variables a tool may see.
+///
+/// The server's environment also holds the database URL, the JWT and
+/// encryption keys, the LiteLLM master key and provider API keys. A shell that
+/// inherited those would print them into tool output and into stored messages,
+/// so both profiles start from this list and nothing else.
+const SAFE_ENV: &[&str] = &[
+    "ALL_PROXY",
     "HOME",
-    "USER",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
     "LANG",
-    "LC_ALL",
-    "TERM",
+    "NO_PROXY",
+    "PATH",
     "SHELL",
-    "TZ",
+    "TERM",
     "TMPDIR",
+    "TOOL_RUNNER_PROXY_URL",
+    "TZ",
+    "USER",
     "XDG_RUNTIME_DIR",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
 ];
 
-fn task_context(cwd: std::path::PathBuf) -> ToolContext {
+/// Locale variables (`LC_ALL`, `LC_CTYPE`, and the rest) pass through as a set.
+const SAFE_ENV_PREFIX: &str = "LC_";
+
+/// Names an operator has deliberately added to [`SAFE_ENV`], comma separated.
+const ENV_PASSTHROUGH: &str = "ZONE_AGENT_ENV_PASSTHROUGH";
+
+/// Bytes a file tool will read in one call.
+const MAX_TOOL_FILE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Seconds a tool-launched command may run before it is killed.
+const TOOL_COMMAND_TIMEOUT_SECS: u64 = 300;
+
+fn safe_env(
+    vars: impl IntoIterator<Item = (String, String)>,
+    passthrough: &str,
+) -> HashMap<String, String> {
+    let operator: HashSet<&str> = passthrough
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    vars.into_iter()
+        .filter(|(key, _)| {
+            SAFE_ENV.contains(&key.as_str())
+                || key.starts_with(SAFE_ENV_PREFIX)
+                || operator.contains(key.as_str())
+        })
+        .collect()
+}
+
+fn tool_env() -> HashMap<String, String> {
+    safe_env(
+        std::env::vars(),
+        &std::env::var(ENV_PASSTHROUGH).unwrap_or_default(),
+    )
+}
+
+/// Chat keeps the host's filesystem reach, which the approval gate covers, but
+/// gets the same narrow environment as a task run.
+fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
     ToolContext {
         cwd,
-        env: TASK_SAFE_ENV
-            .iter()
-            .filter_map(|key| std::env::var(key).ok().map(|val| (key.to_string(), val)))
-            .collect(),
-        max_file_size: 10 * 1024 * 1024,
-        command_timeout: 300,
-        unrestricted: false,
+        env: tool_env(),
+        max_file_size: MAX_TOOL_FILE_BYTES,
+        command_timeout: TOOL_COMMAND_TIMEOUT_SECS,
+        unrestricted: profile == ToolProfile::Chat,
     }
 }
 
@@ -234,15 +284,11 @@ impl ChatTools {
             }
         }
 
-        let context = match profile {
-            ToolProfile::Chat => ToolContext {
-                cwd: host_root(),
-                env: std::env::vars().collect(),
-                unrestricted: true,
-                ..Default::default()
-            },
-            ToolProfile::Task => task_context(task_cwd.unwrap_or_else(host_root)),
+        let cwd = match profile {
+            ToolProfile::Chat => host_root(),
+            ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
         };
+        let context = context(profile, cwd);
 
         let mut assembled = Self {
             registry,
@@ -1101,6 +1147,121 @@ impl ListProjectsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn process_env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    const SECRETS: &[(&str, &str)] = &[
+        ("DATABASE_URL", "postgres://zone:hunter2@postgres:5432/zone"),
+        ("JWT_SECRET", "a-signing-key-of-at-least-32-characters"),
+        ("ENCRYPTION_KEY", "12345678901234567890123456789012"),
+        ("SECURITY_LITELLM_MASTER_KEY", "sk-master"),
+        ("SECURITY_MANAGER_API_KEY", "manager-key"),
+        ("LITELLM_KEY", "sk-litellm"),
+        ("POSTGRES_PASSWORD", "hunter2"),
+        ("OPENAI_API_KEY", "sk-provider"),
+    ];
+
+    #[test]
+    fn safe_env_keeps_a_working_shell_and_drops_every_secret() {
+        let mut vars = process_env(&[
+            ("PATH", "/usr/local/bin:/usr/bin"),
+            ("HOME", "/home/zone"),
+            ("USER", "zone"),
+            ("SHELL", "/bin/sh"),
+            ("LANG", "en_NZ.UTF-8"),
+            ("LC_CTYPE", "en_NZ.UTF-8"),
+            ("TERM", "xterm-256color"),
+            ("TZ", "Pacific/Auckland"),
+            ("TMPDIR", "/tmp"),
+            ("HTTPS_PROXY", "http://127.0.0.1:28888"),
+            ("no_proxy", "localhost,127.0.0.1"),
+            ("TOOL_RUNNER_PROXY_URL", "http://127.0.0.1:28888"),
+        ]);
+        vars.extend(process_env(SECRETS));
+
+        let env = safe_env(vars, "");
+
+        for key in [
+            "PATH",
+            "HOME",
+            "USER",
+            "SHELL",
+            "LANG",
+            "LC_CTYPE",
+            "TERM",
+            "TZ",
+            "TMPDIR",
+            "HTTPS_PROXY",
+            "no_proxy",
+            "TOOL_RUNNER_PROXY_URL",
+        ] {
+            assert!(env.contains_key(key), "{key} must reach a tool");
+        }
+        for (key, _) in SECRETS {
+            assert!(!env.contains_key(*key), "{key} must not reach a tool");
+        }
+    }
+
+    #[test]
+    fn safe_env_honours_the_operator_passthrough() {
+        let vars = process_env(&[
+            ("CARGO_HOME", "/opt/cargo"),
+            ("SSH_AUTH_SOCK", "/tmp/agent.sock"),
+            ("JWT_SECRET", "a-signing-key-of-at-least-32-characters"),
+        ]);
+
+        let env = safe_env(vars, " CARGO_HOME , ,SSH_AUTH_SOCK ");
+
+        assert_eq!(
+            env.get("CARGO_HOME").map(String::as_str),
+            Some("/opt/cargo")
+        );
+        assert_eq!(
+            env.get("SSH_AUTH_SOCK").map(String::as_str),
+            Some("/tmp/agent.sock")
+        );
+        assert!(!env.contains_key("JWT_SECRET"));
+    }
+
+    #[test]
+    fn safe_env_passthrough_is_exact_not_a_prefix() {
+        let vars = process_env(&[("JWT_SECRET", "s"), ("JWT", "s")]);
+        let env = safe_env(vars, "JWT");
+        assert!(env.contains_key("JWT"));
+        assert!(!env.contains_key("JWT_SECRET"));
+    }
+
+    #[tokio::test]
+    async fn chat_tools_never_carry_the_process_environment() {
+        let tools = ChatTools::build(scope()).await;
+        assert!(
+            !tools.context.env.contains_key("CARGO_MANIFEST_DIR"),
+            "the process environment leaked into the chat tool context"
+        );
+        for key in tools.context.env.keys() {
+            assert!(
+                SAFE_ENV.contains(&key.as_str()) || key.starts_with(SAFE_ENV_PREFIX),
+                "{key} is not on the tool environment allowlist"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_chat_shell_cannot_read_the_server_environment() {
+        let tools = ChatTools::build(scope()).await;
+        let result = tools
+            .execute("run_shell", r#"{"command":"env"}"#)
+            .await
+            .output
+            .unwrap();
+        assert!(!result.contains("CARGO_MANIFEST_DIR"), "{result}");
+        assert!(result.contains("PATH="), "{result}");
+    }
 
     #[test]
     fn truncate_marks_cut_text() {

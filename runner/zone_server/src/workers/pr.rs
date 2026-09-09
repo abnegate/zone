@@ -5,11 +5,27 @@
 
 use std::path::Path;
 
-use crate::db::tasks;
+use uuid::Uuid;
+
+use serde_json::{Value, json};
+
+use crate::db::{ai_settings, projects, tasks, workspaces};
 use crate::services::checkout::{Baseline, Repository};
+use crate::services::stages;
 use crate::state::AppState;
+use crate::workers::conflict::agent::ModelRepairAgent;
+use crate::workers::conflict::{RepairOutcome, RepairRequest, repair};
+use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
+use zone_core::llm::{LlmClient, LlmConfig};
+use zone_vcs::conflict::{BranchName, ConflictService};
 use zone_vcs::git::GitService;
-use zone_vcs::pull_request::PrService;
+use zone_vcs::pull_request::{PrService, PullRequestReception, PullRequestReference};
+
+/// Temperature for a repair: a merge resolution is a mechanical edit, not a draft.
+const REPAIR_TEMPERATURE: f32 = 0.0;
+
+/// Tokens a repair turn may spend on its reply.
+const REPAIR_TOKENS: u32 = 8_192;
 
 /// Result of PR creation attempt
 #[derive(Debug)]
@@ -237,6 +253,7 @@ impl Publication<'_> {
         self.identity(baseline).await?;
         if let Some(url) = existing {
             self.record(&url, branch, "open").await?;
+            report_repair(self.state, task.id).await;
             return Ok(PrCreationResult::PrAlreadyExists { pr_url: url });
         }
         let changes = files
@@ -269,11 +286,305 @@ impl Publication<'_> {
             .map_err(|error| error.to_string())?;
         self.identity(baseline).await?;
         self.record(&created.url, branch, &created.state).await?;
+        report_repair(self.state, task.id).await;
         Ok(PrCreationResult::Created {
             pr_url: created.url,
             branch_name: branch.clone(),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceptionSyncResult {
+    Recorded(Box<PullRequestReception>),
+    NoPullRequest,
+    NoCredentials,
+    Error(String),
+}
+
+/// The `pr` fields a reception adds, and the `review` block beside it.
+///
+/// The two are separate because they are merged differently: the pull request
+/// fields are folded into whatever `pr` already holds, while the review comments
+/// replace the previous `review` block wholesale.
+pub fn reception_artifacts(reception: &PullRequestReception) -> (Value, Value) {
+    let mut pull_request = serde_json::Map::new();
+    if let Some(opened_at) = &reception.opened_at {
+        pull_request.insert("opened_at".to_string(), json!(opened_at));
+    }
+    if let Some(merged_at) = &reception.merged_at {
+        pull_request.insert("merged_at".to_string(), json!(merged_at));
+    }
+    if let Some(minutes) = reception.minutes_to_merge {
+        pull_request.insert("minutes_to_merge".to_string(), json!(minutes));
+    }
+    if let Some(state) = &reception.state {
+        pull_request.insert("pr_state".to_string(), json!(state));
+    }
+    pull_request.insert("review_cycles".to_string(), json!(reception.review_cycles));
+    pull_request.insert("approvals".to_string(), json!(reception.approvals));
+
+    (
+        Value::Object(pull_request),
+        json!({ "comments": reception.comments }),
+    )
+}
+
+/// Merge one reception into a run's artifacts, leaving every other key untouched.
+///
+/// The `pr` key is folded into rather than replaced, so the URL and branch name
+/// the creation pass wrote survive; anything already stored under `pr` that is not
+/// an object is discarded rather than concatenated into nonsense.
+async fn record_reception(
+    state: &AppState,
+    run_id: Uuid,
+    reception: &PullRequestReception,
+) -> Result<bool, sqlx::Error> {
+    let (pull_request, review) = reception_artifacts(reception);
+
+    let outcome = sqlx::query(
+        r#"
+        UPDATE task_runs
+        SET artifacts = COALESCE(artifacts, '{}'::jsonb)
+            || jsonb_build_object(
+                $2::text,
+                CASE
+                    WHEN jsonb_typeof(artifacts -> $2::text) = 'object' THEN artifacts -> $2::text
+                    ELSE '{}'::jsonb
+                END || $3::jsonb
+            )
+            || jsonb_build_object($4::text, $5::jsonb)
+        WHERE id = $1
+        "#,
+    )
+    .bind(run_id)
+    .bind(PULL_REQUEST_KEY)
+    .bind(pull_request.to_string())
+    .bind(REVIEW_KEY)
+    .bind(review.to_string())
+    .execute(state.db())
+    .await?;
+
+    Ok(outcome.rows_affected() > 0)
+}
+
+/// Read back how a task's pull request was received and record it on the run.
+pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> ReceptionSyncResult {
+    let task = match tasks::get_task(state.db(), task_id).await {
+        Ok(Some(task)) => task,
+        Ok(None) => return ReceptionSyncResult::Error(format!("Task {} not found", task_id)),
+        Err(error) => {
+            return ReceptionSyncResult::Error(format!("Failed to get task: {}", error));
+        }
+    };
+
+    let Some(pr_url) = task.pr_url.as_deref() else {
+        return ReceptionSyncResult::NoPullRequest;
+    };
+
+    let reference = match PullRequestReference::parse(pr_url) {
+        Ok(reference) => reference,
+        Err(error) => {
+            return ReceptionSyncResult::Error(format!("Invalid pull request URL: {}", error));
+        }
+    };
+
+    let Some(access_token) = access_token(state, &task).await else {
+        return ReceptionSyncResult::NoCredentials;
+    };
+
+    let reception = match PrService::new()
+        .fetch_reception(&reference, &access_token)
+        .await
+    {
+        Ok(reception) => reception,
+        Err(error) => {
+            return ReceptionSyncResult::Error(format!("Failed to read reception: {}", error));
+        }
+    };
+
+    match record_reception(state, run_id, &reception).await {
+        Ok(true) => ReceptionSyncResult::Recorded(Box::new(reception)),
+        Ok(false) => ReceptionSyncResult::Error(format!("Task run {} not found", run_id)),
+        Err(error) => ReceptionSyncResult::Error(format!("Failed to record reception: {}", error)),
+    }
+}
+
+/// Repair a task's branch when it no longer merges with its base.
+///
+/// Everything that makes this safe lives in [`crate::workers::conflict`]: the
+/// conflict is reproduced in a throwaway checkout rather than in any repository on
+/// this machine, and a resolution that discards a branch's work is never published.
+pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> RepairOutcome {
+    let task = match tasks::get_task(state.db(), task_id).await {
+        Ok(Some(task)) => task,
+        Ok(None) => return RepairOutcome::Failed(format!("Task {} not found", task_id)),
+        Err(error) => return RepairOutcome::Failed(format!("Failed to get task: {}", error)),
+    };
+
+    let Some(branch_name) = task.branch_name.as_deref() else {
+        return RepairOutcome::Failed("Task has no branch to repair".to_string());
+    };
+
+    let Some(project_id) = task.project_ids.first().copied() else {
+        return RepairOutcome::Failed("Task has no project".to_string());
+    };
+
+    let project = match projects::get_project(state.db(), project_id).await {
+        Ok(Some(project)) => project,
+        Ok(None) => return RepairOutcome::Failed(format!("Project {} not found", project_id)),
+        Err(error) => return RepairOutcome::Failed(format!("Failed to get project: {}", error)),
+    };
+
+    let (Some(repo_url), Some(access_token)) =
+        (&project.github_repo_url, &project.github_access_token)
+    else {
+        return RepairOutcome::Failed("No GitHub repository configured".to_string());
+    };
+
+    let pr_service = PrService::new();
+    let (owner, repo) = match pr_service.parse_github_url(repo_url) {
+        Ok(parsed) => parsed,
+        Err(error) => return RepairOutcome::Failed(format!("Invalid GitHub URL: {}", error)),
+    };
+
+    if !conflicted(&pr_service, task.pr_url.as_deref(), access_token).await {
+        return RepairOutcome::NotConflicted;
+    }
+
+    let base = match pr_service
+        .get_default_branch(&owner, &repo, access_token)
+        .await
+    {
+        Ok(base) => base,
+        Err(error) => {
+            return RepairOutcome::Failed(format!("Failed to get default branch: {}", error));
+        }
+    };
+
+    let (head, base) = match (BranchName::parse(branch_name), BranchName::parse(&base)) {
+        (Ok(head), Ok(base)) => (head, base),
+        _ => return RepairOutcome::Failed("Branch names are not repairable".to_string()),
+    };
+
+    let model = repair_model(state, &task).await;
+    let repairer = ModelRepairAgent::new(
+        LlmClient::new(LlmConfig {
+            base_url: state.config().litellm_host.clone(),
+            api_key: state.config().litellm_key.clone(),
+            default_model: model.clone(),
+            temperature: REPAIR_TEMPERATURE,
+            max_tokens: REPAIR_TOKENS,
+        }),
+        model,
+    );
+
+    repair(
+        &ConflictService::new(),
+        &repairer,
+        &RepairRequest {
+            remote: repo_url.clone(),
+            token: Some(access_token.clone()),
+            head,
+            base,
+            expected_head: None,
+            expected_base: None,
+            pull_request: task.pr_url.clone(),
+        },
+    )
+    .await
+}
+
+/// Attempt a repair and say what came of it, without letting the outcome change
+/// whether the pull request itself succeeded. A branch that cannot be repaired is
+/// still a branch with a pull request open on it.
+async fn report_repair(state: &AppState, task_id: Uuid) {
+    match repair_conflicts_for_task(state, task_id).await {
+        RepairOutcome::Repaired { files, commit } => tracing::info!(
+            "Repaired {} conflicted file(s) for task {} as {}",
+            files.len(),
+            task_id,
+            commit
+        ),
+        RepairOutcome::NotConflicted => {}
+        RepairOutcome::Rejected { path, verdict } => tracing::warn!(
+            "Refused a conflict repair for task {}: {} was {}",
+            task_id,
+            path,
+            verdict
+        ),
+        RepairOutcome::Strayed(files) => tracing::warn!(
+            "Refused a conflict repair for task {}: it changed {}",
+            task_id,
+            files.join(", ")
+        ),
+        RepairOutcome::Failed(reason) => {
+            tracing::warn!("Conflict repair for task {} failed: {}", task_id, reason)
+        }
+    }
+}
+
+/// Whether GitHub says this branch has stopped merging with its base.
+///
+/// One cheap read stands between every successful task and the expensive work of
+/// reproducing a merge. A branch GitHub has not finished checking answers no: a
+/// pull request opened seconds ago is not yet known to conflict, and repairing on
+/// a guess is how a repair ends up running against a tree nobody asked about.
+async fn conflicted(service: &PrService, pr_url: Option<&str>, access_token: &str) -> bool {
+    let Some(pr_url) = pr_url else {
+        return false;
+    };
+
+    let Ok(reference) = PullRequestReference::parse(pr_url) else {
+        return false;
+    };
+
+    match service.fetch_mergeability(&reference, access_token).await {
+        Ok(mergeability) => mergeability.conflicted(),
+        Err(error) => {
+            tracing::warn!(%error, "Could not read pull request mergeability");
+            false
+        }
+    }
+}
+
+/// The model a repair runs on: the one the task itself ran on, resolved the same
+/// way, because the branch being repaired is that run's own work.
+async fn repair_model(state: &AppState, task: &tasks::TaskRow) -> String {
+    let catalog = stages::Catalog::load(&state.config().ollama_host).await;
+    let settings = match workspaces::get_workspace(state.db(), task.workspace_id).await {
+        Ok(Some(workspace)) => ai_settings::get_effective_ai_settings(
+            state.db(),
+            workspace.organization_id,
+            task.workspace_id,
+        )
+        .await
+        .ok(),
+        _ => None,
+    };
+
+    stages::chat_model(
+        task.model_name.as_deref().unwrap_or(stages::AUTO),
+        &stages::Preferences::from_optional_settings(
+            settings.as_ref(),
+            &state.config().comfyui.classifier_model,
+        ),
+        &catalog,
+        &format!("{}\n\n{}", task.title, task.description),
+        false,
+        true,
+    )
+}
+
+async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<String> {
+    for project_id in &task.project_ids {
+        if let Ok(Some(project)) = projects::get_project(state.db(), *project_id).await
+            && let Some(token) = project.github_access_token
+        {
+            return Some(token);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1393,5 +1704,167 @@ mod publication_tests {
                 .unwrap()
                 .contains("push rejected")
         );
+    }
+}
+
+#[cfg(test)]
+mod reception_tests {
+    use super::*;
+    use crate::workers::learning::artifacts;
+
+    /// Apply a reception to an artifacts document the way the merge query does.
+    fn merged(existing: Value, reception: &PullRequestReception) -> Value {
+        let (pull_request, review) = reception_artifacts(reception);
+        let mut artifacts = existing;
+
+        let mut pr = match artifacts.get(PULL_REQUEST_KEY) {
+            Some(Value::Object(existing)) => existing.clone(),
+            _ => serde_json::Map::new(),
+        };
+        if let Value::Object(fields) = pull_request {
+            pr.extend(fields);
+        }
+
+        artifacts[PULL_REQUEST_KEY] = Value::Object(pr);
+        artifacts[REVIEW_KEY] = review;
+        artifacts
+    }
+
+    fn reception() -> PullRequestReception {
+        PullRequestReception {
+            opened_at: Some("2026-09-04T09:00:00Z".to_string()),
+            merged_at: Some("2026-09-04T11:00:00Z".to_string()),
+            minutes_to_merge: Some(120),
+            review_cycles: 1,
+            approvals: 2,
+            state: Some("closed".to_string()),
+            comments: vec![
+                "needs a regression test".to_string(),
+                "rename this".to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn what_is_written_is_what_the_quality_score_reads_back() {
+        let artifacts = merged(
+            json!({ "pr": { "pr_url": "https://github.com/acme/project/pull/7" } }),
+            &reception(),
+        );
+
+        let read = artifacts::reception(Some(&artifacts), None);
+        assert_eq!(read.minutes_to_merge, Some(120));
+        assert_eq!(read.review_cycles, 1);
+        assert_eq!(read.approvals, 2);
+    }
+
+    #[test]
+    fn a_merge_time_survives_even_without_the_recorded_minutes() {
+        let mut without_minutes = reception();
+        without_minutes.minutes_to_merge = None;
+
+        let artifacts = merged(json!({}), &without_minutes);
+        assert_eq!(
+            artifacts::reception(Some(&artifacts), None).minutes_to_merge,
+            Some(120),
+            "the timestamps alone must be enough for the consumer to derive the duration"
+        );
+    }
+
+    #[test]
+    fn what_is_written_is_what_the_review_classifier_reads_back() {
+        let artifacts = merged(json!({}), &reception());
+        assert_eq!(
+            artifacts::review_comments(Some(&artifacts)),
+            vec!["needs a regression test", "rename this"]
+        );
+    }
+
+    #[test]
+    fn the_object_comment_shape_reads_back_the_same_way() {
+        let artifacts = json!({
+            "review": { "comments": [{ "body": "needs a regression test" }, { "body": "rename this" }] }
+        });
+        assert_eq!(
+            artifacts::review_comments(Some(&artifacts)),
+            vec!["needs a regression test", "rename this"],
+            "both accepted comment shapes must reach the classifier identically"
+        );
+    }
+
+    #[test]
+    fn recording_a_reception_keeps_what_pull_request_creation_wrote() {
+        let artifacts = merged(
+            json!({
+                "pr": {
+                    "pr_url": "https://github.com/acme/project/pull/7",
+                    "branch_name": "zone/task-123",
+                },
+                "attempts": 2,
+                "evaluation": { "verdict": "improved" },
+            }),
+            &reception(),
+        );
+
+        assert_eq!(
+            artifacts["pr"]["pr_url"],
+            json!("https://github.com/acme/project/pull/7")
+        );
+        assert_eq!(artifacts["pr"]["branch_name"], json!("zone/task-123"));
+        assert_eq!(artifacts["attempts"], json!(2));
+        assert_eq!(artifacts["evaluation"]["verdict"], json!("improved"));
+    }
+
+    #[test]
+    fn a_pull_request_key_that_is_not_an_object_is_replaced_rather_than_corrupted() {
+        let artifacts = merged(json!({ "pr": "https://example.test/pull/1" }), &reception());
+        assert_eq!(artifacts["pr"]["approvals"], json!(2));
+        assert_eq!(
+            artifacts::reception(Some(&artifacts), None).approvals,
+            2,
+            "a malformed earlier write must not stop the reception being readable"
+        );
+    }
+
+    #[test]
+    fn an_unmerged_pull_request_records_no_merge_time_at_all() {
+        let open = PullRequestReception {
+            opened_at: Some("2026-09-04T09:00:00Z".to_string()),
+            state: Some("open".to_string()),
+            ..PullRequestReception::default()
+        };
+
+        let artifacts = merged(json!({}), &open);
+        assert!(artifacts["pr"].get("merged_at").is_none());
+        assert!(artifacts["pr"].get("minutes_to_merge").is_none());
+        assert_eq!(
+            artifacts::reception(Some(&artifacts), None).minutes_to_merge,
+            None,
+            "an open pull request must score neutrally rather than instantly"
+        );
+    }
+
+    #[test]
+    fn a_reception_with_no_comments_writes_an_empty_list_not_a_missing_one() {
+        let artifacts = merged(json!({}), &PullRequestReception::default());
+        assert_eq!(artifacts["review"]["comments"], json!([]));
+        assert!(artifacts::review_comments(Some(&artifacts)).is_empty());
+    }
+
+    #[test]
+    fn test_pr_creation_result_debug() {
+        let result = PrCreationResult::Created {
+            pr_url: "https://github.com/test/repo/pull/1".to_string(),
+            branch_name: "zone/task-123-test".to_string(),
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("Created"));
+    }
+
+    #[test]
+    fn test_pr_creation_result_no_changes() {
+        let result = PrCreationResult::NoChanges;
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("NoChanges"));
     }
 }

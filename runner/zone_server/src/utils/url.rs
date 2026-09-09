@@ -15,18 +15,30 @@ pub fn validate_public_url(raw: &str) -> Result<reqwest::Url, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "URL must have a host.".to_string())?;
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && is_private_ip(ip)
-    {
-        return Err("Private IP addresses are not allowed.".to_string());
+
+    // `host_str` hands back IPv6 literals still bracketed, and `[::1]` does not
+    // parse as an address -- so without this every IPv6 spelling of a private
+    // target walked straight past the check below.
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        if is_private_ip(ip) {
+            return Err("Private IP addresses are not allowed.".to_string());
+        }
+        return Ok(url);
     }
-    let host = host.to_ascii_lowercase();
+
+    // A trailing dot is the same name to a resolver and a different string to
+    // `==`, so `localhost.` reached loopback while `localhost` did not.
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost"
         || host.ends_with(".localhost")
         || host.ends_with(".local")
         || host.ends_with(".internal")
         || host == "metadata.google.internal"
-        || host == "169.254.169.254"
     {
         return Err("Internal hostnames are not allowed.".to_string());
     }
@@ -42,7 +54,17 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || ip.octets()[0] == 0
                 || ip.octets() == [169, 254, 169, 254]
         }
-        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+        // An IPv4 address written as IPv6 reaches the same host, so it is
+        // answered by the IPv4 rules rather than a second, weaker set.
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped().or_else(|| ip.to_ipv4()) {
+            Some(ip) => is_private_ip(IpAddr::V4(ip)),
+            None => {
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local()
+            }
+        },
     }
 }
 
@@ -59,6 +81,22 @@ mod tests {
             "http://169.254.169.254/latest",
             "file:///etc/passwd",
             "https://user:pass@example.com/",
+        ] {
+            assert!(validate_public_url(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn rejects_ipv6_and_trailing_dot_spellings_of_the_same_targets() {
+        for url in [
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:169.254.169.254]/latest/meta-data/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://localhost./",
+            "http://LOCALHOST/",
+            "http://127.0.0.1./",
         ] {
             assert!(validate_public_url(url).is_err(), "{url}");
         }

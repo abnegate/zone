@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["tool_runner", "zone_runner", "zone_core", "zone_chat", "zone_comfy", "zone_email", "zone_search", "zone_vcs", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision", "zone_desktop"]
-default-members = ["tool_runner", "zone_runner", "zone_core", "zone_chat", "zone_comfy", "zone_email", "zone_search", "zone_vcs", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision"]
+members = ["tool_runner", "zone_runner", "zone_core", "zone_chat", "zone_comfy", "zone_email", "zone_notify", "zone_search", "zone_vcs", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision", "zone_desktop"]
+default-members = ["tool_runner", "zone_runner", "zone_core", "zone_chat", "zone_comfy", "zone_email", "zone_notify", "zone_search", "zone_vcs", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_vision"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,9 @@ clap = { version = "=4.6.6", features = ["derive"] }
 futures = "=0.3.34"
 bytes = "=1.12.1"
 base64 = "=0.23.1"
+aes-gcm = "=0.11.1"
+subtle = "=2.6.1"
+zeroize = "=1.9.0"
 dashmap = "=6.2.1"
 once_cell = "=1.21.4"
 tokio-stream = "=0.1.19"

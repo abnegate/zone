@@ -3897,6 +3897,7 @@ mod tests {
             revision: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
             observed_at: "2026-09-05T00:00:00+00:00".into(),
             complete: false,
+            provenance: crate::agent::verification::Provenance::ServerExecution,
             outcome: crate::agent::CitationOutcome::Incomplete,
             note: Some("Observed CI only".into()),
         }];

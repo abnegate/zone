@@ -2627,13 +2627,51 @@ async fn test_workspace_theme_delete_not_found() {
 
 // Models - Tests (limited - external service dependent)
 
+/// Serve a fixed catalog on a local port and hand back its URL.
+///
+/// These two tests used to call the live huggingface.co and gpt4all.io
+/// catalogues, which reds CI whenever either is slow, rate-limiting, or has
+/// changed what it returns -- none of which says anything about this route.
+/// `Config` documents these URLs as the override point for exactly this.
+async fn stub_catalog(body: serde_json::Value) -> String {
+    use axum::{Json, Router, routing::get};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port is free");
+    let address = listener.local_addr().expect("the listener has an address");
+    let router = Router::new().fallback(get(move || {
+        let body = body.clone();
+        async move { Json(body) }
+    }));
+
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    format!("http://{address}")
+}
+
 #[tokio::test]
 async fn test_models_list_huggingface() {
-    let client = TestClient::with_db().await;
+    let catalog = stub_catalog(json!([{
+        "id": "TheBloke/Mistral-7B-GGUF",
+        "modelId": "TheBloke/Mistral-7B-GGUF",
+        "author": "TheBloke",
+        "downloads": 1000,
+        "likes": 10,
+        "tags": ["gguf", "text-generation"],
+        "pipeline_tag": "text-generation",
+    }]))
+    .await;
+
+    let mut config = common::test_config();
+    config.huggingface_models_url = catalog;
+
+    let client = TestClient::with_config(config).await;
     let token = get_auth_token(&client).await;
     let (_org_id, _workspace_id) = setup_test_workspace(&client, &token).await;
 
-    // HuggingFace returns data from external API
     let response = client
         .get_auth("/api/models?source=huggingface", &token)
         .await;
@@ -2646,11 +2684,22 @@ async fn test_models_list_huggingface() {
 
 #[tokio::test]
 async fn test_models_list_gpt4all() {
-    let client = TestClient::with_db().await;
+    let catalog = stub_catalog(json!([{
+        "name": "Mistral Instruct",
+        "filename": "mistral-7b-instruct.gguf",
+        "filesize": "4108916224",
+        "parameters": "7 billion",
+        "type": "Mistral",
+    }]))
+    .await;
+
+    let mut config = common::test_config();
+    config.gpt4all_models_url = catalog;
+
+    let client = TestClient::with_config(config).await;
     let token = get_auth_token(&client).await;
     let (_org_id, _workspace_id) = setup_test_workspace(&client, &token).await;
 
-    // GPT4All returns data from external API
     let response = client.get_auth("/api/models?source=gpt4all", &token).await;
 
     response.assert_status(StatusCode::OK);

@@ -17,9 +17,12 @@ pub mod documents;
 pub mod images;
 pub mod integrations;
 pub mod monitoring;
+pub mod readiness;
 pub mod receipts;
+pub mod releases;
 pub mod runner;
 pub mod tools;
+pub mod verification;
 pub mod web;
 
 pub use approval::{ApprovalGate, ApprovalPolicy};
