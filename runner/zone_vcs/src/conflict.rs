@@ -20,7 +20,7 @@ use tempfile::TempDir;
 use thiserror::Error;
 use tokio::process::Command;
 
-use crate::git::inject_token_into_url;
+use crate::git::authenticate;
 
 /// The ref a fetched head lands on inside the throwaway checkout.
 const HEAD_REF: &str = "refs/zone/conflict/head";
@@ -396,13 +396,9 @@ impl ConflictService {
 
         self.run(&checkout, &["init", "--quiet"]).await?;
 
-        let remote = match &request.token {
-            Some(token) => inject_token_into_url(&request.remote, token)
-                .map_err(|error| ConflictError::CommandFailed(error.to_string()))?,
-            None => request.remote.clone(),
-        };
+        let remote = request.remote.clone();
 
-        self.run(
+        self.run_authenticated(
             &checkout,
             &[
                 "fetch",
@@ -412,6 +408,7 @@ impl ConflictService {
                 &format!("+refs/heads/{}:{HEAD_REF}", request.head),
                 &format!("+refs/heads/{}:{BASE_REF}", request.base),
             ],
+            request.token.as_deref(),
         )
         .await?;
 
@@ -522,13 +519,9 @@ impl ConflictService {
         token: Option<&str>,
         branch: &BranchName,
     ) -> ConflictResult<()> {
-        let destination = match token {
-            Some(token) => inject_token_into_url(remote, token)
-                .map_err(|error| ConflictError::CommandFailed(error.to_string()))?,
-            None => remote.to_string(),
-        };
+        let destination = remote.to_string();
 
-        self.run(
+        self.run_authenticated(
             conflict.path(),
             &[
                 "push",
@@ -536,6 +529,7 @@ impl ConflictService {
                 &destination,
                 &format!("HEAD:refs/heads/{branch}"),
             ],
+            token,
         )
         .await
     }
@@ -549,6 +543,26 @@ impl ConflictService {
 
     async fn run(&self, checkout: &Path, arguments: &[&str]) -> ConflictResult<()> {
         self.capture(checkout, arguments).await.map(|_| ())
+    }
+
+    /// Run a command that reaches the network, authenticating by header.
+    async fn run_authenticated(
+        &self,
+        checkout: &Path,
+        arguments: &[&str],
+        token: Option<&str>,
+    ) -> ConflictResult<()> {
+        let mut command = self.command(checkout, arguments);
+        if let Some(token) = token {
+            authenticate(&mut command, token);
+        }
+        let output = command.output().await?;
+        if !output.status.success() {
+            return Err(ConflictError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+        Ok(())
     }
 
     async fn capture(&self, checkout: &Path, arguments: &[&str]) -> ConflictResult<String> {

@@ -11,6 +11,28 @@ const run = {
   error_message: null,
 };
 
+const receipt = {
+  id: 'receipt-1',
+  action: 'create_task',
+  target_type: 'task',
+  target_id: 'task-2',
+  target_label: 'Created task',
+  actor_id: 'user-1',
+  actor_name: 'Task actor',
+  occurred_at: '2026-09-08T12:00:00Z',
+  success: true,
+  outcome: 'Created',
+  href: '/tasks/task-2',
+};
+const log = {
+  id: 'log-1',
+  phase: 'acting',
+  agent_type: 'task',
+  log_level: 'info',
+  message: 'Created task',
+  created_at: '2026-09-08T12:00:00Z',
+};
+
 describe('task runner contract', () => {
   let fetch: ReturnType<typeof spyOn>;
   beforeEach(() => {
@@ -59,6 +81,21 @@ describe('task runner contract', () => {
       expect.stringContaining('/api/tasks/runs/run%2F1/logs'),
       expect.anything()
     );
+  });
+  it('preserves durable action receipts and other metadata in HTTP logs', async () => {
+    const metadata = { action_receipt: receipt, tool_name: 'create_task' };
+    fetch.mockResolvedValueOnce(
+      Response.json({ logs: [{ ...log, metadata }, { ...log, metadata: null }, log] })
+    );
+    const logs = await tasksApi.getTaskRunLogs('task-1', 'run-1');
+    expect(logs[0]).toMatchObject({ metadata });
+    expect(logs[0].metadata?.action_receipt).toEqual(receipt);
+    expect(logs[1]).toMatchObject({ metadata: null });
+    expect(logs[2]).not.toHaveProperty('metadata');
+  });
+  it('preserves action receipts in streamed task logs', () => {
+    const message = { type: 'log', ...log, metadata: { action_receipt: receipt } };
+    expect(TaskProgressMessageSchema.parse(message)).toMatchObject({ metadata: message.metadata });
   });
   it('forwards abort signals for run creation, history, progress, and logs', async () => {
     const controller = new AbortController();

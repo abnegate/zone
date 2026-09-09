@@ -396,9 +396,12 @@ async fn test_list_task_runs() {
 
     // Create multiple runs
     for _ in 0..3 {
-        tasks::create_task_run(&pool, task.id)
+        let run = tasks::create_task_run(&pool, task.id)
             .await
             .expect("Failed to create task run");
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .unwrap();
     }
 
     // List runs

@@ -1,0 +1,54 @@
+name: Development CLI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/dev-cli/**'
+      - 'Makefile'
+      - 'scripts/compose.sh'
+      - 'scripts/test-migrations.py'
+      - '.github/workflows/dev-cli.yml'
+  pull_request:
+    paths:
+      - 'tools/dev-cli/**'
+      - 'Makefile'
+      - 'scripts/compose.sh'
+      - 'scripts/test-migrations.py'
+      - '.github/workflows/dev-cli.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: CLI and migration commands
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Install Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: '3.13'
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path tools/dev-cli/Cargo.toml --check
+
+      - name: Lint all CLI targets
+        run: cargo clippy --manifest-path tools/dev-cli/Cargo.toml --all-targets -- -D warnings
+
+      - name: Run CLI unit and integration tests
+        run: cargo test --manifest-path tools/dev-cli/Cargo.toml --all-targets
+
+      - name: Verify migration Make commands without Docker
+        run: python3 scripts/test-migrations.py

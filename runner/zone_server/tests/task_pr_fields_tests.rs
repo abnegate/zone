@@ -12,6 +12,7 @@ mod db_tests {
         // Create a mock TaskRow to verify the fields exist
         let task = TaskRow {
             id: Uuid::new_v4(),
+            created_by: None,
             workspace_id: Uuid::new_v4(),
             project_ids: vec![Uuid::new_v4()],
             title: "Test".to_string(),

@@ -72,10 +72,6 @@ async fn get_ws_auth_token() -> (String, uuid::Uuid) {
     )
 }
 
-// =============================================================================
-// TaskProgressBroadcaster Unit Tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_broadcaster_new() {
     let broadcaster = TaskProgressBroadcaster::new();
@@ -231,10 +227,6 @@ async fn test_broadcaster_multiple_runs() {
     }
 }
 
-// =============================================================================
-// ProgressMessage Tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_progress_message_init_to_ws() {
     let msg = ProgressMessage::Init {
@@ -269,6 +261,7 @@ async fn test_progress_message_log() {
         agent_type: "executor".to_string(),
         log_level: "info".to_string(),
         message: "Starting task".to_string(),
+        metadata: None,
     };
 
     let json = serde_json::to_string(&msg).unwrap();
@@ -306,10 +299,6 @@ async fn test_progress_message_error() {
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains("\"type\":\"error\""));
 }
-
-// =============================================================================
-// WebSocket Connection Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_ws_connect_without_auth() {
@@ -413,12 +402,25 @@ async fn test_ws_connect_task_run_not_found() {
         .await
         .expect("send");
 
-    // Should receive error about task run not found
-    if let Some(Ok(Message::Text(text))) = ws_stream.next().await {
-        let text_str: &str = text.as_ref();
-        let msg: serde_json::Value = serde_json::from_str(text_str).expect("parse");
-        assert_eq!(msg["type"], "error");
-        assert!(msg["message"].as_str().unwrap().contains("not found"));
+    // Do not distinguish missing runs from runs in another workspace: the socket
+    // is refused either way and must disclose nothing about the run. Matching on
+    // the frame keeps this from passing silently when the socket just closes.
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), ws_stream.next())
+        .await
+        .expect("refusal timed out")
+        .expect("socket produced no frame")
+        .expect("socket error");
+    match &response {
+        Message::Close(_) => {}
+        Message::Text(text) => {
+            let message: serde_json::Value = serde_json::from_str(text).expect("parse");
+            assert_eq!(message["type"], "error");
+            assert!(
+                !message.to_string().contains(&run_id.to_string()),
+                "the refusal named the run: {message}"
+            );
+        }
+        other => panic!("a refused socket sent {other:?} instead of closing"),
     }
 }
 
@@ -439,10 +441,6 @@ async fn test_ws_ping_pong() {
     // Note: The ping/pong is handled at the WebSocket protocol level
     // We might receive it as a Pong or not at all (depends on implementation)
 }
-
-// =============================================================================
-// WebSocket Tests with Actual Task Runs
-// =============================================================================
 
 /// Helper to create a project and task for testing
 async fn create_test_task() -> (uuid::Uuid, uuid::Uuid, String) {

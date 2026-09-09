@@ -5,11 +5,14 @@
 //! - Staging and committing changes
 //! - Pushing to remote
 
+use base64::Engine;
+
 /// Longest diff kept before truncation, in bytes.
 const MAXIMUM_DIFF_BYTES: usize = 50_000;
 
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -63,12 +66,252 @@ impl Default for GitService {
     }
 }
 
+/// The group remains separate from the server so cancellation cannot signal
+/// another task. Drop covers timeout/future cancellation, not server SIGKILL;
+/// abrupt process death requires the hosting supervisor to tear down its group.
+#[cfg(unix)]
+struct Group(nix::unistd::Pid);
+
+#[cfg(unix)]
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Err(error) = nix::sys::signal::killpg(self.0, nix::sys::signal::Signal::SIGKILL)
+            && error != nix::errno::Errno::ESRCH
+        {
+            tracing::warn!(%error, group = self.0.as_raw(), "Could not terminate Git process group");
+        }
+    }
+}
+
 impl GitService {
     /// Create a new git service
     pub fn new() -> Self {
         Self {
             max_branch_length: 100,
         }
+    }
+
+    /// Accept GitHub HTTPS repositories without URL credentials or transport options.
+    pub fn repository_url(source: &str) -> GitResult<String> {
+        let invalid =
+            || GitError::CommandFailed("Expected an HTTPS GitHub owner/repository URL".to_string());
+        let url = reqwest::Url::parse(source).map_err(|_| invalid())?;
+        if url.scheme() != "https"
+            || url.host_str() != Some("github.com")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid());
+        }
+        let path = url.path().trim_matches('/');
+        let parts: Vec<_> = path.split('/').collect();
+        if parts.len() != 2
+            || parts.iter().any(|part| {
+                part.is_empty()
+                    || *part == "."
+                    || *part == ".."
+                    || !part.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+                    })
+            })
+        {
+            return Err(invalid());
+        }
+        let name = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
+        if name.is_empty() {
+            return Err(invalid());
+        }
+        Ok(format!("https://github.com/{}/{}.git", parts[0], name))
+    }
+
+    /// Clone into an empty, caller-owned directory. Credentials live only in the
+    /// child environment, never the origin URL, process arguments, or git config.
+    pub async fn clone_repository(
+        &self,
+        source: &str,
+        destination: &Path,
+        token: Option<&str>,
+    ) -> GitResult<()> {
+        let source = Self::repository_url(source)?;
+        self.clone_source(&source, destination, token, false).await
+    }
+
+    fn network_command(token: Option<&str>) -> Command {
+        // Task-local replacement refs and legacy grafts must not reinterpret
+        // the stored objects used by history checks, diffs, commits or pushes.
+        let mut command = Command::new("git");
+        command
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_GRAFT_FILE", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "/usr/bin/false")
+            .env("GIT_ALLOW_PROTOCOL", "https")
+            .args([
+                "-c",
+                "credential.helper=",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "http.followRedirects=false",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        if let Some(token) = token {
+            authenticate(&mut command, token);
+        }
+        command
+    }
+
+    async fn output(command: &mut Command) -> GitResult<std::process::Output> {
+        #[cfg(unix)]
+        command.process_group(0);
+        command.kill_on_drop(true);
+        let child = command.spawn()?;
+        #[cfg(unix)]
+        let _group = Group(nix::unistd::Pid::from_raw(
+            child
+                .id()
+                .ok_or_else(|| std::io::Error::other("Git process has no ID"))? as i32,
+        ));
+        match tokio::time::timeout(Duration::from_secs(300), child.wait_with_output()).await {
+            Ok(output) => Ok(output?),
+            Err(_) => Err(GitError::CommandFailed(
+                "Git operation timed out".to_string(),
+            )),
+        }
+    }
+
+    async fn finish(command: &mut Command) -> GitResult<()> {
+        let output = Self::output(command).await?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                "Git operation failed; verify repository access".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn clone_source(
+        &self,
+        source: &str,
+        destination: &Path,
+        token: Option<&str>,
+        local: bool,
+    ) -> GitResult<()> {
+        let mut command = Self::network_command(token);
+        // Local transport is reachable only from this module's controlled fixture tests.
+        if local {
+            #[cfg(test)]
+            command.env("GIT_ALLOW_PROTOCOL", "file");
+            #[cfg(not(test))]
+            return Err(GitError::CommandFailed(
+                "Local repositories are disabled".to_string(),
+            ));
+        }
+        command
+            .args(["clone", "--no-hardlinks", "--template=", "--", source])
+            .arg(destination);
+        Self::finish(&mut command).await
+    }
+
+    /// Resume the task branch from a fresh clone without rewriting its history.
+    pub async fn prepare_branch(&self, path: &Path, branch: &str, required: bool) -> GitResult<()> {
+        let reference = format!("refs/heads/{branch}");
+        let valid =
+            Self::output(Self::network_command(None).args(["check-ref-format", &reference]))
+                .await?;
+        if !valid.status.success() || branch.starts_with('-') {
+            return Err(GitError::CommandFailed("Invalid task branch".into()));
+        }
+        let remote = format!("refs/remotes/origin/{branch}");
+        let exists = Self::output(
+            Self::network_command(None)
+                .args(["show-ref", "--verify", "--quiet", &remote])
+                .current_dir(path),
+        )
+        .await?;
+        if !exists.status.success() && (required || exists.status.code() != Some(1)) {
+            return Err(GitError::CommandFailed(
+                "Task branch is missing from the repository".into(),
+            ));
+        }
+        if self.current_branch(path).await? == branch {
+            return Ok(());
+        }
+        let mut command = Self::network_command(None);
+        command.args(["checkout", "-b", branch]);
+        if exists.status.success() {
+            command.arg(&remote);
+        }
+        command.arg("--").current_dir(path);
+        Self::finish(&mut command).await
+    }
+
+    /// Resolve a commit without reading a caller-controlled symbolic baseline later.
+    pub async fn revision(&self, path: &Path, reference: &str) -> GitResult<String> {
+        let output = Self::output(
+            Self::network_command(None)
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{reference}^{{commit}}"),
+                ])
+                .current_dir(path)
+                .stdout(Stdio::piped()),
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed("Checkout commit is missing".into()));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    pub async fn is_ancestor(&self, path: &Path, before: &str, after: &str) -> GitResult<bool> {
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["merge-base", "--is-ancestor", before, after])
+                .current_dir(path),
+        )
+        .await?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GitError::CommandFailed(
+                "Cannot verify checkout history".into(),
+            )),
+        }
+    }
+
+    /// Include changes already committed by task tools in the PR description.
+    pub async fn changed_files(&self, path: &Path, before: &str) -> GitResult<Vec<String>> {
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["diff", "--name-only", "-z", before, "HEAD", "--"])
+                .current_dir(path)
+                .stdout(Stdio::piped()),
+        )
+        .await?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                "Cannot inspect task changes".into(),
+            ));
+        }
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|name| !name.is_empty())
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect())
     }
 
     /// Generate a branch name for a task
@@ -110,27 +353,29 @@ impl GitService {
 
     /// Check if a path is a git repository
     pub async fn is_git_repo(&self, path: &Path) -> GitResult<bool> {
-        let output = Command::new("git")
-            .arg("rev-parse")
-            .arg("--is-inside-work-tree")
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .arg("rev-parse")
+                .arg("--is-inside-work-tree")
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         Ok(output.status.success())
     }
 
     /// Get the current branch name
     pub async fn current_branch(&self, path: &Path) -> GitResult<String> {
-        let output = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -142,13 +387,14 @@ impl GitService {
 
     /// Check if there are uncommitted changes
     pub async fn has_changes(&self, path: &Path) -> GitResult<bool> {
-        let output = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["status", "--porcelain"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -161,13 +407,14 @@ impl GitService {
     /// Get a summary of uncommitted changes
     pub async fn diff_summary(&self, path: &Path) -> GitResult<DiffSummary> {
         // Get list of changed files
-        let status_output = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let status_output = Self::output(
+            Self::network_command(None)
+                .args(["status", "--porcelain"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !status_output.status.success() {
             let stderr = String::from_utf8_lossy(&status_output.stderr);
@@ -187,13 +434,14 @@ impl GitService {
             .collect();
 
         // Get diff stats
-        let diff_stat_output = Command::new("git")
-            .args(["diff", "--shortstat", "HEAD"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let diff_stat_output = Self::output(
+            Self::network_command(None)
+                .args(["diff", "--shortstat", "HEAD"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         let mut insertions = 0;
         let mut deletions = 0;
@@ -216,13 +464,14 @@ impl GitService {
         }
 
         // Get actual diff text (limited)
-        let diff_output = Command::new("git")
-            .args(["diff", "HEAD"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let diff_output = Self::output(
+            Self::network_command(None)
+                .args(["diff", "HEAD"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         let diff_text = String::from_utf8_lossy(&diff_output.stdout);
         // len() counts bytes, so cutting at a fixed offset panics whenever the
@@ -249,31 +498,33 @@ impl GitService {
     /// Create and checkout a new branch
     pub async fn create_branch(&self, path: &Path, branch_name: &str) -> GitResult<()> {
         // Check if branch already exists
-        let check_output = Command::new("git")
-            .args([
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{}", branch_name),
-            ])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let check_output = Self::output(
+            Self::network_command(None)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{}", branch_name),
+                ])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if check_output.status.success() {
             return Err(GitError::BranchExists(branch_name.to_string()));
         }
 
         // Create and checkout the branch
-        let output = Command::new("git")
-            .args(["checkout", "-b", branch_name])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["checkout", "-b", branch_name])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -285,13 +536,14 @@ impl GitService {
 
     /// Stage all changes
     pub async fn stage_all(&self, path: &Path) -> GitResult<()> {
-        let output = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["add", "-A"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -303,13 +555,22 @@ impl GitService {
 
     /// Commit staged changes
     pub async fn commit(&self, path: &Path, message: &str) -> GitResult<String> {
-        let output = Command::new("git")
-            .args(["commit", "-m", message])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args([
+                    "-c",
+                    "user.name=Zone",
+                    "-c",
+                    "user.email=zone@localhost",
+                    "commit",
+                    "-m",
+                    message,
+                ])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -320,13 +581,14 @@ impl GitService {
         }
 
         // Get the commit SHA
-        let sha_output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let sha_output = Self::output(
+            Self::network_command(None)
+                .args(["rev-parse", "HEAD"])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         Ok(String::from_utf8_lossy(&sha_output.stdout)
             .trim()
@@ -335,13 +597,14 @@ impl GitService {
 
     /// Push branch to remote
     pub async fn push(&self, path: &Path, branch_name: &str, remote: &str) -> GitResult<()> {
-        let output = Command::new("git")
-            .args(["push", "-u", remote, branch_name])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["push", "-u", remote, branch_name])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -364,71 +627,66 @@ impl GitService {
         remote_url: &str,
         token: &str,
     ) -> GitResult<()> {
-        // Parse the remote URL and inject token
-        let authenticated_url = inject_token_into_url(remote_url, token)?;
+        let remote = Self::repository_url(remote_url)?;
+        self.push_source(path, branch_name, &remote, token, false)
+            .await
+    }
 
-        // Add/update remote with authenticated URL
-        // First remove if exists, then add
-        let _ = Command::new("git")
-            .args(["remote", "remove", "zone-push"])
-            .current_dir(path)
-            .output()
-            .await;
-
-        let add_output = Command::new("git")
-            .args(["remote", "add", "zone-push", &authenticated_url])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        if !add_output.status.success() {
-            let stderr = String::from_utf8_lossy(&add_output.stderr);
-            // Ignore "already exists" error
-            if !stderr.contains("already exists") {
-                return Err(GitError::CommandFailed(stderr.to_string()));
-            }
+    async fn push_source(
+        &self,
+        path: &Path,
+        branch_name: &str,
+        remote: &str,
+        token: &str,
+        local: bool,
+    ) -> GitResult<()> {
+        let mut command = Self::network_command(Some(token));
+        if local {
+            #[cfg(test)]
+            command.env("GIT_ALLOW_PROTOCOL", "file");
+            #[cfg(not(test))]
+            return Err(GitError::CommandFailed(
+                "Local repositories are disabled".into(),
+            ));
         }
-
-        // Push to the authenticated remote
-        let push_output = Command::new("git")
-            .args(["push", "-u", "zone-push", branch_name])
+        command
+            .args([
+                "push",
+                "--porcelain",
+                "--",
+                remote,
+                &format!("HEAD:refs/heads/{branch_name}"),
+            ])
             .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
-
-        // Clean up the remote with token
-        let _ = Command::new("git")
-            .args(["remote", "remove", "zone-push"])
-            .current_dir(path)
-            .output()
-            .await;
-
-        if !push_output.status.success() {
-            let stderr = String::from_utf8_lossy(&push_output.stderr);
-            if stderr.contains("Authentication failed")
-                || stderr.contains("could not read Username")
-            {
-                return Err(GitError::AuthFailed);
-            }
-            return Err(GitError::CommandFailed(stderr.to_string()));
+            .stdout(Stdio::piped());
+        let output = Self::output(&mut command).await?;
+        if output.status.success() {
+            return Ok(());
         }
-
-        Ok(())
+        // Classify only Git's machine-readable status; never expose remote output
+        // or URLs that could contain credentials or untrusted server messages.
+        let rejected = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .any(|line| line.starts_with(b"!\t"));
+        Err(GitError::CommandFailed(if rejected {
+            "Git push rejected; remote history or policy changed. Retry from a fresh checkout"
+                .into()
+        } else {
+            "Git push failed; verify repository access".into()
+        }))
     }
 
     /// Get the default remote URL
     pub async fn get_remote_url(&self, path: &Path, remote: &str) -> GitResult<String> {
-        let output = Command::new("git")
-            .args(["remote", "get-url", remote])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["remote", "get-url", remote])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             return Err(GitError::NoRemote);
@@ -439,13 +697,14 @@ impl GitService {
 
     /// Checkout existing branch
     pub async fn checkout(&self, path: &Path, branch_name: &str) -> GitResult<()> {
-        let output = Command::new("git")
-            .args(["checkout", branch_name])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await?;
+        let output = Self::output(
+            Self::network_command(None)
+                .args(["checkout", branch_name])
+                .current_dir(path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -456,37 +715,22 @@ impl GitService {
     }
 }
 
-/// Inject authentication token into a git URL
-pub(crate) fn inject_token_into_url(url: &str, token: &str) -> GitResult<String> {
-    // Handle HTTPS URLs: https://github.com/owner/repo.git
-    if let Some(without_scheme) = url.strip_prefix("https://") {
-        // Insert x-access-token:token@ after the scheme
-        return Ok(format!(
-            "https://x-access-token:{}@{}",
-            token, without_scheme
-        ));
-    }
-
-    // Handle SSH URLs - convert to HTTPS with token
-    // git@github.com:owner/repo.git -> https://x-access-token:token@github.com/owner/repo.git
-    if let Some(stripped) = url.strip_prefix("git@") {
-        let parts: Vec<&str> = stripped.splitn(2, ':').collect();
-        if parts.len() == 2 {
-            let host = parts[0];
-            let path = parts[1];
-            return Ok(format!(
-                "https://x-access-token:{}@{}/{}",
-                token, host, path
-            ));
-        }
-    }
-
-    Err(GitError::CommandFailed(format!(
-        "Unsupported URL format: {}",
-        url
-    )))
+/// Authenticate a git network command without putting the token in the URL.
+///
+/// A credential in the remote URL reaches `.git/config`, the process table and
+/// any error text that echoes the remote. The header is scoped to github.com so
+/// a redirect elsewhere cannot carry it.
+pub(crate) fn authenticate(command: &mut Command, token: &str) {
+    let authorization =
+        base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+    command
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: Basic {authorization}"),
+        );
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,34 +764,469 @@ mod tests {
         let branch = service.generate_branch_name(task_id, &long_title);
         assert!(branch.len() <= 100);
     }
+}
+
+#[cfg(test)]
+mod checkout_tests {
+    use super::*;
 
     #[test]
-    fn test_inject_token_https() {
-        let url = "https://github.com/owner/repo.git";
-        let token = "ghp_test123";
-        let result = inject_token_into_url(url, token).unwrap();
+    fn rejects_unsafe_repository_inputs() {
+        for source in [
+            "--upload-pack=evil",
+            "/tmp/repository",
+            "file:///tmp/repository",
+            "ext::command",
+            "git@github.com:owner/repository",
+            "https://token@github.com/owner/repository",
+            "https://github.com/owner/repository?token=secret",
+            "https://elsewhere.test/owner/repository",
+            "https://github.com/owner/repository/extra",
+        ] {
+            assert!(GitService::repository_url(source).is_err(), "{source}");
+        }
         assert_eq!(
-            result,
-            "https://x-access-token:ghp_test123@github.com/owner/repo.git"
+            GitService::repository_url("https://github.com/owner/repository").unwrap(),
+            "https://github.com/owner/repository.git"
         );
     }
 
     #[test]
-    fn test_inject_token_ssh() {
-        let url = "git@github.com:owner/repo.git";
-        let token = "ghp_test123";
-        let result = inject_token_into_url(url, token).unwrap();
-        assert_eq!(
-            result,
-            "https://x-access-token:ghp_test123@github.com/owner/repo.git"
-        );
+    fn authentication_is_not_in_arguments_or_repository_config() {
+        let command = GitService::network_command(Some("sensitive-token"));
+        let arguments = format!("{:?}", command.as_std().get_args().collect::<Vec<_>>());
+        assert!(!arguments.contains("sensitive-token"));
+        assert!(arguments.contains("credential.helper="));
+        assert!(arguments.contains("http.followRedirects=false"));
     }
 
-    #[test]
-    fn test_inject_token_invalid_url() {
-        let url = "invalid://url";
-        let token = "test";
-        let result = inject_token_into_url(url, token);
+    #[tokio::test]
+    async fn failed_clone_prevents_execution() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut executed = false;
+        let result = async {
+            GitService::new()
+                .clone_source(
+                    fixture.path().join("missing").to_str().unwrap(),
+                    &fixture.path().join("checkout"),
+                    Some("sensitive-token"),
+                    true,
+                )
+                .await?;
+            executed = true;
+            Ok::<(), GitError>(())
+        }
+        .await;
         assert!(result.is_err());
+        assert!(!executed);
+        assert!(!result.unwrap_err().to_string().contains("sensitive-token"));
+    }
+
+    #[tokio::test]
+    async fn clone_contains_committed_sentinel() {
+        let fixture = tempfile::tempdir().unwrap();
+        for arguments in [
+            vec!["init"],
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.test"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(arguments)
+                    .current_dir(fixture.path())
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        std::fs::write(fixture.path().join("sentinel"), "committed").unwrap();
+        for arguments in [vec!["add", "sentinel"], vec!["commit", "-m", "fixture"]] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(arguments)
+                    .current_dir(fixture.path())
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+        let destination = tempfile::tempdir().unwrap();
+        let path = destination.path().join("checkout");
+        GitService::new()
+            .clone_source(fixture.path().to_str().unwrap(), &path, None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("sentinel")).unwrap(),
+            "committed"
+        );
+        assert!(path.join(".git").is_dir());
+        let second = destination.path().join("second");
+        GitService::new()
+            .clone_source(
+                fixture.path().to_str().unwrap(),
+                &second,
+                Some("sensitive-token"),
+                true,
+            )
+            .await
+            .unwrap();
+        std::fs::write(path.join("sentinel"), "modified").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(second.join("sentinel")).unwrap(),
+            "committed"
+        );
+        let config = std::fs::read_to_string(second.join(".git/config")).unwrap();
+        assert!(!config.contains("sensitive-token"));
+        assert!(!config.contains("Authorization"));
+        let service = GitService::new();
+        service.stage_all(&path).await.unwrap();
+        assert!(
+            !service
+                .commit(&path, "task change")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let author = std::process::Command::new("git")
+            .args(["show", "-s", "--format=%an <%ae>"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(author.stdout).unwrap().trim(),
+            "Zone <zone@localhost>"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_tests {
+    use super::*;
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// These fixtures share the machine with every other test binary, and under
+    /// llvm-cov the instrumentation slows all of it down. The budgets only bound
+    /// how long a genuine regression takes to surface, so they are generous.
+    const SPAWN_BUDGET: Duration = Duration::from_secs(30);
+    const TEARDOWN_BUDGET: Duration = Duration::from_secs(10);
+
+    async fn marker(directory: &Path, name: &str) -> u32 {
+        tokio::time::timeout(SPAWN_BUDGET, async {
+            loop {
+                if let Ok(value) = tokio::fs::read_to_string(directory.join(name)).await
+                    && let Ok(pid) = value.trim().parse()
+                {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture process did not start")
+    }
+
+    fn alive(pid: u32) -> bool {
+        kill(Pid::from_raw(pid as i32), None).is_ok()
+    }
+
+    async fn cancellation(timeout: bool) {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fixture.path().join("git"),
+            "#!/bin/sh\necho $$ > \"$FIXTURE/parent\"\n/bin/sh \"$FIXTURE/helper\" &\nwait\n",
+        )
+        .unwrap();
+        std::fs::write(fixture.path().join("helper"), "#!/bin/sh\necho $$ > \"$FIXTURE/helper-pid\"\nprintf '%s' \"$GIT_CONFIG_VALUE_0\" > \"$FIXTURE/credential\"\n/bin/sh \"$FIXTURE/grandchild\" &\nwait\n").unwrap();
+        std::fs::write(
+            fixture.path().join("grandchild"),
+            "#!/bin/sh\necho $$ > \"$FIXTURE/grandchild-pid\"\nexec /bin/sleep 60\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            fixture.path().join("git"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let mut unrelated = Command::new("/bin/sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut command = GitService::network_command(Some("fixture-credential"));
+        command
+            .env("PATH", fixture.path())
+            .env("FIXTURE", fixture.path());
+        let operation = tokio::spawn(async move { GitService::finish(&mut command).await });
+        let parent = marker(fixture.path(), "parent").await;
+        let helper = marker(fixture.path(), "helper-pid").await;
+        let grandchild = marker(fixture.path(), "grandchild-pid").await;
+        let credential = tokio::fs::read_to_string(fixture.path().join("credential"))
+            .await
+            .unwrap();
+        assert!(credential.starts_with("Authorization: Basic "));
+        if timeout {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(301)).await;
+            let result = operation.await.unwrap();
+            tokio::time::resume();
+            assert!(
+                matches!(result, Err(GitError::CommandFailed(ref error)) if error.contains("timed out"))
+            );
+        } else {
+            operation.abort();
+            assert!(operation.await.unwrap_err().is_cancelled());
+        }
+        let stopped = tokio::time::timeout(TEARDOWN_BUDGET, async {
+            while [parent, helper, grandchild].iter().any(|pid| alive(*pid)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        let survivor = unrelated.try_wait().unwrap().is_none();
+        // Clean up only this fixture's known processes, including on the seen-red path.
+        for pid in [grandchild, helper, parent] {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+        }
+        unrelated.kill().await.unwrap();
+        tokio::time::timeout(TEARDOWN_BUDGET, async {
+            while [parent, helper, grandchild].iter().any(|pid| alive(*pid)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture cleanup left a Git helper running");
+        assert!(
+            survivor,
+            "cancellation killed an unrelated process outside the Git group"
+        );
+        assert!(
+            stopped,
+            "credential-bearing helper or grandchild survived Git cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_git_future_kills_helpers_and_preserves_unrelated_processes() {
+        cancellation(false).await;
+    }
+
+    #[tokio::test]
+    async fn timed_out_git_kills_helpers_and_preserves_unrelated_processes() {
+        cancellation(true).await;
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    fn git(directory: &Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    async fn forged_ancestry(legacy: bool) {
+        let fixture = tempfile::tempdir().unwrap();
+        git(fixture.path(), &["init", "--initial-branch=main"]);
+        let service = GitService::new();
+        std::fs::write(fixture.path().join("file"), "baseline").unwrap();
+        service.stage_all(fixture.path()).await.unwrap();
+        let baseline = service.commit(fixture.path(), "baseline").await.unwrap();
+        git(fixture.path(), &["checkout", "--orphan", "task"]);
+        std::fs::write(fixture.path().join("file"), "unrelated").unwrap();
+        service.stage_all(fixture.path()).await.unwrap();
+        let orphan = service.commit(fixture.path(), "orphan").await.unwrap();
+        if legacy {
+            std::fs::write(
+                fixture.path().join(".git/info/grafts"),
+                format!("{orphan} {baseline}\n"),
+            )
+            .unwrap();
+        } else {
+            git(fixture.path(), &["replace", "--graft", "HEAD", &baseline]);
+        }
+        assert!(
+            !service
+                .is_ancestor(fixture.path(), &baseline, "HEAD")
+                .await
+                .unwrap(),
+            "task metadata forged baseline ancestry"
+        );
+        assert_eq!(
+            service.revision(fixture.path(), "HEAD").await.unwrap(),
+            orphan
+        );
+        assert_eq!(
+            service
+                .changed_files(fixture.path(), &baseline)
+                .await
+                .unwrap(),
+            vec!["file"]
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_refs_do_not_supply_trusted_ancestry() {
+        forged_ancestry(false).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_grafts_do_not_supply_trusted_ancestry() {
+        forged_ancestry(true).await;
+    }
+
+    #[tokio::test]
+    async fn replacement_objects_cannot_hide_staged_changes() {
+        let fixture = tempfile::tempdir().unwrap();
+        git(fixture.path(), &["init", "--initial-branch=main"]);
+        let service = GitService::new();
+        std::fs::write(fixture.path().join("file"), "baseline").unwrap();
+        service.stage_all(fixture.path()).await.unwrap();
+        let baseline = service.commit(fixture.path(), "baseline").await.unwrap();
+        git(fixture.path(), &["checkout", "-b", "replacement"]);
+        std::fs::write(fixture.path().join("file"), "changed").unwrap();
+        service.stage_all(fixture.path()).await.unwrap();
+        let replacement = service
+            .commit(fixture.path(), "replacement tree")
+            .await
+            .unwrap();
+        git(fixture.path(), &["checkout", "main"]);
+        git(fixture.path(), &["replace", &baseline, &replacement]);
+        std::fs::write(fixture.path().join("file"), "changed").unwrap();
+        git(fixture.path(), &["--no-replace-objects", "add", "-A"]);
+        assert!(
+            service.has_changes(fixture.path()).await.unwrap(),
+            "replacement tree hid staged task changes"
+        );
+        let committed = service
+            .commit(fixture.path(), "real task changes")
+            .await
+            .unwrap();
+        assert_ne!(committed, baseline);
+        assert_eq!(
+            service
+                .changed_files(fixture.path(), &baseline)
+                .await
+                .unwrap(),
+            vec!["file"]
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_resumption_preserves_commits_and_normal_push_rejects_divergence() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        git(&source, &["init", "--initial-branch=main"]);
+        std::fs::write(source.join("initial"), "base").unwrap();
+        let service = GitService::new();
+        service.stage_all(&source).await.unwrap();
+        service.commit(&source, "initial").await.unwrap();
+        let remote = fixture.path().join("remote.git");
+        git(&source, &["clone", "--bare", ".", remote.to_str().unwrap()]);
+        let first = fixture.path().join("first");
+        service
+            .clone_source(remote.to_str().unwrap(), &first, None, true)
+            .await
+            .unwrap();
+        service
+            .prepare_branch(&first, "zone/task-test", false)
+            .await
+            .unwrap();
+        std::fs::write(first.join("first"), "first attempt").unwrap();
+        service.stage_all(&first).await.unwrap();
+        let first_commit = service.commit(&first, "first attempt").await.unwrap();
+        service
+            .push_source(
+                &first,
+                "zone/task-test",
+                remote.to_str().unwrap(),
+                "sensitive-token",
+                true,
+            )
+            .await
+            .unwrap();
+        let second = fixture.path().join("second");
+        service
+            .clone_source(remote.to_str().unwrap(), &second, None, true)
+            .await
+            .unwrap();
+        service
+            .prepare_branch(&second, "zone/task-test", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            service.revision(&second, "HEAD").await.unwrap(),
+            first_commit
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("first")).unwrap(),
+            "first attempt"
+        );
+        std::fs::write(second.join("second"), "second attempt").unwrap();
+        service.stage_all(&second).await.unwrap();
+        let second_commit = service.commit(&second, "second attempt").await.unwrap();
+        service
+            .push_source(
+                &second,
+                "zone/task-test",
+                remote.to_str().unwrap(),
+                "sensitive-token",
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            git(&remote, &["rev-parse", "zone/task-test"]),
+            second_commit
+        );
+        std::fs::write(first.join("concurrent"), "stale checkout").unwrap();
+        service.stage_all(&first).await.unwrap();
+        service.commit(&first, "concurrent attempt").await.unwrap();
+        let failure = service
+            .push_source(
+                &first,
+                "zone/task-test",
+                remote.to_str().unwrap(),
+                "sensitive-token",
+                true,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("Git push rejected"), "{failure}");
+        assert!(
+            !failure.contains("sensitive-token") && !failure.contains(remote.to_str().unwrap())
+        );
+        assert_eq!(
+            git(&remote, &["rev-parse", "zone/task-test"]),
+            second_commit
+        );
+        assert!(
+            !std::fs::read_to_string(first.join(".git/config"))
+                .unwrap()
+                .contains("sensitive-token")
+        );
+        assert!(
+            service
+                .is_ancestor(&second, &first_commit, "HEAD")
+                .await
+                .unwrap()
+        );
     }
 }

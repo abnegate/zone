@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::{tasks, workspace_members};
+use crate::db::{task_access, tasks, workspace_members};
 use crate::state::AppState;
 
 use super::common::{ErrorResponse, Timestamps};
@@ -160,6 +160,7 @@ pub struct TaskRunLogData {
     agent_type: String,
     log_level: String,
     message: String,
+    metadata: Option<serde_json::Value>,
     created_at: String,
 }
 
@@ -177,6 +178,7 @@ impl From<tasks::TaskRunLogRow> for TaskRunLogData {
             agent_type: row.agent_type,
             log_level: row.log_level,
             message: row.message,
+            metadata: row.metadata,
             created_at: row
                 .created_at
                 .map(|dt| dt.and_utc().to_rfc3339())
@@ -248,6 +250,10 @@ fn mutation_error(error: tasks::MutationError) -> Box<Response> {
             StatusCode::BAD_REQUEST,
             "Source is not available in this workspace",
         ),
+        tasks::MutationError::ActiveRun => denied(
+            StatusCode::CONFLICT,
+            "Task has an active run or is no longer available",
+        ),
         tasks::MutationError::Database(error) => database_error(error),
     }
 }
@@ -291,22 +297,22 @@ async fn authorize_task(
     authorize_workspace(state, auth, task.workspace_id, "Task not found").await
 }
 
+/// Authorize a run and read it in the same transaction.
+///
+/// `task_access::read` holds a shared lock on the caller's membership while it
+/// reads the run and its logs, so a revocation committing mid-request cannot be
+/// overtaken by the disclosure. Checking first and reading afterwards would
+/// leave exactly that window open.
 async fn authorize_run(
     state: &AppState,
     auth: &AuthUser,
     run_id: Uuid,
-) -> Result<(), Box<Response>> {
-    let run = tasks::get_task_run(state.db(), run_id)
+) -> Result<task_access::Snapshot, Box<Response>> {
+    let actor = user_id(auth)?;
+    task_access::read(state.db(), run_id, actor)
         .await
         .map_err(database_error)?
-        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task run not found"))?;
-
-    let task = tasks::get_task(state.db(), run.task_id)
-        .await
-        .map_err(database_error)?
-        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task run not found"))?;
-
-    authorize_workspace(state, auth, task.workspace_id, "Task run not found").await
+        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task run not found"))
 }
 
 /// GET /api/workspaces/:workspace_id/tasks
@@ -333,14 +339,7 @@ pub async fn list(
             tasks: items.into_iter().map(TaskData::from).collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *database_error(error),
     }
 }
 
@@ -367,6 +366,7 @@ pub async fn create(
             priority: request.priority,
             is_agentic: request.is_agentic.unwrap_or(false),
             source_id: request.source_id,
+            created_by: Some(user_id),
         },
     )
     .await
@@ -478,14 +478,7 @@ pub async fn queue(
     match tasks::queue_task_authorized(state.db(), user_id, id).await {
         Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
         Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *mutation_error(error),
     }
 }
 
@@ -503,14 +496,7 @@ pub async fn list_runs(
             runs: runs.into_iter().map(TaskRunData::from).collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(error) => *database_error(error),
     }
 }
 
@@ -547,12 +533,17 @@ pub async fn create_run(
             .into_response(),
         Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
         Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
+            if e.as_database_error()
+                .is_some_and(|error| error.is_unique_violation())
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ErrorResponse::new("Task already has an active run")),
+                )
+                    .into_response();
+            }
+
+            *database_error(e)
         }
     }
 }
@@ -563,24 +554,9 @@ pub async fn get_run(
     auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_run(&state, &auth, run_id).await {
-        return *response;
-    }
-    match tasks::get_task_run(state.db(), run_id).await {
-        Ok(Some(run)) => Json(TaskRunResponse::from(run)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task run not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+    match authorize_run(&state, &auth, run_id).await {
+        Ok(snapshot) => Json(TaskRunResponse::from(snapshot.run)).into_response(),
+        Err(response) => response.into_response(),
     }
 }
 
@@ -590,22 +566,16 @@ pub async fn get_run_logs(
     auth: AuthUser,
     Path(run_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if let Err(response) = authorize_run(&state, &auth, run_id).await {
-        return *response;
-    }
-    match tasks::get_task_run_logs(state.db(), run_id).await {
-        Ok(logs) => Json(TaskRunLogsListResponse {
-            logs: logs.into_iter().map(TaskRunLogData::from).collect(),
+    match authorize_run(&state, &auth, run_id).await {
+        Ok(snapshot) => Json(TaskRunLogsListResponse {
+            logs: snapshot
+                .logs
+                .into_iter()
+                .map(TaskRunLogData::from)
+                .collect(),
         })
         .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Err(response) => response.into_response(),
     }
 }
 
@@ -621,6 +591,7 @@ mod tests {
         tasks::TaskRow {
             id: Uuid::from_u128(1),
             workspace_id: Uuid::from_u128(2),
+            created_by: None,
             project_ids: if populated {
                 vec![Uuid::from_u128(3)]
             } else {

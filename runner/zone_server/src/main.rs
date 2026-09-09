@@ -34,6 +34,23 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let migrate = migration_mode(&arguments).expect("Usage: zone-server [--migrate-only]");
+    if migrate {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("Failed to connect to database");
+        zone_server::db::migrations::run(&pool)
+            .await
+            .expect("Failed to run migrations");
+        pool.close().await;
+        tracing::info!("Migrations complete");
+        return;
+    }
+
     tracing::info!("Starting Zone server...");
 
     zone_comfy::observe_requests(zone_server::metrics::record_comfyui);
@@ -52,8 +69,7 @@ async fn main() {
     tracing::info!("Connected to database");
 
     // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&db)
+    zone_server::db::migrations::run(&db)
         .await
         .expect("Failed to run migrations");
 
@@ -185,6 +201,7 @@ async fn main() {
     // Start background workers
     zone_server::workers::housekeeping::spawn(state.clone());
     zone_server::workers::reminders::spawn(state.clone());
+    let recovery = zone_server::workers::task::spawn_recovery(state.clone());
 
     // Configure CORS based on environment
     let cors_layer = if config.cors_origins.len() == 1 && config.cors_origins[0] == "*" {
@@ -240,5 +257,29 @@ async fn main() {
 
     let listener = TcpListener::bind(addr).await.expect("Failed to bind");
 
-    axum::serve(listener, app).await.expect("Server error");
+    let result = axum::serve(listener, app).await;
+    recovery.abort();
+    let _ = recovery.await;
+    result.expect("Server error");
+}
+
+fn migration_mode(arguments: &[String]) -> Result<bool, &'static str> {
+    match arguments {
+        [] => Ok(false),
+        [argument] if argument == "--migrate-only" => Ok(true),
+        _ => Err("Unknown server arguments"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migration_mode;
+
+    #[test]
+    fn migration_arguments_are_exact() {
+        assert_eq!(migration_mode(&[]), Ok(false));
+        assert_eq!(migration_mode(&["--migrate-only".into()]), Ok(true));
+        assert!(migration_mode(&["--migrate-only".into(), "extra".into()]).is_err());
+        assert!(migration_mode(&["--migrate".into()]).is_err());
+    }
 }

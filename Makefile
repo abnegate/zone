@@ -301,19 +301,18 @@ db-shell: ## Open PostgreSQL shell
 
 db-migrate: ## Run database migrations
 	@echo "$(BLUE)Running database migrations...$(NC)"
-	@for migration in runner/zone_server/migrations/*.sql; do \
-		echo "$(GREEN)Applying $$migration...$(NC)"; \
-		docker exec -i postgres psql -U $${POSTGRES_USER:-zone} -d $${POSTGRES_DB:-zone} < "$$migration" 2>&1 | grep -v "already exists" || true; \
-	done
+	@$(COMPOSE) run --build --rm --no-deps manager sh -ec 'if [ -x /app/zone-server ]; then exec /app/zone-server --migrate-only; else cd /app/runner; SQLX_OFFLINE=true exec cargo run -p zone_server --bin zone-server --no-default-features -- --migrate-only; fi'
 	@echo "$(GREEN)Migrations complete!$(NC)"
 
 db-reset: ## DANGER: Reset database (requires confirmation)
 	@echo "$(RED)WARNING: This will delete ALL database data!$(NC)"
-	@read -p "Are you sure? Type 'yes' to confirm: " confirm; \
+	@set -e; read -p "Are you sure? Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" = "yes" ]; then \
 		echo "$(RED)Resetting database...$(NC)"; \
-		docker exec postgres psql -U $${POSTGRES_USER:-zone} -c "DROP DATABASE IF EXISTS $${POSTGRES_DB:-zone}"; \
-		docker exec postgres psql -U $${POSTGRES_USER:-zone} -c "CREATE DATABASE $${POSTGRES_DB:-zone}"; \
+		configuration=$$($(COMPOSE) config --format json); \
+		database=$$(printf '%s' "$$configuration" | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["manager"]["environment"]["POSTGRES_DB"])'); \
+		$(COMPOSE) exec -T postgres sh -ec 'dropdb -U "$$POSTGRES_USER" --if-exists -- "$$1"' sh "$$database"; \
+		$(COMPOSE) exec -T postgres sh -ec 'createdb -U "$$POSTGRES_USER" -- "$$1"' sh "$$database"; \
 		$(MAKE) db-migrate; \
 		echo "$(GREEN)Database reset complete!$(NC)"; \
 	else \

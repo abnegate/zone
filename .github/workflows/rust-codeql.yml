@@ -7,14 +7,19 @@ on:
       - 'runner/**'
       - '.github/workflows/rust-codeql.yml'
       - '.github/codeql/**'
+      - 'scripts/test-dependencies.py'
   pull_request:
     paths:
       - 'runner/**'
       - '.github/workflows/rust-codeql.yml'
       - '.github/codeql/**'
+      - 'scripts/test-dependencies.py'
   schedule:
     # Run weekly on Sunday at midnight UTC
     - cron: '0 0 * * 0'
+
+permissions:
+  contents: read
 
 jobs:
   analyze:
@@ -28,6 +33,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -55,7 +62,7 @@ jobs:
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
         continue-on-error: true
         with:
-          category: "/language:rust"
+          category: '/language:rust'
 
   # Additional security checks using cargo-audit
   audit:
@@ -68,6 +75,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -89,6 +98,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -96,6 +107,9 @@ jobs:
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
 
+      - name: Verify dependency policy boundaries
+        run: python3 ../scripts/test-dependencies.py
+
       - name: Check dependencies
-        run: cargo deny check
-        continue-on-error: true
+        # cargo-deny 0.20 uses CLI overrides for the existing advisory warning policy.
+        run: cargo deny --locked check --warn unmaintained --warn notice

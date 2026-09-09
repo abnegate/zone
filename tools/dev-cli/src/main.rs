@@ -19,7 +19,7 @@ use ratatui::{
 };
 use std::{
     io::{BufRead, BufReader, stdout},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -171,11 +171,7 @@ enum Project {
 
 impl Project {
     fn all() -> Vec<Project> {
-        vec![
-            Project::ManagerFrontend,
-            Project::Runner,
-            Project::Server,
-        ]
+        vec![Project::ManagerFrontend, Project::Runner, Project::Server]
     }
 
     fn display_name(&self) -> &'static str {
@@ -456,7 +452,7 @@ fn find_project_root(start_dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec<TaskConfig> {
+fn create_format_tasks(root: &Path, projects: &[Project], check: bool) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
     let mut rust_task_added = false;
 
@@ -485,23 +481,22 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
                 } else {
                     // Use prettier if available
                     let package_json = working_dir.join("package.json");
-                    if package_json.exists() {
-                        if let Ok(content) = std::fs::read_to_string(&package_json) {
-                            if content.contains("prettier") {
-                                let (cmd, args) = if check {
-                                    ("npx", vec!["prettier", "--check", "src"])
-                                } else {
-                                    ("npx", vec!["prettier", "--write", "src"])
-                                };
-                                tasks.push(TaskConfig {
-                                    project: *project,
-                                    name: format!("Format {}", project.display_name()),
-                                    command: cmd.to_string(),
-                                    args: args.into_iter().map(String::from).collect(),
-                                    working_dir,
-                                });
-                            }
-                        }
+                    if package_json.exists()
+                        && let Ok(content) = std::fs::read_to_string(&package_json)
+                        && content.contains("prettier")
+                    {
+                        let (cmd, args) = if check {
+                            ("npx", vec!["prettier", "--check", "src"])
+                        } else {
+                            ("npx", vec!["prettier", "--write", "src"])
+                        };
+                        tasks.push(TaskConfig {
+                            project: *project,
+                            name: format!("Format {}", project.display_name()),
+                            command: cmd.to_string(),
+                            args: args.into_iter().map(String::from).collect(),
+                            working_dir,
+                        });
                     }
                 }
             }
@@ -529,7 +524,7 @@ fn create_format_tasks(root: &PathBuf, projects: &[Project], check: bool) -> Vec
     tasks
 }
 
-fn create_lint_tasks(root: &PathBuf, projects: &[Project], fix: bool) -> Vec<TaskConfig> {
+fn create_lint_tasks(root: &Path, projects: &[Project], fix: bool) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
     let mut rust_task_added = false;
 
@@ -604,7 +599,7 @@ fn create_lint_tasks(root: &PathBuf, projects: &[Project], fix: bool) -> Vec<Tas
     tasks
 }
 
-fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
+fn create_test_tasks(root: &Path, projects: &[Project]) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
 
     for project in projects {
@@ -662,8 +657,10 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
                              docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres valkey && \
                              until docker exec postgres pg_isready -U postgres > /dev/null 2>&1; do sleep 1; done && \
                              docker exec postgres psql -U postgres -c \"CREATE DATABASE zone_test;\" 2>/dev/null || true && \
-                             cd {server_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test sqlx migrate run && \
-                             cd {working_dir} && DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test cargo test -p zone_server",
+                             export DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test \
+                             TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/zone_test REDIS_URL=redis://localhost:6379 && \
+                             cd {server_dir} && SQLX_OFFLINE=true cargo run -p zone_server --bin zone-server --no-default-features -- --migrate-only && \
+                             cd {working_dir} && cargo test -p zone_server",
                             root = root.display(),
                             server_dir = server_dir.display(),
                             working_dir = working_dir.display()
@@ -678,12 +675,7 @@ fn create_test_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
     tasks
 }
 
-fn create_e2e_tasks(
-    root: &PathBuf,
-    projects: &[Project],
-    headed: bool,
-    ui: bool,
-) -> Vec<TaskConfig> {
+fn create_e2e_tasks(root: &Path, projects: &[Project], headed: bool, ui: bool) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
 
     for project in projects {
@@ -726,7 +718,7 @@ fn create_e2e_tasks(
     tasks
 }
 
-fn create_audit_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
+fn create_audit_tasks(root: &Path, projects: &[Project]) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
     let mut rust_task_added = false;
 
@@ -763,7 +755,7 @@ fn create_audit_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
     tasks
 }
 
-fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig> {
+fn create_coverage_tasks(root: &Path, projects: &[Project]) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
     let mut rust_task_added = false;
 
@@ -804,7 +796,7 @@ fn create_coverage_tasks(root: &PathBuf, projects: &[Project]) -> Vec<TaskConfig
     tasks
 }
 
-fn create_lighthouse_tasks(root: &PathBuf, target: LighthouseTarget) -> Vec<TaskConfig> {
+fn create_lighthouse_tasks(root: &Path, target: LighthouseTarget) -> Vec<TaskConfig> {
     let mut tasks = Vec::new();
 
     let targets = match target {
@@ -890,11 +882,11 @@ async fn run_task(task_idx: usize, task: Arc<Mutex<TaskState>>, tx: mpsc::Sender
         new_path.push_str(&root_bin.to_string_lossy());
         new_path.push(':');
     }
-    if let Some(ref bin) = root_root_bin {
-        if bin.exists() {
-            new_path.push_str(&bin.to_string_lossy());
-            new_path.push(':');
-        }
+    if let Some(ref bin) = root_root_bin
+        && bin.exists()
+    {
+        new_path.push_str(&bin.to_string_lossy());
+        new_path.push(':');
     }
     new_path.push_str(&path_var);
 
@@ -1407,10 +1399,8 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
                                     app.output_scroll = 0;
                                 }
                             }
-                            KeyCode::Char('G') => {
-                                if app.focused_pane == FocusedPane::Output {
-                                    app.output_scroll = usize::MAX;
-                                }
+                            KeyCode::Char('G') if app.focused_pane == FocusedPane::Output => {
+                                app.output_scroll = usize::MAX;
                             }
                             _ => {}
                         }
@@ -1440,11 +1430,11 @@ async fn run_tui(tasks: Vec<TaskConfig>) -> Result<bool> {
                                 let entry_y = y.saturating_sub(app.tasks_area.y + 1);
                                 let entry_idx = entry_y as usize;
                                 // Only select if it's a valid task entry (not a header)
-                                if entry_idx < app.list_entries.len() {
-                                    if matches!(app.list_entries[entry_idx], ListEntry::Task(_)) {
-                                        app.selected_index = entry_idx;
-                                        app.reset_output_scroll();
-                                    }
+                                if entry_idx < app.list_entries.len()
+                                    && matches!(app.list_entries[entry_idx], ListEntry::Task(_))
+                                {
+                                    app.selected_index = entry_idx;
+                                    app.reset_output_scroll();
                                 }
                             } else if in_output {
                                 app.focused_pane = FocusedPane::Output;
@@ -1610,7 +1600,7 @@ async fn run_simple(tasks: Vec<TaskConfig>) -> Result<bool> {
     Ok(failed == 0)
 }
 
-fn run_docker_compose(root: &PathBuf, subcommand: &str, extra_args: &[String]) -> Result<()> {
+fn run_docker_compose(root: &Path, subcommand: &str, extra_args: &[String]) -> Result<()> {
     let mut cmd = Command::new("docker");
     cmd.arg("compose")
         .arg("-f")
@@ -1639,7 +1629,7 @@ fn run_docker_compose(root: &PathBuf, subcommand: &str, extra_args: &[String]) -
     Ok(())
 }
 
-async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> Result<()> {
+async fn run_db_command(root: &Path, command: &DbCommands, _simple: bool) -> Result<()> {
     match command {
         DbCommands::Prepare => {
             println!("{} Regenerating SQLx offline cache...", "→".cyan());
@@ -1693,77 +1683,24 @@ async fn run_db_command(root: &PathBuf, command: &DbCommands, _simple: bool) -> 
                 "  Don't forget to commit the .sqlx directory!".dimmed()
             );
         }
-        DbCommands::Migrate => {
-            println!("{} Applying database migrations...", "→".cyan());
-
-            let migration_file = root.join("runner/zone_server/migrations/001_initial_schema.sql");
-            if !migration_file.exists() {
+        DbCommands::Migrate | DbCommands::Reset => {
+            let target = if matches!(command, DbCommands::Migrate) {
+                "db-migrate"
+            } else {
+                "db-reset"
+            };
+            println!("{} Running make {}...", "→".cyan(), target);
+            let status = Command::new("make")
+                .arg(target)
+                .current_dir(root)
+                .status()?;
+            if !status.success() {
                 return Err(anyhow::anyhow!(
-                    "Migration file not found: {:?}",
-                    migration_file
+                    "make {} failed with exit code: {:?}",
+                    target,
+                    status.code()
                 ));
             }
-
-            let status = Command::new("docker")
-                .args([
-                    "exec", "-i", "postgres", "psql", "-U", "litellm", "-d", "manager",
-                ])
-                .stdin(std::fs::File::open(&migration_file)?)
-                .status()?;
-
-            if !status.success() {
-                return Err(anyhow::anyhow!("Migration failed"));
-            }
-
-            println!("{} Migrations applied successfully", "✓".green().bold());
-        }
-        DbCommands::Reset => {
-            println!("{} Resetting database...", "→".cyan());
-
-            // Drop database
-            let _ = Command::new("docker")
-                .args([
-                    "exec",
-                    "postgres",
-                    "psql",
-                    "-U",
-                    "litellm",
-                    "-c",
-                    "DROP DATABASE IF EXISTS manager;",
-                ])
-                .status();
-
-            // Create database
-            let create = Command::new("docker")
-                .args([
-                    "exec",
-                    "postgres",
-                    "psql",
-                    "-U",
-                    "litellm",
-                    "-c",
-                    "CREATE DATABASE manager;",
-                ])
-                .status()?;
-
-            if !create.success() {
-                return Err(anyhow::anyhow!("Failed to create database"));
-            }
-
-            // Apply migrations
-            let migration_file = root.join("runner/zone_server/migrations/001_initial_schema.sql");
-            let status = Command::new("docker")
-                .args([
-                    "exec", "-i", "postgres", "psql", "-U", "litellm", "-d", "manager",
-                ])
-                .stdin(std::fs::File::open(&migration_file)?)
-                .status()?;
-
-            if !status.success() {
-                return Err(anyhow::anyhow!("Migration failed"));
-            }
-
-            println!("{} Database reset complete", "✓".green().bold());
         }
     }
 
@@ -1821,7 +1758,7 @@ async fn main() -> Result<()> {
         } => create_e2e_tasks(&root, &get_projects(project.clone()), *headed, *ui),
         Commands::Audit { project } => create_audit_tasks(&root, &get_projects(project.clone())),
         Commands::Db { command } => {
-            return run_db_command(&root, &command, cli.simple).await;
+            return run_db_command(&root, command, cli.simple).await;
         }
         Commands::Up { args } => {
             println!(
@@ -1865,4 +1802,28 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_test_command_sets_disposable_database_and_cache() {
+        let tasks = create_test_tasks(Path::new("/zone-fixture"), &[Project::Server]);
+        assert_eq!(tasks.len(), 1);
+        let command = &tasks[0].args[1];
+        let setting = |name: &str| {
+            let prefix = format!("{name}=");
+            command
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix(&prefix))
+        };
+        let database = setting("DATABASE_URL").expect("database for the disposable test fixture");
+        assert!(database.ends_with("/zone_test"));
+        assert_eq!(setting("TEST_DATABASE_URL"), Some(database));
+        assert_eq!(setting("REDIS_URL"), Some("redis://localhost:6379"));
+        assert!(command.contains("--migrate-only"));
+        assert!(!command.contains("001_initial_schema.sql"));
+    }
 }

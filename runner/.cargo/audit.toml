@@ -3,6 +3,7 @@
 [advisories]
 # Ignore specific advisories that have no fix available
 ignore = [
-    # RSA Marvin Attack - no fix available, transitive dependency of sqlx-mysql and jsonwebtoken
+    # RSA Marvin Attack - no fix available. Server JWTs use HMAC only;
+    # octocrab is unused by zone_context. See docs/DEPENDENCIES.md.
     "RUSTSEC-2023-0071",
 ]

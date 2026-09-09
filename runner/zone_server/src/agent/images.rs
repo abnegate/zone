@@ -133,6 +133,9 @@ async fn run_image(
     params: Value,
     edit: bool,
 ) -> ToolResult {
+    let Some(chat_id) = scope.chat_id else {
+        return ToolResult::error("Media generation requires a chat");
+    };
     let prompt = match string_arg(&params, "prompt") {
         Ok(prompt) => prompt.to_string(),
         Err(error) => return error,
@@ -176,8 +179,8 @@ async fn run_image(
         match store
             .persist(
                 scope.workspace_id,
-                scope.chat_id,
-                scope.chat_id,
+                chat_id,
+                chat_id,
                 extension_for(&image.mime),
                 &image.bytes,
             )
@@ -209,12 +212,13 @@ async fn resolve_source(
     image_url: Option<&str>,
     edit: bool,
 ) -> Result<Option<SourceImage>, String> {
+    let chat_id = scope.chat_id.ok_or("Image source requires a chat")?;
     if let Some(url) = image_url {
         let metadata = json!({"attachments":[{"name":"source","mime":"image/png","url":url}]});
         return resolve_source_image_from(
             std::iter::once(Some(&metadata)),
             scope.workspace_id,
-            scope.chat_id,
+            chat_id,
             store,
         )
         .await
@@ -223,7 +227,7 @@ async fn resolve_source(
     if !edit {
         return Ok(None);
     }
-    let history = chats::list_messages(scope.state.db(), scope.chat_id)
+    let history = chats::list_messages(scope.state.db(), chat_id)
         .await
         .map_err(|_| "Could not load earlier images in this chat.".to_string())?;
     resolve_source_image_from(
@@ -232,7 +236,7 @@ async fn resolve_source(
             .rev()
             .map(|message| message.metadata.as_ref()),
         scope.workspace_id,
-        scope.chat_id,
+        chat_id,
         store,
     )
     .await
@@ -264,7 +268,7 @@ mod tests {
         WorkspaceScope {
             state: AppState::new(config, database, None),
             workspace_id: Uuid::new_v4(),
-            chat_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
         }
     }
@@ -450,10 +454,11 @@ mod tests {
                 .as_deref()
                 .is_some_and(|output| output.contains("Generated 1 image(s)"))
         );
+        let chat_id = scope.chat_id.expect("the fixture scope has a chat");
         let stored = root
             .join(scope.workspace_id.to_string())
-            .join(scope.chat_id.to_string())
-            .join(scope.chat_id.to_string())
+            .join(chat_id.to_string())
+            .join(chat_id.to_string())
             .join(result.images[0].rsplit('/').next().unwrap());
         assert_eq!(tokio::fs::read(stored).await.unwrap(), [1, 2, 3, 4]);
         tokio::fs::remove_dir_all(root).await.unwrap();

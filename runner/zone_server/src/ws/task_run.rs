@@ -67,6 +67,8 @@ pub enum ProgressMessage {
         agent_type: String,
         log_level: String,
         message: String,
+        /// Receipt detail the worker attached to this line.
+        metadata: Option<serde_json::Value>,
     },
     /// Task completed successfully
     Completed { status: String },
@@ -325,6 +327,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                     agent_type: log.agent_type,
                     log_level: log.log_level,
                     message: log.message,
+                    metadata: log.metadata,
                 };
                 if sender.send(log_msg.to_ws_message()).await.is_err() {
                     return;
@@ -368,6 +371,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                // A terminal run still owes the client the logs recorded before
+                // it finished, so the frame waits until they have been drained.
+                let mut terminal: Option<ProgressMessage> = None;
                 // Check for status updates
                 match tasks::get_task_run(state.db(), run_id).await {
                     Ok(Some(run)) => {
@@ -380,17 +386,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                             last_status = run.status.clone();
 
                             if run.status == "completed" {
-                                let msg = ProgressMessage::Completed {
+                                terminal = Some(ProgressMessage::Completed {
                                     status: run.status,
-                                };
-                                let _ = sender.send(msg.to_ws_message()).await;
-                                return;
+                                });
                             } else if run.status == "failed" {
-                                let msg = ProgressMessage::Failed {
+                                terminal = Some(ProgressMessage::Failed {
                                     error: run.error_message.unwrap_or_else(|| "Unknown error".to_string()),
-                                };
-                                let _ = sender.send(msg.to_ws_message()).await;
-                                return;
+                                });
                             } else {
                                 let msg = ProgressMessage::StatusUpdate {
                                     status: run.status,
@@ -444,6 +446,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                                 agent_type: log.agent_type,
                                 log_level: log.log_level,
                                 message: log.message,
+                                metadata: log.metadata,
                             };
                             if sender.send(log_msg.to_ws_message()).await.is_err() {
                                 return;
@@ -459,6 +462,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                         let _ = sender.close().await;
                         return;
                     },
+                }
+
+                if let Some(terminal) = terminal {
+                    let _ = sender.send(terminal.to_ws_message()).await;
+                    return;
                 }
             }
 

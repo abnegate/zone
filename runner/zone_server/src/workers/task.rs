@@ -1,14 +1,12 @@
 //! Task execution worker
 //!
 //! Executes agentic tasks in the background using the same streaming agent
-//! loop as chat, with a task budget, a sandboxed tool context and a bounded
-//! retry policy. Models resolve through the same installed-model catalogue
-//! chat uses, so a task never pins a name the deployment cannot serve.
+//! loop as chat, with a task budget and a sandboxed tool context.
 
 use futures::StreamExt;
 use sqlx::PgPool;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -26,8 +24,14 @@ use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
 use crate::workers::pr::{PrCreationResult, create_pr_for_task};
 use zone_chat::capacity::Resolver;
 
+// Max concurrent task executions
 const MAX_CONCURRENT_TASKS: usize = 5;
-const TASK_TIMEOUT: Duration = Duration::from_secs(3600);
+
+// Timeout for task execution (1 hour)
+const TASK_TIMEOUT_SECS: u64 = 3600;
+const TASK_TIMEOUT: Duration = Duration::from_secs(TASK_TIMEOUT_SECS);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Matches the sampling temperature `session::build` gives an interactive chat.
 const TASK_TEMPERATURE: f32 = 0.7;
@@ -46,6 +50,7 @@ const LEVEL_ERROR: &str = "error";
 const NO_MODEL: &str =
     "No completion model is installed or configured for this workspace, so the task cannot run";
 
+// Global semaphore to limit concurrent task executions
 static TASK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 fn get_semaphore() -> &'static Arc<Semaphore> {
@@ -410,152 +415,277 @@ fn leading_duration(tail: &str) -> Option<Duration> {
 ///
 /// Events are persisted asynchronously in spawned tasks to avoid blocking
 /// the agent loop.
+#[derive(Clone)]
 pub struct DatabaseTaskCallback {
     pool: PgPool,
     run_id: Uuid,
+    owner: Option<Uuid>,
 }
 
 impl DatabaseTaskCallback {
     /// Create a new database task callback
     pub fn new(pool: PgPool, run_id: Uuid) -> Self {
-        Self { pool, run_id }
+        Self {
+            pool,
+            run_id,
+            owner: None,
+        }
+    }
+    async fn log(
+        &self,
+        phase: &str,
+        agent: &str,
+        level: &str,
+        message: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        match tasks::add_owned_task_run_log(
+            &self.pool,
+            self.run_id,
+            self.owner,
+            phase,
+            agent,
+            level,
+            message,
+            metadata,
+        )
+        .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("Task execution lost its lease".to_string()),
+            Err(error) => Err(format!("Could not persist task event: {error}")),
+        }
     }
 }
 
 impl AgentCallback for DatabaseTaskCallback {
     fn on_phase_change(&self, phase: AgentPhase, message: Option<&str>) {
-        let pool = self.pool.clone();
-        let run_id = self.run_id;
-        let phase_str = phase.to_string();
-        let message_str = message.map(|s| s.to_string());
-
+        let callback = self.clone();
+        let phase = phase.to_string();
+        let message = message
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Entering {phase} phase"));
         tokio::spawn(async move {
-            if let Err(e) =
-                tasks::update_task_run_progress(&pool, run_id, Some(&phase_str), None).await
-            {
-                tracing::error!("Failed to update task run progress: {}", e);
-            }
-
-            let log_message =
-                message_str.unwrap_or_else(|| format!("Entering {} phase", phase_str));
-
-            if let Err(e) = tasks::add_task_run_log(
-                &pool,
-                run_id,
-                &phase_str,
-                SOURCE_AGENT,
-                LEVEL_INFO,
-                &log_message,
-                None,
-            )
-            .await
-            {
-                tracing::error!("Failed to add task run log: {}", e);
-            }
-        });
-    }
-
-    fn on_tool_call(&self, tool_name: &str, args: &str) {
-        let pool = self.pool.clone();
-        let run_id = self.run_id;
-        let tool_name = tool_name.to_string();
-        let args = args.to_string();
-
-        tokio::spawn(async move {
-            let message = format!("Executing tool: {} with args: {}", tool_name, args);
-
-            if let Err(e) = tasks::add_task_run_log(
-                &pool,
-                run_id,
-                &AgentPhase::Acting.to_string(),
-                SOURCE_TOOL,
-                LEVEL_INFO,
-                &message,
-                Some(serde_json::json!({
-                    "tool": tool_name,
-                    "args": args,
-                })),
-            )
-            .await
-            {
-                tracing::error!("Failed to add task run log: {}", e);
-            }
-        });
-    }
-
-    fn on_tool_result(&self, tool_name: &str, result: &ToolResult) {
-        let pool = self.pool.clone();
-        let run_id = self.run_id;
-        let tool_name = tool_name.to_string();
-        let result = result.clone();
-
-        tokio::spawn(async move {
-            let (log_level, message) = if result.success {
-                (LEVEL_INFO, format!("Tool {} succeeded", tool_name))
-            } else {
-                (
-                    LEVEL_ERROR,
-                    format!("Tool {} failed: {:?}", tool_name, result.error),
+            if matches!(
+                tasks::update_owned_task_run_progress(
+                    &callback.pool,
+                    callback.run_id,
+                    callback.owner,
+                    Some(&phase),
+                    None
                 )
-            };
-
-            if let Err(e) = tasks::add_task_run_log(
-                &pool,
-                run_id,
-                &AgentPhase::Acting.to_string(),
-                SOURCE_TOOL,
-                log_level,
-                &message,
-                Some(serde_json::json!({
-                    "tool": tool_name,
-                    "success": result.success,
-                    "output": result.output,
-                    "error": result.error,
-                })),
-            )
-            .await
-            {
-                tracing::error!("Failed to add task run log: {}", e);
+                .await,
+                Ok(Some(_))
+            ) {
+                let _ = callback.log(&phase, "agent", "info", &message, None).await;
             }
+        });
+    }
+
+    fn on_tool_call(&self, name: &str, arguments: &str) {
+        let callback = self.clone();
+        let name = name.to_string();
+        let arguments = arguments.to_string();
+        tokio::spawn(async move {
+            let _ = callback
+                .log(
+                    "acting",
+                    "tool",
+                    "info",
+                    &format!("Executing tool: {name}"),
+                    Some(serde_json::json!({"tool":name,"args":arguments})),
+                )
+                .await;
+        });
+    }
+
+    fn on_tool_result(&self, name: &str, result: &ToolResult) {
+        let callback = self.clone();
+        let name = name.to_string();
+        let result = result.clone();
+        tokio::spawn(async move {
+            let level = if result.success { "info" } else { "error" };
+            let _ = callback.log("acting", "tool", level, &format!("Tool {name} finished"), Some(serde_json::json!({"tool":name,"success":result.success,"output":result.output,"error":result.error}))).await;
         });
     }
 
     fn on_response(&self, response: &str) {
-        let pool = self.pool.clone();
-        let run_id = self.run_id;
+        let callback = self.clone();
         let response = response.to_string();
-
         tokio::spawn(async move {
-            if let Err(e) = tasks::add_task_run_log(
-                &pool,
-                run_id,
-                &AgentPhase::Responding.to_string(),
-                SOURCE_AGENT,
-                LEVEL_INFO,
-                &response,
-                None,
-            )
-            .await
-            {
-                tracing::error!("Failed to add task run log: {}", e);
-            }
+            let _ = callback
+                .log("responding", "agent", "info", &response, None)
+                .await;
         });
     }
+}
+
+/// Recover orphaned runs and their abandoned local checkouts.
+pub fn spawn_recovery(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = tasks::sweep_task_runs(state.db()).await {
+                tracing::error!(%error, "Could not recover orphaned task runs");
+            }
+            if let Err(error) = crate::db::recovery::reconcile(state.db()).await {
+                tracing::error!(%error, "Could not reconcile terminal task runs");
+            }
+            if let Err(error) = crate::services::checkout::Checkout::recover(state.db()).await {
+                tracing::error!(%error, "Could not recover abandoned task checkouts");
+            }
+        }
+    })
 }
 
 /// Execute a task run
 ///
 /// This function runs the complete task execution pipeline:
-/// 1. Fetches task details from database
-/// 2. Resolves the completion model against the installed catalogue
-/// 3. Gathers context if source_ids are specified
-/// 4. Runs the agent loop under the retry policy, one semaphore permit per
-///    attempt, releasing the permit before any backoff
-/// 5. Updates status to "completed" or "failed"
+/// 1. Acquires semaphore permit to limit concurrent executions
+/// 2. Updates run status to "running"
+/// 3. Fetches task details from database
+/// 4. Gathers context if source_ids are specified
+/// 5. Initializes LLM client and agent
+/// 6. Executes agent loop with DatabaseTaskCallback
+/// 7. Updates status to "completed" or "failed"
 ///
 /// All events are persisted to the database via DatabaseTaskCallback for monitoring.
+/// Run recovery is durable across restarts and independent of agent progress.
 pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
+    let owner = Uuid::new_v4();
+    let run = match tasks::get_task_run(state.db(), run_id).await {
+        Ok(Some(run)) if run.task_id == task_id => run,
+        _ => return,
+    };
+    if let Some(actor) = run.triggered_by {
+        let allowed = match tasks::get_task(state.db(), task_id).await {
+            Ok(Some(task)) => crate::db::workspace_members::has_role_or_higher(
+                state.db(),
+                actor,
+                task.workspace_id,
+                crate::db::workspace_members::WorkspaceRole::Member,
+            )
+            .await
+            .unwrap_or(false),
+            _ => false,
+        };
+        if !allowed {
+            let _ = tasks::complete_task_run(
+                state.db(),
+                run_id,
+                "failed",
+                Some("Workspace write access required"),
+                None,
+            )
+            .await;
+            return;
+        }
+    }
+    if !matches!(
+        tasks::claim_task_run(state.db(), run.id, owner).await,
+        Ok(true)
+    ) {
+        return;
+    }
+    let execution = tasks::Execution {
+        task: task_id,
+        run: run_id,
+        owner,
+        actor: run.triggered_by,
+    };
+    let heartbeat = async {
+        let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let refresh = async {
+                if !execution.authorized(state.db(), false).await? {
+                    return Ok(false);
+                }
+                tasks::heartbeat_task_run(state.db(), run_id, owner).await
+            };
+            if !matches!(
+                tokio::time::timeout(HEARTBEAT_TIMEOUT, refresh).await,
+                Ok(Ok(true))
+            ) {
+                tracing::warn!(%run_id, "Task execution lost its lease or writer access; cancelling pipeline");
+                return;
+            }
+        }
+    };
+    let cancelled = tokio::select! {
+        biased;
+        () = heartbeat => true,
+        () = execute_owned_task_run(state, execution) => false,
+    };
+    if cancelled {
+        let _ = tokio::time::timeout(
+            HEARTBEAT_TIMEOUT,
+            tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some("Task execution lost its lease or writer access"),
+                None,
+            ),
+        )
+        .await;
+    }
+}
+
+async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
+    let tasks::Execution {
+        task: task_id,
+        run: run_id,
+        owner,
+        ..
+    } = execution;
     let mut obs = crate::metrics::TaskObs::new();
+
+    // Acquire semaphore permit to limit concurrent executions
+    let _permit = match get_semaphore().acquire().await {
+        Ok(p) => p,
+        Err(_) => {
+            obs.set_status("semaphore_denied");
+            tracing::error!("Task semaphore closed for run {}", run_id);
+            if let Err(e) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some("System overload - semaphore closed"),
+                None,
+            )
+            .await
+            {
+                tracing::error!("CRITICAL: Failed to update run {} status: {}", run_id, e);
+            }
+            return;
+        }
+    };
+
+    if !matches!(execution.authorized(state.db(), false).await, Ok(true)) {
+        let _ = tasks::complete_owned_task_run(
+            state.db(),
+            run_id,
+            Some(owner),
+            "failed",
+            Some("Workspace write access required"),
+            None,
+        )
+        .await;
+        return;
+    }
+
+    if !matches!(
+        tasks::start_owned_task_run(state.db(), run_id, Some(owner)).await,
+        Ok(true)
+    ) {
+        return;
+    }
 
     tracing::info!(
         "Starting task execution: run_id={}, task_id={}",
@@ -563,35 +693,108 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         task_id
     );
 
+    // Fetch task details
     let task = match tasks::get_task(state.db(), task_id).await {
-        Ok(Some(task)) => task,
+        Ok(Some(t)) => t,
         Ok(None) => {
             obs.set_status("not_found");
             tracing::error!("Task {} not found", task_id);
-            fail(state.db(), run_id, "Task not found", None).await;
-            return;
-        }
-        Err(error) => {
-            obs.set_status("error");
-            tracing::error!("Failed to fetch task {}: {}", task_id, error);
-            fail(
+            if let Err(e) = tasks::complete_owned_task_run(
                 state.db(),
                 run_id,
-                &format!("Failed to fetch task: {}", error),
+                Some(owner),
+                "failed",
+                Some("Task not found"),
                 None,
             )
-            .await;
+            .await
+            {
+                tracing::error!("CRITICAL: Failed to update run {} status: {}", run_id, e);
+            }
+            return;
+        }
+        Err(e) => {
+            obs.set_status("error");
+            tracing::error!("Failed to fetch task {}: {}", task_id, e);
+            if let Err(e) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                "failed",
+                Some(&format!("Failed to fetch task: {}", e)),
+                None,
+            )
+            .await
+            {
+                tracing::error!("CRITICAL: Failed to update run {} status: {}", run_id, e);
+            }
             return;
         }
     };
 
-    // SECURITY: tools run against this directory only, so a GitHub-backed task
-    // never escapes into the server's own working tree.
-    let workspace_path = if task.github_repo_url.is_some() {
-        std::env::temp_dir().join(format!("zone-task-{}", task_id))
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
+    if !matches!(execution.authorized(state.db(), false).await, Ok(true)) {
+        let _ = tasks::complete_owned_task_run(
+            state.db(),
+            run_id,
+            Some(owner),
+            "failed",
+            Some("Workspace write access required"),
+            None,
+        )
+        .await;
+        return;
+    }
+
+    let checkout =
+        match crate::services::checkout::Checkout::prepare(state.db(), &task, execution).await {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                obs.set_status("failed");
+                if let Err(failure) = tasks::complete_owned_task_run(
+                    state.db(),
+                    run_id,
+                    Some(owner),
+                    "failed",
+                    Some(&error),
+                    None,
+                )
+                .await
+                {
+                    tracing::error!(%run_id, %failure, "Failed to record checkout failure");
+                }
+                return;
+            }
+        };
+    let workspace_path = checkout.path().to_path_buf();
+
+    let run = match tasks::get_task_run(state.db(), run_id).await {
+        Ok(Some(run)) => run,
+        _ => return,
     };
+    let actor = task.created_by.and(run.triggered_by);
+    let workspace_id = task.workspace_id;
+    let model = resolve_model(state, &task).await;
+    if stages::is_auto(&model) {
+        obs.set_status(RUN_FAILED);
+        tracing::error!("Task {} has no resolvable completion model", task_id);
+        if let Err(error) = tasks::complete_owned_task_run(
+            state.db(),
+            run_id,
+            Some(owner),
+            RUN_FAILED,
+            Some(NO_MODEL),
+            None,
+        )
+        .await
+        {
+            tracing::error!(
+                "CRITICAL: Failed to update run {} status: {}",
+                run_id,
+                error
+            );
+        }
+        return;
+    }
 
     let evaluator = Evaluator::detect(
         &workspace_path,
@@ -614,34 +817,36 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         Vec::new()
     };
 
-    let model = resolve_model(state, &task).await;
-    if stages::is_auto(&model) {
-        obs.set_status(RUN_FAILED);
-        tracing::error!("Task {} has no resolvable completion model", task_id);
-        fail(state.db(), run_id, NO_MODEL, None).await;
-        return;
-    }
-
     let guidance = guidance(state, &task).await;
     let prompt = format!("# Task: {}\n\n{}", task.title, task.description);
     let policy = RetryPolicy::default();
     let pool = state.db();
+    let workspace = workspace_path.as_path();
     let model = model.as_str();
     let prompt = prompt.as_str();
     let guidance = guidance.as_str();
-    let workspace = workspace_path.as_path();
 
     let result = run_with_policy(
         policy,
-        get_semaphore(),
-        move |_| attempt_run(state, run_id, model, prompt, guidance, workspace),
+        move |_| {
+            attempt_run(
+                state,
+                run_id,
+                owner,
+                workspace_id,
+                actor,
+                model,
+                prompt,
+                guidance,
+                workspace,
+            )
+        },
         move |attempt| record_attempt(pool, run_id, policy, attempt),
     )
     .await;
 
     match result {
         Ok(completed) => {
-            obs.set_status(RUN_COMPLETED);
             let summary = if completed.outcome.summary.trim().is_empty() {
                 "Task completed".to_string()
             } else {
@@ -649,55 +854,11 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             };
 
             tracing::info!(
-                "Task run {} completed: tool_calls={}, attempts={}",
+                "Task run {} agent loop finished: tool_calls={}, attempts={}",
                 run_id,
                 completed.outcome.tool_calls,
                 completed.attempts
             );
-
-            let pr_info = match create_pr_for_task(state, task_id, &workspace_path).await {
-                PrCreationResult::Created {
-                    pr_url,
-                    branch_name,
-                } => {
-                    tracing::info!("Created PR for task {}: {}", task_id, pr_url);
-                    Some(serde_json::json!({
-                        "pr_url": pr_url,
-                        "branch_name": branch_name,
-                    }))
-                }
-                PrCreationResult::NoChanges => {
-                    tracing::info!("No changes to create PR for task {}", task_id);
-                    None
-                }
-                PrCreationResult::NoRepository => {
-                    tracing::info!("No repository configured for task {}", task_id);
-                    None
-                }
-                PrCreationResult::PrAlreadyExists { pr_url } => {
-                    tracing::info!("PR already exists for task {}: {}", task_id, pr_url);
-                    Some(serde_json::json!({
-                        "pr_url": pr_url,
-                        "pr_already_existed": true,
-                    }))
-                }
-                PrCreationResult::Error(err) => {
-                    tracing::warn!("Failed to create PR for task {}: {}", task_id, err);
-                    Some(serde_json::json!({
-                        "pr_error": err,
-                    }))
-                }
-            };
-
-            let mut artifacts = serde_json::json!({
-                "tool_calls": completed.outcome.tool_calls,
-                "summary": summary,
-                "attempts": completed.attempts,
-            });
-
-            if let Some(pr) = pr_info {
-                artifacts["pr"] = pr;
-            }
 
             let evaluation = evaluator.compare(baseline).await;
             if !evaluation.deltas.is_empty() {
@@ -706,17 +867,14 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
                 } else {
                     LEVEL_INFO
                 };
-                let artifact = evaluation.artifact();
                 record_evaluation_log(
                     state,
                     run_id,
                     level,
                     &evaluation.summary,
-                    Some(artifact.clone()),
+                    Some(evaluation.artifact()),
                 )
                 .await;
-                artifacts["evaluation"] = artifact;
-
                 if evaluation.verdict == Verdict::Regressed {
                     tracing::warn!(
                         "Task run {} regressed code quality in: {}",
@@ -726,16 +884,25 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
                 }
             }
 
-            if let Err(error) =
-                tasks::complete_task_run(state.db(), run_id, RUN_COMPLETED, None, Some(artifacts))
-                    .await
-            {
-                tracing::error!(
-                    "CRITICAL: Failed to update run {} status: {}",
-                    run_id,
-                    error
-                );
+            // Attempt PR creation if there are code changes
+            if !matches!(
+                tasks::heartbeat_task_run(state.db(), run_id, owner).await,
+                Ok(true)
+            ) {
+                return;
             }
+            let publication =
+                create_pr_for_task(state, execution, &workspace_path, checkout.baseline()).await;
+            obs.set_status(
+                complete_publication(
+                    state,
+                    execution,
+                    summary,
+                    completed.outcome.tool_calls,
+                    publication,
+                )
+                .await,
+            );
         }
         Err(stopped) => {
             obs.set_status(if stopped.exhausted {
@@ -754,170 +921,23 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
                 "classification": stopped.fault.failure.label(),
                 "stopped": if stopped.exhausted { "exhausted" } else { "terminal" },
             });
-            fail(state.db(), run_id, &stopped.fault.message, Some(artifacts)).await;
-        }
-    }
-}
-
-/// Runs attempts until one succeeds or the policy stops.
-///
-/// A permit is acquired per attempt and dropped before any backoff, so a
-/// sleeping run never occupies a slot other runs are waiting on.
-async fn run_with_policy<Run, Running, Record, Recording>(
-    policy: RetryPolicy,
-    permits: &Semaphore,
-    mut run: Run,
-    mut record: Record,
-) -> Result<Completed, Stopped>
-where
-    Run: FnMut(u32) -> Running,
-    Running: Future<Output = Result<TaskOutcome, Fault>>,
-    Record: FnMut(Attempt) -> Recording,
-    Recording: Future<Output = ()>,
-{
-    let mut number: u32 = 1;
-    loop {
-        let attempted = {
-            let Ok(_permit) = permits.acquire().await else {
-                return Err(Stopped {
-                    fault: Fault::overloaded(),
-                    attempts: number,
-                    exhausted: false,
-                });
-            };
-            run(number).await
-        };
-        let fault = match attempted {
-            Ok(outcome) => {
-                return Ok(Completed {
-                    outcome,
-                    attempts: number,
-                });
-            }
-            Err(fault) => fault,
-        };
-        let decision = policy.decide(number, fault.failure, sample());
-        record(Attempt {
-            number,
-            failure: fault.failure,
-            decision,
-            message: fault.message.clone(),
-        })
-        .await;
-        match decision {
-            Decision::Retry(delay) => {
-                tracing::warn!(
-                    attempt = number,
-                    ?delay,
-                    classification = fault.failure.label(),
-                    error = %fault.message,
-                    "Retrying task run"
+            if let Err(error) = tasks::complete_owned_task_run(
+                state.db(),
+                run_id,
+                Some(owner),
+                RUN_FAILED,
+                Some(&stopped.fault.message),
+                Some(artifacts),
+            )
+            .await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to update run {} status: {}",
+                    run_id,
+                    error
                 );
-                tokio::time::sleep(delay).await;
-                number += 1;
-            }
-            Decision::Terminal => {
-                return Err(Stopped {
-                    fault,
-                    attempts: number,
-                    exhausted: false,
-                });
-            }
-            Decision::Exhausted => {
-                return Err(Stopped {
-                    fault,
-                    attempts: number,
-                    exhausted: true,
-                });
             }
         }
-    }
-}
-
-const EVALUATION_PHASE: &str = "evaluating";
-const EVALUATION_AGENT: &str = "evaluation";
-
-async fn record_evaluation_log(
-    state: &AppState,
-    run_id: Uuid,
-    log_level: &str,
-    message: &str,
-    metadata: Option<serde_json::Value>,
-) {
-    if let Err(error) = tasks::add_task_run_log(
-        state.db(),
-        run_id,
-        EVALUATION_PHASE,
-        EVALUATION_AGENT,
-        log_level,
-        message,
-        metadata,
-    )
-    .await
-    {
-        tracing::error!(
-            "Failed to record evaluation log for run {}: {}",
-            run_id,
-            error
-        );
-    }
-}
-
-async fn attempt_run(
-    state: &AppState,
-    run_id: Uuid,
-    model: &str,
-    prompt: &str,
-    guidance: &str,
-    workspace: &Path,
-) -> Result<TaskOutcome, Fault> {
-    let tools = ChatTools::for_task(state, workspace.to_path_buf()).await;
-    let mut system_prompt = agent::system_prompt(&tools, true);
-    system_prompt.push_str(guidance);
-
-    let capacity = Resolver::with_context(
-        &state.config().litellm_host,
-        &state.config().litellm_key,
-        &state.config().ollama_host,
-        Some(state.config().chat.context),
-    )
-    .resolve(model)
-    .await;
-    let policy = session::policy(&state.config().chat, &capacity);
-    let mut llm = LlmClient::new(LlmConfig {
-        base_url: state.config().litellm_host.clone(),
-        api_key: state.config().litellm_key.clone(),
-        default_model: model.to_string(),
-        temperature: TASK_TEMPERATURE,
-        max_tokens: policy.reserved,
-    });
-    if let Some(limit) = capacity.ollama {
-        llm = llm.with_ollama_context(model, limit);
-    }
-    if capacity.reasoning
-        && let Some(effort) = zone_core::llm::ReasoningEffort::Auto.resolve(prompt)
-    {
-        llm = llm.with_reasoning(model, effort);
-    }
-
-    let callback = DatabaseTaskCallback::new(state.db().clone(), run_id);
-    let messages = vec![
-        LlmMessage::system(system_prompt),
-        LlmMessage::user(prompt.to_string()),
-    ];
-    let mut context = RunContext::from_messages(messages);
-    context.policy = policy;
-    context.reason = capacity.reason;
-
-    match tokio::time::timeout(
-        TASK_TIMEOUT,
-        run_task_loop(llm, model.to_string(), tools, context, &callback),
-    )
-    .await
-    {
-        Ok(Ok(outcome)) => Ok(outcome),
-        Ok(Err(error)) => Err(Fault::agent(error)),
-        Err(_) => Err(Fault::timeout()),
     }
 }
 
@@ -1053,15 +1073,170 @@ async fn record_attempt(pool: &PgPool, run_id: Uuid, policy: RetryPolicy, attemp
     }
 }
 
-async fn fail(pool: &PgPool, run_id: Uuid, message: &str, artifacts: Option<serde_json::Value>) {
-    if let Err(error) =
-        tasks::complete_task_run(pool, run_id, RUN_FAILED, Some(message), artifacts).await
+const EVALUATION_PHASE: &str = "evaluating";
+const EVALUATION_AGENT: &str = "evaluation";
+
+async fn record_evaluation_log(
+    state: &AppState,
+    run_id: Uuid,
+    log_level: &str,
+    message: &str,
+    metadata: Option<serde_json::Value>,
+) {
+    if let Err(error) = tasks::add_task_run_log(
+        state.db(),
+        run_id,
+        EVALUATION_PHASE,
+        EVALUATION_AGENT,
+        log_level,
+        message,
+        metadata,
+    )
+    .await
     {
         tracing::error!(
-            "CRITICAL: Failed to update run {} status: {}",
+            "Failed to record evaluation log for run {}: {}",
             run_id,
             error
         );
+    }
+}
+
+/// Runs attempts until one succeeds or the policy stops.
+///
+/// The owned run holds the only permit for its whole life, checkout included,
+/// so nothing is acquired here. Releasing one across backoff would free
+/// nothing while that run still holds its own, and taking one would deadlock
+/// once every permit belonged to a run waiting on this loop.
+///
+/// A permit is acquired per attempt and dropped before any backoff, so a
+/// sleeping run never occupies a slot other runs are waiting on.
+async fn run_with_policy<Run, Running, Record, Recording>(
+    policy: RetryPolicy,
+    mut run: Run,
+    mut record: Record,
+) -> Result<Completed, Stopped>
+where
+    Run: FnMut(u32) -> Running,
+    Running: Future<Output = Result<TaskOutcome, Fault>>,
+    Record: FnMut(Attempt) -> Recording,
+    Recording: Future<Output = ()>,
+{
+    let mut number: u32 = 1;
+    loop {
+        let fault = match run(number).await {
+            Ok(outcome) => {
+                return Ok(Completed {
+                    outcome,
+                    attempts: number,
+                });
+            }
+            Err(fault) => fault,
+        };
+        let decision = policy.decide(number, fault.failure, sample());
+        record(Attempt {
+            number,
+            failure: fault.failure,
+            decision,
+            message: fault.message.clone(),
+        })
+        .await;
+        match decision {
+            Decision::Retry(delay) => {
+                tracing::warn!(
+                    attempt = number,
+                    ?delay,
+                    classification = fault.failure.label(),
+                    error = %fault.message,
+                    "Retrying task run"
+                );
+                tokio::time::sleep(delay).await;
+                number += 1;
+            }
+            Decision::Terminal => {
+                return Err(Stopped {
+                    fault,
+                    attempts: number,
+                    exhausted: false,
+                });
+            }
+            Decision::Exhausted => {
+                return Err(Stopped {
+                    fault,
+                    attempts: number,
+                    exhausted: true,
+                });
+            }
+        }
+    }
+}
+
+/// One attempt at the agent loop, scoped and lease-fenced like the owned run.
+#[allow(clippy::too_many_arguments)]
+async fn attempt_run(
+    state: &AppState,
+    run_id: Uuid,
+    owner: Uuid,
+    workspace_id: Uuid,
+    actor: Option<Uuid>,
+    model: &str,
+    prompt: &str,
+    guidance: &str,
+    workspace: &Path,
+) -> Result<TaskOutcome, Fault> {
+    let tools = ChatTools::for_task(state, workspace.to_path_buf(), workspace_id, actor)
+        .await
+        .with_task_lease(state.db().clone(), run_id, owner);
+    let mut system_prompt = agent::system_prompt(&tools, true);
+    system_prompt.push_str(guidance);
+
+    let capacity = Resolver::with_context(
+        &state.config().litellm_host,
+        &state.config().litellm_key,
+        &state.config().ollama_host,
+        Some(state.config().chat.context),
+    )
+    .resolve(model)
+    .await;
+    let policy = session::policy(&state.config().chat, &capacity);
+    let mut llm = LlmClient::new(LlmConfig {
+        base_url: state.config().litellm_host.clone(),
+        api_key: state.config().litellm_key.clone(),
+        default_model: model.to_string(),
+        temperature: TASK_TEMPERATURE,
+        max_tokens: policy.reserved,
+    });
+    if let Some(limit) = capacity.ollama {
+        llm = llm.with_ollama_context(model, limit);
+    }
+    if capacity.reasoning
+        && let Some(effort) = zone_core::llm::ReasoningEffort::Auto.resolve(prompt)
+    {
+        llm = llm.with_reasoning(model, effort);
+    }
+
+    let callback = DatabaseTaskCallback {
+        pool: state.db().clone(),
+        run_id,
+        owner: Some(owner),
+    };
+    let messages = vec![
+        LlmMessage::system(system_prompt),
+        LlmMessage::user(prompt.to_string()),
+    ];
+    let mut context = RunContext::from_messages(messages);
+    context.policy = policy;
+    context.reason = capacity.reason;
+
+    match tokio::time::timeout(
+        TASK_TIMEOUT,
+        run_task_loop(llm, model.to_string(), tools, context, &callback),
+    )
+    .await
+    {
+        Ok(Ok(outcome)) => Ok(outcome),
+        Ok(Err(error)) => Err(Fault::agent(error)),
+        Err(_) => Err(Fault::timeout()),
     }
 }
 
@@ -1069,6 +1244,86 @@ async fn fail(pool: &PgPool, run_id: Uuid, message: &str, artifacts: Option<serd
 struct TaskOutcome {
     summary: String,
     tool_calls: usize,
+}
+
+pub(super) async fn complete_publication(
+    state: &AppState,
+    execution: tasks::Execution,
+    summary: String,
+    tool_calls: usize,
+    publication: PrCreationResult,
+) -> &'static str {
+    let failure = match &publication {
+        PrCreationResult::Error(error) => Some(error.clone()),
+        _ => None,
+    };
+    let status = if failure.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
+    let pr_info = match publication {
+        PrCreationResult::Created {
+            pr_url,
+            branch_name,
+        } => {
+            tracing::info!("Created PR for task {}: {}", execution.task, pr_url);
+            Some(serde_json::json!({
+                "pr_url": pr_url,
+                "branch_name": branch_name,
+            }))
+        }
+        PrCreationResult::NoChanges => {
+            tracing::info!("No changes to create PR for task {}", execution.task);
+            None
+        }
+        PrCreationResult::Sandbox => Some(serde_json::json!({"skipped": "legacy_sandbox"})),
+        PrCreationResult::NoRepository => {
+            tracing::info!("No repository configured for task {}", execution.task);
+            None
+        }
+        PrCreationResult::PrAlreadyExists { pr_url } => {
+            tracing::info!("PR already exists for task {}: {}", execution.task, pr_url);
+            Some(serde_json::json!({
+                "pr_url": pr_url,
+                "pr_already_existed": true,
+            }))
+        }
+        PrCreationResult::Error(err) => {
+            tracing::warn!("Failed to create PR for task {}: {}", execution.task, err);
+            Some(serde_json::json!({
+                "pr_error": err,
+            }))
+        }
+    };
+
+    // Build artifacts with PR info if available
+    let mut artifacts = serde_json::json!({
+        "tool_calls": tool_calls,
+        "summary": summary,
+    });
+
+    if let Some(pr) = pr_info {
+        artifacts["pr"] = pr;
+    }
+
+    if let Err(e) = tasks::complete_owned_task_run(
+        state.db(),
+        execution.run,
+        Some(execution.owner),
+        status,
+        failure.as_deref(),
+        Some(artifacts),
+    )
+    .await
+    {
+        tracing::error!(
+            "CRITICAL: Failed to update run {} status: {}",
+            execution.run,
+            e
+        );
+    }
+    status
 }
 
 async fn run_task_loop(
@@ -1106,8 +1361,21 @@ async fn run_task_loop(
                 name,
                 success,
                 detail,
+                receipt,
                 ..
             } => {
+                if let Some(receipt) = receipt {
+                    callback
+                        .log(
+                            "acting",
+                            "tool",
+                            "info",
+                            "Workspace action receipt",
+                            Some(serde_json::json!({"action_receipt": receipt})),
+                        )
+                        .await
+                        .map_err(|error| format!("Could not persist action receipt: {error}"))?;
+                }
                 tool_calls += 1;
                 let result = if success {
                     ToolResult::success(detail)
@@ -1118,34 +1386,19 @@ async fn run_task_loop(
                 callback.on_phase_change(AgentPhase::Observing, None);
             }
             AgentEvent::Canonical(entry) => {
-                tasks::add_task_run_log(
-                    &callback.pool,
-                    callback.run_id,
-                    &AgentPhase::Acting.to_string(),
-                    SOURCE_AGENT,
-                    LEVEL_INFO,
-                    "Canonical conversation event",
-                    Some(serde_json::json!({
-                        "entry_id": entry.id,
-                        "message": entry.message,
-                        "mutations": entry.mutations,
-                    })),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                callback.log("acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":entry.message,"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
             }
             AgentEvent::Checkpoint { summary, .. } => {
-                tasks::add_task_run_log(
-                    &callback.pool,
-                    callback.run_id,
-                    &AgentPhase::Thinking.to_string(),
-                    SOURCE_AGENT,
-                    LEVEL_INFO,
-                    "Conversation checkpoint",
-                    Some(serde_json::to_value(summary).map_err(|error| error.to_string())?),
-                )
-                .await
-                .map_err(|error| error.to_string())?;
+                callback
+                    .log(
+                        "thinking",
+                        "agent",
+                        "info",
+                        "Conversation checkpoint",
+                        Some(serde_json::to_value(summary).map_err(|error| error.to_string())?),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
             AgentEvent::Finalizing(reason) => {
                 callback.on_phase_change(AgentPhase::Responding, Some(&reason));
@@ -1169,6 +1422,577 @@ async fn run_task_loop(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn test_semaphore_initialization() {
+        assert!(Arc::ptr_eq(get_semaphore(), get_semaphore()));
+    }
+
+    #[tokio::test]
+    async fn test_database_task_callback_creation() {
+        let pool = PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let run_id = Uuid::new_v4();
+        let callback = DatabaseTaskCallback::new(pool, run_id);
+        assert_eq!(callback.run_id, run_id);
+    }
+
+    #[tokio::test]
+    async fn capacity_waits_keep_heartbeats_and_stop_on_lease_loss() {
+        let _execution = EXECUTION.lock().await;
+        let url = std::env::var("TEST_DATABASE_URL").expect("isolated TEST_DATABASE_URL");
+        let pool = PgPool::connect(&url).await.unwrap();
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO organizations(id, name, slug) VALUES ($1, 'Heartbeat test', $1::text)",
+        )
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO workspaces(id, organization_id, name, slug) VALUES ($1, $2, 'Heartbeat test', $1::text)").bind(workspace).bind(organization).execute(&pool).await.unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace,
+            &[],
+            "Capacity",
+            "Must not run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let permit = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+            .await
+            .unwrap();
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let execution = tokio::spawn(async move {
+            execute_task_run(&state, run.id, task.id).await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let claimed: bool =
+                    sqlx::query_scalar("SELECT owner IS NOT NULL FROM task_runs WHERE id = $1")
+                        .bind(run.id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if claimed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let first: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT heartbeat_at FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(16)).await;
+        let refreshed: bool =
+            sqlx::query_scalar("SELECT heartbeat_at > $2 FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .bind(first)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(refreshed, "capacity waiting must not look orphaned");
+        assert_eq!(
+            tasks::get_task(&pool, task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
+        );
+        sqlx::query("UPDATE task_runs SET owner = $2 WHERE id = $1")
+            .bind(run.id)
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(16), execution)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tasks::get_task_run_logs(&pool, run.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        drop(permit);
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // Integration tests are in zone_server/tests/task_execution_tests.rs
+
+    #[tokio::test]
+    async fn task_loop_persists_workspace_receipt_before_returning() {
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use serde_json::{Value, json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        let database =
+            std::env::var("TEST_DATABASE_URL").expect("explicit disposable TEST_DATABASE_URL");
+        let pool = PgPool::connect(&database).await.unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Task receipts",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Receipts",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Task actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Receipt owner",
+            "Run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        let provider = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |_: &Request| {
+            let delta = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                json!({"tool_calls":[{"index":0,"id":"receipt-call","type":"function","function":{"name":"create_task","arguments":r#"{"title":"Made by the scoped task","description":"durable result"}"#}}]})
+            } else { json!({"content":"The task was created."}) };
+            let chunk = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            let end = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+            ResponseTemplate::new(200).insert_header("Content-Type", "text/event-stream").set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+        }).mount(&provider).await;
+        let tools =
+            ChatTools::for_task(&state, std::env::temp_dir(), workspace.id, Some(user.id)).await;
+        let callback = DatabaseTaskCallback::new(pool.clone(), run.id);
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_task_loop(
+                LlmClient::new(LlmConfig {
+                    base_url: provider.uri(),
+                    ..LlmConfig::default()
+                }),
+                "test".into(),
+                tools,
+                RunContext::from_messages(vec![LlmMessage::user(
+                    "Create a task titled Made by the scoped task with description durable result",
+                )]),
+                &callback,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(outcome.tool_calls, 1);
+        let receipts: Vec<Value> = sqlx::query_scalar("SELECT metadata->'action_receipt' FROM task_run_logs WHERE task_run_id=$1 AND metadata ? 'action_receipt'").bind(run.id).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            receipts.len(),
+            1,
+            "task loop returned without its durable action receipt"
+        );
+        assert_eq!(receipts[0]["actor_id"], user.id.to_string());
+        assert_eq!(receipts[0]["action"], "create_task");
+        assert_eq!(receipts[0]["success"], true);
+        let target = Uuid::parse_str(receipts[0]["target_id"].as_str().unwrap()).unwrap();
+        let written = tasks::get_task(&pool, target).await.unwrap().unwrap();
+        assert_eq!(written.workspace_id, workspace.id);
+        assert_eq!(written.title, "Made by the scoped task");
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_worker_scopes_actions_uses_checkout_and_cleans_up() {
+        let _execution = EXECUTION.lock().await;
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use serde_json::{Value, json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        let database =
+            std::env::var("TEST_DATABASE_URL").expect("explicit disposable TEST_DATABASE_URL");
+        let pool = PgPool::connect(&database).await.unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Task receipts",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Receipts",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Task actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task_as(
+            &pool,
+            workspace.id,
+            &[],
+            "Receipt owner",
+            "Run",
+            None,
+            None,
+            true,
+            None,
+            Some(user.id),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE tasks SET model_name='gpt-4' WHERE id=$1")
+            .bind(task.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let run = tasks::create_task_run_as(&pool, task.id, Some(user.id))
+            .await
+            .unwrap();
+        let provider = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let observed = Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
+        let checkout = observed.clone();
+        Mock::given(method("POST")).and(path("/chat/completions")).respond_with(move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            if let Some(messages) = body["messages"].as_array() {
+                for message in messages {
+                    if message["role"] == "tool"
+                        && let Some(content) = message["content"].as_str() {
+                            for line in content.lines() {
+                                if line.starts_with('/') {
+                                    let path = std::path::PathBuf::from(line.trim());
+                                    let name = path.file_name().unwrap().to_str().unwrap();
+                                    let (identity, owner) = name.split_once('.').expect("checkout must identify its run and owner");
+                                    assert_eq!(identity, run.id.to_string());
+                                    assert_eq!(Uuid::parse_str(owner).unwrap().to_string(), owner);
+                                    let root = path.parent().unwrap();
+                                    let namespace = root.file_name().unwrap().to_str().unwrap().strip_prefix("zone-checkouts-v1-").expect("database checkout namespace");
+                                    assert_eq!(namespace.len(), 64);
+                                    assert!(namespace.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+                                    assert_eq!(root.parent().unwrap().canonicalize().unwrap(), std::env::temp_dir().canonicalize().unwrap());
+                                    assert!(path.is_dir(), "checkout disappeared during execution");
+                                    *checkout.lock().unwrap() = Some(path);
+                                }
+                            }
+                    }
+                }
+            }
+            let delta = match count.fetch_add(1, Ordering::SeqCst) {
+                0 => json!({"tool_calls":[{"index":0,"id":"cwd-call","type":"function","function":{"name":"run_command","arguments":r#"{"command":"pwd"}"#}}]}),
+                1 => json!({"tool_calls":[{"index":0,"id":"write-call","type":"function","function":{"name":"write_file","arguments":r#"{"path":"sentinel","content":"isolated"}"#}}]}),
+                2 => json!({"tool_calls":[{"index":0,"id":"receipt-call","type":"function","function":{"name":"create_task","arguments":r#"{"title":"Made by the scoped task","description":"durable result"}"#}}]}),
+                _ => {
+                    let directory = checkout.lock().unwrap().clone().expect("pwd did not return a checkout");
+                    assert_eq!(std::fs::read_to_string(directory.join("sentinel")).unwrap(), "isolated");
+                    json!({"content":"The task was created."})
+                }
+            };
+            let chunk = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            let end = json!({"id":"completion","object":"chat.completion.chunk","created":0,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+            ResponseTemplate::new(200).insert_header("Content-Type", "text/event-stream").set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+        }).mount(&provider).await;
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            execute_task_run(&state, run.id, task.id),
+        )
+        .await
+        .unwrap();
+        let completed = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
+        assert_eq!(
+            completed.status, "completed",
+            "{:?}",
+            completed.error_message
+        );
+        assert_eq!(completed.artifacts.as_ref().unwrap()["tool_calls"], 3);
+        let directory = observed.lock().unwrap().clone().unwrap();
+        let owner: Uuid = sqlx::query_scalar("SELECT owner FROM task_runs WHERE id=$1")
+            .bind(run.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            directory.file_name().unwrap().to_str().unwrap(),
+            format!("{}.{}", run.id, owner)
+        );
+        assert!(!directory.exists(), "finished checkout leaked");
+        let early: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_run_logs l JOIN task_runs r ON r.id=l.task_run_id WHERE r.id=$1 AND l.metadata ? 'action_receipt' AND l.created_at <= r.completed_at)").bind(run.id).fetch_one(&pool).await.unwrap();
+        assert!(early, "receipt must be durable before terminal state");
+        let receipts: Vec<Value> = sqlx::query_scalar("SELECT metadata->'action_receipt' FROM task_run_logs WHERE task_run_id=$1 AND metadata ? 'action_receipt'").bind(run.id).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            receipts.len(),
+            1,
+            "task loop returned without its durable action receipt"
+        );
+        assert_eq!(receipts[0]["actor_id"], user.id.to_string());
+        assert_eq!(receipts[0]["action"], "create_task");
+        assert_eq!(receipts[0]["success"], true);
+        let target = Uuid::parse_str(receipts[0]["target_id"].as_str().unwrap()).unwrap();
+        let written = tasks::get_task(&pool, target).await.unwrap().unwrap();
+        assert_eq!(written.workspace_id, workspace.id);
+        assert_eq!(written.title, "Made by the scoped task");
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn writer_revocation_cancels_waiting_and_running_tasks() {
+        let _execution = EXECUTION.lock().await;
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+        for waiting in [true, false] {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .unwrap();
+            let organization = organizations::create_organization(
+                &pool,
+                "Revocation",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let workspace = workspaces::create_workspace(
+                &pool,
+                organization.id,
+                "Revocation",
+                &Uuid::new_v4().to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+            let user = users::create_user(
+                &pool,
+                &format!("{}@example.test", Uuid::new_v4()),
+                "unused",
+                Some("Actor"),
+                false,
+            )
+            .await
+            .unwrap();
+            workspace_members::add_member(
+                &pool,
+                workspace.id,
+                user.id,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .unwrap();
+            let task = tasks::create_task_as(
+                &pool,
+                workspace.id,
+                &[],
+                "Revocation",
+                "Stay blocked",
+                None,
+                None,
+                true,
+                None,
+                Some(user.id),
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE tasks SET model_name='gpt-4' WHERE id=$1")
+                .bind(task.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let run = tasks::create_task_run_as(&pool, task.id, Some(user.id))
+                .await
+                .unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let reached = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let app = Router::new().route("/v2/model/info",get(||async {Json(serde_json::json!({"data":[{"model_name":"gpt-4","litellm_params":{"model":"openai/gpt-4"},"model_info":{"max_input_tokens":128000}}]}))})).route("/chat/completions",post({
+                let requests=requests.clone(); let reached=reached.clone(); let release=release.clone();
+                move || { let requests=requests.clone(); let reached=reached.clone(); let release=release.clone(); async move {
+                    requests.fetch_add(1,Ordering::SeqCst); reached.notify_one(); release.notified().await;
+                    "data: [DONE]\n\n"
+                }}
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let mut config = crate::state::test_config();
+            config.litellm_host = endpoint.clone();
+            config.ollama_host = endpoint;
+            let state = AppState::new(config, pool.clone(), None);
+            let permit = if waiting {
+                Some(
+                    get_semaphore()
+                        .clone()
+                        .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let mut pipeline = tokio::spawn(async move {
+                execute_task_run(&state, run.id, task.id).await;
+            });
+            if waiting {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if sqlx::query_scalar::<_, bool>(
+                            "SELECT owner IS NOT NULL FROM task_runs WHERE id=$1",
+                        )
+                        .bind(run.id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap()
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                tokio::time::timeout(std::time::Duration::from_secs(5), reached.notified())
+                    .await
+                    .unwrap();
+            }
+            sqlx::query(
+                "UPDATE workspace_members SET role='viewer' WHERE workspace_id=$1 AND user_id=$2",
+            )
+            .bind(workspace.id)
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            drop(permit);
+            let finished =
+                tokio::time::timeout(std::time::Duration::from_secs(17), &mut pipeline).await;
+            pipeline.abort();
+            release.notify_waiters();
+            server.abort();
+            assert!(
+                finished.is_ok(),
+                "revoked writer kept executing (waiting={waiting})"
+            );
+            let completed = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
+            assert_eq!(completed.status, "failed");
+            assert!(completed.error_message.unwrap().contains("access"));
+            assert_eq!(requests.load(Ordering::SeqCst), usize::from(!waiting));
+            sqlx::query("DELETE FROM organizations WHERE id=$1")
+                .bind(organization.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM users WHERE id=$1")
+                .bind(user.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1378,12 +2202,10 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_terminal_failure_runs_exactly_once() {
-        let permits = Semaphore::new(MAX_CONCURRENT_TASKS);
         let runs = Arc::new(AtomicU32::new(0));
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let stopped = run_with_policy(
             RetryPolicy::default(),
-            &permits,
             |_| {
                 let runs = Arc::clone(&runs);
                 async move {
@@ -1412,12 +2234,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn transient_failures_stop_at_the_attempt_cap() {
         let policy = RetryPolicy::default();
-        let permits = Semaphore::new(MAX_CONCURRENT_TASKS);
         let runs = Arc::new(AtomicU32::new(0));
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let stopped = run_with_policy(
             policy,
-            &permits,
             |_| {
                 let runs = Arc::clone(&runs);
                 async move {
@@ -1457,10 +2277,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_recovered_run_reports_the_attempts_it_took() {
-        let permits = Semaphore::new(MAX_CONCURRENT_TASKS);
         let completed = run_with_policy(
             RetryPolicy::default(),
-            &permits,
             |number| async move {
                 if number < 3 {
                     Err(Fault::agent("429 Too Many Requests".into()))
@@ -1474,46 +2292,39 @@ mod tests {
         .expect("a transient failure must recover");
 
         assert_eq!(completed.attempts, 3);
-        assert_eq!(permits.available_permits(), MAX_CONCURRENT_TASKS);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_backoff_never_holds_its_permit() {
-        let permits = Arc::new(Semaphore::new(1));
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let observer = tokio::spawn({
-            let permits = Arc::clone(&permits);
-            async move {
-                receiver.recv().await;
-                permits.available_permits()
-            }
-        });
+    async fn the_retry_loop_takes_no_permit_of_its_own() {
+        // The owned run holds the only permit for its whole life so its
+        // checkout stays bounded too. A loop that acquired here would deadlock
+        // as soon as every permit belonged to a run waiting on this loop.
+        let permits = Semaphore::new(MAX_CONCURRENT_TASKS);
+        let held: Vec<_> = (0..MAX_CONCURRENT_TASKS)
+            .map(|_| permits.try_acquire().expect("a permit to hold"))
+            .collect();
+        assert_eq!(permits.available_permits(), 0);
 
-        let completed = run_with_policy(
-            RetryPolicy::default(),
-            &permits,
-            move |number| {
-                let sender = sender.clone();
-                async move {
+        let completed = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_with_policy(
+                RetryPolicy::default(),
+                |number| async move {
                     if number == 1 {
-                        let _ = sender.send(());
                         Err(Fault::agent("connection reset by peer".into()))
                     } else {
                         Ok(outcome())
                     }
-                }
-            },
-            |_| async {},
+                },
+                |_| async {},
+            ),
         )
         .await
-        .expect("the retry must acquire a fresh permit");
+        .expect("the retry loop must not wait on a permit")
+        .expect("the transient failure must recover");
 
         assert_eq!(completed.attempts, 2);
-        assert_eq!(
-            observer.await.unwrap(),
-            1,
-            "the permit must be free while the run backs off"
-        );
-        assert_eq!(permits.available_permits(), 1);
+        assert_eq!(permits.available_permits(), 0, "the loop took a permit");
+        drop(held);
     }
 }

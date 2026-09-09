@@ -3001,7 +3001,7 @@ mod tests {
         let tools = agent::ChatTools::preview(agent::WorkspaceScope {
             state,
             workspace_id: Uuid::new_v4(),
-            chat_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
         })
         .await;

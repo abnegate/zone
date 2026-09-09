@@ -274,7 +274,7 @@ pub async fn build(
     let scope = WorkspaceScope {
         state: state.clone(),
         workspace_id: workspace,
-        chat_id: chat.id,
+        chat_id: Some(chat.id),
         user_id: user,
     };
     let catalog = async {

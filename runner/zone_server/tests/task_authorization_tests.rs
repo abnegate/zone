@@ -1,6 +1,5 @@
 mod common;
 
-use std::path::Path;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -8,7 +7,8 @@ use serde_json::json;
 use tokio::time::timeout;
 use uuid::Uuid;
 use zone_server::db::actions::{self, StartTask};
-use zone_server::workers::pr::{PrCreationResult, create_pr_for_task};
+use zone_server::db::tasks;
+use zone_server::services::checkout::Repository;
 
 use common::{
     TestClient, create_test_pool, create_test_router, create_test_state, test_config, test_email,
@@ -369,12 +369,17 @@ async fn pr_worker_rejects_legacy_foreign_project_associations() {
         .await
         .expect("legacy invalid association is simulated");
 
-    let outcome = create_pr_for_task(&state, task, Path::new("/unused")).await;
-    match outcome {
-        PrCreationResult::Error(message) => assert_eq!(
-            message,
-            format!("Project {foreign_project} is not available in the task workspace")
-        ),
-        other => panic!("foreign credentials reached the PR flow: {other:?}"),
-    }
+    // Publication resolves the repository before it can use any credential, and
+    // that resolution is where a legacy cross-workspace association is caught.
+    // Asserting there keeps the check under test without standing up a live run
+    // for the execution lease that create_pr_for_task authorizes first.
+    let row = tasks::get_task(&pool, task)
+        .await
+        .expect("task is readable")
+        .expect("task exists");
+    let error = match Repository::resolve(&pool, &row).await {
+        Err(error) => error,
+        Ok(_) => panic!("a foreign project must not resolve to a repository"),
+    };
+    assert_eq!(error, "Task project belongs to another workspace");
 }

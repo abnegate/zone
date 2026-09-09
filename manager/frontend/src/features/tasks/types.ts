@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { ActionReceipt } from '../chats/types';
 import type { TaskProgressMessageSchema } from './schemas';
 
 // Task Types
@@ -62,6 +63,7 @@ export interface TaskRunLog {
   agent_type: string;
   level: LogLevel;
   message: string;
+  metadata?: { action_receipt?: ActionReceipt; [key: string]: unknown } | null;
   created_at: string;
 }
 

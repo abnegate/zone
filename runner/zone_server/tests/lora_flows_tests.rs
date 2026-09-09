@@ -549,6 +549,10 @@ async fn frames_endpoint_turns_a_clip_into_training_images() {
 
 #[tokio::test]
 async fn frames_endpoint_rejects_a_file_that_is_not_a_video() {
+    if !ffmpeg_installed() {
+        eprintln!("skipping: ffmpeg is not installed");
+        return;
+    }
     use base64::Engine;
     let models_dir = temp_models();
     let ollama = mock_ollama().await;

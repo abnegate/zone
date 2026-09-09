@@ -79,6 +79,7 @@ async fn check_creation() {
             let id = Uuid::parse_str(body["task"]["id"].as_str().unwrap()).unwrap();
             let persisted = tasks::get_task(&pool, id).await.unwrap().unwrap();
             assert_eq!(persisted.source_id, source_id);
+            assert_eq!(persisted.created_by, Some(user_id));
         }
     }
     let count: i64 = sqlx::query_scalar(

@@ -766,11 +766,23 @@ mod tests {
             "http://192.168.1.50:4000",
             "http://host.docker.internal:11434",
             "http://litellm:4000",
+            "http://[::1]:4000",
         ] {
             assert!(
                 client_for(base_url).validate_outbound_url(base_url).is_ok(),
                 "{base_url} is a supported way to reach a self-hosted model server"
             );
         }
+    }
+
+    #[test]
+    fn a_relative_url_is_refused() {
+        let error = client_for("/v1/chat/completions")
+            .validate_outbound_url("/v1/chat/completions")
+            .unwrap_err();
+        assert!(
+            matches!(&error, LlmError::InvalidConfig(message) if message.contains("absolute URL")),
+            "the refusal has to name the absolute-URL rule: {error}"
+        );
     }
 }

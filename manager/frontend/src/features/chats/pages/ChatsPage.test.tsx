@@ -1024,6 +1024,10 @@ describe('ChatsPage', () => {
       fireEvent.change(input, { target: { value: 'Generate an image of a rooster' } });
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       await waitFor(() => expect(input.value).toBe(''));
+      // Generation reads the clock and registers its interval in an effect. Let
+      // that run before the caller advances time, or it starts from the advanced
+      // reading and reports no elapsed time at all.
+      await act(async () => {});
       return input;
     }
 

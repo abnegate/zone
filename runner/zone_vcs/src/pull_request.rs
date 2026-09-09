@@ -323,8 +323,7 @@ impl PrService {
         }
     }
 
-    /// Create with custom base URL (for testing)
-    #[cfg(test)]
+    /// Create a client for an explicitly supplied API endpoint.
     pub fn with_base_url(base_url: String) -> Self {
         Self {
             client: Client::new(),

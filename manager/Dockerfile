@@ -53,13 +53,15 @@ RUN --mount=type=cache,id=zone-manager-registry,target=/usr/local/cargo/registry
 
 # Must match the builder's Debian release so the glibc the binaries were
 # linked against is present. libstdc++6 backs the statically linked ONNX Runtime.
-FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime-base
 
 # ffmpeg (with ffprobe) decodes the clips submitted for LoRA training. Without
 # it images still train; videos are refused with a message saying why.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates libssl3t64 libstdc++6 ffmpeg \
+        curl ca-certificates git libssl3t64 libstdc++6 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base AS runtime
 
 RUN groupadd --system zone \
     && useradd --system --gid zone --shell /usr/sbin/nologin --no-create-home zone
