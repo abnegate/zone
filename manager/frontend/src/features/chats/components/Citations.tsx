@@ -4,6 +4,7 @@ import {
   citationEvidenceLabel,
   citationHref,
   citationKindLabel,
+  citationProvenanceLabel,
   formatObservedAt,
   formatRevision,
 } from '../utils/citations';
@@ -12,6 +13,7 @@ function CitationItem({ citation }: { citation: Citation }) {
   const href = citationHref(citation);
   const evidence = citationEvidence(citation);
   const revision = formatRevision(citation.revision);
+  const claim = citationProvenanceLabel(citation.provenance);
   const external = Boolean(href && /^https?:\/\//i.test(href));
   const title = (
     <>
@@ -21,7 +23,10 @@ function CitationItem({ citation }: { citation: Citation }) {
   );
 
   return (
-    <li className={`citation citation--${evidence}`} data-testid="citation">
+    <li
+      className={`citation citation--${evidence} citation--${citation.provenance.replace('_', '-')}`}
+      data-testid="citation"
+    >
       {href ? (
         <a
           className="citation-link"
@@ -39,6 +44,7 @@ function CitationItem({ citation }: { citation: Citation }) {
           {formatObservedAt(citation.observed_at)}
         </time>
         <span className="citation-evidence">{citationEvidenceLabel(evidence)}</span>
+        {claim ? <span className="citation-provenance">{claim}</span> : null}
       </span>
       {citation.note ? <p className="citation-note">{citation.note}</p> : null}
     </li>

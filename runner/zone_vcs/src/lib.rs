@@ -22,8 +22,18 @@
 //! # }
 //! ```
 
+pub mod conflict;
 pub mod git;
 pub mod pull_request;
+pub mod resolution;
 
+pub use conflict::{
+    BranchName, CommitSha, Conflict, ConflictError, ConflictRequest, ConflictService,
+    ConflictedPath,
+};
 pub use git::{DiffSummary, GitError, GitService};
-pub use pull_request::{CreatedPr, GitHubBranch, GitHubPullRequest, PrError, PrService};
+pub use pull_request::{
+    CreatedPr, GitHubBranch, GitHubPullRequest, PrError, PrService, PullRequestReception,
+    PullRequestReference,
+};
+pub use resolution::{ConflictSide, ResolutionVerdict};

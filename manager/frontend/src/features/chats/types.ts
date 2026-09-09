@@ -28,9 +28,16 @@ export type CitationKind =
   | 'github_deployment'
   | 'github_issue'
   | 'github_file'
-  | 'workspace_document';
+  | 'workspace_document'
+  | 'behavioral_verification';
 
 export type CitationOutcome = 'success' | 'failure' | 'pending' | 'incomplete' | 'observed';
+
+/// How the outcome was produced. The server executing something and recording
+/// the result proves it; the model saying so is a claim, and a claim never
+/// authorises a passing result. Stored citations predate the field and are
+/// server-proven, matching the server's own default.
+export type CitationProvenance = 'server_execution' | 'model_asserted';
 
 /// A checkable source behind an agent reply. Incomplete evidence is never a pass.
 export interface Citation {
@@ -41,6 +48,7 @@ export interface Citation {
   observed_at: string;
   complete: boolean;
   outcome: CitationOutcome;
+  provenance: CitationProvenance;
   note?: string | null;
 }
 

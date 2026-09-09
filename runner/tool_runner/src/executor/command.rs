@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use super::confinement::Confinement;
 use super::limits::{ExecutorConfig, OutputLimiter};
 use super::process_group::ProcessGroup;
 
@@ -119,33 +120,44 @@ impl CommandExecutor {
         tx: mpsc::Sender<OutboundMessage>,
     ) -> Result<JobHandle, ExecutorError> {
         // Extract RunStart fields
-        let (job_id, workspace, command, args, env, working_dir, timeout_ms, max_output_bytes) =
-            match request {
-                InboundMessage::RunStart {
-                    job_id,
-                    workspace,
-                    command,
-                    args,
-                    env,
-                    working_dir,
-                    timeout_ms,
-                    max_output_bytes,
-                } => (
-                    job_id.clone(),
-                    workspace.clone(),
-                    command.clone(),
-                    args.clone(),
-                    env.clone(),
-                    working_dir.clone(),
-                    *timeout_ms,
-                    *max_output_bytes,
-                ),
-                _ => {
-                    return Err(ExecutorError::InvalidWorkspace(
-                        "Expected RunStart message".to_string(),
-                    ));
-                }
-            };
+        let (
+            job_id,
+            workspace,
+            command,
+            args,
+            env,
+            working_dir,
+            timeout_ms,
+            max_output_bytes,
+            confinement,
+        ) = match request {
+            InboundMessage::RunStart {
+                job_id,
+                workspace,
+                command,
+                args,
+                env,
+                working_dir,
+                timeout_ms,
+                max_output_bytes,
+                confinement,
+            } => (
+                job_id.clone(),
+                workspace.clone(),
+                command.clone(),
+                args.clone(),
+                env.clone(),
+                working_dir.clone(),
+                *timeout_ms,
+                *max_output_bytes,
+                confinement.clone(),
+            ),
+            _ => {
+                return Err(ExecutorError::InvalidWorkspace(
+                    "Expected RunStart message".to_string(),
+                ));
+            }
+        };
 
         // Validate workspace
         if !workspace.exists() {
@@ -165,22 +177,42 @@ impl CommandExecutor {
         // Determine working directory
         let cwd = working_dir.as_ref().unwrap_or(&workspace);
 
-        // Build command
-        let mut cmd = Command::new(&command);
-        cmd.args(&args)
+        // A job that asked to be confined never runs unconfined: an unproven
+        // sandbox fails the spawn instead of falling back.
+        let mut process = match &confinement {
+            Some(request) => {
+                Confinement::probe(request.mode()).await?;
+                let invocation = Confinement::new(&command, args.clone(), cwd)
+                    .with_roots(request)
+                    .with_environment(env.clone())
+                    .host_invocation()?;
+
+                let mut process = Command::new(&invocation.program);
+                process
+                    .args(&invocation.arguments)
+                    .env_clear()
+                    .envs(&invocation.environment);
+                process
+            }
+            None => {
+                let mut process = Command::new(&command);
+                process.args(&args).envs(env.iter());
+                Proxy::from_env().apply(&mut process);
+                process
+            }
+        };
+
+        process
             .current_dir(cwd)
-            .envs(env.iter())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        Proxy::from_env().apply(&mut cmd);
-
         // Set up process group (Unix-specific)
         // Setting process_group(0) creates a new process group with the child as leader
         unsafe {
-            cmd.pre_exec(|| {
+            process.pre_exec(|| {
                 // Create new session and process group
                 nix::unistd::setsid().map_err(std::io::Error::other)?;
                 Ok(())
@@ -188,7 +220,7 @@ impl CommandExecutor {
         }
 
         // Spawn the process
-        let mut child = cmd.spawn().map_err(ExecutorError::SpawnFailed)?;
+        let mut child = process.spawn().map_err(ExecutorError::SpawnFailed)?;
 
         let pid = child.id().ok_or_else(|| {
             ExecutorError::SpawnFailed(std::io::Error::other("Process has no PID"))
@@ -485,6 +517,7 @@ mod tests {
                 ("TOOL_RUNNER_PROXY_URL".to_string(), "".to_string()),
             ]),
             working_dir: None,
+            confinement: None,
             timeout_ms: Some(5000),
             max_output_bytes: None,
         };
@@ -581,6 +614,7 @@ mod tests {
             timeout_ms: Some(30000),
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let handle = executor.spawn(&request, tx).await.unwrap();
@@ -604,6 +638,7 @@ mod tests {
             timeout_ms: Some(5000),
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let handle = executor.spawn(&request, tx).await.unwrap();
@@ -695,6 +730,7 @@ mod tests {
             timeout_ms: Some(5000),
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let handle = executor.spawn(&request, tx).await;
@@ -751,6 +787,7 @@ mod tests {
             timeout_ms: Some(5000),
             max_output_bytes: None,
             working_dir: Some(PathBuf::from("/tmp")),
+            confinement: None,
         };
 
         let handle = executor.spawn(&request, tx).await;
@@ -789,6 +826,7 @@ mod tests {
             timeout_ms: Some(5000),
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let handle = executor.spawn(&request, tx).await;
@@ -824,6 +862,7 @@ mod tests {
             timeout_ms: Some(5000),
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let handle = executor.spawn(&request, tx).await;
@@ -868,6 +907,7 @@ mod tests {
             timeout_ms: None,
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let result = executor.spawn(&request, tx).await;
@@ -896,6 +936,7 @@ mod tests {
             timeout_ms: None,
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let result = executor.spawn(&request, tx).await;
@@ -943,6 +984,7 @@ mod tests {
             timeout_ms: Some(5000),
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let _handle = executor.spawn(&request, tx).await.unwrap();
@@ -976,6 +1018,7 @@ mod tests {
             timeout_ms: Some(5000),
             max_output_bytes: None,
             working_dir: None,
+            confinement: None,
         };
 
         let result = executor.spawn(&request, tx).await;
@@ -1004,6 +1047,7 @@ mod tests {
             timeout_ms: Some(5000),
             max_output_bytes: Some(100), // Small limit
             working_dir: None,
+            confinement: None,
         };
 
         let _handle = executor.spawn(&request, tx).await.unwrap();

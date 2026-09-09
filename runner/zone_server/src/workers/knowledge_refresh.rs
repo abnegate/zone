@@ -1,21 +1,24 @@
-//! Background worker for refreshing web-linked knowledge entries
+//! Refreshing web-linked knowledge entries.
 //!
-//! Periodically checks for knowledge entries that have source URLs and
-//! are due for refresh based on their refresh_interval_minutes setting.
+//! One pass takes the entries whose `refresh_interval_minutes` has elapsed and
+//! re-fetches each one. The cadence belongs to
+//! [`crate::workers::housekeeping`]; what is due, and what refreshing an entry
+//! means, belongs here.
 
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
-use crate::db::knowledge;
+use crate::db::{DbResult, knowledge};
 use crate::state::AppState;
 
 /// Maximum concurrent refresh operations
 const MAX_CONCURRENT_REFRESHES: usize = 3;
 
 /// Interval between refresh checks (5 minutes)
-const REFRESH_CHECK_INTERVAL_SECS: u64 = 300;
+pub const REFRESH_CHECK_INTERVAL_SECS: u64 = 300;
 
 /// Maximum entries to process per cycle
 const MAX_ENTRIES_PER_CYCLE: i64 = 50;
@@ -26,64 +29,62 @@ const HTTP_TIMEOUT_SECS: u64 = 30;
 /// Maximum content size (1MB)
 const MAX_CONTENT_SIZE: usize = 1_048_576;
 
-/// Start the knowledge refresh worker
+/// The concurrency one pass shares across the entries it starts.
 ///
-/// This spawns a background task that periodically checks for knowledge
-/// entries that need refreshing and updates their content.
-pub fn start_refresh_worker(state: AppState) {
-    tokio::spawn(async move {
-        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_REFRESHES));
+/// Held by the worker rather than created per pass, so a pass that starts while
+/// the previous one still has fetches in flight cannot double the load on the
+/// sites being refreshed.
+pub fn permits() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(MAX_CONCURRENT_REFRESHES))
+}
 
-        loop {
-            // Sleep before checking (allows server startup to complete)
-            tokio::time::sleep(Duration::from_secs(REFRESH_CHECK_INTERVAL_SECS)).await;
+/// Start a refresh for every entry that has come due.
+pub async fn run_cycle(state: &AppState, permits: &Arc<Semaphore>) -> DbResult<()> {
+    tracing::debug!("Knowledge refresh worker: checking for entries to refresh");
 
-            tracing::debug!("Knowledge refresh worker: checking for entries to refresh");
+    let entries =
+        knowledge::list_entries_due_for_refresh(state.db(), MAX_ENTRIES_PER_CYCLE).await?;
 
-            // Find entries due for refresh
-            let entries =
-                match knowledge::list_entries_due_for_refresh(state.db(), MAX_ENTRIES_PER_CYCLE)
-                    .await
-                {
-                    Ok(entries) => entries,
-                    Err(e) => {
-                        tracing::error!("Failed to list entries for refresh: {}", e);
-                        continue;
-                    }
-                };
+    if entries.is_empty() {
+        tracing::debug!("Knowledge refresh worker: no entries due for refresh");
+        return Ok(());
+    }
 
-            if entries.is_empty() {
-                tracing::debug!("Knowledge refresh worker: no entries due for refresh");
-                continue;
-            }
+    tracing::info!(
+        "Knowledge refresh worker: found {} entries to refresh",
+        entries.len()
+    );
 
-            tracing::info!(
-                "Knowledge refresh worker: found {} entries to refresh",
-                entries.len()
-            );
+    // The housekeeping slot for this worker stays taken until the pass
+    // returns, which is what stops two passes running at once. Detaching the
+    // work here returns before any of it has happened, so the slot frees on a
+    // pass that has not started fetching and the next tick re-reads the same
+    // rows -- `last_refreshed` only moves when a refresh finishes. Fifty
+    // entries through three permits outlast the five-minute cadence easily,
+    // and each pass then re-fetches URLs the previous one is still fetching.
+    let mut refreshes = JoinSet::new();
 
-            // Process entries concurrently with semaphore limiting
-            for entry in entries {
-                let state_clone = state.clone();
-                let semaphore_clone = semaphore.clone();
+    for entry in entries {
+        let state = state.clone();
+        let permits = Arc::clone(permits);
 
-                tokio::spawn(async move {
-                    let _permit = match semaphore_clone.acquire().await {
-                        Ok(p) => p,
-                        Err(_) => {
-                            tracing::error!(
-                                "Failed to acquire refresh semaphore for entry {}",
-                                entry.id
-                            );
-                            return;
-                        }
-                    };
+        refreshes.spawn(async move {
+            let Ok(_permit) = permits.acquire().await else {
+                tracing::error!("Failed to acquire refresh semaphore for entry {}", entry.id);
+                return;
+            };
 
-                    refresh_entry(&state_clone, entry).await;
-                });
-            }
+            refresh_entry(&state, entry).await;
+        });
+    }
+
+    while let Some(refresh) = refreshes.join_next().await {
+        if let Err(error) = refresh {
+            tracing::error!("A knowledge refresh did not finish: {error}");
         }
-    });
+    }
+
+    Ok(())
 }
 
 /// Refresh a single knowledge entry
@@ -227,8 +228,7 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_default();
+        .map(str::to_string);
 
     let body = response
         .text()
@@ -244,8 +244,7 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
         ));
     }
 
-    // Extract text based on content type
-    let text = if content_type.contains("text/html") {
+    let text = if is_html(content_type.as_deref(), &body) {
         extract_text_from_html(&body)
     } else {
         body
@@ -257,6 +256,26 @@ async fn fetch_web_content(url: &str) -> Result<(String, String), String> {
     let hash = hex::encode(hasher.finalize());
 
     Ok((text, hash))
+}
+
+/// Whether the body should have its markup stripped before being stored.
+///
+/// A missing header is not evidence the body is plain text. Without the sniff,
+/// a server that omits Content-Type -- or sends one with a byte that is not
+/// ASCII, which cannot be read as a string -- gets its markup stored verbatim
+/// as the entry's text, embedded, and handed to the agent as knowledge. Media
+/// types are case-insensitive, so `TEXT/HTML` has to match too.
+fn is_html(content_type: Option<&str>, body: &str) -> bool {
+    match content_type {
+        Some(declared) => {
+            let declared = declared.to_ascii_lowercase();
+            declared.contains("text/html") || declared.contains("application/xhtml")
+        }
+        None => {
+            let start = body.trim_start().to_ascii_lowercase();
+            start.starts_with("<!doctype html") || start.starts_with("<html")
+        }
+    }
 }
 
 /// Extract text content from HTML
@@ -298,19 +317,27 @@ fn extract_text_from_html(html: &str) -> String {
 }
 
 /// Extract text from HTML element, skipping non-content elements
+/// Text of an element and its descendants, walked iteratively.
+///
+/// Recursion here descends once per level of nesting, and the fetch cap admits
+/// a megabyte of markup — enough for hundreds of thousands of nested divs. A
+/// Rust stack overflow is a SIGSEGV rather than an unwinding panic, so it takes
+/// the process with it and the worker restarts onto the same row, which is a
+/// crash loop driven by a workspace-supplied URL.
 fn extract_text_from_element(element: &scraper::ElementRef) -> String {
-    let mut text = String::new();
+    const SKIPPED: [&str; 7] = [
+        "script", "style", "nav", "header", "footer", "aside", "noscript",
+    ];
 
-    for node in element.children() {
+    let mut text = String::new();
+    let mut pending: Vec<_> = element.children().rev().collect();
+
+    while let Some(node) = pending.pop() {
         if let Some(element_ref) = scraper::ElementRef::wrap(node) {
-            let tag = element_ref.value().name();
-            if matches!(
-                tag,
-                "script" | "style" | "nav" | "header" | "footer" | "aside" | "noscript"
-            ) {
+            if SKIPPED.contains(&element_ref.value().name()) {
                 continue;
             }
-            text.push_str(&extract_text_from_element(&element_ref));
+            pending.extend(element_ref.children().rev());
         } else if let Some(text_node) = node.value().as_text() {
             text.push_str(text_node);
         }
@@ -404,5 +431,29 @@ mod tests {
         assert!(text.contains("Main content"));
         assert!(!text.contains("Navigation links"));
         assert!(!text.contains("Footer info"));
+    }
+
+    #[test]
+    fn a_page_is_stripped_of_markup_even_when_the_server_will_not_say_it_is_html() {
+        assert!(is_html(Some("text/html; charset=utf-8"), ""));
+
+        // Media types are case-insensitive, and this one used to fall through
+        // to the raw-body branch.
+        assert!(is_html(Some("TEXT/HTML"), ""));
+        assert!(is_html(Some("application/xhtml+xml"), ""));
+
+        // No header at all, or one carrying a byte that cannot be read as a
+        // string: the body is the only evidence left.
+        assert!(is_html(None, "<!DOCTYPE html><html><body>hi</body></html>"));
+        assert!(is_html(None, "\n  <html><body>hi</body></html>"));
+
+        assert!(!is_html(
+            Some("text/plain"),
+            "<html>not actually served as html</html>"
+        ));
+        assert!(!is_html(
+            None,
+            "# A markdown document\n\nwith a <span> in it"
+        ));
     }
 }

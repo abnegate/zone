@@ -11,6 +11,7 @@ const citation = (overrides: Partial<Citation> = {}): Citation => ({
   observed_at: '2026-09-05T00:00:00.000Z',
   complete: true,
   outcome: 'success',
+  provenance: 'server_execution',
   ...overrides,
 });
 
@@ -62,5 +63,14 @@ describe('Citations', () => {
     expect(items[0]).not.toHaveTextContent('Passing');
     expect(items[1].querySelector('a')).toHaveAttribute('href', '/wiki');
     expect(screen.getByText('content-hash')).toBeInTheDocument();
+  });
+
+  it('marks a model claim and leaves server-proven evidence unmarked', () => {
+    const { rerender } = render(<Citations citations={[citation()]} />);
+    expect(screen.queryByText(/not verified/i)).not.toBeInTheDocument();
+
+    rerender(<Citations citations={[citation({ provenance: 'model_asserted' })]} />);
+    expect(screen.getByText('Claimed by the model, not verified')).toBeInTheDocument();
+    expect(screen.getByTestId('citation')).toHaveClass('citation--model-asserted');
   });
 });

@@ -120,7 +120,12 @@ impl TestClient {
 
     /// Create a test client with a database connection
     pub async fn with_db() -> Self {
-        let config = test_config();
+        Self::with_config(test_config()).await
+    }
+
+    /// Create a test client whose config has been adjusted, for tests that
+    /// need to point an upstream URL at a local stub.
+    pub async fn with_config(config: Config) -> Self {
         let pool = create_test_pool().await;
         let state = create_test_state(config, pool);
         let router = create_test_router(state);
