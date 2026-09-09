@@ -891,8 +891,14 @@ mod process_tests {
     use nix::unistd::Pid;
     use std::os::unix::fs::PermissionsExt;
 
+    /// These fixtures share the machine with every other test binary, and under
+    /// llvm-cov the instrumentation slows all of it down. The budgets only bound
+    /// how long a genuine regression takes to surface, so they are generous.
+    const SPAWN_BUDGET: Duration = Duration::from_secs(30);
+    const TEARDOWN_BUDGET: Duration = Duration::from_secs(10);
+
     async fn marker(directory: &Path, name: &str) -> u32 {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(SPAWN_BUDGET, async {
             loop {
                 if let Ok(value) = tokio::fs::read_to_string(directory.join(name)).await
                     && let Ok(pid) = value.trim().parse()
@@ -957,7 +963,7 @@ mod process_tests {
             operation.abort();
             assert!(operation.await.unwrap_err().is_cancelled());
         }
-        let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+        let stopped = tokio::time::timeout(TEARDOWN_BUDGET, async {
             while [parent, helper, grandchild].iter().any(|pid| alive(*pid)) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -970,7 +976,7 @@ mod process_tests {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
         }
         unrelated.kill().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(TEARDOWN_BUDGET, async {
             while [parent, helper, grandchild].iter().any(|pid| alive(*pid)) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
