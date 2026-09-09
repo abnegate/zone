@@ -162,6 +162,39 @@ Run basic automated tests:
 make test
 ```
 
+### Verifying a feature in the console
+
+The Playwright suite under `manager/frontend/e2e` mocks every API call and signs
+itself in with a forged token, so it can pass while nothing works. A feature is
+not verified until it has been seen in the console against a real server.
+
+`make live-verify` does that: it builds `zone-server`, migrates the database,
+registers two tenants through the real registration endpoint, starts the console
+against that server, and runs `manager/frontend/live` headless.
+
+```bash
+export DATABASE_URL=postgres://…   # the server migrates it on startup
+export REDIS_URL=redis://127.0.0.1:6379
+export JWT_SECRET=… ENCRYPTION_KEY=…
+
+make live-verify                        # everything
+make live-verify ARGS=live/train        # one file
+ZONE_LIVE_KEEP=1 make live-verify       # leave the rig up to poke at
+
+# Two checks drive a real agent end to end. They are skipped unless a model
+# that reliably calls tools is named, because whether a model reaches for one
+# is the model's decision. `llama3.2:3b` never did in five attempts.
+ZONE_LIVE_AGENT_MODEL=qwen3.8:27b make live-verify
+```
+
+Chat, tasks and captions use the host Ollama. ComfyUI is replaced by a stand-in
+that speaks the real `/prompt`, `/history`, `/view` protocol and returns real
+PNG, WebM and FLAC bytes, so the server's whole media path runs without the
+weights — each lane is asserted byte-exact against the fixture it should have
+collected. What a *model* produces is therefore never claimed by this suite; add
+a test here for the console path, and keep model quality in
+`comfyui/tests`.
+
 ### Testing Checklist
 
 Before submitting a PR, verify:

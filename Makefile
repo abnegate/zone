@@ -9,6 +9,7 @@
 	shell-ollama shell-litellm shell-manager shell-console \
 	shell-postgres shell-valkey db-shell db-migrate \
 	test-server test-console test-console-coverage test-e2e test-e2e-ui \
+	live-verify \
 	lint-console format-console check-console \
 	list-models stats prune version env urls \
 	sqlx-prepare \
@@ -669,6 +670,10 @@ test-console-coverage: ## Run console tests with coverage report
 test-e2e: ## Run Playwright end-to-end tests
 	@echo "$(BLUE)Running E2E tests...$(NC)"
 	cd manager/frontend && bun run test:e2e
+
+live-verify: ## Verify the console against a real server (ARGS=live/train for a subset)
+	@echo "$(BLUE)Verifying the console against a real server...$(NC)"
+	./scripts/live-verify.sh $(ARGS)
 
 test-e2e-ui: ## Run Playwright tests with UI
 	@echo "$(BLUE)Running E2E tests with UI...$(NC)"

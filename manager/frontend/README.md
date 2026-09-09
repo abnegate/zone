@@ -27,7 +27,16 @@ Runs the linter (Biome) on the source code.
 
 ### `bun run test:e2e`
 
-Runs end-to-end tests with Playwright.
+Runs end-to-end tests with Playwright against mocked API responses (`e2e/`).
+
+### `bun run test:live`
+
+Runs the live suite (`live/`) against a real server. Nothing in it mocks a
+route, forges a token, or answers for the API, so a passing test has seen the
+console render what the server actually sent. It needs the rig
+`make live-verify` brings up — run that instead unless the rig is already
+running, in which case set `ZONE_LIVE_STATE`, `ZONE_COMFY_FIXTURES` and
+`ZONE_TRAIN_FIXTURES` to what the script printed.
 
 ## Learn More
 

@@ -22,6 +22,6 @@
     "resolveJsonModule": true,
     "types": ["@types/bun", "vite/client"]
   },
-  "include": ["src", "vite.config.ts"],
+  "include": ["src", "live", "vite.config.ts"],
   "exclude": ["**/*.test.ts", "**/*.test.tsx", "**/__mocks__/**", "**/setupTests.ts"]
 }
