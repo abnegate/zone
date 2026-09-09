@@ -52,6 +52,25 @@ impl Database {
         task
     }
 
+    async fn reconcilable(&self, count: i64) -> Vec<Uuid> {
+        let organization = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations(id,name,slug) VALUES($1,'Migration',$1::text)")
+            .bind(organization)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO workspaces(id,organization_id,name,slug) VALUES($1,$2,'Migration',$1::text)").bind(workspace).bind(organization).execute(&self.pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks(id,workspace_id,title,description,status) SELECT gen_random_uuid(),$1::uuid,'Migration','Regression','in_progress' FROM generate_series(1,$2::bigint)").bind(workspace).bind(count).execute(&self.pool).await.unwrap();
+        sqlx::query("INSERT INTO task_runs(id,task_id,status,completed_at) SELECT gen_random_uuid(),id,'completed',NOW() FROM tasks WHERE workspace_id=$1").bind(workspace).execute(&self.pool).await.unwrap();
+        sqlx::query("UPDATE tasks SET active_run_id=task_runs.id FROM task_runs WHERE task_runs.task_id=tasks.id AND tasks.workspace_id=$1").bind(workspace).execute(&self.pool).await.unwrap();
+        sqlx::query_scalar("SELECT id FROM tasks WHERE workspace_id=$1 ORDER BY id")
+            .bind(workspace)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+    }
+
     async fn cleanup(self) {
         self.pool.close().await;
         sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {}", self.name)))
@@ -445,5 +464,101 @@ async fn migration_command_needs_only_database_and_propagates_failures() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn reconcile_skips_tasks_another_server_locked() {
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    let tasks = database.reconcilable(2).await;
+    let (held, free) = (tasks[0], tasks[1]);
+    let mut holder = database.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM tasks WHERE id=$1 FOR UPDATE")
+        .bind(held)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let changed = tokio::time::timeout(
+        Duration::from_secs(10),
+        zone_server::db::recovery::reconcile(&database.pool),
+    )
+    .await
+    .expect("reconcile waited on a task row another server had locked")
+    .unwrap();
+    assert_eq!(changed, 1, "reconcile did not skip the locked task");
+
+    let skipped: (String, Option<Uuid>) =
+        sqlx::query_as("SELECT status,active_run_id FROM tasks WHERE id=$1")
+            .bind(held)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(skipped.0, "in_progress");
+    assert!(skipped.1.is_some(), "a skipped task lost its active run");
+    let reconciled: (String, Option<Uuid>) =
+        sqlx::query_as("SELECT status,active_run_id FROM tasks WHERE id=$1")
+            .bind(free)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(reconciled, ("review".to_string(), None));
+
+    holder.rollback().await.unwrap();
+    assert_eq!(
+        zone_server::db::recovery::reconcile(&database.pool)
+            .await
+            .unwrap(),
+        1,
+        "a released task was never reconciled"
+    );
+    let released: (String, Option<Uuid>) =
+        sqlx::query_as("SELECT status,active_run_id FROM tasks WHERE id=$1")
+            .bind(held)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(released, ("review".to_string(), None));
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn reconcile_bounds_each_batch() {
+    let database = Database::new().await;
+    migrations::run(&database.pool).await.unwrap();
+    let total = 105;
+    database.reconcilable(total).await;
+
+    let first = zone_server::db::recovery::reconcile(&database.pool)
+        .await
+        .unwrap();
+    assert!(
+        first < total as u64,
+        "one pass reconciled all {total} tasks, so the batch holds unbounded task locks"
+    );
+
+    let mut drained = first;
+    while drained < total as u64 {
+        let pass = zone_server::db::recovery::reconcile(&database.pool)
+            .await
+            .unwrap();
+        assert!(pass > 0, "reconciliation stalled at {drained} of {total}");
+        drained += pass;
+    }
+    assert_eq!(drained, total as u64);
+    assert_eq!(
+        zone_server::db::recovery::reconcile(&database.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE active_run_id IS NOT NULL OR status<>'review'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0, "tasks remained unreconciled after draining");
     database.cleanup().await;
 }
