@@ -20,10 +20,16 @@ import unittest
 from pathlib import Path
 
 COMFYUI = Path(__file__).parents[1]
-INSTALL = Path(os.environ.get('COMFYUI_INSTALL_DIR', ''))
 
-if not INSTALL.is_dir():
+# `Path('')` is `PosixPath('.')`, which is a directory, so checking the path
+# rather than the value leaves the guard below dead -- the same footgun that
+# made `train_lora.py`'s own required-variable check unreachable.
+_INSTALL = os.environ.get('COMFYUI_INSTALL_DIR', '').strip()
+if not _INSTALL:
     raise RuntimeError('COMFYUI_INSTALL_DIR must point to the pinned ComfyUI checkout')
+INSTALL = Path(_INSTALL)
+if not INSTALL.is_dir():
+    raise RuntimeError(f'COMFYUI_INSTALL_DIR is not a directory: {INSTALL}')
 if str(COMFYUI) not in sys.path:
     sys.path.insert(0, str(COMFYUI))
 if str(INSTALL) not in sys.path:

@@ -82,9 +82,10 @@ def tenant(who, org_name, slug, workspace_name):
         'GET', f'/api/organizations/{org["id"]}/workspaces', token=token, expect=[200]
     )
     rows = spaces.get('workspaces', [])
-    if rows:
-        workspace = rows[0]
-    else:
+    # The list is ordered by creation, newest first, so position picks whichever
+    # workspace was made last rather than the one this rig seeded.
+    workspace = next((row for row in rows if row.get('slug') == 'live'), None)
+    if workspace is None:
         _, workspace = call(
             'POST',
             f'/api/organizations/{org["id"]}/workspaces',

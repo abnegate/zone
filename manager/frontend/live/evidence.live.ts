@@ -168,6 +168,12 @@ test('a document the agent read is cited', async ({ page }) => {
       `Call the list_documents tool with the query "${title}", then call read_document on the id it returns, and cite it.`
     );
     await box.press('Enter');
+    // `.message-status` only exists once the turn has started, so waiting for
+    // it to reach zero returns immediately and the next attempt would submit
+    // over the top of a turn already running.
+    await expect(page.locator('.message-assistant')).toHaveCount(attempt, {
+      timeout: 280_000,
+    });
     await expect(page.locator('.message-status')).toHaveCount(0, { timeout: 280_000 });
     const { body } = await api('GET', `/api/chats/${chatId}`, { token });
     const messages =

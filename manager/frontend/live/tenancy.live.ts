@@ -128,24 +128,25 @@ test("the run stream is closed to a tenant that does not own it", async ({ page 
   expect(intruder.closed).toBe(true);
 });
 
-test("another tenant's workspace shows the intruder nothing, even when named", async ({
+test("the intruder's own console shows nothing of the other tenant", async ({
   page,
   consoleErrors,
 }) => {
   const { taskId } = await tenantA();
 
-  // A hostile client can put any id in its own local storage. The server, not
-  // the console, is what has to refuse.
-  await page.addInitScript((context) => {
-    localStorage.setItem('manager_current_org', context.organization);
-    localStorage.setItem('manager_current_workspace', context.workspace);
-  }, { organization: state.owner.organization.id, workspace: state.owner.workspace.id });
-
+  // `WorkspaceProvider` restores only an organization the caller is a member of
+  // and only a workspace from that organization, so seeding foreign ids into
+  // local storage does not make the console request them -- it silently falls
+  // back to the intruder's own tenant. Hostile ids are covered by the
+  // request-level checks above, which is where that behaviour actually lives.
+  // What this adds is that the rendered console leaks nothing across tenants.
   await signIn(page, state.intruder);
   await page.goto('/tasks');
+  await expect(page.locator('main, .page').first()).toBeVisible();
 
   await expect(page.locator('body')).not.toContainText('Tenant A private task');
   await expect(page.locator('body')).not.toContainText(taskId);
+  await expect(page.locator('body')).not.toContainText(state.owner.workspace.id);
   // Refusals the console expects are not app errors; a 500 would be.
   expect(consoleErrors.filter((entry) => entry.startsWith('5'))).toEqual([]);
 });

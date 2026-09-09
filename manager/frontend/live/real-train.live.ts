@@ -50,21 +50,29 @@ test.describe('real LoRA training', () => {
 
     await page.getByRole('button', { name: 'Train', exact: true }).click();
 
-    // A failed run answers with the error banner and never renders a result,
-    // so waiting only on the result burns the whole timeout on a run that is
-    // already over. Whichever lands first decides.
+    // A failed run answers with the error banner and never renders a result, so
+    // waiting only on the result burns the whole timeout on a run that is
+    // already over. `expect.poll` retries until it matches, so the poll ends on
+    // *either* terminal state and the failure is reported after it, not from
+    // inside it -- returning a failure string from the callback would just keep
+    // retrying for the full timeout.
     const result = page.locator('.train-result');
     const failure = page.locator('.error-placeholder');
+    let reason = '';
     await expect
       .poll(
         async () => {
-          if (await failure.count()) return `failed: ${await failure.first().innerText()}`;
           if (await result.count()) return 'finished';
+          if (await failure.count()) {
+            reason = await failure.first().innerText();
+            return 'failed';
+          }
           return 'running';
         },
         { timeout: 7_000_000, intervals: [5_000] }
       )
-      .toBe('finished');
+      .not.toBe('running');
+    expect(reason, 'training reported an error instead of a result').toBe('');
     await expect(result).toContainText(/Training finished/);
 
     const quality = page.locator('.train-quality');

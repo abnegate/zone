@@ -8,6 +8,16 @@ import { api, expect, signIn, state, test, tokenFor } from './harness';
 
 const AUDIO_CHECKPOINT = 'ace_step_v1_3.5b.safetensors';
 
+/** Clicking Save does not await the handler, so the reload can beat the write. */
+async function save(page: import('@playwright/test').Page, pattern: RegExp) {
+  const written = page.waitForResponse(
+    (response) => pattern.test(new URL(response.url()).pathname) && response.request().method() === 'PUT'
+  );
+  await page.getByRole('button', { name: /save changes/i }).click();
+  const response = await written;
+  expect(response.status(), await response.text()).toBeLessThan(400);
+}
+
 test('the workspace settings page opens at all', async ({ page, consoleErrors }) => {
   await signIn(page);
   await page.goto('/settings');
@@ -37,7 +47,7 @@ test('an audio checkpoint set on the organization survives a reload', async ({
   const audio = page.locator('#model-audio');
   await expect(audio).toBeVisible();
   await audio.selectOption(AUDIO_CHECKPOINT);
-  await page.getByRole('button', { name: /save changes/i }).click();
+  await save(page, /\/settings\/ai$/);
 
   // Read it back from a fresh load, so what is asserted came from the database.
   await page.goto('/org-settings');
@@ -67,13 +77,25 @@ test('the workspace audio checkpoint overrides the organization', async ({ page 
   const audio = page.locator('#model-audio');
   await expect(audio).toBeVisible();
   await audio.selectOption(AUDIO_CHECKPOINT);
-  await page.getByRole('button', { name: /save changes/i }).click();
+  await save(page, /\/settings\/ai$/);
 
   await page.goto('/settings');
   await page.getByRole('tab', { name: /ai settings/i }).click();
   await expect(page.locator('#model-audio')).toHaveValue(AUDIO_CHECKPOINT);
 
+  // The organization test stored the same checkpoint and the suite runs
+  // serially, so the effective value alone would be satisfied by the
+  // organization's row. The workspace's own row can only hold this because the
+  // override was written.
   const token = await tokenFor(state.owner);
+  const workspace = await api(
+    'GET',
+    `/api/organizations/${state.owner.organization.id}/workspaces/${state.owner.workspace.id}/settings/ai`,
+    { token }
+  );
+  expect(workspace.status).toBe(200);
+  expect(JSON.stringify(workspace.body)).toContain(AUDIO_CHECKPOINT);
+
   const effective = await api(
     'GET',
     `/api/organizations/${state.owner.organization.id}/workspaces/${state.owner.workspace.id}/settings/ai/effective`,

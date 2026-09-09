@@ -132,13 +132,19 @@ export async function createChat(
  * lanes take a while even against the stand-in, so the wait is generous.
  */
 export async function sendAndSettle(page: Page, message: string, timeout = 240_000) {
+  const assistant = page.locator('.message-assistant');
+  const before = await assistant.count();
   const box = page.getByPlaceholder(/type a message/i).first();
   await box.fill(message);
   await box.press('Enter');
   await expect(page.locator('.message-user').filter({ hasText: message })).toBeVisible({
     timeout: 30_000,
   });
-  // `.message-status` is the streaming indicator; the turn is over when it goes.
+  // Waiting only for `.message-status` to reach zero passes before the turn has
+  // started, because `Generation` renders it on `message_start`. The reply
+  // arriving is the real signal, so that is waited for first and the indicator
+  // going is what says the turn is finished rather than still streaming.
+  await expect(assistant).toHaveCount(before + 1, { timeout });
   await expect(page.locator('.message-status')).toHaveCount(0, { timeout });
 }
 

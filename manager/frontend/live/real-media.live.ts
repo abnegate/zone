@@ -45,10 +45,16 @@ async function openChat(page: import('@playwright/test').Page, title: string) {
 
 /** A real diffusion pass takes minutes on Apple Silicon, so the wait is long. */
 async function send(page: import('@playwright/test').Page, message: string) {
+  const assistant = page.locator('.message-assistant');
+  const before = await assistant.count();
   const box = page.getByPlaceholder(/type a message/i);
   await box.fill(message);
   await box.press('Enter');
   await expect(page.locator('.message-user').filter({ hasText: message })).toBeVisible();
+  // `.message-status` is absent until `message_start`, so waiting for it to
+  // reach zero returns before the turn begins and the long timeout below never
+  // applies -- the media assertions would then run on the 30s default.
+  await expect(assistant).toHaveCount(before + 1, { timeout: 1_500_000 });
   await expect(page.locator('.message-status')).toHaveCount(0, { timeout: 1_500_000 });
   const failure = page.getByRole('alert');
   if (await failure.count()) {
