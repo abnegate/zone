@@ -362,13 +362,13 @@ describe('TrainPanel', () => {
       screen.getByText('Zone tried to improve these images before the final screen:')
     ).toBeInTheDocument();
     expect(
-      screen.getByText('It passed the final screen, and the improved copy was used.')
+      screen.getByText(/It passed the final screen, and the improved copy was used\./)
     ).toBeInTheDocument();
     expect(
-      screen.getByText('It did not pass the final screen, so it was not used.')
+      screen.getByText(/It did not pass the final screen, so it was not used\./)
     ).toBeInTheDocument();
     expect(
-      screen.getByText('Zone could not create an improved copy, so it was not used.')
+      screen.getByText(/Zone could not create an improved copy, so it was not used\./)
     ).toBeInTheDocument();
     expect(
       screen.getByText(
