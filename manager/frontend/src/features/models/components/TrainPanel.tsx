@@ -177,8 +177,8 @@ function Screening({ screening }: { screening: TrainScreening | null }): ReactEl
       {groups.length > 0 && (
         <>
           <p className="train-screening-summary">
-            Trained on {screening.kept} of {screening.kept + screening.dropped.length} images.
-            These were set aside:
+            Trained on {screening.kept} of {screening.kept + screening.dropped.length} images. These
+            were set aside:
           </p>
           <ul className="train-screening-list">
             {groups.map((group) => (
@@ -200,11 +200,8 @@ function Screening({ screening }: { screening: TrainScreening | null }): ReactEl
             Zone tried to improve these images before the final screen:
           </p>
           <ul className="train-screening-list">
-            {attempted.map((image, index) => (
-              <li
-                className="train-screening-item"
-                key={`${image.filename}:${image.reason}:${index}`}
-              >
+            {attempted.map((image) => (
+              <li className="train-screening-item" key={image.source_index}>
                 <span className="tag train-drop">{image.filename}</span>
                 <span>
                   We tried to improve this {REASONS[image.reason].singular}.{' '}

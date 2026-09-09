@@ -88,6 +88,7 @@ pub enum RemediationOutcome {
 /// One target that Zone tried to repair before selecting the training set.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Remediation {
+    pub source_index: usize,
     pub filename: String,
     pub reason: crate::screening::Rejection,
     pub outcome: RemediationOutcome,
@@ -597,6 +598,7 @@ async fn remediate(
         .map(|(index, reason)| RemediationAttempt {
             index: *index,
             remediation: Remediation {
+                source_index: *index,
                 filename: request[*index].filename.clone(),
                 reason: *reason,
                 outcome: RemediationOutcome::Failed,
@@ -1286,6 +1288,7 @@ impl Framed {
 /// in the dataset: the loader fits whatever it is given onto a white square, so
 /// an uncropped photo trains on its own letterboxing and on however much
 /// background the photographer happened to include.
+#[cfg(test)]
 fn frame(subject: &Subject, image: &TrainImage, side: u32) -> Result<Framed, TrainError> {
     let target = decode_base64(&image.bytes_base64)?;
     frame_with_target(subject, image, &target, side)
@@ -2175,6 +2178,7 @@ mod tests {
         assert_eq!(
             outcome.screening.attempted,
             vec![Remediation {
+                source_index: 0,
                 filename: "target.png".into(),
                 reason: Rejection::Small,
                 outcome: RemediationOutcome::Used,
@@ -2203,6 +2207,7 @@ mod tests {
                 RemediationAttempt {
                     index: 0,
                     remediation: Remediation {
+                        source_index: 0,
                         filename: "used.png".into(),
                         reason: Rejection::Small,
                         outcome: RemediationOutcome::Failed,
@@ -2212,6 +2217,7 @@ mod tests {
                 RemediationAttempt {
                     index: 1,
                     remediation: Remediation {
+                        source_index: 1,
                         filename: "rejected.png".into(),
                         reason: Rejection::Blurred,
                         outcome: RemediationOutcome::Failed,
@@ -2221,6 +2227,7 @@ mod tests {
                 RemediationAttempt {
                     index: 2,
                     remediation: Remediation {
+                        source_index: 2,
                         filename: "failed.png".into(),
                         reason: Rejection::Small,
                         outcome: RemediationOutcome::Failed,
@@ -2238,16 +2245,19 @@ mod tests {
             attempted,
             vec![
                 Remediation {
+                    source_index: 0,
                     filename: "used.png".into(),
                     reason: Rejection::Small,
                     outcome: RemediationOutcome::Used,
                 },
                 Remediation {
+                    source_index: 1,
                     filename: "rejected.png".into(),
                     reason: Rejection::Blurred,
                     outcome: RemediationOutcome::StillRejected,
                 },
                 Remediation {
+                    source_index: 2,
                     filename: "failed.png".into(),
                     reason: Rejection::Small,
                     outcome: RemediationOutcome::Failed,

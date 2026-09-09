@@ -340,18 +340,30 @@ describe('TrainPanel', () => {
           kept: 3,
           dropped: [],
           attempted: [
-            { filename: 'small.png', reason: 'small' as const, outcome: 'used' as const },
             {
+              source_index: 0,
+              filename: 'small.png',
+              reason: 'small' as const,
+              outcome: 'used' as const,
+            },
+            {
+              source_index: 1,
               filename: 'blurred.png',
               reason: 'blurred' as const,
               outcome: 'still_rejected' as const,
             },
-            { filename: 'broken.png', reason: 'small' as const, outcome: 'failed' as const },
+            {
+              source_index: 2,
+              filename: 'broken.png',
+              reason: 'small' as const,
+              outcome: 'failed' as const,
+            },
           ],
         },
       })
     );
     render(<TrainPanel onTrained={mock()} />);
+    await waitFor(() => expect(screen.getByLabelText('Base')).toHaveTextContent('Qwen Image Edit'));
     await selectBase('FLUX.1 Schnell');
     fillIdentity();
     await addTargets(file('target.png', 'target'));

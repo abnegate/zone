@@ -44,6 +44,7 @@ export type DroppedImage = {
 };
 
 export type TrainRemediation = {
+  source_index: number;
   filename: string;
   reason: DropReason;
   outcome: 'used' | 'still_rejected' | 'failed';

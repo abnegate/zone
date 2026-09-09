@@ -44,6 +44,7 @@ type TrainResult = {
     kept: number;
     dropped: Array<{ filename: string; reason: 'duplicate' | 'blurred' | 'small' }>;
     attempted?: Array<{
+      source_index: number;
       filename: string;
       reason: 'duplicate' | 'blurred' | 'small';
       outcome: 'used' | 'still_rejected' | 'failed';
@@ -892,9 +893,14 @@ test.describe('Models Page', () => {
         kept: 3,
         dropped: [],
         attempted: [
-          { filename: 'small.png', reason: 'small', outcome: 'used' },
-          { filename: 'blurred.png', reason: 'blurred', outcome: 'still_rejected' },
-          { filename: 'broken.png', reason: 'small', outcome: 'failed' },
+          { source_index: 0, filename: 'small.png', reason: 'small', outcome: 'used' },
+          {
+            source_index: 1,
+            filename: 'blurred.png',
+            reason: 'blurred',
+            outcome: 'still_rejected',
+          },
+          { source_index: 2, filename: 'broken.png', reason: 'small', outcome: 'failed' },
         ],
       },
     });
