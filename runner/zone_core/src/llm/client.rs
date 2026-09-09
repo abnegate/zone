@@ -45,6 +45,8 @@ fn http() -> Client {
 pub enum LlmError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("Invalid config: {0}")]
+    InvalidConfig(String),
     #[error("API error: {status} - {message}")]
     Api { status: u16, message: String },
     #[error("JSON error: {0}")]
