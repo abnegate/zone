@@ -73,7 +73,7 @@ pub async fn create_pr_for_task(
         baseline,
         git: &git,
         remote: &git,
-        service: PrService::new(),
+        service: PrService::with_base_url(state.config().github_api_url.clone()),
     }
     .run()
     .await
@@ -393,7 +393,7 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
         return ReceptionSyncResult::NoCredentials;
     };
 
-    let reception = match PrService::new()
+    let reception = match PrService::with_base_url(state.config().github_api_url.clone())
         .fetch_reception(&reference, &access_token)
         .await
     {
@@ -442,7 +442,7 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         return RepairOutcome::Failed("No GitHub repository configured".to_string());
     };
 
-    let pr_service = PrService::new();
+    let pr_service = PrService::with_base_url(state.config().github_api_url.clone());
     let (owner, repo) = match pr_service.parse_github_url(repo_url) {
         Ok(parsed) => parsed,
         Err(error) => return RepairOutcome::Failed(format!("Invalid GitHub URL: {}", error)),

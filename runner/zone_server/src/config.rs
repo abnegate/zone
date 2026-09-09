@@ -13,6 +13,10 @@ pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
 /// Upstream HuggingFace models API. Tests should override `Config::huggingface_models_url`.
 pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/models";
 
+/// GitHub's own REST origin, which `GITHUB_API_URL` overrides for GitHub
+/// Enterprise and for exercising publication against a stand-in.
+pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
+
 /// Server configuration loaded from environment variables
 #[derive(Clone)]
 pub struct Config {
@@ -51,6 +55,10 @@ pub struct Config {
     pub cors_allow_credentials: bool,
     /// Application base URL for email links (default: http://localhost:3000)
     pub app_base_url: String,
+    /// Origin of the GitHub REST API. Configurable so a deployment can publish
+    /// to GitHub Enterprise, and so the publication path can be exercised
+    /// against something other than github.com.
+    pub github_api_url: String,
     /// Live web search via SearXNG (through Gluetun when the VPN profile is up)
     pub web_search: WebSearchConfig,
     /// Direct ComfyUI image generation and artifact storage.
@@ -351,6 +359,17 @@ impl Config {
         let app_base_url =
             env::var("APP_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
+        let github_api_url = env::var("GITHUB_API_URL")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| DEFAULT_GITHUB_API_URL.to_string());
+        if !github_api_url.starts_with("http://") && !github_api_url.starts_with("https://") {
+            return Err(ConfigError::Invalid(
+                "GITHUB_API_URL must be an absolute http or https URL",
+            ));
+        }
+
         Ok(Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: env::var("PORT")
@@ -387,6 +406,7 @@ impl Config {
             cors_origins,
             cors_allow_credentials,
             app_base_url,
+            github_api_url,
             web_search: WebSearchConfig::from_env(),
             comfyui: ComfyUiConfig::from_env(),
             source_index: SourceIndexConfig::from_env(),
@@ -425,6 +445,7 @@ impl std::fmt::Debug for Config {
             .field("cors_origins", &self.cors_origins)
             .field("cors_allow_credentials", &self.cors_allow_credentials)
             .field("app_base_url", &self.app_base_url)
+            .field("github_api_url", &self.github_api_url)
             .field("web_search", &self.web_search)
             .field("comfyui", &self.comfyui)
             .field("source_index", &self.source_index)
@@ -513,6 +534,7 @@ mod tests {
             cors_origins: vec!["*".to_string()],
             cors_allow_credentials: false,
             app_base_url: "http://localhost:3000".to_string(),
+            github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
             web_search: WebSearchConfig::default(),
             comfyui: ComfyUiConfig::default(),
             source_index: SourceIndexConfig::default(),
@@ -672,6 +694,65 @@ mod tests {
         AllowedOrigins::new(entries.iter().map(|entry| entry.to_string()))
     }
 
+    /// `PrService` carries a `with_base_url` constructor and the App issuer an
+    /// `at` one, both documented for GitHub Enterprise, and neither was
+    /// reachable from configuration -- every production caller hardcoded
+    /// github.com. That left Enterprise unusable and the publication path
+    /// impossible to exercise against anything but the real API.
+    #[test]
+    fn the_github_origin_is_configurable_and_must_be_absolute() {
+        let _lock = ENVIRONMENT.lock().expect("environment lock");
+        let names = [
+            "DATABASE_URL",
+            "ENCRYPTION_KEY",
+            "GITHUB_API_URL",
+            "JWT_SECRET",
+            "LITELLM_HOST",
+            "LITELLM_KEY",
+            "REDIS_URL",
+        ];
+        let _environment = Environment::isolated(&names);
+        Environment::set("JWT_SECRET", "12345678901234567890123456789012");
+        Environment::set("ENCRYPTION_KEY", "12345678901234567890123456789012");
+        Environment::set("DATABASE_URL", "postgres://localhost/zone");
+        Environment::set("REDIS_URL", "redis://localhost");
+        Environment::set("LITELLM_HOST", "http://localhost:4000");
+        Environment::set("LITELLM_KEY", "key");
+
+        assert_eq!(
+            Config::from_env().expect("unset falls back").github_api_url,
+            DEFAULT_GITHUB_API_URL
+        );
+
+        Environment::set("GITHUB_API_URL", "https://github.example.com/api/v3/");
+        assert_eq!(
+            Config::from_env()
+                .expect("an enterprise origin is valid")
+                .github_api_url,
+            "https://github.example.com/api/v3",
+            "the trailing slash goes, because every caller joins a rooted path"
+        );
+
+        Environment::set("GITHUB_API_URL", "   ");
+        assert_eq!(
+            Config::from_env()
+                .expect("blank is not a setting")
+                .github_api_url,
+            DEFAULT_GITHUB_API_URL
+        );
+
+        Environment::set("GITHUB_API_URL", "github.example.com");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "GITHUB_API_URL must be an absolute http or https URL"
+                ))
+            ),
+            "a scheme-less origin would produce relative request URLs"
+        );
+    }
+
     #[test]
     fn allowed_origins_reject_hosts_that_merely_contain_a_configured_one() {
         let origins = allowed(&["https://zone.example.com", "manager.example.com"]);
@@ -796,6 +877,7 @@ mod tests {
         let _lock = ENVIRONMENT.lock().expect("environment lock");
         let names = [
             "APP_BASE_URL",
+            "GITHUB_API_URL",
             "CORS_ALLOW_CREDENTIALS",
             "CORS_ORIGINS",
             "DATABASE_URL",
@@ -869,6 +951,7 @@ mod tests {
         assert_eq!(defaults.cors_origins, ["*"]);
         assert!(!defaults.cors_allow_credentials);
         assert_eq!(defaults.app_base_url, "http://localhost:3000");
+        assert_eq!(defaults.github_api_url, DEFAULT_GITHUB_API_URL);
         assert_eq!(defaults.source_index, SourceIndexConfig::default());
         assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
         assert_eq!(defaults.train_upload_limit_mb, 512);
@@ -884,6 +967,7 @@ mod tests {
         Environment::set("CORS_ORIGINS", " https://one.test, ,https://two.test ");
         Environment::set("CORS_ALLOW_CREDENTIALS", "true");
         Environment::set("APP_BASE_URL", "https://zone.test");
+        Environment::set("GITHUB_API_URL", "https://github.example.com/api/v3/");
         Environment::set("SOURCE_RESYNC_ENABLED", "off");
         Environment::set("SOURCE_RESYNC_POLL_SECS", "1");
         Environment::set("SOURCE_RESYNC_INTERVAL_SECS", "9999999");
@@ -916,6 +1000,11 @@ mod tests {
         );
         assert!(configured.cors_allow_credentials);
         assert_eq!(configured.app_base_url, "https://zone.test");
+        // The trailing slash goes, because every caller joins a rooted path.
+        assert_eq!(
+            configured.github_api_url,
+            "https://github.example.com/api/v3"
+        );
         assert_eq!(
             configured.source_index,
             SourceIndexConfig {
